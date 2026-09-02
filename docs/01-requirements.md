@@ -5,7 +5,7 @@
 | 항목 | 내용 |
 |---|---|
 | 문서 ID | `MCPF-REQ-001` |
-| 문서 버전 | `v0.1` |
+| 문서 버전 | `v0.2` |
 | 상태 | Draft - 개발 기준 초안 |
 | 기준 저장소 | `ramza2/mcp-flow` |
 | 공식 과제명 | MCP 연계 업무 자동화 AI 에이전트 개발 |
@@ -51,7 +51,7 @@ MCPFlow는 사용자의 자연어 업무 요청을 분석하여 등록된 MCP To
 | 사용자 기능 | 자연어 요청, 실행계획 확인, 실행, 결과 확인, 이력 조회, 예약 관리 |
 | Agent 기능 | 요청 분석, Tool 후보 검색, Tool 선택, 파라미터 구성, 실행계획 생성, 결과 요약 |
 | 실행 기능 | 단일, 순차, 병렬, 조건, 제한 반복, 재시도, 타임아웃, 취소, 승인대기 |
-| MCP 관리 | Server 등록, 연결 검증, 초기화, capability 확인, Tool Discovery, Tool 호출, 상태 관리 |
+| MCP 관리 | Server 등록, 연결 검증, protocol version·capability discovery, Tool Discovery, Tool 호출, 상태 관리 |
 | Workflow 관리 | 실행계획 및 재사용 가능한 Workflow의 작성, 검증, 버전, 실행 |
 | 운영 기능 | 사용자·역할·권한, 승인, 예약, 실행이력, 감사로그, 대시보드, 알림 연계점 |
 | 확장 기능 | 외부 MCP 후보 탐색·검토·등록, OpenAPI/Python 기반 Tool 생성·검증 |
@@ -113,7 +113,7 @@ MCPFlow는 사용자의 자연어 업무 요청을 분석하여 등록된 MCP To
 |---|---|
 | MCP Server | MCP 규격에 따라 Tool 등의 capability를 제공하는 서버 또는 로컬 프로세스 |
 | MCP Tool | MCP Server가 공개하며 정형 입력을 받아 작업을 수행하는 호출 단위 |
-| MCP Manager | Server 연결, capability 협상, Tool Discovery 및 호출을 담당하는 MCPFlow 모듈 |
+| MCP Manager | Server 연결, protocol version·capability discovery/협상, Tool Discovery 및 호출을 담당하는 MCPFlow 모듈 |
 | Agent | 자연어 요청을 분석하고 사용 가능한 Tool을 바탕으로 실행계획을 생성하는 논리적 실행 주체 |
 | Agent Runtime | Agent 설정, 프롬프트, LLM 호출, Tool 후보 탐색 및 계획 생성을 담당하는 모듈 |
 | Execution Plan | 실행할 Step, 의존관계, 입력 바인딩, 조건, 정책을 포함한 실행 명세 |
@@ -148,7 +148,7 @@ MCPFlow는 사용자의 자연어 업무 요청을 분석하여 등록된 MCP To
 ### UC-01. MCP Server 등록 및 Tool 동기화
 
 1. MCP 관리자가 Server 연결정보와 인증정보 참조값을 입력한다.
-2. 시스템이 연결, 초기화 및 capability 협상을 수행한다.
+2. 시스템이 연결 후 Current MCP의 `server/discover` 또는 legacy handshake로 protocol version과 capability를 확인한다.
 3. 시스템이 Tool 목록과 스키마를 조회한다.
 4. 관리자가 변경내역을 확인하고 Tool을 활성화한다.
 5. 등록·검증·활성화 행위가 감사로그에 기록된다.
@@ -226,9 +226,9 @@ MCPFlow는 사용자의 자연어 업무 요청을 분석하여 등록된 MCP To
 | ID | 요구사항 | 우선순위 | 개발 증분 | 수용기준 |
 |---|---|---:|---|---|
 | REQ-MCP-001 | MCP 관리자는 MCP Server의 이름, 설명, 전송방식, 연결정보 및 운영상태를 등록·조회·변경할 수 있어야 한다. | Must | Foundation | 필수값 검증 후 Server가 저장되고 목록·상세 화면에서 확인된다. |
-| REQ-MCP-002 | 시스템은 로컬 프로세스 연계용 `stdio`와 원격 연계용 `Streamable HTTP` 전송방식을 지원해야 한다. | Must | Foundation | 각 전송방식의 시험 Server에 연결하여 초기화 및 Tool 호출이 성공한다. |
+| REQ-MCP-002 | 시스템은 로컬 프로세스 연계용 `stdio`와 원격 연계용 `Streamable HTTP` 전송방식을 지원해야 한다. | Must | Foundation | 각 전송방식의 시험 Server에서 protocol discovery/협상 및 Tool 호출이 성공한다. |
 | REQ-MCP-003 | 구형 HTTP+SSE 연계는 필요 시 호환 어댑터로 제공하고 핵심 도메인 로직과 분리해야 한다. | Could | Extension | 어댑터 비활성화가 표준 전송방식에 영향을 주지 않는다. |
-| REQ-MCP-004 | 시스템은 Server 연결 시 MCP 초기화와 protocol/capability 협상을 수행하고 결과를 저장해야 한다. | Must | Foundation | 협상된 protocol 정보와 capability를 Server 상세에서 확인할 수 있다. |
+| REQ-MCP-004 | 시스템은 Server 연결 시 Current MCP의 `server/discover` 또는 legacy handshake로 protocol version과 capability를 확인·협상하고 결과를 저장해야 한다. | Must | Foundation | 선택된 protocol 정보, capability 및 protocol era를 Server 상세에서 확인할 수 있다. |
 | REQ-MCP-005 | 시스템은 연결 시험 기능을 제공하고 DNS, 네트워크, 인증, protocol 및 timeout 오류를 구분해야 한다. | Must | Foundation | 실패 원인이 분류된 오류코드와 운영자가 이해할 수 있는 메시지로 표시된다. |
 | REQ-MCP-006 | 인증정보와 비밀값은 자원 메타데이터와 분리하여 secret 참조로 관리해야 한다. | Must | Foundation | 조회 API·로그·화면에 원문 secret이 반환되지 않는다. |
 | REQ-MCP-007 | Server를 `DRAFT`, `ACTIVE`, `INACTIVE`, `ERROR` 상태로 관리하고 `ACTIVE` 상태만 실행에 사용해야 한다. | Must | Foundation | 비활성 또는 오류 Server의 Tool이 신규 실행 후보에서 제외된다. |
@@ -459,7 +459,7 @@ MCPFlow는 사용자의 자연어 업무 요청을 분석하여 등록된 MCP To
 |---|---|---:|---|
 | NFR-TEST-001 | Backend 도메인·서비스는 단위시험, API는 통합시험, 핵심 시나리오는 E2E 시험을 제공해야 한다. | Must | CI에서 시험 종류별 결과와 실패 원인을 확인할 수 있다. |
 | NFR-TEST-002 | 외부 LLM/MCP 없이 반복 가능한 mock 또는 fixture 기반 시험환경을 제공해야 한다. | Must | 네트워크 없이 핵심 상태전이와 오류정책 시험을 수행할 수 있다. |
-| NFR-TEST-003 | 실제 MCP Server를 사용하는 protocol 호환성 시험을 별도로 제공해야 한다. | Must | stdio와 Streamable HTTP 시험 Server에서 initialize, discovery, call이 통과한다. |
+| NFR-TEST-003 | 실제 MCP Server를 사용하는 protocol 호환성 시험을 별도로 제공해야 한다. | Must | stdio와 Streamable HTTP 시험 Server에서 Current `server/discover` 또는 legacy handshake, `tools/list`, `tools/call`이 통과한다. |
 | NFR-TEST-004 | 보안·권한·승인·감사 요구사항은 정상경로뿐 아니라 우회 시나리오를 시험해야 한다. | Must | 권한 없는 API 직접호출, 입력변조, 재사용 승인 및 prompt injection 시험결과가 존재한다. |
 | NFR-TEST-005 | 요구사항 ID와 테스트케이스 ID의 추적표를 유지해야 한다. | Must | Must 요구사항마다 하나 이상의 검증방법 또는 테스트케이스가 연결된다. |
 | NFR-TEST-006 | CI는 formatting, lint, type check, unit test, migration check 및 secret scan을 수행해야 한다. | Must | 보호 브랜치 반영 전 필수 검사 결과를 확인할 수 있다. |
@@ -524,7 +524,7 @@ MCPFlow는 사용자의 자연어 업무 요청을 분석하여 등록된 MCP To
 | 응답시간 | 요청 수신부터 최종 응답까지의 E2E 시간과 planning·MCP·LLM 등 구간시간을 분리 측정 | `NFR-PERF-001`, `REQ-EXE-014` |
 | Tool 매핑 정확도 | 정답 Tool과 자동 선택 Tool의 일치 건수 ÷ 전체 평가 요청 건수 × 100 | `REQ-AGT-004`, `REQ-AGT-005`, `REQ-AGT-014` |
 | 연계·검증 완료 MCP Tool 수 | 등록 후 Discovery·스키마 검증·시험호출을 통과한 내부·외부 Tool의 고유 건수, 목표 10건 이상 | `REQ-TOOL-012`, `REQ-DISC-004`, `REQ-FAC-008` |
-| 등록 성공률 | 기준 등록 시도 중 연결·초기화·Discovery·저장 완료 건수 ÷ 전체 유효 등록 시도 건수 × 100 | `REQ-MCP-004`, `REQ-MCP-005`, `REQ-TOOL-001` |
+| 등록 성공률 | 기준 등록 시도 중 연결·protocol 협상·Tool Discovery·저장 완료 건수 ÷ 전체 유효 등록 시도 건수 × 100 | `REQ-MCP-004`, `REQ-MCP-005`, `REQ-TOOL-001` |
 | 복합 실행 시나리오 완료율 | 사전 정의된 순차·병렬·조건·반복 시나리오 성공 건수 ÷ 전체 실행 건수 × 100 | `REQ-WF-003`~`REQ-WF-009`, `REQ-EXE-017` |
 | 운영 기능 통과율 | 예약·승인·권한·감사 등 운영 시험의 통과 항목 수 ÷ 전체 시험 항목 수 × 100 | `REQ-AUTH-*`, `REQ-APR-*`, `REQ-SCH-*`, `REQ-AUD-*` |
 
@@ -587,5 +587,5 @@ MCPFlow는 사용자의 자연어 업무 요청을 분석하여 등록된 MCP To
 
 | 버전 | 일자 | 변경 내용 |
 |---|---|---|
+| v0.2 | 2026-09-02 | MCP 2026-07-28 `server/discover` 및 legacy protocol 호환 기준 반영 |
 | v0.1 | 2026-09-02 | 실제 개발 기준 요구사항, 수용기준, 성능지표 연계 및 미확정 사항 최초 작성 |
-
