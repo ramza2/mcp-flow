@@ -5,9 +5,9 @@
 | 항목 | 내용 |
 |---|---|
 | 문서 ID | `MCPF-FUNC-001` |
-| 문서 버전 | `v0.1` |
+| 문서 버전 | `v0.2` |
 | 상태 | Draft - 개발 기준 초안 |
-| 기준 문서 | `docs/01-requirements.md` v0.1 |
+| 기준 문서 | `docs/01-requirements.md` v0.2 |
 | 공식 과제명 | MCP 연계 업무 자동화 AI 에이전트 개발 |
 | 개발 프로젝트명 | MCPFlow |
 | 최종 수정일 | 2026-09-02 |
@@ -35,7 +35,7 @@
 |---|---|---|
 | 공통 기반 | `FNC-COM-*` | 공통 API, 입력검증, 목록조회, 비동기 Job, 오류처리 |
 | 인증·권한 | `FNC-AUTH-*` | 로그인, 사용자, 역할, Permission, 자원 접근제어 |
-| MCP Server | `FNC-MCP-*` | 등록, 연결검증, 초기화, 상태, 상태점검, 변경영향 |
+| MCP Server | `FNC-MCP-*` | 등록, 연결검증, protocol discovery/협상, 상태, 상태점검, 변경영향 |
 | MCP Tool | `FNC-TOOL-*` | Discovery, Registry, 버전, 정책, 시험호출, 검증완료 관리 |
 | Agent | `FNC-AGT-*` | Agent 설정, 요청분석, 후보검색, Tool 선택, 입력구성, 응답생성 |
 | Workflow | `FNC-WF-*` | 실행계획, Workflow 작성·검증·버전·게시, 복합 흐름 |
@@ -351,7 +351,7 @@ transport별 입력:
 - 금지된 URL, 미승인 실행대상, 원문 secret 반환 시 등록을 거절한다.
 - 연결시험 실패가 입력 저장 자체를 취소할지는 사용자 선택으로 하되 활성화는 허용하지 않는다.
 
-### FNC-MCP-002. 연결시험 및 capability 협상
+### FNC-MCP-002. 연결시험 및 protocol discovery/협상
 
 | 항목 | 정의 |
 |---|---|
@@ -365,8 +365,8 @@ transport별 입력:
 
 1. Server 설정과 secret 참조를 로딩한다.
 2. transport 연결을 생성하고 지정 timeout을 적용한다.
-3. MCP initialize와 protocol/capability 협상을 수행한다.
-4. 성공 시 protocol version, server info, capability 및 지연시간을 저장한다.
+3. Current MCP는 `server/discover`, legacy MCP는 격리된 handshake adapter로 protocol/capability를 확인한다.
+4. 성공 시 protocol era/version, server identity, capability 및 지연시간을 저장한다.
 5. 실패 시 DNS, network, authentication, protocol, process, timeout 또는 unknown으로 분류한다.
 6. 연결을 정상 종료하고 결과를 감사·운영 로그에 기록한다.
 
@@ -439,7 +439,7 @@ transport별 입력:
 
 처리절차:
 
-1. Server와 protocol session을 초기화한다.
+1. Server의 protocol era에 따라 Current discovery metadata 또는 legacy session을 준비한다.
 2. Tool 목록을 pagination과 protocol 기능에 따라 끝까지 조회한다.
 3. 각 Tool의 원본 이름, 설명, input schema, output 정보, annotation을 정규화한다.
 4. 원본 메타데이터 hash를 계산하고 기존 Registry와 비교한다.
@@ -1337,7 +1337,7 @@ secret 설정은 일반 운영설정과 분리한다. 변경 전후 값은 감�
 3. 의존성 잠금정보와 컨테이너 빌드 정의를 만든다.
 4. 격리환경에서 정적검사와 빌드를 수행한다.
 5. 제한된 network·filesystem·process·CPU·memory 정책으로 기동한다.
-6. MCP initialize, Tool Discovery, schema 및 시험호출을 검증한다.
+6. Current `server/discover` 또는 legacy handshake, Tool Discovery, schema 및 시험호출을 검증한다.
 7. 단계별 로그와 산출물 hash를 저장한다.
 
 실제 credential은 생성 소스, 이미지 layer, Job 로그에 포함하지 않는다.
@@ -1610,4 +1610,5 @@ Factory Job 성공만으로 운영 배포하거나 Agent 후보에 포함하지 
 
 | 버전 | 일자 | 변경 내용 |
 |---|---|---|
+| v0.2 | 2026-09-02 | MCP 2026-07-28 stateless discovery와 legacy adapter 기준 반영 |
 | v0.1 | 2026-09-02 | 요구사항 기반 기능 흐름, 입력·처리·출력·예외, 상태모델, 화면 및 개발 증분 최초 작성 |
