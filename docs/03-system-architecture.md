@@ -5,9 +5,9 @@
 | 항목 | 내용 |
 |---|---|
 | 문서 ID | `MCPF-ARCH-001` |
-| 문서 버전 | `v0.1` |
+| 문서 버전 | `v0.2` |
 | 상태 | Draft - 개발 기준 초안 |
-| 기준 문서 | `docs/01-requirements.md` v0.1, `docs/02-functional-specification.md` v0.1 |
+| 기준 문서 | `docs/01-requirements.md` v0.2, `docs/02-functional-specification.md` v0.2 |
 | 공식 과제명 | MCP 연계 업무 자동화 AI 에이전트 개발 |
 | 개발 프로젝트명 | MCPFlow |
 | 최종 수정일 | 2026-09-02 |
@@ -620,7 +620,7 @@ Celery 자체 autoretry에 업무판단 전체를 맡기지 않는다. Execution
 |---|---|
 | Server Registry | 연결설정, 상태, protocol, capability, secret reference |
 | Transport Factory | stdio, Streamable HTTP, legacy SSE adapter 생성 |
-| Session Manager | initialize, capability negotiation, lifecycle, reconnect |
+| Protocol Manager | Current `server/discover`, 요청별 version metadata, legacy handshake, capability negotiation |
 | Discovery Service | tools/list, pagination, metadata 정규화, diff |
 | Tool Registry | Tool version, schema, annotation, 운영 metadata, policy |
 | Invocation Service | tools/call, timeout, cancellation, result normalization |
@@ -630,7 +630,7 @@ Celery 자체 autoretry에 업무판단 전체를 맡기지 않는다. Execution
 
 ```python
 class MCPClientPort(Protocol):
-    async def initialize(self, server: MCPServerConfig) -> MCPServerInfo: ...
+    async def discover_server(self, server: MCPServerConfig) -> MCPServerInfo: ...
     async def list_tools(self, server: MCPServerConfig) -> list[MCPToolDescriptor]: ...
     async def call_tool(
         self,
@@ -659,12 +659,12 @@ class MCPClientPort(Protocol):
 - Tool 호출은 Server 특성과 protocol capability에 따라 요청 단위 또는 제한된 session pool을 사용한다.
 - session은 사용자 secret 원문을 cache key나 로그에 포함하지 않는다.
 - Server 설정 version이 바뀌면 기존 session을 폐기한다.
-- Worker 장애 후 session 복구를 가정하지 않고 protocol initialize부터 재수행한다.
+- Worker 장애 후 transport session 복구를 가정하지 않고 Current discovery metadata 재검증 또는 legacy handshake부터 재수행한다.
 - stateful Server 사용이 필요하면 session affinity와 복구제약을 Server 정책에 명시한다.
 
 ### 14.5 Tool Registry 동기화
 
-1. Server 연결 및 initialize 성공
+1. Server 연결 및 Current `server/discover` 또는 legacy handshake 성공
 2. Tool 목록 전체 조회
 3. schema·annotation 정규화 및 검증
 4. 원본 metadata hash 계산
@@ -676,7 +676,7 @@ class MCPClientPort(Protocol):
 
 ### 14.6 MCP protocol version
 
-기준 구현은 2026-07-28 MCP 문서와 호환되는 공식 SDK를 우선 검토한다. 특정 version 문자열만 하드코딩하지 않고 initialize 협상결과와 지원범위를 Server별로 기록한다. SDK upgrade는 stdio·Streamable HTTP contract test와 실제 시험 Server 검증 후 반영한다.
+기준 구현은 2026-07-28 MCP 문서와 호환되는 공식 SDK를 우선한다. Current protocol은 `server/discover`와 요청별 version metadata로 협상하고, 구형 initialize handshake는 legacy adapter에서만 처리한다. 선택 version과 지원범위를 Server별로 기록하며 SDK upgrade는 stdio·Streamable HTTP contract test 후 반영한다.
 
 ---
 
@@ -896,7 +896,7 @@ user_id, resource_type, resource_id, result, error_code, duration_ms
 | Agent | analysis/selection/plan latency, LLM calls, schema repair, confidence |
 | Execution | queued/running/completed, E2E latency, recovery, cancellation |
 | Queue | depth, publish failure, task runtime, redelivery |
-| MCP | connection, initialize, discovery, call latency/error, Server health |
+| MCP | connection, server discovery/legacy handshake, tools discovery, call latency/error, Server health |
 | Scheduler | due lag, occurrence created/skipped, failure pause |
 | Approval | pending age, decision latency, expired count |
 | Factory | validation/build/test duration and failure stage |
@@ -929,7 +929,7 @@ flowchart TD
 - build network는 dependency mirror 등 허용 endpoint로 제한한다.
 - base image와 dependency는 digest/lock으로 재현 가능하게 한다.
 - source, generator version, template version, dependency lock, artifact hash를 저장한다.
-- static scan, container scan, MCP initialize/list/call contract test를 수행한다.
+- static scan, container scan, Current `server/discover` 또는 legacy handshake와 `tools/list`/`tools/call` contract test를 수행한다.
 - 시험 credential은 운영 credential과 분리한다.
 
 ### 21.3 배포 산출물
@@ -1308,7 +1308,7 @@ mcp-flow/
 ### ASR-001. 단일 Tool E2E
 
 1. 관리자가 Streamable HTTP 시험 Server를 등록한다.
-2. 연결·initialize·Discovery를 수행한다.
+2. 연결·protocol version/capability discovery와 Tool Discovery를 수행한다.
 3. Tool을 검증·활성화한다.
 4. 사용자가 자연어로 요청한다.
 5. Agent가 후보검색·선택·plan을 생성한다.
@@ -1403,5 +1403,5 @@ mcp-flow/
 
 | 버전 | 일자 | 변경 내용 |
 |---|---|---|
+| v0.2 | 2026-09-02 | MCP 2026-07-28 stateless discovery, 요청별 version metadata 및 legacy adapter 구조 반영 |
 | v0.1 | 2026-09-02 | 전체 논리·실행·데이터·Agent·MCP·보안·배포 아키텍처 및 기술 스택 최초 작성 |
-
