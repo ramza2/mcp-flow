@@ -635,24 +635,45 @@ function PredicateBuilder({
         </>
       )}
       <Field label={depth === 0 ? 'Operator' : `Operator (depth ${depth})`}>
-        <select
-          value={value.op}
-          disabled={disabled}
-          onChange={e => onChange(predicateFromOp(e.target.value as PredicateOp))}
-          className={inputClass}
-        >
-          <optgroup label="Compare">
-            {COMPARE_OPS.map(op => <option key={op} value={op}>{op}</option>)}
-          </optgroup>
-          <optgroup label="Unary">
-            {UNARY_OPS.map(op => <option key={op} value={op}>{op}</option>)}
-          </optgroup>
-          <optgroup label="Logic">
-            <option value="not">not</option>
-            <option value="and">and</option>
-            <option value="or">or</option>
-          </optgroup>
-        </select>
+        <div className="space-y-1.5">
+          <div className="flex flex-wrap gap-1">
+            {COMPARE_OPS.map(op => (
+              <button
+                key={op}
+                type="button"
+                disabled={disabled}
+                onClick={() => onChange(predicateFromOp(op))}
+                className={`px-2 py-1 rounded text-[11px] font-mono border ${value.op === op ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-slate-600 border-slate-200 hover:border-indigo-300'}`}
+              >
+                {op}
+              </button>
+            ))}
+          </div>
+          <div className="flex flex-wrap gap-1">
+            {UNARY_OPS.map(op => (
+              <button
+                key={op}
+                type="button"
+                disabled={disabled}
+                onClick={() => onChange(predicateFromOp(op))}
+                className={`px-2 py-1 rounded text-[11px] font-mono border ${value.op === op ? 'bg-amber-600 text-white border-amber-600' : 'bg-white text-slate-600 border-slate-200 hover:border-amber-300'}`}
+              >
+                {op}
+              </button>
+            ))}
+            {(['not', 'and', 'or'] as const).map(op => (
+              <button
+                key={op}
+                type="button"
+                disabled={disabled}
+                onClick={() => onChange(predicateFromOp(op))}
+                className={`px-2 py-1 rounded text-[11px] font-mono border ${value.op === op ? 'bg-violet-600 text-white border-violet-600' : 'bg-white text-slate-600 border-slate-200 hover:border-violet-300'}`}
+              >
+                {op}
+              </button>
+            ))}
+          </div>
+        </div>
       </Field>
 
       {COMPARE_OPS.includes(value.op as CompareOp) && (
