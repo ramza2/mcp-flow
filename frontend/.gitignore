@@ -1,6 +1,11 @@
 node_modules/
-dist/
-build/
+/dist/
+/build/
+# Root .gitignore (Python) ignores any `build/`/`dist/` dir at any depth, which
+# would otherwise swallow application source under src/screens/build. Keep the
+# real source tracked.
+!/src/**/build/
+!/src/**/dist/
 .cache/
 .env*
 .vite/
