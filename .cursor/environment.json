@@ -1,0 +1,14 @@
+{
+  "name": "MCPFlow",
+  "install": "cd frontend && CI=true pnpm install --frozen-lockfile",
+  "terminals": [
+    {
+      "name": "frontend",
+      "command": "cd frontend && pnpm dev",
+      "description": "MCPFlow frontend — Vite dev server (React + TypeScript) on port 8443."
+    }
+  ],
+  "ports": [
+    { "name": "frontend", "port": 8443 }
+  ]
+}
