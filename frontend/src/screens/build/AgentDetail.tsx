@@ -1,12 +1,14 @@
 import { useState } from 'react';
 import { useNavigate, useParams } from 'react-router';
-import { ArrowLeft, Pencil, Rocket } from 'lucide-react';
+import { ArrowLeft, Eye, Pencil, Plus, Rocket } from 'lucide-react';
 import StatusBadge, { VersionBadge, RiskBadge, VerificationBadge } from '../../components/ui/StatusBadge';
 import { TabBar } from '../../components/ui/Tabs';
 import Button from '../../components/ui/Button';
 import DataTable, { Column } from '../../components/ui/DataTable';
 import { InlineAlert } from '../../components/ui/EmptyState';
 import { mockAgents, mockAgentFull, mockTools } from '../../data/mock';
+
+type VersionStatus = 'DRAFT' | 'PUBLISHED' | 'DEPRECATED';
 
 export default function AgentDetail() {
   const { agentId } = useParams();
@@ -17,6 +19,20 @@ export default function AgentDetail() {
   const full = mockAgentFull[agent.id] ?? mockAgentFull['agt-001'];
   const allowedTools = mockTools.filter(t => full.allowedToolIds.includes(t.id));
   const latest = full.versions[0];
+  const latestStatus = (latest?.status ?? 'DRAFT') as VersionStatus;
+
+  const handleLatestPrimary = () => {
+    if (!latest) {
+      navigate(`/agents/${agent.id}/versions/new/edit`);
+      return;
+    }
+    if (latestStatus === 'DRAFT') {
+      navigate(`/agents/${agent.id}/versions/${latest.version}/edit`);
+      return;
+    }
+    // PUBLISHED (or unexpected) → Create New Draft Version
+    navigate(`/agents/${agent.id}/versions/new/edit`);
+  };
 
   return (
     <div>
@@ -34,10 +50,17 @@ export default function AgentDetail() {
             </div>
           </div>
           <div className="flex gap-2">
-            <Button variant="outline" size="sm" icon={<Pencil size={13} />} onClick={() => navigate(`/agents/${agent.id}/versions/${latest.version}/edit`)}>
-              최신 버전 편집
+            <Button
+              variant="outline"
+              size="sm"
+              icon={latestStatus === 'DRAFT' ? <Pencil size={13} /> : <Plus size={13} />}
+              onClick={handleLatestPrimary}
+            >
+              {latestStatus === 'DRAFT' ? '최신 버전 편집' : 'Create New Draft'}
             </Button>
-            <Button size="sm" icon={<Rocket size={13} />}>Publish</Button>
+            <Button size="sm" icon={<Rocket size={13} />} disabled={latestStatus !== 'DRAFT'}>
+              Publish
+            </Button>
           </div>
         </div>
       </div>
@@ -74,13 +97,19 @@ export default function AgentDetail() {
         )}
 
         {tab === 'versions' && (
-          <div className="max-w-4xl bg-white rounded-xl border border-slate-200 overflow-hidden">
-            <DataTable
-              columns={versionCols(navigate, agent.id)}
-              data={full.versions}
-              rowKey={r => r.version}
-              onRowClick={r => navigate(`/agents/${agent.id}/versions/${r.version}/edit`)}
+          <div className="space-y-3 max-w-4xl">
+            <InlineAlert
+              type="info"
+              message="편집은 DRAFT Version에만 적용됩니다. PUBLISHED는 View 또는 Create New Draft Version만 가능하며, DEPRECATED는 View만 가능합니다."
             />
+            <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
+              <DataTable
+                columns={versionCols(navigate, agent.id)}
+                data={full.versions}
+                rowKey={r => r.version}
+                onRowClick={r => navigate(`/agents/${agent.id}/versions/${r.version}/edit`)}
+              />
+            </div>
           </div>
         )}
 
@@ -116,11 +145,40 @@ function versionCols(navigate: (to: string) => void, agentId: string): Column<ty
     { key: 'validation', label: 'Validation', render: r => r.validation ? <StatusBadge status={r.validation} size="sm" /> : <span className="text-xs text-slate-400">–</span> },
     { key: 'createdBy', label: 'Author', render: r => <span className="text-xs text-slate-500">{r.createdBy}</span> },
     { key: 'createdAt', label: 'Created', render: r => <span className="text-xs text-slate-400">{r.createdAt}</span> },
-    { key: 'actions', label: '', render: r => (
-      <div onClick={e => e.stopPropagation()}>
-        <button onClick={() => navigate(`/agents/${agentId}/versions/${r.version}/edit`)} className="p-1.5 rounded text-slate-400 hover:text-indigo-600 hover:bg-indigo-50" title="편집"><Pencil size={13} /></button>
-      </div>
-    )},
+    { key: 'actions', label: '', render: r => {
+      const status = r.status as VersionStatus;
+      return (
+        <div className="flex items-center gap-1" onClick={e => e.stopPropagation()}>
+          {(status === 'PUBLISHED' || status === 'DEPRECATED') && (
+            <button
+              onClick={() => navigate(`/agents/${agentId}/versions/${r.version}/edit`)}
+              className="p-1.5 rounded text-slate-400 hover:text-indigo-600 hover:bg-indigo-50"
+              title="View"
+            >
+              <Eye size={13} />
+            </button>
+          )}
+          {status === 'DRAFT' && (
+            <button
+              onClick={() => navigate(`/agents/${agentId}/versions/${r.version}/edit`)}
+              className="p-1.5 rounded text-slate-400 hover:text-indigo-600 hover:bg-indigo-50"
+              title="Edit"
+            >
+              <Pencil size={13} />
+            </button>
+          )}
+          {status === 'PUBLISHED' && (
+            <button
+              onClick={() => navigate(`/agents/${agentId}/versions/new/edit`)}
+              className="p-1.5 rounded text-slate-400 hover:text-indigo-600 hover:bg-indigo-50"
+              title="Create New Draft Version"
+            >
+              <Plus size={13} />
+            </button>
+          )}
+        </div>
+      );
+    }},
   ];
 }
 

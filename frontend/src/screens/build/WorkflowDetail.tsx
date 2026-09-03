@@ -1,12 +1,14 @@
 import { useState } from 'react';
 import { useNavigate, useParams } from 'react-router';
-import { ArrowLeft, Pencil, Rocket, Calendar } from 'lucide-react';
+import { ArrowLeft, Calendar, Eye, Pencil, Plus, Rocket } from 'lucide-react';
 import StatusBadge, { VersionBadge, RiskBadge, VerificationBadge } from '../../components/ui/StatusBadge';
 import { TabBar } from '../../components/ui/Tabs';
 import Button from '../../components/ui/Button';
 import DataTable, { Column } from '../../components/ui/DataTable';
-import { EmptyState } from '../../components/ui/EmptyState';
+import { EmptyState, InlineAlert } from '../../components/ui/EmptyState';
 import { mockWorkflows, mockWorkflowFull } from '../../data/mock';
+
+type VersionStatus = 'DRAFT' | 'PUBLISHED' | 'DEPRECATED';
 
 export default function WorkflowDetail() {
   const { workflowId } = useParams();
@@ -16,6 +18,19 @@ export default function WorkflowDetail() {
   const workflow = mockWorkflows.find(w => w.id === workflowId) ?? mockWorkflows[0];
   const full = mockWorkflowFull[workflow.id] ?? mockWorkflowFull['wf-001'];
   const latest = full.versions[0];
+  const latestStatus = (latest?.status ?? 'DRAFT') as VersionStatus;
+
+  const handleLatestPrimary = () => {
+    if (!latest) {
+      navigate(`/workflows/${workflow.id}/versions/new/edit`);
+      return;
+    }
+    if (latestStatus === 'DRAFT') {
+      navigate(`/workflows/${workflow.id}/versions/${latest.version}/edit`);
+      return;
+    }
+    navigate(`/workflows/${workflow.id}/versions/new/edit`);
+  };
 
   return (
     <div>
@@ -33,10 +48,17 @@ export default function WorkflowDetail() {
             </div>
           </div>
           <div className="flex gap-2">
-            <Button variant="outline" size="sm" icon={<Pencil size={13} />} onClick={() => navigate(`/workflows/${workflow.id}/versions/${latest.version}/edit`)}>
-              Designer 열기
+            <Button
+              variant="outline"
+              size="sm"
+              icon={latestStatus === 'DRAFT' ? <Pencil size={13} /> : <Plus size={13} />}
+              onClick={handleLatestPrimary}
+            >
+              {latestStatus === 'DRAFT' ? 'Designer 열기' : 'Create New Draft'}
             </Button>
-            <Button size="sm" icon={<Rocket size={13} />}>Publish</Button>
+            <Button size="sm" icon={<Rocket size={13} />} disabled={latestStatus !== 'DRAFT'}>
+              Publish
+            </Button>
           </div>
         </div>
       </div>
@@ -73,13 +95,19 @@ export default function WorkflowDetail() {
         )}
 
         {tab === 'versions' && (
-          <div className="max-w-4xl bg-white rounded-xl border border-slate-200 overflow-hidden">
-            <DataTable
-              columns={versionCols(navigate, workflow.id)}
-              data={full.versions}
-              rowKey={r => r.version}
-              onRowClick={r => navigate(`/workflows/${workflow.id}/versions/${r.version}/edit`)}
+          <div className="space-y-3 max-w-4xl">
+            <InlineAlert
+              type="info"
+              message="DRAFT Version만 Designer에서 편집할 수 있습니다. PUBLISHED는 View 또는 Create New Draft Version, DEPRECATED는 View만 가능합니다."
             />
+            <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
+              <DataTable
+                columns={versionCols(navigate, workflow.id)}
+                data={full.versions}
+                rowKey={r => r.version}
+                onRowClick={r => navigate(`/workflows/${workflow.id}/versions/${r.version}/edit`)}
+              />
+            </div>
           </div>
         )}
 
@@ -133,11 +161,40 @@ function versionCols(navigate: (to: string) => void, workflowId: string): Column
     { key: 'changeSummary', label: 'Change Summary', render: r => <span className="text-sm text-slate-700">{r.changeSummary}</span> },
     { key: 'createdBy', label: 'Author', render: r => <span className="text-xs text-slate-500">{r.createdBy}</span> },
     { key: 'createdAt', label: 'Created', render: r => <span className="text-xs text-slate-400">{r.createdAt}</span> },
-    { key: 'actions', label: '', render: r => (
-      <div onClick={e => e.stopPropagation()}>
-        <button onClick={() => navigate(`/workflows/${workflowId}/versions/${r.version}/edit`)} className="p-1.5 rounded text-slate-400 hover:text-indigo-600 hover:bg-indigo-50" title="편집"><Pencil size={13} /></button>
-      </div>
-    )},
+    { key: 'actions', label: '', render: r => {
+      const status = r.status as VersionStatus;
+      return (
+        <div className="flex items-center gap-1" onClick={e => e.stopPropagation()}>
+          {(status === 'PUBLISHED' || status === 'DEPRECATED') && (
+            <button
+              onClick={() => navigate(`/workflows/${workflowId}/versions/${r.version}/edit`)}
+              className="p-1.5 rounded text-slate-400 hover:text-indigo-600 hover:bg-indigo-50"
+              title="View"
+            >
+              <Eye size={13} />
+            </button>
+          )}
+          {status === 'DRAFT' && (
+            <button
+              onClick={() => navigate(`/workflows/${workflowId}/versions/${r.version}/edit`)}
+              className="p-1.5 rounded text-slate-400 hover:text-indigo-600 hover:bg-indigo-50"
+              title="Edit"
+            >
+              <Pencil size={13} />
+            </button>
+          )}
+          {status === 'PUBLISHED' && (
+            <button
+              onClick={() => navigate(`/workflows/${workflowId}/versions/new/edit`)}
+              className="p-1.5 rounded text-slate-400 hover:text-indigo-600 hover:bg-indigo-50"
+              title="Create New Draft Version"
+            >
+              <Plus size={13} />
+            </button>
+          )}
+        </div>
+      );
+    }},
   ];
 }
 
