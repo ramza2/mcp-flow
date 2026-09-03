@@ -15,7 +15,10 @@ type StepType = 'TOOL' | 'CONDITION' | 'JOIN' | 'APPROVAL' | 'LOOP';
 type BindingKind = 'LITERAL' | 'PLAN_INPUT' | 'STEP_OUTPUT' | 'EXECUTION_CONTEXT' | 'LOOP_CONTEXT' | 'SECRET_REF';
 type JoinPolicy = 'ALL_SUCCESS' | 'ALL_COMPLETE' | 'ANY_SUCCESS';
 type LoopMode = 'FOR_EACH' | 'WHILE';
-type PredicateOp = 'eq' | 'ne' | 'gt' | 'gte' | 'lt' | 'lte' | 'in' | 'contains' | 'exists' | 'is_null' | 'and' | 'or' | 'not';
+type CompareOp = 'eq' | 'ne' | 'gt' | 'gte' | 'lt' | 'lte' | 'in' | 'contains';
+type UnaryOp = 'exists' | 'is_null';
+type LogicOp = 'and' | 'or' | 'not';
+type PredicateOp = CompareOp | UnaryOp | LogicOp;
 type VersionStatus = 'DRAFT' | 'PUBLISHED' | 'DEPRECATED';
 type ValidationCode =
   | 'Circular Dependency'
@@ -37,11 +40,12 @@ interface BindingValue {
   secretRef?: string;
 }
 
-interface PredicateClause {
-  left: BindingValue;
-  op: PredicateOp;
-  right: BindingValue;
-}
+/** Canonical Predicate AST (docs/04) — recursive, not flat left/op/right for all ops. */
+type PredicateNode =
+  | { op: CompareOp; left: BindingValue; right: BindingValue }
+  | { op: UnaryOp; operand: BindingValue }
+  | { op: 'not'; child: PredicateNode }
+  | { op: 'and' | 'or'; children: PredicateNode[] };
 
 interface Step {
   id: string;
@@ -56,7 +60,7 @@ interface Step {
   loopMode?: LoopMode;
   maxIterations?: number;
   loopCollection?: BindingValue;
-  predicate?: PredicateClause;
+  predicate?: PredicateNode;
   bindings?: Record<string, BindingValue>;
 }
 
@@ -81,16 +85,32 @@ const PALETTE: PaletteItem[] = [
   { kind: 'visual', id: 'END', label: 'End', hint: '시각적 종료 표현 (persisted type 아님)', icon: <Circle size={14} />, color: 'text-slate-500 bg-slate-100' },
 ];
 
-const PREDICATE_OPS: PredicateOp[] = ['eq', 'ne', 'gt', 'gte', 'lt', 'lte', 'in', 'contains', 'exists', 'is_null', 'and', 'or', 'not'];
+const COMPARE_OPS: CompareOp[] = ['eq', 'ne', 'gt', 'gte', 'lt', 'lte', 'in', 'contains'];
+const UNARY_OPS: UnaryOp[] = ['exists', 'is_null'];
+const PREDICATE_OPS: PredicateOp[] = [...COMPARE_OPS, ...UNARY_OPS, 'not', 'and', 'or'];
 const BINDING_KINDS: BindingKind[] = ['LITERAL', 'PLAN_INPUT', 'STEP_OUTPUT', 'EXECUTION_CONTEXT', 'LOOP_CONTEXT', 'SECRET_REF'];
 const JOIN_POLICIES: JoinPolicy[] = ['ALL_SUCCESS', 'ALL_COMPLETE', 'ANY_SUCCESS'];
 
 const defaultBinding = (): BindingValue => ({ kind: 'LITERAL', value: '' });
-const defaultPredicate = (): PredicateClause => ({
-  left: { kind: 'STEP_OUTPUT', stepId: '', path: '' },
+const defaultCompareLeft = (): BindingValue => ({ kind: 'STEP_OUTPUT', stepId: '', path: '' });
+const defaultPredicate = (): PredicateNode => ({
   op: 'eq',
-  right: { kind: 'LITERAL', value: '' },
+  left: defaultCompareLeft(),
+  right: defaultBinding(),
 });
+
+function predicateFromOp(op: PredicateOp): PredicateNode {
+  if (COMPARE_OPS.includes(op as CompareOp)) {
+    return { op: op as CompareOp, left: defaultCompareLeft(), right: defaultBinding() };
+  }
+  if (UNARY_OPS.includes(op as UnaryOp)) {
+    return { op: op as UnaryOp, operand: defaultCompareLeft() };
+  }
+  if (op === 'not') {
+    return { op: 'not', child: defaultPredicate() };
+  }
+  return { op: op as 'and' | 'or', children: [defaultPredicate(), defaultPredicate()] };
+}
 
 function createStep(type: StepType, index: number, dependsOn: string[] = []): Step {
   const base: Step = {
@@ -598,43 +618,131 @@ function BindingEditor({
 }
 
 function PredicateBuilder({
-  value, steps, disabled, onChange,
+  value, steps, disabled, onChange, depth = 0,
 }: {
-  value: PredicateClause;
+  value: PredicateNode;
   steps: Step[];
   disabled?: boolean;
-  onChange: (v: PredicateClause) => void;
+  onChange: (v: PredicateNode) => void;
+  depth?: number;
 }) {
-  const unary = value.op === 'exists' || value.op === 'is_null' || value.op === 'not';
   return (
-    <div className="space-y-3 border border-slate-200 rounded-lg p-3">
-      <p className="text-xs font-medium text-slate-600">Predicate Builder</p>
-      <InlineAlert type="info" message="JavaScript/Python Editor는 사용할 수 없습니다. 제한된 Predicate AST만 지원합니다." />
-      <BindingEditor
-        label="Left operand"
-        value={value.left}
-        steps={steps}
-        disabled={disabled}
-        onChange={left => onChange({ ...value, left })}
-      />
-      <Field label="Operator">
+    <div className={`space-y-3 border border-slate-200 rounded-lg p-3 ${depth > 0 ? 'bg-slate-50/60' : ''}`}>
+      {depth === 0 && (
+        <>
+          <p className="text-xs font-medium text-slate-600">Predicate Builder</p>
+          <InlineAlert type="info" message="JavaScript/Python Editor는 사용할 수 없습니다. 제한된 Predicate AST만 지원합니다." />
+        </>
+      )}
+      <Field label={depth === 0 ? 'Operator' : `Operator (depth ${depth})`}>
         <select
           value={value.op}
           disabled={disabled}
-          onChange={e => onChange({ ...value, op: e.target.value as PredicateOp })}
+          onChange={e => onChange(predicateFromOp(e.target.value as PredicateOp))}
           className={inputClass}
         >
-          {PREDICATE_OPS.map(op => <option key={op} value={op}>{op}</option>)}
+          <optgroup label="Compare">
+            {COMPARE_OPS.map(op => <option key={op} value={op}>{op}</option>)}
+          </optgroup>
+          <optgroup label="Unary">
+            {UNARY_OPS.map(op => <option key={op} value={op}>{op}</option>)}
+          </optgroup>
+          <optgroup label="Logic">
+            <option value="not">not</option>
+            <option value="and">and</option>
+            <option value="or">or</option>
+          </optgroup>
         </select>
       </Field>
-      {!unary && (
+
+      {COMPARE_OPS.includes(value.op as CompareOp) && (
+        <>
+          <BindingEditor
+            label="Left"
+            value={(value as Extract<PredicateNode, { left: BindingValue }>).left}
+            steps={steps}
+            disabled={disabled}
+            onChange={left => onChange({ ...(value as Extract<PredicateNode, { left: BindingValue }>), left })}
+          />
+          <BindingEditor
+            label="Right"
+            value={(value as Extract<PredicateNode, { right: BindingValue }>).right}
+            steps={steps}
+            disabled={disabled}
+            onChange={right => onChange({ ...(value as Extract<PredicateNode, { right: BindingValue }>), right })}
+          />
+        </>
+      )}
+
+      {UNARY_OPS.includes(value.op as UnaryOp) && (
         <BindingEditor
-          label="Right operand"
-          value={value.right}
+          label="Operand"
+          value={(value as Extract<PredicateNode, { operand: BindingValue }>).operand}
           steps={steps}
           disabled={disabled}
-          onChange={right => onChange({ ...value, right })}
+          onChange={operand => onChange({ ...(value as Extract<PredicateNode, { operand: BindingValue }>), operand })}
         />
+      )}
+
+      {value.op === 'not' && (
+        <div className="space-y-2">
+          <p className="text-xs font-medium text-slate-600">Child Predicate</p>
+          <PredicateBuilder
+            value={value.child}
+            steps={steps}
+            disabled={disabled}
+            depth={depth + 1}
+            onChange={child => onChange({ op: 'not', child })}
+          />
+        </div>
+      )}
+
+      {(value.op === 'and' || value.op === 'or') && (
+        <div className="space-y-2">
+          <div className="flex items-center justify-between">
+            <p className="text-xs font-medium text-slate-600">Children ({value.children.length})</p>
+            {!disabled && (
+              <button
+                type="button"
+                onClick={() => onChange({ ...value, children: [...value.children, defaultPredicate()] })}
+                className="inline-flex items-center gap-1 text-xs text-indigo-600 hover:text-indigo-700"
+              >
+                <Plus size={12} /> Child 추가
+              </button>
+            )}
+          </div>
+          {value.children.map((child, idx) => (
+            <div key={`${value.op}-${idx}`} className="relative">
+              {!disabled && value.children.length > 1 && (
+                <button
+                  type="button"
+                  onClick={() => onChange({
+                    ...value,
+                    children: value.children.filter((_, i) => i !== idx),
+                  })}
+                  className="absolute -right-1 -top-1 z-10 p-1 rounded text-slate-400 hover:text-red-500 hover:bg-red-50 bg-white border border-slate-200"
+                  title="Child 삭제"
+                >
+                  <Trash2 size={11} />
+                </button>
+              )}
+              <PredicateBuilder
+                value={child}
+                steps={steps}
+                disabled={disabled}
+                depth={depth + 1}
+                onChange={next => {
+                  const children = value.children.slice();
+                  children[idx] = next;
+                  onChange({ ...value, children });
+                }}
+              />
+            </div>
+          ))}
+          {value.children.length === 0 && (
+            <p className="text-[10px] text-amber-600">{value.op.toUpperCase()}는 최소 1개의 child Predicate가 필요합니다.</p>
+          )}
+        </div>
       )}
     </div>
   );
@@ -655,6 +763,39 @@ function isBindingInvalid(b?: BindingValue): boolean {
   if (b.kind === 'SECRET_REF') return !b.secretRef?.trim();
   if (b.kind === 'STEP_OUTPUT') return !b.stepId || !b.path?.trim();
   return !b.path?.trim();
+}
+
+/** Recursively validate Predicate AST shape and bindings. */
+function validatePredicate(node: PredicateNode | undefined): string | null {
+  if (!node || !PREDICATE_OPS.includes(node.op)) {
+    return 'Predicate AST가 없거나 허용되지 않는 operator입니다.';
+  }
+  if (COMPARE_OPS.includes(node.op as CompareOp)) {
+    const n = node as Extract<PredicateNode, { left: BindingValue; right: BindingValue }>;
+    if (isBindingInvalid(n.left)) return `비교(${node.op}) Left binding이 불완전합니다.`;
+    if (isBindingInvalid(n.right)) return `비교(${node.op}) Right binding이 불완전합니다.`;
+    return null;
+  }
+  if (UNARY_OPS.includes(node.op as UnaryOp)) {
+    const n = node as Extract<PredicateNode, { operand: BindingValue }>;
+    if (isBindingInvalid(n.operand)) return `Unary(${node.op}) Operand binding이 불완전합니다.`;
+    return null;
+  }
+  if (node.op === 'not') {
+    if (!node.child) return 'NOT은 하위 Predicate 1개가 필요합니다.';
+    return validatePredicate(node.child);
+  }
+  if (node.op === 'and' || node.op === 'or') {
+    if (!node.children || node.children.length < 1) {
+      return `${node.op.toUpperCase()}는 하나 이상의 child Predicate가 필요합니다.`;
+    }
+    for (let i = 0; i < node.children.length; i++) {
+      const err = validatePredicate(node.children[i]);
+      if (err) return `${node.op}[${i}]: ${err}`;
+    }
+    return null;
+  }
+  return '알 수 없는 Predicate operator입니다.';
 }
 
 function validatePlan(steps: Step[]): { code: ValidationCode; message: string; stepId?: string }[] {
@@ -744,11 +885,9 @@ function validatePlan(steps: Step[]): { code: ValidationCode; message: string; s
     }
 
     if (s.type === 'CONDITION') {
-      const p = s.predicate;
-      if (!p || !PREDICATE_OPS.includes(p.op) || isBindingInvalid(p.left)) {
-        issues.push({ code: 'Invalid Predicate', message: 'Predicate AST가 불완전하거나 허용되지 않습니다.', stepId: s.id });
-      } else if (p.op !== 'exists' && p.op !== 'is_null' && p.op !== 'not' && isBindingInvalid(p.right)) {
-        issues.push({ code: 'Invalid Predicate', message: 'Right operand binding이 필요합니다.', stepId: s.id });
+      const err = validatePredicate(s.predicate);
+      if (err) {
+        issues.push({ code: 'Invalid Predicate', message: err, stepId: s.id });
       }
     }
 
@@ -764,9 +903,9 @@ function validatePlan(steps: Step[]): { code: ValidationCode; message: string; s
         issues.push({ code: 'Invalid Binding', message: 'FOR_EACH collection binding이 필요합니다.', stepId: s.id });
       }
       if (s.loopMode === 'WHILE') {
-        const p = s.predicate;
-        if (!p || isBindingInvalid(p.left)) {
-          issues.push({ code: 'Invalid Predicate', message: 'WHILE predicate가 필요합니다.', stepId: s.id });
+        const err = validatePredicate(s.predicate);
+        if (err) {
+          issues.push({ code: 'Invalid Predicate', message: `WHILE: ${err}`, stepId: s.id });
         }
       }
     }
