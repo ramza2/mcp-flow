@@ -1,12 +1,20 @@
 import { useState } from 'react';
 import { useNavigate, useParams } from 'react-router';
-import { ArrowLeft, Info } from 'lucide-react';
 import PageHeader from '../../components/ui/PageHeader';
 import Button from '../../components/ui/Button';
 import { InlineAlert } from '../../components/ui/EmptyState';
-import { mockSchedules } from '../../data/mock';
+import { mockAgents, mockSchedules, mockWorkflows } from '../../data/mock';
+import {
+  SCHEDULE_MISFIRE_POLICIES,
+  SCHEDULE_OVERLAP_POLICIES,
+  SCHEDULE_TARGET_TYPES,
+  labelScheduleTarget,
+  type ScheduleMisfirePolicy,
+  type ScheduleOverlapPolicy,
+  type ScheduleTargetType,
+} from '../../domain';
 
-const PREVIEW_RUNS = [
+const DEFAULT_PREVIEW = [
   '2026-09-09 09:00 KST',
   '2026-09-16 09:00 KST',
   '2026-09-23 09:00 KST',
@@ -16,15 +24,43 @@ export default function ScheduleEdit() {
   const navigate = useNavigate();
   const { id } = useParams();
   const isNew = !id || id === 'new';
-  const existing = isNew ? null : mockSchedules[0];
+  const existing = isNew ? null : (mockSchedules.find(s => s.id === id) ?? mockSchedules[0]);
 
   const [name, setName] = useState(existing?.name ?? '');
-  const [targetType, setTargetType] = useState(existing?.targetType ?? 'Workflow');
-  const [scheduleType, setScheduleType] = useState('Recurring');
-  const [cron, setCron] = useState('0 9 * * 1');
-  const [timezone, setTimezone] = useState('Asia/Seoul');
-  const [active, setActive] = useState(existing?.status !== 'INACTIVE');
+  const [targetType, setTargetType] = useState<ScheduleTargetType>(existing?.targetType ?? 'WORKFLOW_VERSION');
+  const [targetId, setTargetId] = useState(existing?.targetId ?? '');
+  const [version, setVersion] = useState(existing?.version ?? '');
+  const [inputJson, setInputJson] = useState('{\n  \n}');
+  const [scheduleType, setScheduleType] = useState<'One-time' | 'Recurring'>(
+    existing?.scheduleKind === 'RECURRING' ? 'Recurring' : isNew ? 'Recurring' : 'One-time'
+  );
+  const [oneTimeAt, setOneTimeAt] = useState('');
+  const [cron, setCron] = useState(existing?.schedule ?? '0 9 * * 1');
+  const [timezone, setTimezone] = useState(existing?.timezone ?? 'Asia/Seoul');
+  const [overlap, setOverlap] = useState<ScheduleOverlapPolicy>(existing?.overlapPolicy ?? 'SKIP');
+  const [misfire, setMisfire] = useState<ScheduleMisfirePolicy>(existing?.misfirePolicy ?? 'SKIP');
+  // ACTIVE vs PAUSED — never INACTIVE
+  const [active, setActive] = useState(existing ? existing.status === 'ACTIVE' : true);
   const [saving, setSaving] = useState(false);
+
+  const targets = targetType === 'AGENT_VERSION'
+    ? mockAgents.map(a => ({ id: a.id, name: a.name, versions: a.versions.map(v => v.version) }))
+    : mockWorkflows.map(w => ({
+      id: w.id,
+      name: w.name,
+      // Logical workflows list publishedVersion only; mock designer holds full version history
+      versions: w.publishedVersion ? [w.publishedVersion, 'v1'] : ['v1'],
+    }));
+
+  const selectedTarget = targets.find(t => t.id === targetId) ?? targets[0];
+  const versionOptions = selectedTarget?.versions ?? [];
+  const previewRuns = !isNew && existing?.nextRunsPreview?.length
+    ? existing.nextRunsPreview
+    : scheduleType === 'Recurring'
+      ? DEFAULT_PREVIEW
+      : oneTimeAt
+        ? [`${oneTimeAt} ${timezone.includes('Seoul') ? 'KST' : ''}`.trim()]
+        : [];
 
   const handleSave = async () => {
     setSaving(true);
@@ -56,33 +92,63 @@ export default function ScheduleEdit() {
           </Field>
           <Field label="Target Type">
             <div className="flex gap-3">
-              {['Agent', 'Workflow'].map(t => (
+              {SCHEDULE_TARGET_TYPES.map(t => (
                 <label key={t} className="flex items-center gap-2 cursor-pointer">
-                  <input type="radio" checked={targetType === t} onChange={() => setTargetType(t)} className="accent-indigo-600" />
-                  <span className="text-sm text-slate-700">{t} Version</span>
+                  <input
+                    type="radio"
+                    checked={targetType === t}
+                    onChange={() => {
+                      setTargetType(t);
+                      setTargetId('');
+                      setVersion('');
+                    }}
+                    className="accent-indigo-600"
+                  />
+                  <span className="text-sm text-slate-700">{labelScheduleTarget(t)}</span>
                 </label>
               ))}
             </div>
           </Field>
           <Field label="Target">
-            <select className={inputClass}>
-              <option>Weekly Report Workflow</option>
-              <option>Document Review Workflow</option>
-              <option>General Work Assistant</option>
+            <select
+              value={targetId || selectedTarget?.id || ''}
+              onChange={e => {
+                setTargetId(e.target.value);
+                setVersion('');
+              }}
+              className={inputClass}
+            >
+              {targets.map(t => (
+                <option key={t.id} value={t.id}>{t.name}</option>
+              ))}
             </select>
           </Field>
           <Field label="Version">
-            <select className={inputClass}>
-              <option>v2 (PUBLISHED)</option>
-              <option>v1 (DEPRECATED)</option>
+            <select
+              value={version || versionOptions[0] || ''}
+              onChange={e => setVersion(e.target.value)}
+              className={inputClass}
+            >
+              {versionOptions.map(v => (
+                <option key={v} value={v}>{v}</option>
+              ))}
             </select>
+          </Field>
+          <Field label="Input">
+            <textarea
+              value={inputJson}
+              onChange={e => setInputJson(e.target.value)}
+              rows={4}
+              placeholder='{"key": "value"}'
+              className={`${inputClass} h-auto font-mono py-2`}
+            />
           </Field>
         </Section>
 
         <Section title="실행 일정">
           <Field label="Schedule Type">
             <div className="flex gap-3">
-              {['One-time', 'Recurring'].map(t => (
+              {(['One-time', 'Recurring'] as const).map(t => (
                 <label key={t} className="flex items-center gap-2 cursor-pointer">
                   <input type="radio" checked={scheduleType === t} onChange={() => setScheduleType(t)} className="accent-indigo-600" />
                   <span className="text-sm text-slate-700">{t}</span>
@@ -90,7 +156,16 @@ export default function ScheduleEdit() {
               ))}
             </div>
           </Field>
-          {scheduleType === 'Recurring' && (
+          {scheduleType === 'One-time' ? (
+            <Field label="Date / Time">
+              <input
+                type="datetime-local"
+                value={oneTimeAt}
+                onChange={e => setOneTimeAt(e.target.value)}
+                className={inputClass}
+              />
+            </Field>
+          ) : (
             <Field label="Cron 표현식">
               <input value={cron} onChange={e => setCron(e.target.value)} placeholder="0 9 * * 1" className={`${inputClass} font-mono`} />
               <p className="text-xs text-slate-400 mt-1">매주 월요일 09:00</p>
@@ -105,35 +180,37 @@ export default function ScheduleEdit() {
           </Field>
         </Section>
 
-        {scheduleType === 'Recurring' && (
-          <Section title="예상 실행 시각 (Next 3 Runs)">
+        <Section title="예상 실행 시각 (Next Runs Preview)">
+          {previewRuns.length === 0 ? (
+            <p className="text-sm text-slate-400">일정을 설정하면 예상 실행 시각이 표시됩니다.</p>
+          ) : (
             <div className="space-y-1.5">
-              {PREVIEW_RUNS.map((r, i) => (
+              {previewRuns.map((r, i) => (
                 <div key={i} className="flex items-center gap-2 text-sm">
                   <span className="text-slate-400 w-4">{i + 1}.</span>
                   <span className="font-mono text-slate-700">{r}</span>
                 </div>
               ))}
             </div>
-          </Section>
-        )}
+          )}
+        </Section>
 
         <Section title="옵션">
           <Field label="Overlap Policy">
-            <select className={inputClass}>
-              <option>SKIP</option>
-              <option>QUEUE</option>
-              <option>CANCEL_RUNNING</option>
+            <select value={overlap} onChange={e => setOverlap(e.target.value as ScheduleOverlapPolicy)} className={inputClass}>
+              {SCHEDULE_OVERLAP_POLICIES.map(p => (
+                <option key={p} value={p}>{p}</option>
+              ))}
             </select>
           </Field>
           <Field label="Misfire Policy">
-            <select className={inputClass}>
-              <option>SKIP</option>
-              <option>RUN_ONCE</option>
-              <option>RUN_ALL</option>
+            <select value={misfire} onChange={e => setMisfire(e.target.value as ScheduleMisfirePolicy)} className={inputClass}>
+              {SCHEDULE_MISFIRE_POLICIES.map(p => (
+                <option key={p} value={p}>{p}</option>
+              ))}
             </select>
           </Field>
-          <Field label="활성화">
+          <Field label="상태">
             <label className="flex items-center gap-2 cursor-pointer">
               <div
                 onClick={() => setActive(v => !v)}
@@ -141,7 +218,7 @@ export default function ScheduleEdit() {
               >
                 <div className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-all ${active ? 'left-5.5' : 'left-0.5'}`} />
               </div>
-              <span className="text-sm text-slate-700">{active ? '활성' : '비활성'}</span>
+              <span className="text-sm text-slate-700">{active ? 'ACTIVE' : 'PAUSED'}</span>
             </label>
           </Field>
         </Section>

@@ -15,8 +15,56 @@ export default function AgentDetail() {
   const navigate = useNavigate();
   const [tab, setTab] = useState('overview');
 
-  const agent = mockAgents.find(a => a.id === agentId) ?? mockAgents[0];
-  const full = mockAgentFull[agent.id] ?? mockAgentFull['agt-001'];
+  const existingAgent = mockAgents.find(a => a.id === agentId);
+  const isNewLogicalAgent = !existingAgent && !!agentId?.startsWith('agt-');
+  const unknownAgentId = !existingAgent && !isNewLogicalAgent;
+
+  const agent = existingAgent ?? (isNewLogicalAgent
+    ? {
+      id: agentId!,
+      name: 'New Agent',
+      status: 'DRAFT' as const,
+      publishedVersion: null as string | null,
+      allowedTools: 0,
+      modelProfile: 'Claude 3.5 Sonnet',
+      owner: 'admin',
+      updatedAt: new Date().toISOString().slice(0, 10),
+      versions: [{ version: 'v1', status: 'DRAFT' as const, createdAt: new Date().toISOString().slice(0, 10), author: 'admin' }],
+    }
+    : null);
+
+  const full = isNewLogicalAgent
+    ? {
+      description: '신규 Logical Agent (아직 저장되지 않은 Mock Draft)',
+      purpose: '',
+      visibility: 'INTERNAL',
+      createdAt: new Date().toISOString().slice(0, 10),
+      currentVersion: null as string | null,
+      allowedToolIds: [] as string[],
+      instructions: '',
+      versions: [{
+        version: 'v1',
+        status: 'DRAFT' as const,
+        changeSummary: 'Initial draft',
+        validation: null as 'VALID' | 'INVALID' | 'WARNING' | null,
+        createdBy: 'admin',
+        createdAt: new Date().toISOString().slice(0, 10),
+        publishedAt: null as string | null,
+      }],
+    }
+    : (agent ? (mockAgentFull[agent.id] ?? null) : null);
+
+  if (unknownAgentId || !agent || !full) {
+    return (
+      <div className="p-6">
+        <InlineAlert type="warning" message={`Agent를 찾을 수 없습니다: ${agentId ?? '(missing id)'}`} />
+        <div className="mt-4">
+          <Button variant="outline" onClick={() => navigate('/agents')}>Agents로 돌아가기</Button>
+        </div>
+      </div>
+    );
+  }
+
   const allowedTools = mockTools.filter(t => full.allowedToolIds.includes(t.id));
   const latest = full.versions[0];
   const latestStatus = (latest?.status ?? 'DRAFT') as VersionStatus;

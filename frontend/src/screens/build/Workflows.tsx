@@ -6,9 +6,16 @@ import StatusBadge, { VersionBadge } from '../../components/ui/StatusBadge';
 import FilterBar from '../../components/ui/FilterBar';
 import Button from '../../components/ui/Button';
 import { mockWorkflows } from '../../data/mock';
+import { WORKFLOW_STATUSES } from '../../domain';
 
 export default function Workflows() {
   const navigate = useNavigate();
+
+  /** Mock UX: create Logical Workflow + initial DRAFT Version (Designer falls back if id unknown). */
+  const handleNewWorkflow = () => {
+    const id = `wf-${Date.now().toString(36)}`;
+    navigate(`/workflows/${id}/versions/v1/edit`);
+  };
 
   const columns: Column<typeof mockWorkflows[0]>[] = [
     { key: 'name', label: 'Name', render: r => (
@@ -37,16 +44,16 @@ export default function Workflows() {
       <PageHeader
         title="Workflows"
         description="여러 Tool과 Step을 조합한 실행 흐름을 설계하고 관리합니다."
-        actions={<Button icon={<Plus size={14} />} onClick={() => navigate('/workflows/wf-001/versions/new/edit')}>New Workflow</Button>}
+        actions={<Button icon={<Plus size={14} />} onClick={handleNewWorkflow}>New Workflow</Button>}
       />
       <div className="p-6 space-y-4">
         <FilterBar
           search searchPlaceholder="Workflow 이름 검색..."
           filters={[
-            { key: 'status', label: '상태', options: [
-              { value: 'PUBLISHED', label: 'Published' },
-              { value: 'DRAFT', label: 'Draft' },
-            ] },
+            { key: 'status', label: '상태', options: WORKFLOW_STATUSES.map(v => ({
+              value: v,
+              label: v.charAt(0) + v.slice(1).toLowerCase(),
+            })) },
           ]}
         />
         <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">

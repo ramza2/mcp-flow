@@ -15,8 +15,58 @@ export default function WorkflowDetail() {
   const navigate = useNavigate();
   const [tab, setTab] = useState('overview');
 
-  const workflow = mockWorkflows.find(w => w.id === workflowId) ?? mockWorkflows[0];
-  const full = mockWorkflowFull[workflow.id] ?? mockWorkflowFull['wf-001'];
+  const existingWorkflow = mockWorkflows.find(w => w.id === workflowId);
+  const isNewLogicalWorkflow = !existingWorkflow && !!workflowId?.startsWith('wf-');
+  const unknownWorkflowId = !existingWorkflow && !isNewLogicalWorkflow;
+
+  const workflow = existingWorkflow ?? (isNewLogicalWorkflow
+    ? {
+      id: workflowId!,
+      name: 'New Workflow',
+      status: 'DRAFT' as const,
+      publishedVersion: null as string | null,
+      steps: 0,
+      owner: 'admin',
+      lastPublished: null as string | null,
+      updatedAt: new Date().toISOString().slice(0, 10),
+    }
+    : null);
+
+  const full = isNewLogicalWorkflow
+    ? {
+      description: '신규 Logical Workflow (아직 저장되지 않은 Mock Draft)',
+      owner: 'admin',
+      currentVersion: null as string | null,
+      toolCount: 0,
+      scheduleCount: 0,
+      createdAt: new Date().toISOString().slice(0, 10),
+      lastPublished: null as string | null,
+      versions: [{
+        version: 'v1',
+        status: 'DRAFT' as const,
+        steps: 0,
+        changeSummary: 'Initial draft',
+        validation: null as 'VALID' | 'INVALID' | 'WARNING' | null,
+        createdBy: 'admin',
+        createdAt: new Date().toISOString().slice(0, 10),
+        publishedAt: null as string | null,
+      }],
+      tools: [] as typeof mockWorkflowFull['wf-001']['tools'],
+      schedules: [] as typeof mockWorkflowFull['wf-001']['schedules'],
+    }
+    : (workflow ? (mockWorkflowFull[workflow.id] ?? null) : null);
+
+  if (unknownWorkflowId || !workflow || !full) {
+    return (
+      <div className="p-6">
+        <InlineAlert type="warning" message={`Workflow를 찾을 수 없습니다: ${workflowId ?? '(missing id)'}`} />
+        <div className="mt-4">
+          <Button variant="outline" onClick={() => navigate('/workflows')}>Workflows로 돌아가기</Button>
+        </div>
+      </div>
+    );
+  }
+
   const latest = full.versions[0];
   const latestStatus = (latest?.status ?? 'DRAFT') as VersionStatus;
 

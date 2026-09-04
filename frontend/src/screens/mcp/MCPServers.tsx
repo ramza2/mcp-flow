@@ -1,11 +1,12 @@
 import { useNavigate } from 'react-router';
-import { Plus, RefreshCw, Eye, ToggleLeft } from 'lucide-react';
+import { Plus, RefreshCw, Eye } from 'lucide-react';
 import PageHeader from '../../components/ui/PageHeader';
 import DataTable, { Column } from '../../components/ui/DataTable';
 import StatusBadge from '../../components/ui/StatusBadge';
 import FilterBar from '../../components/ui/FilterBar';
 import Button from '../../components/ui/Button';
 import { mockMCPServers } from '../../data/mock';
+import { labelDiscoveryMode, MCP_SERVER_STATUSES } from '../../domain';
 
 export default function MCPServers() {
   const navigate = useNavigate();
@@ -16,7 +17,9 @@ export default function MCPServers() {
     { key: 'status', label: '상태', render: r => <StatusBadge status={r.status} size="sm" /> },
     { key: 'protocol', label: 'Protocol', render: r => <span className="text-xs text-slate-600">{r.protocol}</span> },
     { key: 'version', label: 'Version', render: r => <span className="font-mono text-xs text-slate-500">{r.version}</span> },
-    { key: 'discovery', label: 'Discovery Mode', render: r => <span className="text-xs text-slate-500">{r.discovery}</span> },
+    { key: 'discoveryMode', label: 'Discovery Mode', render: r => (
+      <span className="text-xs text-slate-500">{labelDiscoveryMode(r.discoveryMode)}</span>
+    )},
     { key: 'toolCount', label: 'Tools', render: r => <span className="text-sm text-slate-600">{r.toolCount}</span>, align: 'center' },
     { key: 'lastHealth', label: 'Last Health', render: r => <span className="text-xs text-slate-400">{r.lastHealth}</span> },
     { key: 'actions', label: '', render: r => (
@@ -38,7 +41,7 @@ export default function MCPServers() {
         <FilterBar
           search searchPlaceholder="서버 이름 검색..."
           filters={[
-            { key: 'status', label: '상태', options: [{ value: 'ACTIVE', label: 'Active' }, { value: 'INACTIVE', label: 'Inactive' }] },
+            { key: 'status', label: '상태', options: MCP_SERVER_STATUSES.map(v => ({ value: v, label: v })) },
             { key: 'transport', label: 'Transport', options: [
               { value: 'Streamable HTTP', label: 'Streamable HTTP' },
               { value: 'STDIO', label: 'STDIO' },

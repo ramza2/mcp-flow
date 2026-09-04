@@ -4,6 +4,7 @@ import DataTable, { Column } from '../../components/ui/DataTable';
 import StatusBadge, { RiskBadge } from '../../components/ui/StatusBadge';
 import FilterBar from '../../components/ui/FilterBar';
 import { mockApprovals } from '../../data/mock';
+import { APPROVAL_STATUSES } from '../../domain';
 
 export default function Approvals() {
   const navigate = useNavigate();
@@ -16,10 +17,7 @@ export default function Approvals() {
     { key: 'riskClass', label: 'Risk', render: r => <RiskBadge risk={r.riskClass} /> },
     { key: 'requestedAt', label: '요청 시각', render: r => <span className="text-xs text-slate-500">{r.requestedAt}</span> },
     { key: 'expiresAt', label: '만료 시각', render: r => <span className="text-xs text-slate-500">{r.expiresAt}</span> },
-    { key: 'status', label: '상태', render: r => {
-      const s = r.status === 'PENDING' ? 'WAITING_APPROVAL' : r.status === 'APPROVED' ? 'APPROVED' : 'REJECTED';
-      return <StatusBadge status={s} size="sm" />;
-    }},
+    { key: 'status', label: '상태', render: r => <StatusBadge status={r.status} size="sm" /> },
   ];
 
   return (
@@ -30,7 +28,10 @@ export default function Approvals() {
           search
           searchPlaceholder="목적, 요청자 검색..."
           filters={[
-            { key: 'status', label: '상태', options: [{ value: 'PENDING', label: '대기중' }, { value: 'APPROVED', label: '승인됨' }, { value: 'REJECTED', label: '거절됨' }] },
+            { key: 'status', label: '상태', options: APPROVAL_STATUSES.map(v => ({
+              value: v,
+              label: v.replace(/_/g, ' '),
+            })) },
             { key: 'risk', label: 'Risk Class', options: [
               { value: 'NON_IDEMPOTENT_WRITE', label: 'Non-Idempotent Write' },
               { value: 'DESTRUCTIVE', label: 'Destructive' },

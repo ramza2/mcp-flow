@@ -3,6 +3,13 @@ import { useNavigate } from 'react-router';
 import { ArrowLeft, Check, ChevronRight, RefreshCw, AlertTriangle } from 'lucide-react';
 import Button from '../../components/ui/Button';
 import { InlineAlert } from '../../components/ui/EmptyState';
+import { mockSecrets } from '../../data/mock';
+import {
+  CURRENT_MCP_PROTOCOL_VERSION,
+  MCP_AUTH_TYPES,
+  labelAuthType,
+  type MCPAuthType,
+} from '../../domain';
 
 const STEPS = ['Basic', 'Transport', 'Authentication', 'Connection Test', 'Protocol / Capability', 'Tool Preview', 'Review & Register'];
 
@@ -10,10 +17,19 @@ export default function MCPServerNew() {
   const navigate = useNavigate();
   const [step, setStep] = useState(0);
   const [transport, setTransport] = useState('Streamable HTTP');
-  const [authType, setAuthType] = useState('API Key');
+  const [authType, setAuthType] = useState<MCPAuthType>('API_KEY_HEADER');
+  const [secretMode, setSecretMode] = useState<'existing' | 'new'>('existing');
+  const [secretRefId, setSecretRefId] = useState(mockSecrets[0]?.id ?? '');
+  const [newSecretValue, setNewSecretValue] = useState('');
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<'idle' | 'ok' | 'fail'>('idle');
   const [registering, setRegistering] = useState(false);
+
+  const isLegacy = transport === 'Legacy HTTP/SSE';
+  const discoveryMode = isLegacy ? 'LEGACY_HANDSHAKE' : 'INFERRED_CURRENT';
+  const protocolLabel = isLegacy ? 'Legacy MCP' : 'Current MCP';
+  const protocolVersion = isLegacy ? '2024-11-05' : CURRENT_MCP_PROTOCOL_VERSION;
+  const needsSecret = authType !== 'NONE';
 
   const runTest = async () => {
     setTesting(true);
@@ -111,21 +127,62 @@ export default function MCPServerNew() {
         {step === 2 && (
           <Section title="Authentication">
             <Field label="인증 방식">
-              <select value={authType} onChange={e => setAuthType(e.target.value)} className={inputClass}>
-                <option>API Key</option>
-                <option>Bearer Token</option>
-                <option>OAuth 2.0</option>
-                <option>없음</option>
+              <select
+                value={authType}
+                onChange={e => setAuthType(e.target.value as MCPAuthType)}
+                className={inputClass}
+              >
+                {MCP_AUTH_TYPES.map(t => (
+                  <option key={t} value={t}>{labelAuthType(t)}</option>
+                ))}
               </select>
             </Field>
-            {authType === 'API Key' && (
-              <div className="p-3 bg-slate-50 rounded-lg border border-slate-200">
-                <p className="text-xs font-medium text-slate-600 mb-2">API Key</p>
-                <input type="password" placeholder="새 API Key 입력 (저장 후 다시 표시되지 않음)" className={inputClass} />
-                <p className="text-xs text-slate-400 mt-1.5">저장된 Secret은 원문을 다시 확인할 수 없습니다.</p>
+            {needsSecret && (
+              <div className="space-y-3">
+                <Field label="Secret">
+                  <div className="flex gap-3 mb-2">
+                    {(['existing', 'new'] as const).map(mode => (
+                      <label key={mode} className="flex items-center gap-2 cursor-pointer">
+                        <input
+                          type="radio"
+                          checked={secretMode === mode}
+                          onChange={() => setSecretMode(mode)}
+                          className="accent-indigo-600"
+                        />
+                        <span className="text-sm text-slate-700">
+                          {mode === 'existing' ? 'Existing Secret Reference' : 'New Secret registration'}
+                        </span>
+                      </label>
+                    ))}
+                  </div>
+                  {secretMode === 'existing' ? (
+                    <select
+                      value={secretRefId}
+                      onChange={e => setSecretRefId(e.target.value)}
+                      className={inputClass}
+                    >
+                      {mockSecrets.map(s => (
+                        <option key={s.id} value={s.id}>{s.name} ({s.type})</option>
+                      ))}
+                    </select>
+                  ) : (
+                    <div>
+                      <input
+                        type="password"
+                        value={newSecretValue}
+                        onChange={e => setNewSecretValue(e.target.value)}
+                        placeholder="새 Secret 입력 (저장 후 다시 표시되지 않음)"
+                        className={inputClass}
+                      />
+                      <p className="text-xs text-slate-400 mt-1.5">
+                        Raw secret is not shown again after save. 등록 후 원문을 다시 확인할 수 없습니다.
+                      </p>
+                    </div>
+                  )}
+                </Field>
+                <InlineAlert type="warning" message="Secret 원문은 저장 후 다시 표시되지 않습니다. 안전하게 보관하세요." />
               </div>
             )}
-            <InlineAlert type="warning" message="Secret 원문은 저장 후 다시 표시되지 않습니다. 안전하게 보관하세요." />
           </Section>
         )}
 
@@ -151,12 +208,21 @@ export default function MCPServerNew() {
         {step === 4 && (
           <Section title="Protocol / Capability">
             <div className="space-y-2 text-sm">
-              <Row label="Protocol">Current MCP</Row>
-              <Row label="Protocol Version">2025-03-26</Row>
-              <Row label="Discovery Mode">Inferred Current</Row>
-              <Row label="server/discover">미지원 (정상 — 현재 MCP 표준에서는 선택사항)</Row>
+              <Row label="Protocol">{protocolLabel}</Row>
+              <Row label="Protocol Version">{protocolVersion}</Row>
+              <Row label="Discovery Mode">{discoveryMode}</Row>
+              {!isLegacy && (
+                <Row label="server/discover">Optional — Current MCP에서는 명시적 Discovery가 선택사항입니다</Row>
+              )}
             </div>
-            <InlineAlert type="info" message="server/discover를 지원하지 않는 서버는 Tool 목록을 initialize 응답에서 추론합니다. 오류가 아닙니다." />
+            {isLegacy ? (
+              <InlineAlert type="info" message="Legacy MCP는 LEGACY_HANDSHAKE Discovery Mode를 사용합니다. initialize/initialized lifecycle은 Legacy Adapter 책임입니다." />
+            ) : (
+              <InlineAlert
+                type="info"
+                message="Current MCP: server/discover는 optional입니다. Explicit discovery 없이도 self-describing Current 요청이 정상 동작하면 INFERRED_CURRENT로 호환 가능합니다."
+              />
+            )}
           </Section>
         )}
 
@@ -186,9 +252,17 @@ export default function MCPServerNew() {
           <Section title="Review & Register">
             <div className="space-y-2 text-sm">
               <Row label="이름">Weather MCP (새 서버)</Row>
-              <Row label="Transport">Streamable HTTP</Row>
-              <Row label="인증">API Key — 설정됨 ••••••••••••</Row>
-              <Row label="Protocol">Current MCP (2025-03-26)</Row>
+              <Row label="Transport">{transport}</Row>
+              <Row label="인증">
+                {labelAuthType(authType)}
+                {needsSecret
+                  ? secretMode === 'existing'
+                    ? ` — Ref: ${mockSecrets.find(s => s.id === secretRefId)?.name ?? secretRefId}`
+                    : ' — New Secret (원문 저장 후 비표시)'
+                  : ''}
+              </Row>
+              <Row label="Protocol">{protocolLabel} ({protocolVersion})</Row>
+              <Row label="Discovery">{discoveryMode}</Row>
               <Row label="Tool 수">3개 (Discovery 후 활성화)</Row>
             </div>
             <Button loading={registering} onClick={handleRegister} className="mt-2">서버 등록</Button>

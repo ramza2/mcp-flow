@@ -1,11 +1,16 @@
 import { useState } from 'react';
 import { useNavigate, useParams } from 'react-router';
 import { ArrowLeft, RefreshCw } from 'lucide-react';
-import StatusBadge from '../../components/ui/StatusBadge';
+import StatusBadge, { RiskBadge, VerificationBadge } from '../../components/ui/StatusBadge';
 import { TabBar } from '../../components/ui/Tabs';
 import Button from '../../components/ui/Button';
 import { mockMCPServers, mockTools } from '../../data/mock';
 import DataTable, { Column } from '../../components/ui/DataTable';
+import {
+  CURRENT_MCP_PROTOCOL_VERSION,
+  labelAuthType,
+  labelDiscoveryMode,
+} from '../../domain';
 
 export default function MCPServerDetail() {
   const { serverId } = useParams();
@@ -13,6 +18,9 @@ export default function MCPServerDetail() {
   const [tab, setTab] = useState('overview');
   const server = mockMCPServers.find(s => s.id === serverId) ?? mockMCPServers[0];
   const serverTools = mockTools.filter(t => t.serverId === server.id);
+  const displayVersion = server.protocol === 'Current MCP'
+    ? CURRENT_MCP_PROTOCOL_VERSION
+    : server.version;
 
   return (
     <div>
@@ -26,7 +34,7 @@ export default function MCPServerDetail() {
             <div className="flex items-center gap-3 mt-1">
               <StatusBadge status={server.status} />
               <span className="text-xs text-slate-400 font-mono">{server.transport}</span>
-              <span className="text-xs text-slate-400">{server.protocol} · {server.version}</span>
+              <span className="text-xs text-slate-400">{server.protocol} · {displayVersion}</span>
             </div>
           </div>
           <div className="flex gap-2">
@@ -56,13 +64,13 @@ export default function MCPServerDetail() {
             <InfoCard title="연결 정보">
               <Row label="Transport">{server.transport}</Row>
               <Row label="Protocol">{server.protocol}</Row>
-              <Row label="Version" mono>{server.version}</Row>
-              <Row label="Discovery">{server.discovery}</Row>
+              <Row label="Version" mono>{displayVersion}</Row>
+              <Row label="Discovery">{labelDiscoveryMode(server.discoveryMode)}</Row>
               <Row label="Last Health">{server.lastHealth}</Row>
             </InfoCard>
             <InfoCard title="인증">
-              <Row label="방식">API Key</Row>
-              <Row label="상태">설정됨</Row>
+              <Row label="방식">{labelAuthType(server.authType)}</Row>
+              <Row label="상태">{server.secretRefId || server.authType === 'NONE' ? '설정됨' : '미설정'}</Row>
               <Row label="원문">••••••••••••</Row>
             </InfoCard>
           </div>
@@ -131,8 +139,6 @@ export default function MCPServerDetail() {
     </div>
   );
 }
-
-import { RiskBadge, VerificationBadge } from '../../components/ui/StatusBadge';
 
 const toolCols: Column<typeof mockTools[0]>[] = [
   { key: 'displayName', label: 'Display Name', render: r => <span className="font-medium text-slate-800">{r.displayName}</span> },
