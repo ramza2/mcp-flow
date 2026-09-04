@@ -78,11 +78,16 @@ export default function ExecutionDetail() {
   const [status, setStatus] = useState<ExecutionStatus>(base.status);
   const [cancelling, setCancelling] = useState(false);
   const [mrtrResponded, setMrtrResponded] = useState(false);
+  const isMrtrExecution = base.id === 'EXE-20260902-00126' || base.status === 'WAITING_INPUT';
 
   const steps = useMemo(() => {
-    if (base.id === 'EXE-20260902-00126' || status === 'WAITING_INPUT') {
+    if (isMrtrExecution || status === 'WAITING_INPUT' || (mrtrResponded && status === 'RUNNING')) {
       return MRTR_STEPS.map(s => s.runtimeInput
-        ? { ...s, runtimeInput: { ...s.runtimeInput, responded: mrtrResponded }, status: mrtrResponded ? 'RUNNING' as StepStatus : s.status }
+        ? {
+          ...s,
+          runtimeInput: { ...s.runtimeInput, responded: mrtrResponded },
+          status: (mrtrResponded || status === 'RUNNING' ? 'RUNNING' : s.status) as StepStatus,
+        }
         : s);
     }
     if (base.status === 'CANCELLED' || status === 'CANCELLED' || status === 'CANCEL_REQUESTED') {
@@ -90,9 +95,15 @@ export default function ExecutionDetail() {
     }
     if (base.id === 'EXE-20260901-00119') return UNKNOWN_STEPS;
     return DEFAULT_STEPS;
-  }, [base.id, base.status, status, mrtrResponded]);
+  }, [base.id, base.status, status, mrtrResponded, isMrtrExecution]);
 
   const [selectedStep, setSelectedStep] = useState<StepRow | null>(null);
+
+  /** Runtime MRTR: WAITING_INPUT → user response → Execution RUNNING (and Step RUNNING). */
+  const handleMrtrRespond = () => {
+    setMrtrResponded(true);
+    setStatus('RUNNING');
+  };
 
   const handleCancel = async () => {
     if (cancelling) return;
@@ -176,7 +187,7 @@ export default function ExecutionDetail() {
             approvalId={approvalId}
             onOpenApproval={() => navigate(`/approvals/${approvalId ?? 'apr-001'}`)}
             steps={steps}
-            onMrtrRespond={() => setMrtrResponded(true)}
+            onMrtrRespond={handleMrtrRespond}
           />
         )}
         {tab === 'steps' && <StepsTab steps={steps} selectedStep={selectedStep} onSelectStep={setSelectedStep} />}
@@ -198,7 +209,9 @@ function OverviewTab({
   steps: StepRow[];
   onMrtrRespond: () => void;
 }) {
-  const mrtr = steps.find(s => s.runtimeInput && s.status === 'WAITING_INPUT')?.runtimeInput;
+  // Keep Runtime Input card visible after respond (Step may already be RUNNING).
+  const mrtr = steps.find(s => s.runtimeInput)?.runtimeInput;
+  const showMrtrCard = !!mrtr && (status === 'WAITING_INPUT' || !!mrtr.responded);
 
   return (
     <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 max-w-4xl">
@@ -234,9 +247,13 @@ function OverviewTab({
         </div>
       )}
 
-      {mrtr && (
+      {showMrtrCard && mrtr && (
         <div className="col-span-full bg-amber-50 border border-amber-200 rounded-xl p-4 space-y-2">
-          <p className="text-sm font-semibold text-amber-800">MCP Tool requests information (Runtime WAITING_INPUT)</p>
+          <p className="text-sm font-semibold text-amber-800">
+            {mrtr.responded
+              ? 'MCP Tool input received — Execution resumed'
+              : 'MCP Tool requests information (Runtime WAITING_INPUT)'}
+          </p>
           <div className="text-xs text-amber-700 space-y-0.5">
             <p>MCP Server: {mrtr.server}</p>
             <p>Tool: <span className="font-mono">{mrtr.tool}</span></p>
@@ -247,7 +264,9 @@ function OverviewTab({
           {!mrtr.responded && (
             <Button size="sm" onClick={onMrtrRespond}>응답 후 Resume</Button>
           )}
-          {mrtr.responded && <InlineAlert type="info" message="응답 제출됨 — Execution RUNNING으로 재개" />}
+          {mrtr.responded && status === 'RUNNING' && (
+            <InlineAlert type="info" message="응답 제출됨 — Execution RUNNING으로 재개" />
+          )}
         </div>
       )}
     </div>

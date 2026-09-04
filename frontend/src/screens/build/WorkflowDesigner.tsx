@@ -143,29 +143,84 @@ function createStep(type: StepType, index: number, dependsOn: string[] = []): St
 export default function WorkflowDesigner() {
   const navigate = useNavigate();
   const { workflowId, versionId } = useParams();
-  const isNew = !versionId || versionId === 'new';
+  const isNewVersionRoute = !versionId || versionId === 'new';
 
-  const workflow = mockWorkflows.find(w => w.id === workflowId) ?? mockWorkflows[0];
-  const full = mockWorkflowFull[workflow.id] ?? mockWorkflowFull['wf-001'];
-  const existing = !isNew ? full.versions.find(v => v.version === versionId) : undefined;
+  const existingWorkflow = mockWorkflows.find(w => w.id === workflowId);
+  /** New Workflow flow: unknown wf-* id = new Logical Workflow + initial DRAFT Version (never fall back to wf-001). */
+  const isNewLogicalWorkflow = !existingWorkflow && !!workflowId?.startsWith('wf-');
+  const unknownWorkflowId = !existingWorkflow && !isNewLogicalWorkflow;
+
+  const blankFull = {
+    description: '',
+    owner: 'admin',
+    currentVersion: null as string | null,
+    toolCount: 0,
+    scheduleCount: 0,
+    createdAt: new Date().toISOString().slice(0, 10),
+    lastPublished: null as string | null,
+    versions: [{
+      version: 'v1',
+      status: 'DRAFT' as const,
+      steps: 0,
+      changeSummary: 'Initial draft',
+      validation: null as 'VALID' | 'INVALID' | 'WARNING' | null,
+      createdBy: 'admin',
+      createdAt: new Date().toISOString().slice(0, 10),
+      publishedAt: null as string | null,
+    }],
+    tools: [] as typeof mockWorkflowFull['wf-001']['tools'],
+    schedules: [] as typeof mockWorkflowFull['wf-001']['schedules'],
+  };
+
+  const workflow = existingWorkflow ?? (isNewLogicalWorkflow
+    ? {
+      id: workflowId!,
+      name: 'New Workflow',
+      status: 'DRAFT' as const,
+      publishedVersion: null as string | null,
+      steps: 0,
+      owner: 'admin',
+      lastPublished: null as string | null,
+      updatedAt: new Date().toISOString().slice(0, 10),
+    }
+    : {
+      id: workflowId ?? 'unknown',
+      name: 'Unknown Workflow',
+      status: 'DRAFT' as const,
+      publishedVersion: null as string | null,
+      steps: 0,
+      owner: 'admin',
+      lastPublished: null as string | null,
+      updatedAt: '',
+    });
+
+  const full = isNewLogicalWorkflow
+    ? blankFull
+    : (existingWorkflow ? (mockWorkflowFull[existingWorkflow.id] ?? blankFull) : blankFull);
+
+  const isNew = isNewVersionRoute || isNewLogicalWorkflow;
+  const existing = !isNewVersionRoute && !isNewLogicalWorkflow
+    ? full.versions.find(v => v.version === versionId)
+    : undefined;
   const versionStatus = (isNew ? 'DRAFT' : (existing?.status ?? 'DRAFT')) as VersionStatus;
   const readOnly = versionStatus === 'DEPRECATED';
   const publishedBlocked = versionStatus === 'PUBLISHED';
 
   const [steps, setSteps] = useState<Step[]>(() => {
-    if (full.tools.length > 0) {
-      return full.tools.map((t, i) => ({
-        id: `step-${i}`,
-        type: 'TOOL' as StepType,
-        name: t.step,
-        toolId: t.toolId,
-        toolVersion: t.version,
-        risk: t.riskClass,
-        dependsOn: i === 0 ? [] : [`step-${i - 1}`],
-        bindings: { input: { kind: 'PLAN_INPUT' as BindingKind, path: '/input' } },
-      }));
+    // New logical workflow: empty/minimal plan — never clone existing Weekly Report tools.
+    if (isNewLogicalWorkflow || full.tools.length === 0) {
+      return [createStep('TOOL', 0)];
     }
-    return [createStep('TOOL', 0)];
+    return full.tools.map((t, i) => ({
+      id: `step-${i}`,
+      type: 'TOOL' as StepType,
+      name: t.step,
+      toolId: t.toolId,
+      toolVersion: t.version,
+      risk: t.riskClass,
+      dependsOn: i === 0 ? [] : [`step-${i - 1}`],
+      bindings: { input: { kind: 'PLAN_INPUT' as BindingKind, path: '/input' } },
+    }));
   });
   const [selected, setSelected] = useState<string | null>(steps[0]?.id ?? null);
   const [showEndMarker, setShowEndMarker] = useState(true);
@@ -220,6 +275,17 @@ export default function WorkflowDesigner() {
 
   const selectedStep = steps.find(s => s.id === selected) ?? null;
 
+  if (unknownWorkflowId) {
+    return (
+      <div className="p-6">
+        <InlineAlert type="warning" message={`Workflow를 찾을 수 없습니다: ${workflowId ?? '(missing id)'}`} />
+        <div className="mt-4">
+          <Button variant="outline" onClick={() => navigate('/workflows')}>Workflows로 돌아가기</Button>
+        </div>
+      </div>
+    );
+  }
+
   if (publishedBlocked) {
     return (
       <div>
@@ -255,8 +321,18 @@ export default function WorkflowDesigner() {
           { label: workflow.name, to: `/workflows/${workflow.id}` },
           { label: readOnly ? `View (${versionId})` : `Designer (${versionId})` },
         ]}
-        title={readOnly ? 'Workflow Designer (View)' : 'Workflow Designer'}
-        description={`${workflow.name} · ${steps.length} steps · Execution Plan v1`}
+        title={
+          isNewLogicalWorkflow
+            ? 'New Workflow · Draft v1'
+            : readOnly
+              ? 'Workflow Designer (View)'
+              : 'Workflow Designer'
+        }
+        description={
+          isNewLogicalWorkflow
+            ? `${workflow.name} · DRAFT · empty plan`
+            : `${workflow.name} · ${steps.length} steps · Execution Plan v1`
+        }
         actions={
           <>
             <Button variant="outline" onClick={() => navigate(`/workflows/${workflow.id}`)}>{readOnly ? '닫기' : '취소'}</Button>

@@ -25,20 +25,74 @@ const RISK_OPTIONS = ['READ_ONLY', 'IDEMPOTENT_WRITE', 'NON_IDEMPOTENT_WRITE', '
 export default function AgentEdit() {
   const navigate = useNavigate();
   const { agentId, versionId } = useParams();
-  const isNew = !versionId || versionId === 'new';
+  const isNewVersionRoute = !versionId || versionId === 'new';
 
-  const agent = mockAgents.find(a => a.id === agentId) ?? mockAgents[0];
-  const full = mockAgentFull[agent.id] ?? mockAgentFull['agt-001'];
-  const existing = !isNew ? full.versions.find(v => v.version === versionId) : undefined;
+  const existingAgent = mockAgents.find(a => a.id === agentId);
+  /** New Agent flow: unknown agt-* id = new Logical Agent + initial DRAFT Version (never fall back to agt-001). */
+  const isNewLogicalAgent = !existingAgent && !!agentId?.startsWith('agt-');
+  const unknownAgentId = !existingAgent && !isNewLogicalAgent;
+
+  const defaultModel = mockModelProfiles.find(m => m.type === 'LLM')?.name ?? 'Claude 3.5 Sonnet';
+  const blankFull = {
+    description: '',
+    purpose: '',
+    visibility: 'INTERNAL',
+    createdAt: new Date().toISOString().slice(0, 10),
+    currentVersion: null as string | null,
+    allowedToolIds: [] as string[],
+    instructions: '',
+    versions: [{
+      version: 'v1',
+      status: 'DRAFT' as const,
+      changeSummary: 'Initial draft',
+      validation: null as 'VALID' | 'INVALID' | 'WARNING' | null,
+      createdBy: 'admin',
+      createdAt: new Date().toISOString().slice(0, 10),
+      publishedAt: null as string | null,
+    }],
+  };
+
+  const agent = existingAgent ?? (isNewLogicalAgent
+    ? {
+      id: agentId!,
+      name: 'New Agent',
+      status: 'DRAFT' as const,
+      publishedVersion: null as string | null,
+      allowedTools: 0,
+      modelProfile: defaultModel,
+      owner: 'admin',
+      updatedAt: new Date().toISOString().slice(0, 10),
+      versions: [{ version: 'v1', status: 'DRAFT' as const, createdAt: new Date().toISOString().slice(0, 10), author: 'admin' }],
+    }
+    : {
+      id: agentId ?? 'unknown',
+      name: 'Unknown Agent',
+      status: 'DRAFT' as const,
+      publishedVersion: null as string | null,
+      allowedTools: 0,
+      modelProfile: defaultModel,
+      owner: 'admin',
+      updatedAt: '',
+      versions: [] as typeof mockAgents[0]['versions'],
+    });
+
+  const full = isNewLogicalAgent
+    ? blankFull
+    : (existingAgent ? (mockAgentFull[existingAgent.id] ?? blankFull) : blankFull);
+
+  const isNew = isNewVersionRoute || isNewLogicalAgent;
+  const existing = !isNewVersionRoute && !isNewLogicalAgent
+    ? full.versions.find(v => v.version === versionId)
+    : undefined;
   const versionStatus = (isNew ? 'DRAFT' : (existing?.status ?? 'DRAFT')) as VersionStatus;
   const readOnly = versionStatus === 'DEPRECATED';
   const publishedBlocked = versionStatus === 'PUBLISHED';
 
-  const [name, setName] = useState(agent.name);
-  const [purpose, setPurpose] = useState(full.purpose);
+  const [name, setName] = useState(isNewLogicalAgent ? '' : (existingAgent?.name ?? ''));
+  const [purpose, setPurpose] = useState(isNewLogicalAgent ? '' : full.purpose);
   const [visibility, setVisibility] = useState(full.visibility);
   const [modelProfile, setModelProfile] = useState(agent.modelProfile);
-  const [instructions, setInstructions] = useState(full.instructions);
+  const [instructions, setInstructions] = useState(isNewLogicalAgent ? '' : full.instructions);
   const [selectedTools, setSelectedTools] = useState<string[]>(isNew ? [] : full.allowedToolIds);
   const [autoSelectThreshold, setAutoSelectThreshold] = useState(0.82);
   const [confirmationThreshold, setConfirmationThreshold] = useState(0.60);
@@ -127,6 +181,17 @@ export default function AgentEdit() {
     navigate(`/agents/${agent.id}`);
   };
 
+  if (unknownAgentId) {
+    return (
+      <div className="p-6">
+        <InlineAlert type="warning" message={`Agent를 찾을 수 없습니다: ${agentId ?? '(missing id)'}`} />
+        <div className="mt-4">
+          <Button variant="outline" onClick={() => navigate('/agents')}>Agents로 돌아가기</Button>
+        </div>
+      </div>
+    );
+  }
+
   if (publishedBlocked) {
     return (
       <div>
@@ -165,7 +230,15 @@ export default function AgentEdit() {
           { label: agent.name, to: `/agents/${agent.id}` },
           { label: isNew ? '새 버전' : readOnly ? `${versionId} View` : `${versionId} 편집` },
         ]}
-        title={isNew ? '새 Agent 버전' : readOnly ? `Agent Version View (${versionId})` : `Agent 버전 편집 (${versionId})`}
+        title={
+          isNewLogicalAgent
+            ? 'New Agent · Draft v1'
+            : isNewVersionRoute
+              ? '새 Agent 버전'
+              : readOnly
+                ? `Agent Version View (${versionId})`
+                : `Agent 버전 편집 (${versionId})`
+        }
         actions={
           <>
             <Button variant="outline" onClick={() => navigate(`/agents/${agent.id}`)}>{readOnly ? '닫기' : '취소'}</Button>
