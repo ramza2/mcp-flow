@@ -1,5 +1,8 @@
 from fastapi import APIRouter
 
-# Feature routers are added in later vertical slices.
-# Health lives under /health/* (docs/06/08), not under /api/v1.
+from app.api.v1.mcp_servers import router as mcp_servers_router
+from app.api.v1.mcp_tools import router as mcp_tools_router
+
 api_v1_router = APIRouter()
+api_v1_router.include_router(mcp_servers_router)
+api_v1_router.include_router(mcp_tools_router)
