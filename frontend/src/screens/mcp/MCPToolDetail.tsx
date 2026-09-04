@@ -26,6 +26,7 @@ export default function MCPToolDetail() {
   const { toolId } = useParams();
   const navigate = useNavigate();
   const mountedRef = useRef(true);
+  const versionRequestRef = useRef<AbortController | null>(null);
   const [tab, setTab] = useState('overview');
   const [tool, setTool] = useState<MCPToolDto | null>(null);
   const [versions, setVersions] = useState<MCPToolVersionDto[]>([]);
@@ -41,28 +42,43 @@ export default function MCPToolDetail() {
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
+      versionRequestRef.current?.abort();
+      versionRequestRef.current = null;
     };
   }, []);
 
-  const loadVersionDetail = useCallback(
-    async (versionId: string, signal?: AbortSignal) => {
-      if (!toolId) return;
-      setVersionLoading(true);
-      setVersionError(null);
-      try {
-        const ver = await getToolVersion(toolId, versionId, signal);
-        if (signal?.aborted || !mountedRef.current) return;
-        setSelectedVersion(ver);
-      } catch (err) {
-        if (isAbortError(err) || signal?.aborted || !mountedRef.current) return;
-        setSelectedVersion(null);
-        setVersionError(toFeedbackError(err, 'ToolVersion 상세를 불러오지 못했습니다.'));
-      } finally {
-        if (!signal?.aborted && mountedRef.current) setVersionLoading(false);
+  const loadVersionDetail = useCallback(async (versionId: string) => {
+    if (!toolId) return;
+
+    versionRequestRef.current?.abort();
+    const controller = new AbortController();
+    versionRequestRef.current = controller;
+
+    setSelectedVersionId(versionId);
+    setVersionLoading(true);
+    setVersionError(null);
+
+    try {
+      const ver = await getToolVersion(toolId, versionId, controller.signal);
+      if (versionRequestRef.current !== controller || !mountedRef.current) return;
+      setSelectedVersion(ver);
+    } catch (err) {
+      if (
+        isAbortError(err) ||
+        controller.signal.aborted ||
+        versionRequestRef.current !== controller ||
+        !mountedRef.current
+      ) {
+        return;
       }
-    },
-    [toolId],
-  );
+      setSelectedVersion(null);
+      setVersionError(toFeedbackError(err, 'ToolVersion 상세를 불러오지 못했습니다.'));
+    } finally {
+      if (versionRequestRef.current === controller && mountedRef.current) {
+        setVersionLoading(false);
+      }
+    }
+  }, [toolId]);
 
   const loadTool = useCallback(() => {
     if (!toolId) return () => {};
@@ -91,10 +107,10 @@ export default function MCPToolDetail() {
           return;
         }
         const currentId = t.current_version_id ?? versItems[0]?.id ?? null;
-        setSelectedVersionId(currentId);
         if (currentId) {
-          await loadVersionDetail(currentId, controller.signal);
+          await loadVersionDetail(currentId);
         } else {
+          setSelectedVersionId(null);
           setSelectedVersion(null);
         }
       })
@@ -113,6 +129,8 @@ export default function MCPToolDetail() {
     return () => {
       cancelled = true;
       controller.abort();
+      versionRequestRef.current?.abort();
+      versionRequestRef.current = null;
     };
   }, [toolId, loadVersionDetail]);
 
@@ -120,10 +138,8 @@ export default function MCPToolDetail() {
     return loadTool();
   }, [loadTool]);
 
-  const selectVersion = async (versionId: string) => {
-    if (!toolId) return;
-    setSelectedVersionId(versionId);
-    await loadVersionDetail(versionId);
+  const selectVersion = (versionId: string) => {
+    void loadVersionDetail(versionId);
   };
 
   if (loading && !tool) {

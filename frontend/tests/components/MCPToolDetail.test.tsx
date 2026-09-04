@@ -118,6 +118,62 @@ describe('MCPToolDetail — API detail', () => {
     expect(screen.getAllByText('WARNING').length).toBeGreaterThan(0);
   });
 
+  it('ignores stale Version A response after Version B is selected', async () => {
+    const user = userEvent.setup();
+    let resolveA!: (value: Response) => void;
+    const pendingA = new Promise<Response>(resolve => {
+      resolveA = resolve;
+    });
+    let aSignal: AbortSignal | undefined;
+
+    const fetchMock = vi.fn((input: RequestInfo, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input.url;
+      if (url.match(/\/mcp\/tools\/[^/]+$/) && !url.includes('/versions')) {
+        return Promise.resolve(jsonResponse(discoveredTool));
+      }
+      if (url.includes('/versions') && url.endsWith(warningVersion.id)) {
+        aSignal = init?.signal ?? undefined;
+        return pendingA;
+      }
+      if (url.includes('/versions') && url.endsWith(validVersion.id)) {
+        return Promise.resolve(jsonResponse(validVersion));
+      }
+      if (url.includes('/versions')) {
+        return Promise.resolve(jsonResponse(versionList));
+      }
+      return Promise.resolve(new Response('Not found', { status: 404 }));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    renderWithRouter(<MCPToolDetail />, {
+      path: '/mcp/tools/:toolId',
+      route: `/mcp/tools/${discoveredTool.id}`,
+    });
+
+    await screen.findByRole('heading', { name: 'Search Docs' });
+    await user.click(screen.getByRole('button', { name: /^Versions$/i }));
+
+    // Version A (v3) — keep pending
+    await user.click(screen.getByText('v3'));
+    await waitFor(() => {
+      expect(aSignal).toBeDefined();
+    });
+
+    // Version B (v1) — resolves first
+    await user.click(screen.getByText('v1'));
+    await waitFor(() => {
+      expect(aSignal?.aborted).toBe(true);
+    });
+
+    // Late A response must not overwrite B
+    resolveA(jsonResponse(warningVersion));
+
+    await user.click(screen.getByRole('button', { name: /^Overview$/i }));
+    expect(await screen.findByText('v1')).toBeInTheDocument();
+    expect(screen.getAllByText('VALID').length).toBeGreaterThan(0);
+    expect(screen.queryByText('v3')).not.toBeInTheDocument();
+  });
+
   it('shows version-specific error when detail API fails without losing Tool Overview', async () => {
     const user = userEvent.setup();
     const fetchMock = vi.fn((input: RequestInfo) => {
