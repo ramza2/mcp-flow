@@ -124,5 +124,9 @@ export const MCP_AUTH_TYPES = [
 ] as const;
 export type MCPAuthType = (typeof MCP_AUTH_TYPES)[number];
 
+/** Authorable Execution Plan v1 Step Types (docs/04). Visual PARALLEL/END are not persisted. */
+export const AUTHORABLE_STEP_TYPES = ['TOOL', 'CONDITION', 'JOIN', 'APPROVAL', 'LOOP'] as const;
+export type AuthorableStepType = (typeof AUTHORABLE_STEP_TYPES)[number];
+
 /** Current MCP protocol version (docs/04). */
 export const CURRENT_MCP_PROTOCOL_VERSION = '2026-07-28';

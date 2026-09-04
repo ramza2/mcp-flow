@@ -9,9 +9,9 @@ import Button from '../../components/ui/Button';
 import { RiskBadge } from '../../components/ui/StatusBadge';
 import { InlineAlert } from '../../components/ui/EmptyState';
 import { mockWorkflows, mockWorkflowFull, mockTools, mockApprovalPolicies } from '../../data/mock';
+import type { AuthorableStepType } from '../../domain';
 
-/** Canonical authorable Step Types (Execution Plan v1). No PARALLEL / CONDITIONAL / End as domain types. */
-type StepType = 'TOOL' | 'CONDITION' | 'JOIN' | 'APPROVAL' | 'LOOP';
+/** Canonical authorable Step Types come from domain (Execution Plan v1). Visual PARALLEL/END stay presentation-only. */
 type BindingKind = 'LITERAL' | 'PLAN_INPUT' | 'STEP_OUTPUT' | 'EXECUTION_CONTEXT' | 'LOOP_CONTEXT' | 'SECRET_REF';
 type JoinPolicy = 'ALL_SUCCESS' | 'ALL_COMPLETE' | 'ANY_SUCCESS';
 type LoopMode = 'FOR_EACH' | 'WHILE';
@@ -49,7 +49,7 @@ type PredicateNode =
 
 interface Step {
   id: string;
-  type: StepType;
+  type: AuthorableStepType;
   name: string;
   dependsOn: string[];
   toolId?: string;
@@ -65,10 +65,10 @@ interface Step {
 }
 
 type PaletteItem =
-  | { kind: 'step'; type: StepType; label: string; icon: React.ReactNode; color: string }
+  | { kind: 'step'; type: AuthorableStepType; label: string; icon: React.ReactNode; color: string }
   | { kind: 'visual'; id: 'PARALLEL' | 'END'; label: string; hint: string; icon: React.ReactNode; color: string };
 
-const STEP_META: Record<StepType, { label: string; icon: React.ReactNode; color: string }> = {
+const STEP_META: Record<AuthorableStepType, { label: string; icon: React.ReactNode; color: string }> = {
   TOOL: { label: 'Tool', icon: <Zap size={14} />, color: 'text-indigo-600 bg-indigo-50' },
   CONDITION: { label: 'Condition', icon: <Split size={14} />, color: 'text-amber-600 bg-amber-50' },
   JOIN: { label: 'Join', icon: <GitBranch size={14} />, color: 'text-cyan-600 bg-cyan-50' },
@@ -112,7 +112,7 @@ function predicateFromOp(op: PredicateOp): PredicateNode {
   return { op: op as 'and' | 'or', children: [defaultPredicate(), defaultPredicate()] };
 }
 
-function createStep(type: StepType, index: number, dependsOn: string[] = []): Step {
+function createStep(type: AuthorableStepType, index: number, dependsOn: string[] = []): Step {
   const base: Step = {
     id: `step-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
     type,
@@ -213,7 +213,7 @@ export default function WorkflowDesigner() {
     }
     return full.tools.map((t, i) => ({
       id: `step-${i}`,
-      type: 'TOOL' as StepType,
+      type: 'TOOL' as AuthorableStepType,
       name: t.step,
       toolId: t.toolId,
       toolVersion: t.version,
@@ -231,7 +231,7 @@ export default function WorkflowDesigner() {
     setSteps(prev => prev.map(s => (s.id === id ? { ...s, ...patch } : s)));
   };
 
-  const addStep = (type: StepType) => {
+  const addStep = (type: AuthorableStepType) => {
     if (readOnly || publishedBlocked) return;
     const prevId = steps[steps.length - 1]?.id;
     const step = createStep(type, steps.length, prevId ? [prevId] : []);
