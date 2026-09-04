@@ -5,14 +5,15 @@ import sys
 from typing import Any
 
 from app.core.config import Settings
+from app.core.middleware import get_request_id
 
 
 class RequestIdFilter(logging.Filter):
-    """Inject request_id into log records when available."""
+    """Inject request_id from request context when the record does not already have one."""
 
     def filter(self, record: logging.LogRecord) -> bool:
         if not hasattr(record, "request_id"):
-            record.request_id = "-"
+            record.request_id = get_request_id() or "-"
         return True
 
 

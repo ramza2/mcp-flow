@@ -20,7 +20,6 @@ class Settings(BaseSettings):
     debug: bool = False
     log_level: str = "INFO"
 
-    api_v1_prefix: str = "/api/v1"
     docs_enabled: bool = True
 
     database_url: str = Field(

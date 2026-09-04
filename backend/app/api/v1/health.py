@@ -1,5 +1,4 @@
-from fastapi import APIRouter, status
-from fastapi.responses import JSONResponse
+from fastapi import APIRouter, Response, status
 
 from app.api.dependencies import DatabasePingDep
 from app.schemas.common import HealthLiveResponse, HealthReadyResponse, ReadinessChecks
@@ -14,17 +13,24 @@ async def live() -> HealthLiveResponse:
     return HealthLiveResponse(status="ok")
 
 
-@router.get("/ready", response_model=HealthReadyResponse)
-async def ready(database_ping: DatabasePingDep) -> JSONResponse:
+@router.get(
+    "/ready",
+    response_model=HealthReadyResponse,
+    responses={503: {"model": HealthReadyResponse}},
+)
+async def ready(
+    response: Response,
+    database_ping: DatabasePingDep,
+) -> HealthReadyResponse:
     """Readiness — traffic-critical checks (DB). Details stay non-sensitive."""
     checks = await check_readiness(database_ping=database_ping)
     db_status = checks["database"]
     ready_ok = db_status == "ok"
-    payload = HealthReadyResponse(
+
+    if not ready_ok:
+        response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+
+    return HealthReadyResponse(
         status="ok" if ready_ok else "unavailable",
         checks=ReadinessChecks(database=db_status),
-    )
-    return JSONResponse(
-        status_code=status.HTTP_200_OK if ready_ok else status.HTTP_503_SERVICE_UNAVAILABLE,
-        content=payload.model_dump(),
     )

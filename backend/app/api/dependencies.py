@@ -1,19 +1,23 @@
-from collections.abc import AsyncIterator
 from typing import Annotated
 
 from fastapi import Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.config import Settings, get_settings
+from app.core.config import Settings
 from app.db.session import get_db_session
 from app.services.health import DatabasePing, ping_database
+
+
+def get_app_settings(request: Request) -> Settings:
+    """Return settings bound to this application instance (create_app injection)."""
+    return request.app.state.settings
 
 
 def get_request_id_dep(request: Request) -> str:
     return getattr(request.state, "request_id", "-")
 
 
-SettingsDep = Annotated[Settings, Depends(get_settings)]
+SettingsDep = Annotated[Settings, Depends(get_app_settings)]
 RequestIdDep = Annotated[str, Depends(get_request_id_dep)]
 DbSessionDep = Annotated[AsyncSession, Depends(get_db_session)]
 
@@ -24,7 +28,3 @@ async def get_database_ping() -> DatabasePing:
 
 
 DatabasePingDep = Annotated[DatabasePing, Depends(get_database_ping)]
-
-
-async def lifespan_noop() -> AsyncIterator[None]:
-    yield

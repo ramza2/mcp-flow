@@ -25,9 +25,9 @@ async def test_health_live_ok(client: AsyncClient) -> None:
 async def test_health_ready_ok_with_db_override(client: AsyncClient) -> None:
     response = await client.get("/health/ready")
     assert response.status_code == 200
+    assert response.headers["content-type"].startswith("application/json")
     body = response.json()
-    assert body["status"] == "ok"
-    assert body["checks"]["database"] == "ok"
+    assert body == {"status": "ok", "checks": {"database": "ok"}}
 
 
 @pytest.mark.asyncio
@@ -44,9 +44,9 @@ async def test_health_ready_unavailable_when_db_fails(settings: Settings) -> Non
     application.dependency_overrides.clear()
 
     assert response.status_code == 503
+    assert response.headers["content-type"].startswith("application/json")
     body = response.json()
-    assert body["status"] == "unavailable"
-    assert body["checks"]["database"] == "unavailable"
+    assert body == {"status": "unavailable", "checks": {"database": "unavailable"}}
     # Never leak connection strings / credentials.
     assert "change-me" not in response.text
     assert "postgresql" not in response.text.lower()
