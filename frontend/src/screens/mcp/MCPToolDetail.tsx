@@ -1,44 +1,134 @@
-import { useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { useNavigate, useParams } from 'react-router';
-import { ArrowLeft, Play } from 'lucide-react';
-import StatusBadge, { RiskBadge, VerificationBadge } from '../../components/ui/StatusBadge';
+import { ArrowLeft } from 'lucide-react';
+import StatusBadge from '../../components/ui/StatusBadge';
 import { TabBar } from '../../components/ui/Tabs';
-import Button from '../../components/ui/Button';
-import { mockTools } from '../../data/mock';
-import { InlineAlert } from '../../components/ui/EmptyState';
+import JsonViewer from '../../components/ui/JsonViewer';
+import { EmptyState, ErrorState, LoadingSkeleton } from '../../components/ui/EmptyState';
+import { getMCPTool, getToolVersion, listToolVersions } from '../../api/mcp';
+import { isAbortError, isApiError } from '../../api/client';
+import type { MCPToolDto, MCPToolVersionDto } from '../../api/types';
+import { formatTimestamp, shortenId } from '../../domain';
 
 export default function MCPToolDetail() {
   const { toolId } = useParams();
   const navigate = useNavigate();
   const [tab, setTab] = useState('overview');
-  const [testRunning, setTestRunning] = useState(false);
-  const [testResult, setTestResult] = useState<string | null>(null);
+  const [tool, setTool] = useState<MCPToolDto | null>(null);
+  const [versions, setVersions] = useState<MCPToolVersionDto[]>([]);
+  const [selectedVersionId, setSelectedVersionId] = useState<string | null>(null);
+  const [selectedVersion, setSelectedVersion] = useState<MCPToolVersionDto | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [notFound, setNotFound] = useState(false);
+  const [error, setError] = useState<{ message: string; requestId?: string } | null>(null);
 
-  const tool = mockTools.find(t => t.id === toolId) ?? mockTools[0];
-  const isHighRisk = tool.riskClass === 'DESTRUCTIVE' || tool.riskClass === 'NON_IDEMPOTENT_WRITE';
+  const loadTool = useCallback(() => {
+    if (!toolId) return () => {};
+    const controller = new AbortController();
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+    setNotFound(false);
 
-  const runTest = async () => {
-    setTestRunning(true);
-    await delay(1800);
-    setTestRunning(false);
-    setTestResult(JSON.stringify({ temperature: 23.5, weather: "맑음", humidity: 60, city: "Seoul" }, null, 2));
+    getMCPTool(toolId, controller.signal)
+      .then(async t => {
+        if (cancelled) return;
+        setTool(t);
+        const vers = await listToolVersions(toolId, { signal: controller.signal });
+        if (cancelled) return;
+        setVersions(vers.items);
+        const currentId = t.current_version_id ?? vers.items[0]?.id ?? null;
+        setSelectedVersionId(currentId);
+        if (currentId) {
+          const ver = await getToolVersion(toolId, currentId, controller.signal);
+          if (!cancelled) setSelectedVersion(ver);
+        } else {
+          setSelectedVersion(null);
+        }
+      })
+      .catch(err => {
+        if (isAbortError(err) || cancelled) return;
+        if (isApiError(err) && err.status === 404) {
+          setNotFound(true);
+          return;
+        }
+        const apiErr = isApiError(err) ? err : null;
+        setError({
+          message: apiErr?.message ?? 'Tool 정보를 불러오지 못했습니다.',
+          requestId: apiErr?.requestId ?? undefined,
+        });
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+      controller.abort();
+    };
+  }, [toolId]);
+
+  useEffect(() => {
+    return loadTool();
+  }, [loadTool]);
+
+  const selectVersion = async (versionId: string) => {
+    if (!toolId) return;
+    setSelectedVersionId(versionId);
+    try {
+      const ver = await getToolVersion(toolId, versionId);
+      setSelectedVersion(ver);
+    } catch {
+      setSelectedVersion(versions.find(v => v.id === versionId) ?? null);
+    }
   };
+
+  if (loading && !tool) {
+    return (
+      <div className="p-6">
+        <LoadingSkeleton rows={8} />
+      </div>
+    );
+  }
+
+  if (notFound) {
+    return (
+      <div className="p-6">
+        <ErrorState message="Tool을 찾을 수 없습니다." onRetry={() => navigate('/mcp/tools')} />
+      </div>
+    );
+  }
+
+  if (error || !tool) {
+    return (
+      <div className="p-6">
+        <ErrorState message={error?.message} requestId={error?.requestId} onRetry={loadTool} />
+      </div>
+    );
+  }
+
+  const displayName = tool.display_name ?? tool.remote_name;
+  const validationStatus = selectedVersion?.validation_status;
 
   return (
     <div>
       <div className="bg-white border-b border-slate-200 px-6 py-4">
-        <button onClick={() => navigate('/mcp/tools')} className="flex items-center gap-1.5 text-sm text-slate-500 hover:text-slate-700 mb-3">
+        <button
+          onClick={() => navigate('/mcp/tools')}
+          className="flex items-center gap-1.5 text-sm text-slate-500 hover:text-slate-700 mb-3"
+        >
           <ArrowLeft size={14} /> MCP Tools
         </button>
         <div className="flex items-start justify-between">
           <div>
-            <h1 className="text-lg font-semibold text-slate-900">{tool.displayName}</h1>
-            <p className="text-xs font-mono text-slate-400 mt-0.5">{tool.sourceName}</p>
+            <h1 className="text-lg font-semibold text-slate-900">{displayName}</h1>
+            <p className="text-xs font-mono text-slate-400 mt-0.5">{tool.remote_name}</p>
             <div className="flex items-center gap-3 mt-2">
               <StatusBadge status={tool.status} />
-              <RiskBadge risk={tool.riskClass} />
-              <VerificationBadge status={tool.verification} />
-              <span className="text-xs text-slate-400">{tool.serverName}</span>
+              {validationStatus && (
+                <ValidationBadge status={validationStatus} />
+              )}
+              <span className="text-xs text-slate-400 font-mono">{shortenId(tool.mcp_server_id)}</span>
             </div>
           </div>
         </div>
@@ -66,179 +156,103 @@ export default function MCPToolDetail() {
         {tab === 'overview' && (
           <div className="grid grid-cols-2 gap-4">
             <InfoCard title="Tool 정보">
-              <Row label="Source Name" mono>{tool.sourceName}</Row>
-              <Row label="Server">{tool.serverName}</Row>
-              <Row label="Version" mono>{tool.currentVersion}</Row>
-              <Row label="Validation">{tool.validation}</Row>
-              <Row label="Capability" mono>{tool.capability}</Row>
-              <Row label="Used By">{tool.usedBy}개 Agent/Workflow</Row>
+              <Row label="Source Name" mono>{tool.remote_name}</Row>
+              <Row label="Display Name">{tool.display_name ?? '—'}</Row>
+              <Row label="Server ID" mono>{shortenId(tool.mcp_server_id)}</Row>
+              <Row label="Tool Status"><StatusBadge status={tool.status} size="sm" /></Row>
+              <Row label="Current Version">
+                {selectedVersion ? `v${selectedVersion.version_no}` : '—'}
+              </Row>
+              <Row label="Version Validation">
+                {validationStatus ? <ValidationBadge status={validationStatus} /> : '—'}
+              </Row>
+              <Row label="First Seen">{formatTimestamp(tool.first_seen_at)}</Row>
+              <Row label="Last Seen">{formatTimestamp(tool.last_seen_at)}</Row>
             </InfoCard>
-            <InfoCard title="Risk 설명">
-              <RiskBadge risk={tool.riskClass} />
-              <p className="text-xs text-slate-600 mt-2">
-                {tool.riskClass === 'READ_ONLY' && '외부 데이터를 변경하지 않습니다. 안전하게 반복 실행할 수 있습니다.'}
-                {tool.riskClass === 'IDEMPOTENT_WRITE' && '동일 요청의 중복 효과가 제어됩니다.'}
-                {tool.riskClass === 'NON_IDEMPOTENT_WRITE' && '중복 실행 시 추가 작업이 발생할 수 있습니다.'}
-                {tool.riskClass === 'DESTRUCTIVE' && '삭제 또는 복구하기 어려운 작업이 포함됩니다.'}
-                {tool.riskClass === 'UNKNOWN' && '이 Tool의 부작용 특성이 충분히 검증되지 않았습니다.'}
-              </p>
-            </InfoCard>
+            {selectedVersion?.validation_errors && selectedVersion.validation_errors.length > 0 && (
+              <InfoCard title="Validation Errors">
+                <JsonViewer value={selectedVersion.validation_errors} />
+              </InfoCard>
+            )}
           </div>
         )}
 
         {tab === 'schema' && (
           <div className="bg-white rounded-xl border border-slate-200 p-4">
             <h3 className="text-sm font-semibold text-slate-800 mb-3">Input Schema</h3>
-            <pre className="text-xs font-mono bg-slate-50 rounded-lg p-4 text-slate-700 overflow-auto">
-{`{
-  "type": "object",
-  "properties": {
-    "city": {
-      "type": "string",
-      "description": "도시 이름",
-      "required": true
-    },
-    "units": {
-      "type": "string",
-      "enum": ["celsius", "fahrenheit"],
-      "default": "celsius"
-    }
-  }
-}`}
-            </pre>
+            <JsonViewer value={selectedVersion?.input_schema ?? null} emptyLabel="Input schema가 없습니다." />
           </div>
         )}
 
         {tab === 'output' && (
           <div className="bg-white rounded-xl border border-slate-200 p-4">
             <h3 className="text-sm font-semibold text-slate-800 mb-3">Output Schema</h3>
-            <pre className="text-xs font-mono bg-slate-50 rounded-lg p-4 text-slate-700 overflow-auto">
-{`{
-  "type": "object",
-  "properties": {
-    "temperature": { "type": "number" },
-    "weather": { "type": "string" },
-    "humidity": { "type": "number" },
-    "city": { "type": "string" }
-  }
-}`}
-            </pre>
+            <JsonViewer value={selectedVersion?.output_schema ?? null} emptyLabel="Output schema가 없습니다." />
           </div>
         )}
 
         {tab === 'policy' && (
-          <InfoCard title="Tool Policy">
-            <Row label="Risk Class"><RiskBadge risk={tool.riskClass} /></Row>
-            <Row label="User Confirmation">{tool.riskClass !== 'READ_ONLY' ? '필요' : '불필요'}</Row>
-            <Row label="Approval Policy">{tool.riskClass === 'NON_IDEMPOTENT_WRITE' ? 'Standard Email Approval' : '–'}</Row>
-            <Row label="Timeout">30초</Row>
-            <Row label="Max Attempts">3회</Row>
-            <Row label="Result Size Limit">1MB</Row>
-            <Row label="Auto Select">허용됨</Row>
-          </InfoCard>
+          <EmptyState title="Tool Policy deferred" description="Policy API는 아직 제공되지 않습니다." />
         )}
 
         {tab === 'verification' && (
-          <div className="space-y-4">
-            <InlineAlert
-              type="info"
-              message="Verification은 ToolVersion 단위입니다. Logical Tool이 아니라 특정 ToolVersion에 귀속됩니다."
-            />
-            <InfoCard title={`Verification — ToolVersion ${tool.currentVersion}`}>
-              <Row label="Verification Status"><VerificationBadge status={tool.verification} /></Row>
-              <Row label="ToolVersion" mono>{tool.currentVersion}</Row>
-              <Row label="Verified At">2026-08-15 14:00</Row>
-              <Row label="Verified By">admin</Row>
-              <Row label="Test Execution" mono>EXE-VERIFY-20260815-001</Row>
-              <Row label="Criteria Version" mono>v1.2</Row>
-              <Row label="Evidence">schema_match · sample_call_ok · risk_review</Row>
-              <Row label="Expires At">2026-11-15 14:00</Row>
-            </InfoCard>
-            {tool.verification === 'EXPIRED' && (
-              <InlineAlert type="warning" message="이 ToolVersion의 Verification이 만료되었습니다. 재검증을 실행하거나 관리자에게 문의하세요." />
-            )}
-          </div>
+          <EmptyState title="Verification deferred" description="Verification API는 아직 제공되지 않습니다." />
         )}
 
         {tab === 'test' && (
-          <div className="space-y-4">
-            {isHighRisk && (
-              <InlineAlert type="warning" message={`이 Tool은 ${tool.riskClass} 등급입니다. Test Call 실행 시 실제 Side Effect가 발생할 수 있습니다.`} />
-            )}
-            <InfoCard title="Test Call">
-              <div className="space-y-3">
-                <div>
-                  <label className="text-xs font-medium text-slate-600 block mb-1">city</label>
-                  <input defaultValue="Seoul" className="w-full h-8 px-2.5 text-sm border border-slate-200 rounded-md focus:outline-none focus:ring-1 focus:ring-indigo-500" />
-                </div>
-                <div>
-                  <label className="text-xs font-medium text-slate-600 block mb-1">units</label>
-                  <select className="w-full h-8 px-2 text-sm border border-slate-200 rounded-md focus:outline-none focus:ring-1 focus:ring-indigo-500 bg-white">
-                    <option>celsius</option>
-                    <option>fahrenheit</option>
-                  </select>
-                </div>
-                <Button icon={<Play size={13} />} loading={testRunning} onClick={runTest} size="sm">Test 실행</Button>
-              </div>
-              {testResult && (
-                <div className="mt-4">
-                  <p className="text-xs font-semibold text-slate-500 mb-2">Result</p>
-                  <pre className="text-xs font-mono bg-slate-50 rounded-lg p-3 text-slate-700 overflow-auto">{testResult}</pre>
-                </div>
-              )}
-            </InfoCard>
-          </div>
+          <EmptyState title="Test Call deferred" description="Manual Tool Test API는 아직 제공되지 않습니다." />
         )}
 
         {tab === 'usedby' && (
-          <InfoCard title="사용 중인 Agent / Workflow">
-            {['General Work Assistant (v2)', 'Research Assistant (v1)'].slice(0, tool.usedBy).map((a, i) => (
-              <div key={i} className="py-1.5 text-sm text-slate-700">{a}</div>
-            ))}
-            {tool.usedBy === 0 && <p className="text-sm text-slate-400">사용 중인 Agent/Workflow가 없습니다.</p>}
-          </InfoCard>
+          <EmptyState title="Used By deferred" description="Agent/Workflow 사용 이력 API는 아직 제공되지 않습니다." />
         )}
 
         {tab === 'versions' && (
           <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
-            {[
-              { version: tool.currentVersion, status: 'CURRENT', validation: tool.validation, verification: tool.verification, at: tool.updatedAt },
-              { version: 'v0.9.0', status: 'DEPRECATED', validation: 'VALID', verification: 'EXPIRED', at: '2026-07-01' },
-            ].map((v, i) => (
-              <div key={i} className="flex items-center justify-between px-4 py-3 border-b last:border-0">
-                <div>
-                  <p className="text-sm font-mono font-medium text-slate-800">{v.version}</p>
-                  <p className="text-xs text-slate-400">{v.at}</p>
-                </div>
-                <div className="flex items-center gap-2">
-                  <StatusBadge status={v.status === 'CURRENT' ? 'ACTIVE' : 'DEPRECATED'} size="sm" />
-                  <span className="text-xs text-slate-500">{v.validation}</span>
-                  <VerificationBadge status={v.verification} />
-                </div>
-              </div>
-            ))}
+            {versions.length === 0 ? (
+              <EmptyState title="버전 이력이 없습니다" />
+            ) : (
+              versions.map(v => (
+                <button
+                  key={v.id}
+                  type="button"
+                  onClick={() => selectVersion(v.id)}
+                  className={`w-full flex items-center justify-between px-4 py-3 border-b last:border-0 text-left hover:bg-slate-50 ${
+                    selectedVersionId === v.id ? 'bg-indigo-50' : ''
+                  }`}
+                >
+                  <div>
+                    <p className="text-sm font-mono font-medium text-slate-800">v{v.version_no}</p>
+                    <p className="text-xs text-slate-400">{formatTimestamp(v.discovered_at)}</p>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    {tool.current_version_id === v.id && (
+                      <span className="text-xs text-indigo-600 font-medium">current</span>
+                    )}
+                    <ValidationBadge status={v.validation_status} />
+                  </div>
+                </button>
+              ))
+            )}
           </div>
         )}
 
         {tab === 'audit' && (
-          <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
-            {[
-              { time: '2026-09-01 10:00', actor: 'admin', action: 'tool.policy.update', result: 'SUCCESS' },
-              { time: '2026-08-15 14:00', actor: 'admin', action: 'tool.version.verify', result: 'SUCCESS' },
-              { time: '2026-08-10 09:30', actor: 'system', action: 'tool.discover', result: 'SUCCESS' },
-            ].map((log, i) => (
-              <div key={i} className="flex gap-4 px-4 py-3 border-b last:border-0 text-sm">
-                <span className="font-mono text-xs text-slate-400 w-36 shrink-0">{log.time}</span>
-                <span className="text-slate-600 w-16 shrink-0">{log.actor}</span>
-                <span className="font-mono text-xs text-indigo-600">{log.action}</span>
-                <span className={`ml-auto text-xs ${log.result === 'SUCCESS' ? 'text-green-600' : 'text-red-600'}`}>{log.result}</span>
-              </div>
-            ))}
-          </div>
+          <EmptyState title="Audit deferred" description="Tool Audit 이력 API는 아직 제공되지 않습니다." />
         )}
       </div>
     </div>
   );
+}
+
+function ValidationBadge({ status }: { status: string }) {
+  const styles: Record<string, string> = {
+    VALID: 'text-green-700 bg-green-50',
+    WARNING: 'text-amber-700 bg-amber-50',
+    INVALID: 'text-red-700 bg-red-50',
+  };
+  const s = styles[status] ?? 'text-slate-500 bg-slate-100';
+  return <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${s}`}>{status}</span>;
 }
 
 function InfoCard({ title, children }: { title: string; children: React.ReactNode }) {
@@ -258,5 +272,3 @@ function Row({ label, children, mono }: { label: string; children: React.ReactNo
     </div>
   );
 }
-
-function delay(ms: number) { return new Promise(r => setTimeout(r, ms)); }
