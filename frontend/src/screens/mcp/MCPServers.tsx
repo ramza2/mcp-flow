@@ -6,7 +6,7 @@ import StatusBadge from '../../components/ui/StatusBadge';
 import FilterBar from '../../components/ui/FilterBar';
 import Button from '../../components/ui/Button';
 import { mockMCPServers } from '../../data/mock';
-import { labelDiscoveryMode } from '../../domain';
+import { labelDiscoveryMode, MCP_SERVER_STATUSES } from '../../domain';
 
 export default function MCPServers() {
   const navigate = useNavigate();
@@ -41,7 +41,7 @@ export default function MCPServers() {
         <FilterBar
           search searchPlaceholder="서버 이름 검색..."
           filters={[
-            { key: 'status', label: '상태', options: [{ value: 'ACTIVE', label: 'Active' }, { value: 'INACTIVE', label: 'Inactive' }] },
+            { key: 'status', label: '상태', options: MCP_SERVER_STATUSES.map(v => ({ value: v, label: v })) },
             { key: 'transport', label: 'Transport', options: [
               { value: 'Streamable HTTP', label: 'Streamable HTTP' },
               { value: 'STDIO', label: 'STDIO' },

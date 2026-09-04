@@ -216,11 +216,11 @@ export default function MCPServerNew() {
               )}
             </div>
             {isLegacy ? (
-              <InlineAlert type="info" message="Legacy MCP는 LEGACY_HANDSHAKE Discovery Mode를 사용합니다." />
+              <InlineAlert type="info" message="Legacy MCP는 LEGACY_HANDSHAKE Discovery Mode를 사용합니다. initialize/initialized lifecycle은 Legacy Adapter 책임입니다." />
             ) : (
               <InlineAlert
                 type="info"
-                message="Current MCP: Discovery는 선택사항입니다. Self-describing initialize가 동작하면 INFERRED_CURRENT로 Tool을 인식합니다."
+                message="Current MCP: server/discover는 optional입니다. Explicit discovery 없이도 self-describing Current 요청이 정상 동작하면 INFERRED_CURRENT로 호환 가능합니다."
               />
             )}
           </Section>
