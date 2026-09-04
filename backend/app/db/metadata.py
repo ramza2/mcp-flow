@@ -1,0 +1,5 @@
+"""SQLAlchemy metadata export for Alembic."""
+
+from app.db.base import Base, metadata
+
+__all__ = ["Base", "metadata"]
