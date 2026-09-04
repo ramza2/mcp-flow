@@ -46,8 +46,8 @@ class MCPToolVersionResponse(BaseModel):
     mcp_tool_id: uuid.UUID
     version_no: int
     remote_description: str | None = None
-    input_schema: dict[str, Any] | None = None
-    output_schema: dict[str, Any] | None = None
+    input_schema: Any | None = None
+    output_schema: Any | None = None
     annotations: dict[str, Any] | None = None
     schema_dialect: str | None = None
     content_hash: str

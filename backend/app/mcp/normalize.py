@@ -16,14 +16,28 @@ _SAFE_HASH_FIELDS = ("name", "description", "inputSchema", "outputSchema", "anno
 
 @dataclass(slots=True)
 class RemoteToolDescriptor:
-    """Normalized remote tool descriptor from ``tools/list``."""
+    """Remote tool descriptor from ``tools/list``.
+
+    Schema fields preserve remote wire values (including malformed non-objects) so
+    validation can mark INVALID and fingerprints remain distinct.
+    """
 
     name: str
     description: str | None = None
-    input_schema: dict[str, Any] | None = None
-    output_schema: dict[str, Any] | None = None
+    input_schema: Any = None
+    output_schema: Any = None
     annotations: dict[str, Any] | None = None
     raw: dict[str, Any] = field(default_factory=dict)
+
+
+def _json_safe(value: Any) -> Any:
+    """Ensure fingerprint payload is JSON-serializable without silently dropping meaning."""
+
+    try:
+        json.dumps(value)
+        return value
+    except (TypeError, ValueError):
+        return {"__unserializable__": type(value).__name__}
 
 
 def content_hash(descriptor: RemoteToolDescriptor) -> str:
@@ -32,20 +46,31 @@ def content_hash(descriptor: RemoteToolDescriptor) -> str:
     payload: dict[str, Any] = {
         "name": descriptor.name,
         "description": descriptor.description,
-        "inputSchema": descriptor.input_schema,
-        "outputSchema": descriptor.output_schema,
+        "inputSchema": _json_safe(descriptor.input_schema),
+        "outputSchema": _json_safe(descriptor.output_schema),
         "annotations": descriptor.annotations,
     }
-    # Only the documented safe fields; keys sorted for stability.
     canonical = {key: payload[key] for key in _SAFE_HASH_FIELDS}
     encoded = json.dumps(canonical, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
+def schema_for_storage(schema: Any) -> Any:
+    """Persist JSON-serializable schema as-is; else null (wire kept in raw_descriptor)."""
+
+    if schema is None:
+        return None
+    try:
+        json.dumps(schema)
+    except (TypeError, ValueError):
+        return None
+    return schema
+
+
 def _validate_one_schema(label: str, schema: Any) -> tuple[ToolVersionValidationStatus, list[str]]:
     if schema is None:
         return ToolVersionValidationStatus.VALID, []
-    if isinstance(schema, list) or not isinstance(schema, dict):
+    if not isinstance(schema, dict):
         return (
             ToolVersionValidationStatus.INVALID,
             [f"{label} must be a JSON object (dict), got {type(schema).__name__}."],

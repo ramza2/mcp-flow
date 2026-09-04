@@ -234,6 +234,145 @@ async def test_http_facade_rejects_legacy() -> None:
     assert exc.value.error_code == "MCP_LEGACY_UNSUPPORTED"
 
 
+@pytest.mark.asyncio
+async def test_jsonrpc_wrong_version_raises_invalid_jsonrpc() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content.decode("utf-8"))
+        return httpx.Response(
+            200,
+            json={"jsonrpc": "1.0", "id": body["id"], "result": {}},
+        )
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as http:
+        client = CurrentMCPClient(http=http)
+        with pytest.raises(MCPClientError) as exc:
+            await client.discover_capabilities("https://mcp.example/mcp")
+    assert exc.value.error_code == "MCP_INVALID_JSONRPC"
+
+
+@pytest.mark.asyncio
+async def test_jsonrpc_mismatched_id_raises_invalid_jsonrpc() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"jsonrpc": "2.0", "id": "wrong-id", "result": {}},
+        )
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as http:
+        client = CurrentMCPClient(http=http)
+        with pytest.raises(MCPClientError) as exc:
+            await client.discover_capabilities("https://mcp.example/mcp")
+    assert exc.value.error_code == "MCP_INVALID_JSONRPC"
+
+
+@pytest.mark.asyncio
+async def test_jsonrpc_non_object_payload_raises_invalid_jsonrpc() -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=["not", "an", "object"])
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as http:
+        client = CurrentMCPClient(http=http)
+        with pytest.raises(MCPClientError) as exc:
+            await client.discover_capabilities("https://mcp.example/mcp")
+    assert exc.value.error_code == "MCP_INVALID_JSONRPC"
+
+
+@pytest.mark.asyncio
+async def test_jsonrpc_missing_result_and_error_raises_invalid_jsonrpc() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content.decode("utf-8"))
+        return httpx.Response(200, json={"jsonrpc": "2.0", "id": body["id"]})
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as http:
+        client = CurrentMCPClient(http=http)
+        with pytest.raises(MCPClientError) as exc:
+            await client.discover_capabilities("https://mcp.example/mcp")
+    assert exc.value.error_code == "MCP_INVALID_JSONRPC"
+
+
+@pytest.mark.asyncio
+async def test_jsonrpc_both_result_and_error_raises_invalid_jsonrpc() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content.decode("utf-8"))
+        return httpx.Response(
+            200,
+            json={
+                "jsonrpc": "2.0",
+                "id": body["id"],
+                "result": {},
+                "error": {"code": -1, "message": "boom"},
+            },
+        )
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as http:
+        client = CurrentMCPClient(http=http)
+        with pytest.raises(MCPClientError) as exc:
+            await client.discover_capabilities("https://mcp.example/mcp")
+    assert exc.value.error_code == "MCP_INVALID_JSONRPC"
+
+
+@pytest.mark.asyncio
+async def test_discover_method_not_found_raises_when_id_matches() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content.decode("utf-8"))
+        return httpx.Response(
+            200,
+            json={
+                "jsonrpc": "2.0",
+                "id": body["id"],
+                "error": {"code": -32601, "message": "Method not found"},
+            },
+        )
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as http:
+        client = CurrentMCPClient(http=http)
+        with pytest.raises(DiscoverUnsupportedError) as exc:
+            await client.discover_capabilities("https://mcp.example/mcp")
+    assert exc.value.error_layer == "PROTOCOL"
+    assert exc.value.retryable is False
+
+
+def test_malformed_schema_preserved_and_validated_invalid() -> None:
+    client = CurrentMCPClient()
+    parsed = client._parse_tool(
+        {"name": "broken", "inputSchema": ["not", "an", "object"]}
+    )
+    assert parsed is not None
+    assert parsed.input_schema == ["not", "an", "object"]
+
+    status, errors = validate_tool_schemas(parsed.input_schema, parsed.output_schema)
+    assert status == ToolVersionValidationStatus.INVALID
+    assert errors
+
+    hash_array = content_hash(parsed)
+    parsed_string = client._parse_tool({"name": "broken", "inputSchema": "broken"})
+    assert parsed_string is not None
+    assert parsed_string.input_schema == "broken"
+    hash_string = content_hash(parsed_string)
+    assert hash_array != hash_string
+
+
+def test_mcp_server_create_rejects_extra_fields() -> None:
+    with pytest.raises(ValidationError):
+        MCPServerCreate(
+            name="Weather MCP",
+            transport_type=MCPTransportType.STREAMABLE_HTTP,
+            endpoint_url="https://mcp.example/mcp",
+            password="secret",
+        )
+
+
+def test_discovery_create_rejects_extra_fields() -> None:
+    with pytest.raises(ValidationError):
+        DiscoveryCreateRequest(apply_changes=False, token="secret")
+
+
 def test_mcp_server_create_defaults() -> None:
     created = MCPServerCreate(
         name="Weather MCP",

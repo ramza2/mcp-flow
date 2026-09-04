@@ -5,8 +5,10 @@ from __future__ import annotations
 import uuid
 from typing import Any
 
+import httpx
 import pytest
 from app.domain.enums import MCPDiscoveryMode
+from app.mcp.client import MCPHttpClient
 from app.models.mcp import MCPServer
 from httpx import AsyncClient
 from sqlalchemy import select
@@ -16,6 +18,28 @@ from tests.fixtures.test_mcp_server import TestMCPScenario
 
 API_SERVERS = "/api/v1/mcp/servers"
 API_TOOLS = "/api/v1/mcp/tools"
+
+
+class SpyMCPHttpClient(MCPHttpClient):
+    """Counts remote MCP calls; subclasses should raise if invoked."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            http=httpx.AsyncClient(
+                transport=httpx.MockTransport(
+                    lambda _request: httpx.Response(500, text="should not be called")
+                )
+            )
+        )
+        self.calls = 0
+
+    async def discover_capabilities(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        self.calls += 1
+        raise AssertionError("discover_capabilities should not be called")
+
+    async def list_tools(self, *args: Any, **kwargs: Any) -> list[Any]:
+        self.calls += 1
+        raise AssertionError("list_tools should not be called")
 
 
 def _server_payload(**overrides: Any) -> dict[str, Any]:
@@ -188,6 +212,10 @@ async def test_stdio_requires_manifest_rejects_endpoint(db_client: AsyncClient) 
 
 @pytest.mark.asyncio
 async def test_create_rejects_raw_credential_fields(db_client: AsyncClient) -> None:
+    before = await db_client.get(API_SERVERS)
+    assert before.status_code == 200
+    total_before = before.json()["total"]
+
     response = await db_client.post(
         API_SERVERS,
         json={
@@ -197,11 +225,33 @@ async def test_create_rejects_raw_credential_fields(db_client: AsyncClient) -> N
             "api_key": "key-123",
         },
     )
-    assert response.status_code == 201
-    body = response.json()
-    assert "password" not in body
-    assert "token" not in body
-    assert "api_key" not in body
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "VALIDATION_ERROR"
+
+    after = await db_client.get(API_SERVERS)
+    assert after.status_code == 200
+    assert after.json()["total"] == total_before
+
+
+@pytest.mark.asyncio
+async def test_patch_status_forbidden_422(db_client: AsyncClient) -> None:
+    created = await _create_server(db_client)
+    server_id = created["id"]
+
+    with_body = await db_client.patch(
+        f"{API_SERVERS}/{server_id}",
+        json={"status": "ACTIVE", "lock_version": created["lock_version"]},
+    )
+    assert with_body.status_code == 422
+    assert with_body.json()["error"]["code"] == "VALIDATION_ERROR"
+
+    with_header = await db_client.patch(
+        f"{API_SERVERS}/{server_id}",
+        headers={"If-Match": str(created["lock_version"])},
+        json={"status": "ACTIVE"},
+    )
+    assert with_header.status_code == 422
+    assert with_header.json()["error"]["code"] == "VALIDATION_ERROR"
 
 
 @pytest.mark.asyncio
@@ -329,6 +379,125 @@ async def test_connection_test_bearer_without_secret_failed(
     body = response.json()
     assert body["status"] == "FAILED"
     assert body["error_code"] == "MCP_AUTH_SECRET_UNAVAILABLE"
+
+
+@pytest.mark.asyncio
+async def test_connection_test_bearer_with_secret_id_fail_closed_no_http(
+    db_client: AsyncClient,
+    override_mcp_client,
+) -> None:
+    secret_id = uuid.uuid4()
+    created = await _create_server(
+        db_client,
+        auth_type="BEARER",
+        auth_secret_id=str(secret_id),
+    )
+    spy = SpyMCPHttpClient()
+    override_mcp_client(spy)
+
+    response = await db_client.post(f"{API_SERVERS}/{created['id']}/connection-tests")
+    assert response.status_code == 201
+    body = response.json()
+    assert body["status"] == "FAILED"
+    assert body["error_code"] == "MCP_AUTH_SECRET_UNAVAILABLE"
+    assert spy.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_discovery_bearer_with_secret_id_fail_closed_no_http(
+    db_client: AsyncClient,
+    override_mcp_client,
+) -> None:
+    secret_id = uuid.uuid4()
+    created = await _create_server(
+        db_client,
+        auth_type="BEARER",
+        auth_secret_id=str(secret_id),
+    )
+    spy = SpyMCPHttpClient()
+    override_mcp_client(spy)
+
+    response = await db_client.post(
+        f"{API_SERVERS}/{created['id']}/discoveries",
+        json={"apply_changes": False},
+    )
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "MCP_AUTH_SECRET_UNAVAILABLE"
+    assert spy.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_discovery_apply_malformed_schema_invalid_version(
+    db_client: AsyncClient,
+    override_mcp_client,
+) -> None:
+    created = await _create_server(db_client)
+    override_mcp_client(
+        TestMCPScenario(TestMCPScenario.MALFORMED_SCHEMA).build_http_client()
+    )
+    server_id = created["id"]
+
+    response = await db_client.post(
+        f"{API_SERVERS}/{server_id}/discoveries",
+        json={"apply_changes": True},
+    )
+    assert response.status_code == 201
+    body = response.json()
+    assert body["success"] is True
+    assert body["diff"]["added"] == 2
+
+    tools = await db_client.get(
+        f"{API_SERVERS}/{server_id}/tools",
+        params={"q": "broken_tool"},
+    )
+    assert tools.status_code == 200
+    assert tools.json()["total"] == 1
+    broken = tools.json()["items"][0]
+    assert broken["remote_name"] == "broken_tool"
+
+    versions = await db_client.get(f"{API_TOOLS}/{broken['id']}/versions")
+    assert versions.status_code == 200
+    assert versions.json()["total"] == 1
+    version = versions.json()["items"][0]
+    assert version["validation_status"] == "INVALID"
+    assert version["input_schema"] == ["not", "an", "object"]
+
+
+@pytest.mark.asyncio
+async def test_discovery_malformed_schema_fingerprint_change(
+    db_client: AsyncClient,
+    override_mcp_client,
+) -> None:
+    created = await _create_server(db_client)
+    override_mcp_client(
+        TestMCPScenario(TestMCPScenario.MALFORMED_SCHEMA).build_http_client()
+    )
+    server_id = created["id"]
+
+    await db_client.post(
+        f"{API_SERVERS}/{server_id}/discoveries",
+        json={"apply_changes": True},
+    )
+
+    second = await db_client.post(
+        f"{API_SERVERS}/{server_id}/discoveries",
+        json={"apply_changes": True},
+    )
+    assert second.status_code == 201
+    body = second.json()
+    assert body["success"] is True
+    assert body["diff"]["changed"] == 1
+    assert body["diff"]["unchanged"] == 1
+
+    tools = await db_client.get(
+        f"{API_SERVERS}/{server_id}/tools",
+        params={"q": "broken_tool"},
+    )
+    broken = tools.json()["items"][0]
+    versions = await db_client.get(f"{API_TOOLS}/{broken['id']}/versions")
+    assert versions.json()["total"] == 2
+    hashes = {item["content_hash"] for item in versions.json()["items"]}
+    assert len(hashes) == 2
 
 
 @pytest.mark.asyncio

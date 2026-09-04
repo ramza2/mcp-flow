@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import status
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import AppError
@@ -24,7 +25,13 @@ from app.domain.enums import (
 )
 from app.mcp.client import MCPHttpClient
 from app.mcp.errors import DiscoverUnsupportedError, MCPClientError
-from app.mcp.normalize import RemoteToolDescriptor, content_hash, validate_tool_schemas
+from app.mcp.normalize import (
+    RemoteToolDescriptor,
+    content_hash,
+    schema_for_storage,
+    validate_tool_schemas,
+)
+from app.mcp.secrets import SecretResolver, UnimplementedSecretResolver
 from app.models.mcp import MCPServer, MCPServerCheck, MCPServerDiscovery, MCPTool
 from app.repositories.mcp_discovery import MCPDiscoveryRepository
 from app.repositories.mcp_server import MCPServerRepository
@@ -132,14 +139,66 @@ def _check_to_response(
     )
 
 
+def _build_remote_meta(
+    remote_tools: list[RemoteToolDescriptor],
+) -> tuple[dict[str, RemoteToolDescriptor], dict[str, dict[str, Any]]]:
+    remote_by_name: dict[str, RemoteToolDescriptor] = {}
+    remote_meta: dict[str, dict[str, Any]] = {}
+    for desc in remote_tools:
+        digest = content_hash(desc)
+        validation_status, validation_errors = validate_tool_schemas(
+            desc.input_schema,
+            desc.output_schema,
+        )
+        remote_by_name[desc.name] = desc
+        remote_meta[desc.name] = {
+            "content_hash": digest,
+            "validation_status": str(validation_status),
+            "validation_errors": validation_errors or None,
+        }
+    return remote_by_name, remote_meta
+
+
+def _compute_diff(
+    *,
+    remote_by_name: dict[str, RemoteToolDescriptor],
+    remote_meta: dict[str, dict[str, Any]],
+    existing_by_name: dict[str, MCPTool],
+    current_hashes: dict[str, str | None],
+) -> tuple[list[str], list[str], list[str], list[str]]:
+    added: list[str] = []
+    changed: list[str] = []
+    unchanged: list[str] = []
+    missing: list[str] = []
+
+    for name in remote_by_name:
+        tool = existing_by_name.get(name)
+        if tool is None:
+            added.append(name)
+            continue
+        if current_hashes.get(name) == remote_meta[name]["content_hash"]:
+            unchanged.append(name)
+        else:
+            changed.append(name)
+
+    for name in existing_by_name:
+        if name not in remote_by_name:
+            missing.append(name)
+
+    return added, changed, unchanged, missing
+
+
 class MCPDiscoveryService:
     def __init__(
         self,
         session: AsyncSession,
         http_client: MCPHttpClient,
+        *,
+        secret_resolver: SecretResolver | None = None,
     ) -> None:
         self._session = session
         self._http = http_client
+        self._secrets: SecretResolver = secret_resolver or UnimplementedSecretResolver()
         self._servers = MCPServerRepository(session)
         self._discoveries = MCPDiscoveryRepository(session)
         self._tools = MCPToolRepository(session)
@@ -154,6 +213,16 @@ class MCPDiscoveryService:
             )
         return server
 
+    async def _credential_auth_blocked(self, config: ServerConfig) -> bool:
+        """Fail-closed for any non-NONE auth until a real SecretResolver is available."""
+
+        if config.auth_type == MCPAuthType.NONE:
+            return False
+        if config.auth_secret_id is None:
+            return True
+        resolved = await self._secrets.resolve(config.auth_secret_id)
+        return resolved is None
+
     async def connection_test(self, server_id: uuid.UUID) -> ConnectionTestResponse:
         server = await self._require_server(server_id)
         config = _server_config(server)
@@ -162,14 +231,17 @@ class MCPDiscoveryService:
         # End DB transaction before any remote HTTP work.
         await self._session.commit()
 
-        if config.auth_type != MCPAuthType.NONE and config.auth_secret_id is None:
+        if await self._credential_auth_blocked(config):
             check = await self._discoveries.create_check(
                 mcp_server_id=config.id,
                 check_type=MCPCheckType.MANUAL,
                 status=MCPCheckStatus.FAILED,
                 error_layer="AUTH",
                 error_code="MCP_AUTH_SECRET_UNAVAILABLE",
-                error_message="auth_secret_id is required for authenticated MCP servers.",
+                error_message=(
+                    "Secret Store resolver is not available; "
+                    "credential auth MCP servers cannot perform remote HTTP calls."
+                ),
             )
             server = await self._require_server(config.id)
             server.last_error_at = datetime.now(UTC)
@@ -264,10 +336,13 @@ class MCPDiscoveryService:
         config = _server_config(server)
         _reject_unsupported_transport(config)
 
-        if config.auth_type != MCPAuthType.NONE and config.auth_secret_id is None:
+        if await self._credential_auth_blocked(config):
             raise AppError(
                 code="MCP_AUTH_SECRET_UNAVAILABLE",
-                message="auth_secret_id is required for authenticated MCP servers.",
+                message=(
+                    "Secret Store resolver is not available; "
+                    "credential auth MCP servers cannot perform remote discovery."
+                ),
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             )
         if not config.endpoint_url:
@@ -335,52 +410,72 @@ class MCPDiscoveryService:
             await self._session.refresh(discovery)
             return _discovery_to_response(discovery)
 
-        # Normalize / validate / fingerprint outside of apply mutations.
-        remote_by_name: dict[str, RemoteToolDescriptor] = {}
-        remote_meta: dict[str, dict[str, Any]] = {}
-        for desc in remote_tools:
-            digest = content_hash(desc)
-            validation_status, validation_errors = validate_tool_schemas(
-                desc.input_schema,
-                desc.output_schema,
+        # Fingerprint remote descriptors outside DB mutation.
+        remote_by_name, remote_meta = _build_remote_meta(remote_tools)
+
+        if apply_changes:
+            # Serialize apply for this server only — re-read tools under row lock.
+            locked = await self._servers.lock_for_update(config.id)
+            if locked is None:
+                raise AppError(
+                    code="NOT_FOUND",
+                    message="MCP server not found.",
+                    status_code=status.HTTP_404_NOT_FOUND,
+                )
+            existing_tools, _ = await self._tools.list_tools(
+                mcp_server_id=config.id,
+                page=1,
+                page_size=10_000,
             )
-            remote_by_name[desc.name] = desc
-            remote_meta[desc.name] = {
-                "content_hash": digest,
-                "validation_status": str(validation_status),
-                "validation_errors": validation_errors or None,
-            }
+            existing_by_name = {tool.remote_name: tool for tool in existing_tools}
+            current_hashes: dict[str, str | None] = {}
+            for name, tool in existing_by_name.items():
+                current_hash: str | None = None
+                if tool.current_version_id is not None:
+                    version = await self._tools.get_version(tool.current_version_id)
+                    if version is not None:
+                        current_hash = version.content_hash
+                current_hashes[name] = current_hash
 
-        existing_tools, _ = await self._tools.list_tools(
-            mcp_server_id=config.id,
-            page=1,
-            page_size=10_000,
-        )
-        existing_by_name = {tool.remote_name: tool for tool in existing_tools}
-
-        added: list[str] = []
-        changed: list[str] = []
-        unchanged: list[str] = []
-        missing: list[str] = []
-
-        for name in remote_by_name:
-            tool = existing_by_name.get(name)
-            if tool is None:
-                added.append(name)
-                continue
-            current_hash: str | None = None
-            if tool.current_version_id is not None:
-                version = await self._tools.get_version(tool.current_version_id)
-                if version is not None:
-                    current_hash = version.content_hash
-            if current_hash == remote_meta[name]["content_hash"]:
-                unchanged.append(name)
-            else:
-                changed.append(name)
-
-        for name in existing_by_name:
-            if name not in remote_by_name:
-                missing.append(name)
+            added, changed, unchanged, missing = _compute_diff(
+                remote_by_name=remote_by_name,
+                remote_meta=remote_meta,
+                existing_by_name=existing_by_name,
+                current_hashes=current_hashes,
+            )
+            await self._apply_tool_diff(
+                server_id=config.id,
+                remote_by_name=remote_by_name,
+                remote_meta=remote_meta,
+                existing_by_name=existing_by_name,
+                added=added,
+                changed=changed,
+                unchanged=unchanged,
+                missing=missing,
+            )
+            server = locked
+        else:
+            existing_tools, _ = await self._tools.list_tools(
+                mcp_server_id=config.id,
+                page=1,
+                page_size=10_000,
+            )
+            existing_by_name = {tool.remote_name: tool for tool in existing_tools}
+            current_hashes = {}
+            for name, tool in existing_by_name.items():
+                current_hash = None
+                if tool.current_version_id is not None:
+                    version = await self._tools.get_version(tool.current_version_id)
+                    if version is not None:
+                        current_hash = version.content_hash
+                current_hashes[name] = current_hash
+            added, changed, unchanged, missing = _compute_diff(
+                remote_by_name=remote_by_name,
+                remote_meta=remote_meta,
+                existing_by_name=existing_by_name,
+                current_hashes=current_hashes,
+            )
+            server = await self._require_server(config.id)
 
         diff_summary = {
             "added": len(added),
@@ -404,18 +499,6 @@ class MCPDiscoveryService:
             for name in names
         ]
 
-        if apply_changes:
-            await self._apply_tool_diff(
-                server_id=config.id,
-                remote_by_name=remote_by_name,
-                remote_meta=remote_meta,
-                existing_by_name=existing_by_name,
-                added=added,
-                changed=changed,
-                unchanged=unchanged,
-                missing=missing,
-            )
-
         negotiated = CURRENT_MCP_PROTOCOL_VERSION
         finished = datetime.now(UTC)
         discovery = await self._discoveries.get_discovery(discovery_id)
@@ -434,7 +517,6 @@ class MCPDiscoveryService:
             "tool_summaries": tool_summaries,
         }
 
-        server = await self._require_server(config.id)
         server.discovery_mode = str(discovery_mode)
         server.capabilities = capabilities
         server.negotiated_protocol_version = negotiated
@@ -458,13 +540,17 @@ class MCPDiscoveryService:
         for name in added:
             desc = remote_by_name[name]
             meta = remote_meta[name]
-            tool = await self._tools.create_tool(
+            tool = await self._tools.get_or_create_tool(
                 mcp_server_id=server_id,
                 remote_name=name,
-                status=MCPToolStatus.DISCOVERED,
             )
-            version = await self._ensure_version(tool.id, desc, meta)
-            tool.current_version_id = version.id
+            tool_row, _created = tool
+            if tool_row.status == MCPToolStatus.MISSING:
+                tool_row.status = MCPToolStatus.DISCOVERED
+            elif _created:
+                tool_row.status = MCPToolStatus.DISCOVERED
+            version = await self._ensure_version(tool_row.id, desc, meta)
+            tool_row.current_version_id = version.id
             await self._session.flush()
 
         for name in changed:
@@ -498,18 +584,25 @@ class MCPDiscoveryService:
         if existing is not None:
             return existing
         version_no = await self._tools.next_version_no(tool_id)
-        return await self._tools.create_version(
-            mcp_tool_id=tool_id,
-            version_no=version_no,
-            content_hash=meta["content_hash"],
-            validation_status=meta["validation_status"],
-            remote_description=desc.description,
-            input_schema=desc.input_schema,
-            output_schema=desc.output_schema,
-            annotations=desc.annotations,
-            raw_descriptor=desc.raw,
-            validation_errors=meta["validation_errors"],
-        )
+        try:
+            async with self._session.begin_nested():
+                return await self._tools.create_version(
+                    mcp_tool_id=tool_id,
+                    version_no=version_no,
+                    content_hash=meta["content_hash"],
+                    validation_status=meta["validation_status"],
+                    remote_description=desc.description,
+                    input_schema=schema_for_storage(desc.input_schema),
+                    output_schema=schema_for_storage(desc.output_schema),
+                    annotations=desc.annotations,
+                    raw_descriptor=desc.raw,
+                    validation_errors=meta["validation_errors"],
+                )
+        except IntegrityError:
+            recovered = await self._tools.get_version_by_hash(tool_id, meta["content_hash"])
+            if recovered is not None:
+                return recovered
+            raise
 
     async def list_discoveries(
         self,

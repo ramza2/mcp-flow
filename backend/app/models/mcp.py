@@ -190,8 +190,10 @@ class MCPToolVersion(Base):
     )
     version_no: Mapped[int] = mapped_column(Integer, nullable=False)
     remote_description: Mapped[str | None] = mapped_column(Text, nullable=True)
-    input_schema: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
-    output_schema: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    # JSONB may hold object schemas or malformed remote values (list/string/number)
+    # so INVALID validation remains reconstructible (docs/05).
+    input_schema: Mapped[Any | None] = mapped_column(JSONB, nullable=True)
+    output_schema: Mapped[Any | None] = mapped_column(JSONB, nullable=True)
     annotations: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     raw_descriptor: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     schema_dialect: Mapped[str | None] = mapped_column(String(64), nullable=True)

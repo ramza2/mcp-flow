@@ -20,6 +20,8 @@ from app.domain.enums import (
 
 
 class MCPServerCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     name: str = Field(min_length=1, max_length=255)
     description: str | None = None
     transport_type: MCPTransportType
@@ -33,6 +35,10 @@ class MCPServerCreate(BaseModel):
 
 
 class MCPServerUpdate(BaseModel):
+    """PATCH body — status transitions use activate/deactivate actions only."""
+
+    model_config = ConfigDict(extra="forbid")
+
     name: str | None = Field(default=None, min_length=1, max_length=255)
     description: str | None = None
     transport_type: MCPTransportType | None = None
@@ -43,7 +49,6 @@ class MCPServerUpdate(BaseModel):
     connect_timeout_ms: int | None = Field(default=None, ge=1)
     call_timeout_ms: int | None = Field(default=None, ge=1)
     max_concurrency: int | None = Field(default=None, ge=1)
-    status: MCPServerStatus | None = None
     lock_version: int | None = Field(default=None, ge=1)
 
 
@@ -109,6 +114,8 @@ class ConnectionTestListResponse(BaseModel):
 
 
 class DiscoveryCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     mode: str = "FULL"
     apply_changes: bool = False
 

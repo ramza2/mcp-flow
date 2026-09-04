@@ -176,10 +176,9 @@ class MCPServerService:
         expected_lock_version: int,
     ) -> MCPServer:
         server = await self._require(server_id)
-        if server.lock_version != expected_lock_version:
-            self._raise_version_conflict()
+        # Do not rely on Python lock_version pre-check — CAS happens in update_atomic.
 
-        payload = data.model_dump(exclude_unset=True, exclude={"lock_version", "status"})
+        payload = data.model_dump(exclude_unset=True, exclude={"lock_version"})
         transport = MCPTransportType(
             payload.get("transport_type", server.transport_type)
         )
@@ -217,16 +216,20 @@ class MCPServerService:
                 fields["stdio_manifest_id"] = None
                 fields["endpoint_url"] = normalized
 
-        try:
-            updated = await self._servers.update(
-                server,
-                expected_lock_version=expected_lock_version,
-                **fields,
-            )
-        except ValueError as exc:
-            if str(exc) == "RESOURCE_VERSION_CONFLICT":
-                self._raise_version_conflict()
-            raise
+        updated = await self._servers.update_atomic(
+            server_id,
+            expected_lock_version=expected_lock_version,
+            **fields,
+        )
+        if updated is None:
+            current = await self._servers.get(server_id)
+            if current is None:
+                raise AppError(
+                    code="NOT_FOUND",
+                    message="MCP server not found.",
+                    status_code=status.HTTP_404_NOT_FOUND,
+                )
+            self._raise_version_conflict()
 
         await self._session.commit()
         await self._session.refresh(updated)

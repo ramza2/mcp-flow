@@ -19,7 +19,11 @@ _JSONRPC_METHOD_NOT_FOUND = -32601
 
 
 class CurrentMCPClient:
-    """HTTP client for Current MCP wire format (no tools/call)."""
+    """HTTP client for Current MCP wire format (no tools/call).
+
+    ``Mcp-Name`` is reserved for named tool operations (e.g. tools/call) and is not
+    set for ``server/discover`` / ``tools/list`` in this vertical slice.
+    """
 
     def __init__(self, http: httpx.AsyncClient | None = None) -> None:
         self._http = http
@@ -36,13 +40,17 @@ class CurrentMCPClient:
             await self._http.aclose()
             self._http = None
 
-    def _build_headers(self, method: str) -> dict[str, str]:
-        return {
+    def _build_headers(self, method: str, *, mcp_name: str | None = None) -> dict[str, str]:
+        headers = {
             "MCP-Protocol-Version": CURRENT_MCP_PROTOCOL_VERSION,
             "Mcp-Method": method,
             "Content-Type": "application/json",
             "Accept": "application/json",
         }
+        # Named operations (tools/call) would set Mcp-Name; not applicable here.
+        if mcp_name:
+            headers["Mcp-Name"] = mcp_name
+        return headers
 
     def _build_params(self, extra: dict[str, Any] | None = None) -> dict[str, Any]:
         params: dict[str, Any] = {
@@ -55,10 +63,10 @@ class CurrentMCPClient:
             params.update(extra)
         return params
 
-    def _build_body(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+    def _build_body(self, method: str, params: dict[str, Any], request_id: str) -> dict[str, Any]:
         return {
             "jsonrpc": "2.0",
-            "id": str(uuid.uuid4()),
+            "id": request_id,
             "method": method,
             "params": params,
         }
@@ -108,6 +116,47 @@ class CurrentMCPClient:
             retryable=False,
         )
 
+    def _validate_jsonrpc_envelope(self, payload: Any, *, request_id: str) -> dict[str, Any]:
+        if not isinstance(payload, dict):
+            raise MCPClientError(
+                error_layer="PROTOCOL",
+                error_code="MCP_INVALID_JSONRPC",
+                message="MCP server returned a non-object JSON-RPC payload.",
+                retryable=False,
+            )
+        if payload.get("jsonrpc") != "2.0":
+            raise MCPClientError(
+                error_layer="PROTOCOL",
+                error_code="MCP_INVALID_JSONRPC",
+                message="MCP JSON-RPC version must be '2.0'.",
+                retryable=False,
+            )
+        if payload.get("id") != request_id:
+            raise MCPClientError(
+                error_layer="PROTOCOL",
+                error_code="MCP_INVALID_JSONRPC",
+                message="MCP JSON-RPC response id does not match request id.",
+                retryable=False,
+            )
+        has_result = "result" in payload
+        has_error = "error" in payload
+        if has_result == has_error:
+            # Exactly one of result/error is required for a response.
+            raise MCPClientError(
+                error_layer="PROTOCOL",
+                error_code="MCP_INVALID_JSONRPC",
+                message="MCP JSON-RPC response must contain exactly one of result or error.",
+                retryable=False,
+            )
+        if has_error and not isinstance(payload.get("error"), dict):
+            raise MCPClientError(
+                error_layer="PROTOCOL",
+                error_code="MCP_INVALID_JSONRPC",
+                message="MCP JSON-RPC error must be an object.",
+                retryable=False,
+            )
+        return payload
+
     async def _post_rpc(
         self,
         *,
@@ -117,8 +166,9 @@ class CurrentMCPClient:
         params_extra: dict[str, Any] | None = None,
     ) -> Any:
         timeout = httpx.Timeout(timeout_ms / 1000.0)
+        request_id = str(uuid.uuid4())
         headers = self._build_headers(method)
-        body = self._build_body(method, self._build_params(params_extra))
+        body = self._build_body(method, self._build_params(params_extra), request_id)
         client = await self._client()
 
         # Never log Authorization headers or request/response bodies.
@@ -142,15 +192,9 @@ class CurrentMCPClient:
                 retryable=False,
             ) from exc
 
-        if not isinstance(payload, dict):
-            raise MCPClientError(
-                error_layer="PROTOCOL",
-                error_code="MCP_INVALID_JSONRPC",
-                message="MCP server returned a non-object JSON-RPC payload.",
-                retryable=False,
-            )
+        envelope = self._validate_jsonrpc_envelope(payload, request_id=request_id)
 
-        error = payload.get("error")
+        error = envelope.get("error")
         if error is not None:
             code = error.get("code") if isinstance(error, dict) else None
             err_message = (
@@ -167,7 +211,7 @@ class CurrentMCPClient:
                 retryable=False,
             )
 
-        return payload.get("result")
+        return envelope.get("result")
 
     async def discover_capabilities(
         self,
@@ -199,14 +243,25 @@ class CurrentMCPClient:
         if not isinstance(name, str) or not name:
             return None
         description = item.get("description")
-        input_schema = item.get("inputSchema", item.get("input_schema"))
-        output_schema = item.get("outputSchema", item.get("output_schema"))
+        # Preserve remote schema wire values — do not coerce malformed schemas to None.
+        if "inputSchema" in item:
+            input_schema = item.get("inputSchema")
+        elif "input_schema" in item:
+            input_schema = item.get("input_schema")
+        else:
+            input_schema = None
+        if "outputSchema" in item:
+            output_schema = item.get("outputSchema")
+        elif "output_schema" in item:
+            output_schema = item.get("output_schema")
+        else:
+            output_schema = None
         annotations = item.get("annotations")
         return RemoteToolDescriptor(
             name=name,
             description=description if isinstance(description, str) else None,
-            input_schema=input_schema if isinstance(input_schema, dict) else None,
-            output_schema=output_schema if isinstance(output_schema, dict) else None,
+            input_schema=input_schema,
+            output_schema=output_schema,
             annotations=annotations if isinstance(annotations, dict) else None,
             raw=dict(item),
         )

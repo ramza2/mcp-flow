@@ -30,6 +30,18 @@ _WEATHER_TOOL: dict[str, Any] = {
     },
 }
 
+_BROKEN_TOOL: dict[str, Any] = {
+    "name": "broken_tool",
+    "description": "Malformed input schema (array)",
+    "inputSchema": ["not", "an", "object"],
+}
+
+_BROKEN_TOOL_V2: dict[str, Any] = {
+    "name": "broken_tool",
+    "description": "Malformed input schema (string)",
+    "inputSchema": "broken",
+}
+
 _ECHO_SCHEMA_V2: dict[str, Any] = {
     "name": "echo",
     "description": "Echo input back (v2)",
@@ -57,11 +69,21 @@ class TestMCPScenario:
     CONNECTION_FAILURE = "connection_failure"
     PROTOCOL_FAILURE = "protocol_failure"
     ZERO_TOOLS = "zero_tools"
+    MALFORMED_SCHEMA = "malformed_schema"
 
     def __init__(self, scenario: str = HEALTHY) -> None:
         self.scenario = scenario
+        self.tools_override: list[dict[str, Any]] | None = None
         self._discover_calls = 0
         self._tools_list_calls = 0
+
+    @property
+    def discover_calls(self) -> int:
+        return self._discover_calls
+
+    @property
+    def tools_list_calls(self) -> int:
+        return self._tools_list_calls
 
     def _jsonrpc_ok(self, request: httpx.Request, result: Any) -> httpx.Response:
         body = json.loads(request.content.decode("utf-8"))
@@ -88,8 +110,16 @@ class TestMCPScenario:
         )
 
     def _current_tools(self) -> list[dict[str, Any]]:
+        if self.tools_override is not None:
+            return list(self.tools_override)
+
         if self.scenario == self.ZERO_TOOLS:
             return []
+
+        if self.scenario == self.MALFORMED_SCHEMA:
+            if self._tools_list_calls > 1:
+                return [_BROKEN_TOOL_V2, _ECHO_TOOL]
+            return [_BROKEN_TOOL, _ECHO_TOOL]
 
         if self.scenario == self.SCHEMA_CHANGE and self._tools_list_calls > 1:
             return [_ECHO_SCHEMA_V2, _WEATHER_TOOL]

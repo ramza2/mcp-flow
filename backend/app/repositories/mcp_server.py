@@ -6,7 +6,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import Select, func, or_, select
+from sqlalchemy import Select, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.mcp import MCPServer
@@ -72,6 +72,17 @@ class MCPServerRepository:
         result = await self._session.execute(stmt)
         return result.scalar_one_or_none()
 
+    async def lock_for_update(self, server_id: uuid.UUID) -> MCPServer | None:
+        """Lock live MCP Server row for apply serialization (SELECT ... FOR UPDATE)."""
+
+        stmt = (
+            self._live()
+            .where(MCPServer.id == server_id)
+            .with_for_update()
+        )
+        result = await self._session.execute(stmt)
+        return result.scalar_one_or_none()
+
     async def list(
         self,
         *,
@@ -119,6 +130,43 @@ class MCPServerRepository:
         rows = list((await self._session.execute(rows_stmt)).scalars().all())
         return rows, total
 
+    async def update_atomic(
+        self,
+        server_id: uuid.UUID,
+        *,
+        expected_lock_version: int,
+        updated_by: uuid.UUID | None = None,
+        **fields: Any,
+    ) -> MCPServer | None:
+        """Compare-and-swap update on ``lock_version`` (docs/05 optimistic lock)."""
+
+        values: dict[str, Any] = {
+            key: value
+            for key, value in fields.items()
+            if hasattr(MCPServer, key) and key not in {"id", "lock_version"}
+        }
+        values["lock_version"] = MCPServer.lock_version + 1
+        values["updated_at"] = func.now()
+        if updated_by is not None:
+            values["updated_by"] = updated_by
+
+        stmt = (
+            update(MCPServer)
+            .where(
+                MCPServer.id == server_id,
+                MCPServer.lock_version == expected_lock_version,
+                MCPServer.deleted_at.is_(None),
+            )
+            .values(**values)
+            .returning(MCPServer)
+        )
+        result = await self._session.execute(stmt)
+        row = result.scalar_one_or_none()
+        if row is None:
+            return None
+        await self._session.refresh(row)
+        return row
+
     async def update(
         self,
         server: MCPServer,
@@ -127,8 +175,16 @@ class MCPServerRepository:
         updated_by: uuid.UUID | None = None,
         **fields: Any,
     ) -> MCPServer:
-        if expected_lock_version is not None and server.lock_version != expected_lock_version:
-            raise ValueError("RESOURCE_VERSION_CONFLICT")
+        if expected_lock_version is not None:
+            updated = await self.update_atomic(
+                server.id,
+                expected_lock_version=expected_lock_version,
+                updated_by=updated_by,
+                **fields,
+            )
+            if updated is None:
+                raise ValueError("RESOURCE_VERSION_CONFLICT")
+            return updated
 
         for key, value in fields.items():
             if not hasattr(server, key):

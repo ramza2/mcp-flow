@@ -2,18 +2,75 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
 import uuid
+from typing import Any
 
+import httpx
 import pytest
 from alembic import command
 from alembic.config import Config
+from app.mcp.client import MCPHttpClient
 from app.mcp.normalize import RemoteToolDescriptor, content_hash
 from app.models.mcp import MCPServer, MCPTool, MCPToolVersion
 from app.repositories.mcp_server import MCPServerRepository
 from app.repositories.mcp_tool import MCPToolRepository
+from app.services.mcp_discovery import MCPDiscoveryService
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+_ECHO_TOOL: dict[str, Any] = {
+    "name": "echo",
+    "description": "Echo input back",
+    "inputSchema": {
+        "type": "object",
+        "properties": {"message": {"type": "string"}},
+        "required": ["message"],
+    },
+}
+
+_WEATHER_TOOL: dict[str, Any] = {
+    "name": "lookup_weather",
+    "description": "Lookup weather for a city",
+    "inputSchema": {
+        "type": "object",
+        "properties": {"city": {"type": "string"}},
+        "required": ["city"],
+    },
+}
+
+
+def _concurrent_discovery_handler(request: httpx.Request) -> httpx.Response:
+    body = json.loads(request.content.decode("utf-8"))
+    method = body.get("method")
+    if method == "server/discover":
+        return httpx.Response(
+            200,
+            json={
+                "jsonrpc": "2.0",
+                "id": body["id"],
+                "result": {"tools": {"listChanged": True}},
+            },
+        )
+    if method == "tools/list":
+        return httpx.Response(
+            200,
+            json={
+                "jsonrpc": "2.0",
+                "id": body["id"],
+                "result": {"tools": [_ECHO_TOOL, _WEATHER_TOOL]},
+            },
+        )
+    return httpx.Response(
+        200,
+        json={
+            "jsonrpc": "2.0",
+            "id": body["id"],
+            "error": {"code": -32601, "message": f"Unknown method: {method}"},
+        },
+    )
 
 
 @pytest.mark.integration
@@ -252,3 +309,105 @@ async def test_tool_version_increments_after_apply(
         assert total == 2
         version_nos = sorted(row.version_no for row in rows)
         assert version_nos == [1, 2]
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_concurrent_atomic_patch_lock(
+    integration_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with integration_session_factory() as session:
+        repo = MCPServerRepository(session)
+        server = await repo.create(
+            code=f"lock-{uuid.uuid4().hex[:8]}",
+            name="Original",
+            transport_type="STREAMABLE_HTTP",
+            endpoint_url="https://mcp.test/mcp",
+        )
+        await session.commit()
+        server_id = server.id
+        assert server.lock_version == 1
+
+    async def patch_name(name: str) -> MCPServer | None:
+        async with integration_session_factory() as session:
+            repo = MCPServerRepository(session)
+            updated = await repo.update_atomic(
+                server_id,
+                expected_lock_version=1,
+                name=name,
+            )
+            if updated is not None:
+                await session.commit()
+            return updated
+
+    winner_a, winner_b = await asyncio.gather(
+        patch_name("Winner A"),
+        patch_name("Winner B"),
+    )
+    winners = [row for row in (winner_a, winner_b) if row is not None]
+    losers = [row for row in (winner_a, winner_b) if row is None]
+    assert len(winners) == 1
+    assert len(losers) == 1
+    assert winners[0].lock_version == 2
+
+    async with integration_session_factory() as session:
+        final = await MCPServerRepository(session).get(server_id)
+        assert final is not None
+        assert final.lock_version == 2
+        assert final.name in {"Winner A", "Winner B"}
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_concurrent_discovery_apply(
+    integration_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with integration_session_factory() as session:
+        servers = MCPServerRepository(session)
+        server = await servers.create(
+            code=f"disc-conc-{uuid.uuid4().hex[:8]}",
+            name="Concurrent Discovery",
+            transport_type="STREAMABLE_HTTP",
+            endpoint_url="https://mcp.test/mcp",
+        )
+        await session.commit()
+        server_id = server.id
+
+    transport = httpx.MockTransport(_concurrent_discovery_handler)
+
+    async def run_discovery() -> bool:
+        async with integration_session_factory() as session:
+            http = httpx.AsyncClient(transport=transport)
+            client = MCPHttpClient(http=http)
+            try:
+                service = MCPDiscoveryService(session, client)
+                result = await service.discover(server_id, apply_changes=True)
+                return result.success
+            finally:
+                await client.aclose()
+
+    success_a, success_b = await asyncio.gather(run_discovery(), run_discovery())
+    assert success_a is True
+    assert success_b is True
+
+    async with integration_session_factory() as session:
+        tools_repo = MCPToolRepository(session)
+        tools, total = await tools_repo.list_tools(
+            mcp_server_id=server_id,
+            page=1,
+            page_size=100,
+        )
+        assert total == 2
+        remote_names = [tool.remote_name for tool in tools]
+        assert sorted(remote_names) == ["echo", "lookup_weather"]
+        assert len(remote_names) == len(set(remote_names))
+
+        for tool in tools:
+            versions, version_total = await tools_repo.list_versions(
+                mcp_tool_id=tool.id,
+                page=1,
+                page_size=100,
+            )
+            assert version_total == 1
+            assert tool.current_version_id == versions[0].id
+            assert versions[0].content_hash is not None
