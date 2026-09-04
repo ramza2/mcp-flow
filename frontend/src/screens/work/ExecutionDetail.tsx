@@ -81,6 +81,8 @@ export default function ExecutionDetail() {
   const isMrtrExecution = base.id === 'EXE-20260902-00126' || base.status === 'WAITING_INPUT';
 
   const steps = useMemo(() => {
+    // UNKNOWN_OUTCOME demo must win over CANCELLED fallback for this fixture.
+    if (base.id === 'EXE-20260901-00119') return UNKNOWN_STEPS;
     if (isMrtrExecution || status === 'WAITING_INPUT' || (mrtrResponded && status === 'RUNNING')) {
       return MRTR_STEPS.map(s => s.runtimeInput
         ? {
@@ -93,7 +95,6 @@ export default function ExecutionDetail() {
     if (base.status === 'CANCELLED' || status === 'CANCELLED' || status === 'CANCEL_REQUESTED') {
       return DEFAULT_STEPS.map((s, i) => (i === 0 ? { ...s, status: 'SUCCEEDED' as StepStatus } : { ...s, status: (status === 'CANCELLED' ? 'CANCELLED' : s.status) as StepStatus }));
     }
-    if (base.id === 'EXE-20260901-00119') return UNKNOWN_STEPS;
     return DEFAULT_STEPS;
   }, [base.id, base.status, status, mrtrResponded, isMrtrExecution]);
 
