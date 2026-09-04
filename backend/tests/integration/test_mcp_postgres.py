@@ -153,8 +153,9 @@ async def test_jsonb_input_schema_roundtrip(
             transport_type="STREAMABLE_HTTP",
             endpoint_url="https://mcp.test/mcp",
             transport_config={"retry": {"max": 3}},
-            capabilities={"tools": {"listChanged": True}},
         )
+        server.capabilities = {"tools": {"listChanged": True}}
+        await session.flush()
         tool = await tools.create_tool(mcp_server_id=server.id, remote_name="geo")
         version = await tools.create_version(
             mcp_tool_id=tool.id,

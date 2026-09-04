@@ -189,22 +189,40 @@ def integration_database_url() -> str:
 
 
 @pytest.fixture(scope="session")
-def integration_engine(integration_database_url: str) -> AsyncEngine:
-    return create_async_engine(integration_database_url, pool_pre_ping=True)
-
-
-@pytest.fixture(scope="session")
 def alembic_upgrade_head(integration_database_url: str) -> None:
     backend_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
     cfg = Config(os.path.join(backend_dir, "alembic.ini"))
     cfg.set_main_option("sqlalchemy.url", integration_database_url)
+    # Ensure env.py / settings cannot fall back to the placeholder default user.
+    os.environ["MCPFLOW_DATABASE_URL"] = integration_database_url
+    from app.core.config import get_settings
+
+    get_settings.cache_clear()
     command.upgrade(cfg, "head")
+
+
+@pytest.fixture
+async def integration_engine(
+    integration_database_url: str,
+    alembic_upgrade_head: None,
+) -> AsyncIterator[AsyncEngine]:
+    # Function-scoped engine avoids cross-loop reuse under pytest-asyncio.
+    from sqlalchemy.pool import NullPool
+
+    engine = create_async_engine(
+        integration_database_url,
+        pool_pre_ping=True,
+        poolclass=NullPool,
+    )
+    try:
+        yield engine
+    finally:
+        await engine.dispose()
 
 
 @pytest.fixture
 async def integration_session_factory(
     integration_engine: AsyncEngine,
-    alembic_upgrade_head: None,
 ) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
     factory = async_sessionmaker(
         bind=integration_engine,

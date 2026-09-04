@@ -24,6 +24,11 @@ target_metadata = metadata
 
 
 def get_url() -> str:
+    # Prefer an explicit alembic Config override (tests / CLI) when present and
+    # not the placeholder from alembic.ini.
+    configured = (config.get_main_option("sqlalchemy.url") or "").strip()
+    if configured and not configured.startswith("driver://"):
+        return configured
     return get_settings().database_url
 
 
