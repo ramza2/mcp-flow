@@ -1,3 +1,4 @@
+from collections.abc import AsyncIterator
 from typing import Annotated
 
 from fastapi import Depends, Request
@@ -5,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
 from app.db.session import get_db_session
+from app.mcp.client import MCPHttpClient
 from app.services.health import DatabasePing, ping_database
 
 
@@ -28,3 +30,15 @@ async def get_database_ping() -> DatabasePing:
 
 
 DatabasePingDep = Annotated[DatabasePing, Depends(get_database_ping)]
+
+
+async def get_mcp_http_client() -> AsyncIterator[MCPHttpClient]:
+    """Request-scoped MCP HTTP client (facade creates CurrentMCPClient)."""
+    client = MCPHttpClient()
+    try:
+        yield client
+    finally:
+        await client.aclose()
+
+
+MCPHttpClientDep = Annotated[MCPHttpClient, Depends(get_mcp_http_client)]

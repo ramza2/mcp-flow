@@ -183,6 +183,37 @@ class MCPDiscoveryMode(StrEnum):
     LEGACY_HANDSHAKE = "LEGACY_HANDSHAKE"
 
 
+class MCPTransportType(StrEnum):
+    """docs/05 mcp_servers.transport_type."""
+
+    STDIO = "STDIO"
+    STREAMABLE_HTTP = "STREAMABLE_HTTP"
+    LEGACY_HTTP_SSE = "LEGACY_HTTP_SSE"
+
+
+class MCPProtocolEra(StrEnum):
+    """docs/05 mcp_servers.protocol_era."""
+
+    CURRENT = "CURRENT"
+    LEGACY = "LEGACY"
+
+
+class MCPCheckType(StrEnum):
+    """docs/05 mcp_server_checks.check_type."""
+
+    MANUAL = "MANUAL"
+    SCHEDULED = "SCHEDULED"
+    PRE_ACTIVATION = "PRE_ACTIVATION"
+
+
+class MCPCheckStatus(StrEnum):
+    """docs/05 mcp_server_checks.status."""
+
+    SUCCEEDED = "SUCCEEDED"
+    FAILED = "FAILED"
+    TIMED_OUT = "TIMED_OUT"
+
+
 class MCPAuthType(StrEnum):
     NONE = "NONE"
     BEARER = "BEARER"

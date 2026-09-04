@@ -1,6 +1,22 @@
-"""MCP integration package boundary (docs/03/04).
+"""MCP integration package — Current HTTP discovery / tools/list client."""
 
-Current MCP (2026-07-28) and LegacyMCPAdapter live here later.
-No transport / tools/call / discover / MRTR client code in this skeleton.
-STDIO execution belongs in mcp-worker only — never in the API process.
-"""
+from app.mcp.client import MCPHttpClient
+from app.mcp.current import CurrentMCPClient
+from app.mcp.errors import DiscoverUnsupportedError, MCPClientError
+from app.mcp.normalize import (
+    DiffChangeType,
+    RemoteToolDescriptor,
+    content_hash,
+    validate_tool_schemas,
+)
+
+__all__ = [
+    "CurrentMCPClient",
+    "DiffChangeType",
+    "DiscoverUnsupportedError",
+    "MCPClientError",
+    "MCPHttpClient",
+    "RemoteToolDescriptor",
+    "content_hash",
+    "validate_tool_schemas",
+]
