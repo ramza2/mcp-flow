@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router';
 import { ArrowLeft, RefreshCw } from 'lucide-react';
 import StatusBadge from '../../components/ui/StatusBadge';
@@ -32,22 +32,44 @@ import {
 const DISCOVERY_PAGE_SIZE = 20;
 const TOOLS_PAGE_SIZE = 20;
 
+type FeedbackError = { message: string; requestId?: string };
+
+function toFeedbackError(err: unknown, fallback: string): FeedbackError {
+  if (isApiError(err)) {
+    return {
+      message: err.message,
+      requestId: err.requestId ?? undefined,
+    };
+  }
+  return { message: fallback };
+}
+
 export default function MCPServerDetail() {
   const { serverId } = useParams();
   const navigate = useNavigate();
+  const mountedRef = useRef(true);
+
   const [tab, setTab] = useState('overview');
   const [server, setServer] = useState<MCPServerDto | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [notFound, setNotFound] = useState(false);
+  const [error, setError] = useState<FeedbackError | null>(null);
+
   const [tools, setTools] = useState<MCPToolDto[]>([]);
   const [toolsTotal, setToolsTotal] = useState(0);
   const [toolsPage, setToolsPage] = useState(1);
   const [toolsHasNext, setToolsHasNext] = useState(false);
+  const [toolsLoading, setToolsLoading] = useState(false);
+  const [toolsError, setToolsError] = useState<FeedbackError | null>(null);
+
   const [discoveries, setDiscoveries] = useState<DiscoveryDto[]>([]);
   const [discPage, setDiscPage] = useState(1);
   const [discTotal, setDiscTotal] = useState(0);
   const [discHasNext, setDiscHasNext] = useState(false);
-  const [loading, setLoading] = useState(true);
-  const [notFound, setNotFound] = useState(false);
-  const [error, setError] = useState<{ message: string; requestId?: string } | null>(null);
+  const [discoveriesLoading, setDiscoveriesLoading] = useState(false);
+  const [discoveriesError, setDiscoveriesError] = useState<FeedbackError | null>(null);
+
+  const [mutationError, setMutationError] = useState<FeedbackError | null>(null);
   const [statusMutating, setStatusMutating] = useState(false);
   const [testing, setTesting] = useState(false);
   const [lastTest, setLastTest] = useState<ConnectionTestDto | null>(null);
@@ -57,94 +79,165 @@ export default function MCPServerDetail() {
   const [applying, setApplying] = useState(false);
   const [applyError, setApplyError] = useState<string | null>(null);
 
-  const fetchAll = useCallback(() => {
-    if (!serverId) return () => {};
-    const controller = new AbortController();
-    let cancelled = false;
-    setLoading(true);
-    setError(null);
-    setNotFound(false);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
-    getMCPServer(serverId, controller.signal)
-      .then(async srv => {
-        if (cancelled) return;
-        setServer(srv);
-        const [toolsData, discData] = await Promise.all([
-          listServerTools(serverId, {
-            page: toolsPage,
-            page_size: TOOLS_PAGE_SIZE,
-            signal: controller.signal,
-          }),
-          listDiscoveries(serverId, {
-            page: discPage,
-            page_size: DISCOVERY_PAGE_SIZE,
-            signal: controller.signal,
-          }),
-        ]);
-        if (cancelled) return;
+  const reloadServer = useCallback(
+    async (signal?: AbortSignal) => {
+      if (!serverId) return null;
+      const srv = await getMCPServer(serverId, signal);
+      if (signal?.aborted || !mountedRef.current) return null;
+      setServer(srv);
+      return srv;
+    },
+    [serverId],
+  );
+
+  const reloadTools = useCallback(
+    async (signal?: AbortSignal) => {
+      if (!serverId) return;
+      setToolsLoading(true);
+      setToolsError(null);
+      try {
+        const toolsData = await listServerTools(serverId, {
+          page: toolsPage,
+          page_size: TOOLS_PAGE_SIZE,
+          signal,
+        });
+        if (signal?.aborted || !mountedRef.current) return;
         setTools(toolsData.items);
         setToolsTotal(toolsData.total);
         setToolsHasNext(toolsData.has_next);
+      } catch (err) {
+        if (isAbortError(err) || signal?.aborted || !mountedRef.current) return;
+        setToolsError(toFeedbackError(err, 'Tool 목록을 불러오지 못했습니다.'));
+      } finally {
+        if (!signal?.aborted && mountedRef.current) setToolsLoading(false);
+      }
+    },
+    [serverId, toolsPage],
+  );
+
+  const reloadDiscoveries = useCallback(
+    async (signal?: AbortSignal) => {
+      if (!serverId) return;
+      setDiscoveriesLoading(true);
+      setDiscoveriesError(null);
+      try {
+        const discData = await listDiscoveries(serverId, {
+          page: discPage,
+          page_size: DISCOVERY_PAGE_SIZE,
+          signal,
+        });
+        if (signal?.aborted || !mountedRef.current) return;
         setDiscoveries(discData.items);
         setDiscTotal(discData.total);
         setDiscHasNext(discData.has_next);
+      } catch (err) {
+        if (isAbortError(err) || signal?.aborted || !mountedRef.current) return;
+        setDiscoveriesError(toFeedbackError(err, 'Discovery 이력을 불러오지 못했습니다.'));
+      } finally {
+        if (!signal?.aborted && mountedRef.current) setDiscoveriesLoading(false);
+      }
+    },
+    [serverId, discPage],
+  );
+
+  // Critical: server detail only
+  useEffect(() => {
+    if (!serverId) return;
+    const controller = new AbortController();
+    setLoading(true);
+    setError(null);
+    setNotFound(false);
+    setServer(null);
+    setToolsPage(1);
+    setDiscPage(1);
+
+    getMCPServer(serverId, controller.signal)
+      .then(srv => {
+        if (controller.signal.aborted || !mountedRef.current) return;
+        setServer(srv);
       })
       .catch(err => {
-        if (isAbortError(err) || cancelled) return;
+        if (isAbortError(err) || controller.signal.aborted || !mountedRef.current) return;
         if (isApiError(err) && err.status === 404) {
           setNotFound(true);
           setServer(null);
           return;
         }
-        const apiErr = isApiError(err) ? err : null;
-        setError({
-          message: apiErr?.message ?? '서버 정보를 불러오지 못했습니다.',
-          requestId: apiErr?.requestId ?? undefined,
-        });
+        setError(toFeedbackError(err, '서버 정보를 불러오지 못했습니다.'));
       })
       .finally(() => {
-        if (!cancelled) setLoading(false);
+        if (!controller.signal.aborted && mountedRef.current) setLoading(false);
       });
 
-    return () => {
-      cancelled = true;
-      controller.abort();
-    };
-  }, [serverId, toolsPage, discPage]);
+    return () => controller.abort();
+  }, [serverId]);
 
+  // Secondary: tools
   useEffect(() => {
-    return fetchAll();
-  }, [fetchAll]);
+    if (!serverId || !server) return;
+    const controller = new AbortController();
+    void reloadTools(controller.signal);
+    return () => controller.abort();
+  }, [serverId, server?.id, toolsPage, reloadTools]);
+
+  // Secondary: discoveries
+  useEffect(() => {
+    if (!serverId || !server) return;
+    const controller = new AbortController();
+    void reloadDiscoveries(controller.signal);
+    return () => controller.abort();
+  }, [serverId, server?.id, discPage, reloadDiscoveries]);
 
   const handleActivate = async () => {
     if (!serverId) return;
     setStatusMutating(true);
+    setMutationError(null);
     try {
       const updated = await activateMCPServer(serverId);
+      if (!mountedRef.current) return;
       setServer(updated);
+    } catch (err) {
+      if (!mountedRef.current) return;
+      setMutationError(toFeedbackError(err, 'Activate에 실패했습니다.'));
     } finally {
-      setStatusMutating(false);
+      if (mountedRef.current) setStatusMutating(false);
     }
   };
 
   const handleDeactivate = async () => {
     if (!serverId) return;
     setStatusMutating(true);
+    setMutationError(null);
     try {
       const updated = await deactivateMCPServer(serverId);
+      if (!mountedRef.current) return;
       setServer(updated);
+    } catch (err) {
+      if (!mountedRef.current) return;
+      setMutationError(toFeedbackError(err, 'Deactivate에 실패했습니다.'));
     } finally {
-      setStatusMutating(false);
+      if (mountedRef.current) setStatusMutating(false);
     }
   };
 
   const runConnectionTest = async () => {
     if (!serverId) return;
     setTesting(true);
+    setMutationError(null);
     try {
       const result = await connectionTestMCPServer(serverId);
+      if (!mountedRef.current) return;
       setLastTest(result);
+      await reloadServer();
     } catch (err) {
+      if (!mountedRef.current) return;
       if (isApiError(err)) {
         setLastTest({
           id: '',
@@ -159,9 +252,16 @@ export default function MCPServerDetail() {
           error_message: err.message,
           checked_at: new Date().toISOString(),
         });
+      } else {
+        setMutationError(toFeedbackError(err, '연결 테스트에 실패했습니다.'));
+      }
+      try {
+        await reloadServer();
+      } catch {
+        // keep previous server metadata if refetch fails
       }
     } finally {
-      setTesting(false);
+      if (mountedRef.current) setTesting(false);
     }
   };
 
@@ -169,10 +269,14 @@ export default function MCPServerDetail() {
     if (!serverId) return;
     setDiscovering(true);
     setPreviewResult(null);
+    setMutationError(null);
     try {
       const result = await createDiscovery(serverId, { apply_changes: false });
+      if (!mountedRef.current) return;
       setPreviewResult(result);
+      await reloadServer();
     } catch (err) {
+      if (!mountedRef.current) return;
       if (isApiError(err)) {
         setPreviewResult({
           id: '',
@@ -189,9 +293,11 @@ export default function MCPServerDetail() {
           finished_at: null,
           capabilities: null,
         });
+      } else {
+        setMutationError(toFeedbackError(err, 'Discovery Preview에 실패했습니다.'));
       }
     } finally {
-      setDiscovering(false);
+      if (mountedRef.current) setDiscovering(false);
     }
   };
 
@@ -201,17 +307,19 @@ export default function MCPServerDetail() {
     setApplyError(null);
     try {
       const result = await createDiscovery(serverId, { apply_changes: true });
+      if (!mountedRef.current) return;
       if (!result.success) {
         setApplyError(result.error_message ?? 'Discovery 적용에 실패했습니다.');
         return;
       }
       setApplyOpen(false);
       setPreviewResult(null);
-      fetchAll();
+      await Promise.all([reloadServer(), reloadTools(), reloadDiscoveries()]);
     } catch (err) {
+      if (!mountedRef.current) return;
       setApplyError(isApiError(err) ? err.message : 'Discovery 적용에 실패했습니다.');
     } finally {
-      setApplying(false);
+      if (mountedRef.current) setApplying(false);
     }
   };
 
@@ -234,7 +342,31 @@ export default function MCPServerDetail() {
   if (error || !server) {
     return (
       <div className="p-6">
-        <ErrorState message={error?.message} requestId={error?.requestId} onRetry={fetchAll} />
+        <ErrorState
+          message={error?.message}
+          requestId={error?.requestId}
+          onRetry={() => {
+            if (!serverId) return;
+            setLoading(true);
+            setError(null);
+            getMCPServer(serverId)
+              .then(srv => {
+                if (!mountedRef.current) return;
+                setServer(srv);
+              })
+              .catch(err => {
+                if (!mountedRef.current) return;
+                if (isApiError(err) && err.status === 404) {
+                  setNotFound(true);
+                  return;
+                }
+                setError(toFeedbackError(err, '서버 정보를 불러오지 못했습니다.'));
+              })
+              .finally(() => {
+                if (mountedRef.current) setLoading(false);
+              });
+          }}
+        />
       </div>
     );
   }
@@ -323,6 +455,14 @@ export default function MCPServerDetail() {
             </Button>
           </div>
         </div>
+        {mutationError && (
+          <div className="mt-3 space-y-1">
+            <InlineAlert type="error" message={mutationError.message} />
+            {mutationError.requestId && (
+              <p className="font-mono text-xs text-slate-400">Request ID: {mutationError.requestId}</p>
+            )}
+          </div>
+        )}
         {lastTest && (
           <div className="mt-3 p-3 rounded-lg border border-slate-200 bg-slate-50 text-sm">
             <span className="font-medium">{labelCheckStatus(lastTest.status)}</span>
@@ -398,35 +538,53 @@ export default function MCPServerDetail() {
 
         {tab === 'tools' && (
           <div className="max-w-4xl">
-            <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
-              {tools.length === 0 ? (
+            {toolsLoading && <LoadingSkeleton rows={4} />}
+            {!toolsLoading && toolsError && (
+              <ErrorState
+                message={toolsError.message}
+                requestId={toolsError.requestId}
+                onRetry={() => void reloadTools()}
+              />
+            )}
+            {!toolsLoading && !toolsError && tools.length === 0 && (
+              <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
                 <EmptyState title="이 서버에 등록된 Tool이 없습니다" description="Discovery를 실행해 Tool을 가져오세요." />
-              ) : (
-                <>
-                  <DataTable
-                    columns={toolCols}
-                    data={tools}
-                    rowKey={r => r.id}
-                    onRowClick={r => navigate(`/mcp/tools/${r.id}`)}
-                  />
-                  <Pagination
-                    page={toolsPage}
-                    pageSize={TOOLS_PAGE_SIZE}
-                    total={toolsTotal}
-                    hasNext={toolsHasNext}
-                    onPageChange={setToolsPage}
-                  />
-                </>
-              )}
-            </div>
+              </div>
+            )}
+            {!toolsLoading && !toolsError && tools.length > 0 && (
+              <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
+                <DataTable
+                  columns={toolCols}
+                  data={tools}
+                  rowKey={r => r.id}
+                  onRowClick={r => navigate(`/mcp/tools/${r.id}`)}
+                />
+                <Pagination
+                  page={toolsPage}
+                  pageSize={TOOLS_PAGE_SIZE}
+                  total={toolsTotal}
+                  hasNext={toolsHasNext}
+                  onPageChange={setToolsPage}
+                />
+              </div>
+            )}
           </div>
         )}
 
         {tab === 'discovery' && (
           <div className="max-w-2xl">
-            {discoveries.length === 0 ? (
+            {discoveriesLoading && <LoadingSkeleton rows={4} />}
+            {!discoveriesLoading && discoveriesError && (
+              <ErrorState
+                message={discoveriesError.message}
+                requestId={discoveriesError.requestId}
+                onRetry={() => void reloadDiscoveries()}
+              />
+            )}
+            {!discoveriesLoading && !discoveriesError && discoveries.length === 0 && (
               <EmptyState title="Discovery 이력이 없습니다" />
-            ) : (
+            )}
+            {!discoveriesLoading && !discoveriesError && discoveries.length > 0 && (
               <div className="space-y-2">
                 {discoveries.map(d => (
                   <div

@@ -118,6 +118,51 @@ describe('MCPToolDetail — API detail', () => {
     expect(screen.getAllByText('WARNING').length).toBeGreaterThan(0);
   });
 
+  it('shows version-specific error when detail API fails without losing Tool Overview', async () => {
+    const user = userEvent.setup();
+    const fetchMock = vi.fn((input: RequestInfo) => {
+      const url = typeof input === 'string' ? input : input.url;
+      if (url.match(/\/mcp\/tools\/[^/]+$/) && !url.includes('/versions')) {
+        return Promise.resolve(jsonResponse(discoveredTool));
+      }
+      if (url.includes('/versions') && url.endsWith(warningVersion.id)) {
+        return Promise.resolve(
+          jsonResponse(
+            {
+              error: {
+                code: 'INTERNAL_ERROR',
+                message: 'version detail failed',
+                request_id: 'req-ver-500',
+              },
+            },
+            500,
+          ),
+        );
+      }
+      if (url.includes('/versions') && url.endsWith(validVersion.id)) {
+        return Promise.resolve(jsonResponse(validVersion));
+      }
+      if (url.includes('/versions')) {
+        return Promise.resolve(jsonResponse(versionList));
+      }
+      return Promise.resolve(new Response('Not found', { status: 404 }));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    renderWithRouter(<MCPToolDetail />, {
+      path: '/mcp/tools/:toolId',
+      route: `/mcp/tools/${discoveredTool.id}`,
+    });
+
+    expect(await screen.findByRole('heading', { name: 'Search Docs' })).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: /^Versions$/i }));
+    await user.click(screen.getByText('v3'));
+
+    expect(await screen.findByText(/version detail failed/i)).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Search Docs' })).toBeInTheDocument();
+    expect(screen.getByText('DISCOVERED')).toBeInTheDocument();
+  });
+
   it('shows deferred tabs as empty state', async () => {
     const user = userEvent.setup();
     vi.stubGlobal('fetch', stubToolFetch());

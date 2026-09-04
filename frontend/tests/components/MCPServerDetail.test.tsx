@@ -100,7 +100,92 @@ describe('MCPServerDetail — API detail', () => {
     });
   });
 
-  it('runs connection test and shows result', async () => {
+  it('shows Activate RESOURCE_CONFLICT without unhandled rejection', async () => {
+    const draft = { ...activeServer, status: 'DRAFT' as const };
+    const fetchMock = vi.fn((input: RequestInfo, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input.url;
+      if (init?.method === 'POST' && url.includes('/activate')) {
+        return Promise.resolve(
+          jsonResponse(
+            {
+              error: {
+                code: 'RESOURCE_CONFLICT',
+                message: 'Server cannot be activated from current status',
+                request_id: 'req-conflict-1',
+                retryable: false,
+              },
+            },
+            409,
+          ),
+        );
+      }
+      if (url.includes('/tools')) return Promise.resolve(jsonResponse(toolList));
+      if (url.includes('/discoveries')) return Promise.resolve(jsonResponse(discoveryList));
+      if (url.includes('/mcp/servers/')) return Promise.resolve(jsonResponse(draft));
+      return Promise.resolve(new Response('Not found', { status: 404 }));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const user = userEvent.setup();
+    renderWithRouter(<MCPServerDetail />, {
+      path: '/mcp/servers/:serverId',
+      route: `/mcp/servers/${activeServer.id}`,
+    });
+
+    await screen.findByText('Docs MCP');
+    await user.click(screen.getByRole('button', { name: /^Activate$/i }));
+
+    expect(await screen.findByText(/Server cannot be activated from current status/i)).toBeInTheDocument();
+    expect(screen.getByText(/Request ID: req-conflict-1/i)).toBeInTheDocument();
+    expect(screen.getByText('DRAFT')).toBeInTheDocument();
+  });
+
+  it('keeps Overview when Tools secondary API fails', async () => {
+    const fetchMock = vi.fn((input: RequestInfo) => {
+      const url = typeof input === 'string' ? input : input.url;
+      if (url.includes('/tools')) {
+        return Promise.resolve(
+          jsonResponse(
+            {
+              error: {
+                code: 'INTERNAL_ERROR',
+                message: 'tools boom',
+                request_id: 'req-tools-500',
+              },
+            },
+            500,
+          ),
+        );
+      }
+      if (url.includes('/discoveries')) return Promise.resolve(jsonResponse(discoveryList));
+      if (url.includes(`/mcp/servers/${activeServer.id}`)) {
+        return Promise.resolve(jsonResponse(activeServer));
+      }
+      return Promise.resolve(new Response('Not found', { status: 404 }));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const user = userEvent.setup();
+    renderWithRouter(<MCPServerDetail />, {
+      path: '/mcp/servers/:serverId',
+      route: `/mcp/servers/${activeServer.id}`,
+    });
+
+    expect(await screen.findByRole('heading', { name: 'Docs MCP' })).toBeInTheDocument();
+    expect(screen.getByText('ACTIVE')).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: /^Tools/i }));
+    expect(await screen.findByText(/tools boom/i)).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Docs MCP' })).toBeInTheDocument();
+  });
+
+  it('runs connection test, shows result, and refetches server metadata', async () => {
+    let serverGets = 0;
+    const updatedServer = {
+      ...activeServer,
+      last_healthy_at: '2026-09-04T08:00:00+00:00',
+      negotiated_protocol_version: '2025-06-18',
+    };
     const fetchMock = vi.fn((input: RequestInfo, init?: RequestInit) => {
       const url = typeof input === 'string' ? input : input.url;
       if (init?.method === 'POST' && url.includes('/connection-tests')) {
@@ -108,7 +193,10 @@ describe('MCPServerDetail — API detail', () => {
       }
       if (url.includes('/tools')) return Promise.resolve(jsonResponse(toolList));
       if (url.includes('/discoveries')) return Promise.resolve(jsonResponse(discoveryList));
-      if (url.includes('/mcp/servers/')) return Promise.resolve(jsonResponse(activeServer));
+      if (url.includes('/mcp/servers/') && !url.includes('/tools') && !url.includes('/discoveries')) {
+        serverGets += 1;
+        return Promise.resolve(jsonResponse(serverGets === 1 ? activeServer : updatedServer));
+      }
       return Promise.resolve(new Response('Not found', { status: 404 }));
     });
     vi.stubGlobal('fetch', fetchMock);
@@ -124,9 +212,19 @@ describe('MCPServerDetail — API detail', () => {
 
     expect(await screen.findByText(/Succeeded/i)).toBeInTheDocument();
     expect(screen.getByText(/42ms/)).toBeInTheDocument();
+    await waitFor(() => {
+      expect(serverGets).toBeGreaterThanOrEqual(2);
+    });
+    expect(await screen.findByText('2025-06-18')).toBeInTheDocument();
   });
 
-  it('discovery preview then apply with confirm dialog', async () => {
+  it('discovery preview then apply with confirm dialog and refetches', async () => {
+    let serverGets = 0;
+    const afterPreview = {
+      ...activeServer,
+      discovery_mode: 'EXPLICIT_DISCOVERY' as const,
+      negotiated_protocol_version: '2025-06-18',
+    };
     const fetchMock = vi.fn((input: RequestInfo, init?: RequestInit) => {
       const url = typeof input === 'string' ? input : input.url;
       const body = init?.body ? JSON.parse(init.body as string) : {};
@@ -138,7 +236,10 @@ describe('MCPServerDetail — API detail', () => {
       }
       if (url.includes('/tools')) return Promise.resolve(jsonResponse(toolList));
       if (url.includes('/discoveries')) return Promise.resolve(jsonResponse(discoveryList));
-      if (url.includes('/mcp/servers/')) return Promise.resolve(jsonResponse(activeServer));
+      if (url.includes('/mcp/servers/')) {
+        serverGets += 1;
+        return Promise.resolve(jsonResponse(serverGets === 1 ? activeServer : afterPreview));
+      }
       return Promise.resolve(new Response('Not found', { status: 404 }));
     });
     vi.stubGlobal('fetch', fetchMock);
@@ -152,6 +253,9 @@ describe('MCPServerDetail — API detail', () => {
     await screen.findByText('Docs MCP');
     await user.click(screen.getByRole('button', { name: /Discovery Preview/i }));
     expect(await screen.findByText(/Discovery Preview — Success/i)).toBeInTheDocument();
+    await waitFor(() => {
+      expect(serverGets).toBeGreaterThanOrEqual(2);
+    });
 
     await user.click(screen.getByRole('button', { name: /Apply Discovery/i }));
     await user.click(screen.getByRole('button', { name: /^Apply$/i }));

@@ -68,8 +68,9 @@ async function parseError(response: Response): Promise<ApiError> {
       return new ApiError({
         status: response.status,
         code: 'NON_JSON_ERROR',
-        message: text.slice(0, 200) || `HTTP ${response.status}`,
+        message: `Server returned a non-JSON error response (HTTP ${response.status}).`,
         requestId: requestIdHeader,
+        retryable: response.status >= 500,
       });
     }
   }

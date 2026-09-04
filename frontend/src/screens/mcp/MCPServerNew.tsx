@@ -197,7 +197,9 @@ export default function MCPServerNew() {
               <Row label="Protocol">Current MCP</Row>
               <Row label="Protocol Version">{CURRENT_MCP_PROTOCOL_VERSION}</Row>
               <Row label="Protocol Era">CURRENT</Row>
-              <Row label="Discovery Mode">INFERRED_CURRENT (등록 후 결정)</Row>
+              <Row label="Discovery Mode">
+                미결정 — Discovery 실행 후 EXPLICIT_DISCOVERY 또는 INFERRED_CURRENT
+              </Row>
               <Row label="server/discover">Optional — Current MCP에서는 명시적 Discovery가 선택사항입니다</Row>
             </div>
             <InlineAlert

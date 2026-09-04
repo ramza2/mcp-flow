@@ -66,16 +66,33 @@ describe('apiRequest', () => {
     expect(isAbortError(abortErr)).toBe(true);
   });
 
-  it('handles non-JSON error responses', async () => {
+  it('handles non-JSON error responses with generic message and preserves X-Request-ID', async () => {
     vi.stubGlobal(
       'fetch',
-      vi.fn().mockResolvedValue(new Response('Internal Server Error', { status: 500 })),
+      vi.fn().mockImplementation(() =>
+        Promise.resolve(
+          new Response('<html>Internal Server Error stacktrace</html>', {
+            status: 502,
+            headers: { 'X-Request-ID': 'req-non-json-1' },
+          }),
+        ),
+      ),
     );
-    await expect(apiRequest('/mcp/servers')).rejects.toMatchObject({
-      code: 'NON_JSON_ERROR',
-      status: 500,
-      message: 'Internal Server Error',
-    });
+    try {
+      await apiRequest('/mcp/servers');
+      expect.fail('should throw');
+    } catch (e) {
+      expect(isApiError(e)).toBe(true);
+      expect(e).toMatchObject({
+        code: 'NON_JSON_ERROR',
+        status: 502,
+        message: 'Server returned a non-JSON error response (HTTP 502).',
+        requestId: 'req-non-json-1',
+        retryable: true,
+      });
+      expect((e as ApiError).message).not.toContain('stacktrace');
+      expect((e as ApiError).message).not.toContain('<html>');
+    }
   });
 
   it('serializes query params and omits empty values', async () => {
