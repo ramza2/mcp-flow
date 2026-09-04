@@ -1,0 +1,83 @@
+# Local development override — hot reload + loopback diagnostic ports.
+# Usage:
+#   docker compose -f compose.yaml -f compose.local.yaml up -d --build
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: infra/docker/backend.Dockerfile
+      target: dev
+      args:
+        PYTHON_IMAGE: python:3.12.10-slim-bookworm
+    # Hot reload needs writable bind mounts — disable base read_only for local.
+    read_only: false
+    volumes:
+      - ./backend/app:/app/app
+      - ./backend/alembic:/app/alembic
+      - ./backend/alembic.ini:/app/alembic.ini
+    command:
+      [
+        "uvicorn",
+        "app.main:app",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8000",
+        "--reload",
+      ]
+    ports:
+      - "127.0.0.1:${MCPFLOW_API_DEBUG_PORT:-8000}:8000"
+
+  migration:
+    build:
+      context: .
+      dockerfile: infra/docker/backend.Dockerfile
+      target: runtime
+      args:
+        PYTHON_IMAGE: python:3.12.10-slim-bookworm
+
+  frontend:
+    build:
+      context: .
+      dockerfile: infra/docker/frontend.Dockerfile
+      target: dev
+      args:
+        NODE_IMAGE: node:22.14.0-bookworm-slim
+        NGINX_IMAGE: nginxinc/nginx-unprivileged:1.27.4-alpine
+    read_only: false
+    environment:
+      PORT: "8080"
+    volumes:
+      - ./frontend:/frontend
+      - frontend_node_modules:/frontend/node_modules
+    command: ["pnpm", "dev", "--host", "0.0.0.0", "--port", "8080"]
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:8080/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 40s
+
+  postgres:
+    ports:
+      - "127.0.0.1:${MCPFLOW_POSTGRES_DEBUG_PORT:-5432}:5432"
+
+  redis:
+    ports:
+      - "127.0.0.1:${MCPFLOW_REDIS_DEBUG_PORT:-6379}:6379"
+
+  object-storage:
+    ports:
+      - "127.0.0.1:${MCPFLOW_MINIO_API_DEBUG_PORT:-9000}:9000"
+      - "127.0.0.1:${MCPFLOW_MINIO_CONSOLE_DEBUG_PORT:-9001}:9001"
+
+volumes:
+  frontend_node_modules:
+    name: mcpflow_frontend_node_modules

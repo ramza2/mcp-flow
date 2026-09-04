@@ -1,0 +1,35 @@
+# Traefik dynamic routes — prefixes are preserved (no strip).
+# Priority: API/Health above frontend catch-all. No buffering middleware (SSE-safe).
+http:
+  routers:
+    api:
+      rule: "PathPrefix(`/api/v1`)"
+      entryPoints:
+        - web
+      service: api
+      priority: 100
+
+    health:
+      rule: "PathPrefix(`/health`)"
+      entryPoints:
+        - web
+      service: api
+      priority: 100
+
+    frontend:
+      rule: "PathPrefix(`/`)"
+      entryPoints:
+        - web
+      service: frontend
+      priority: 1
+
+  services:
+    api:
+      loadBalancer:
+        servers:
+          - url: "http://api:8000"
+
+    frontend:
+      loadBalancer:
+        servers:
+          - url: "http://frontend:8080"

@@ -68,6 +68,23 @@ alembic upgrade head
 
 Do not use `Base.metadata.create_all()` for production schema management.
 
+## Dependency lock (Docker runtime)
+
+Docker production images install pinned transitive dependencies from
+`requirements.lock`, then install this package with `--no-deps`.
+
+Regenerate after changing runtime dependencies in `pyproject.toml`:
+
+```bash
+python3 -m venv .venv-lock
+source .venv-lock/bin/activate
+pip install -U pip
+pip install -e .
+pip freeze | grep -v -E '^-e |mcpflow-backend' | sort > requirements.lock
+```
+
+Editable local development (`pip install -e ".[dev]"`) continues to work without the lock file.
+
 ## Architecture notes
 
 Package boundaries under `app/` mirror `docs/03` responsibilities

@@ -1,0 +1,21 @@
+# Traefik static configuration — file provider only (no Docker socket).
+api:
+  dashboard: false
+  insecure: false
+
+ping:
+  entryPoint: web
+
+entryPoints:
+  web:
+    address: ":8080"
+
+providers:
+  file:
+    filename: /etc/traefik/dynamic/routes.yml
+    watch: true
+
+log:
+  level: INFO
+
+accessLog: {}
