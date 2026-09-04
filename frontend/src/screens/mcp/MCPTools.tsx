@@ -3,10 +3,18 @@ import PageHeader from '../../components/ui/PageHeader';
 import DataTable, { Column } from '../../components/ui/DataTable';
 import StatusBadge, { RiskBadge, VerificationBadge } from '../../components/ui/StatusBadge';
 import FilterBar from '../../components/ui/FilterBar';
-import { mockTools } from '../../data/mock';
+import { mockMCPServers, mockTools } from '../../data/mock';
+import {
+  MCP_TOOL_STATUSES,
+  RISK_CLASSES,
+  TOOL_VERIFICATION_STATUSES,
+  TOOL_VERSION_VALIDATION_STATUSES,
+} from '../../domain';
 
 export default function MCPTools() {
   const navigate = useNavigate();
+
+  const capabilities = [...new Set(mockTools.map(t => t.capability))].sort();
 
   const columns: Column<typeof mockTools[0]>[] = [
     { key: 'displayName', label: 'Display Name', render: r => <span className="font-medium text-slate-800">{r.displayName}</span> },
@@ -21,6 +29,7 @@ export default function MCPTools() {
       return <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${s}`}>{r.validation}</span>;
     }},
     { key: 'verification', label: 'Verification', render: r => <VerificationBadge status={r.verification} /> },
+    { key: 'capability', label: 'Capability', render: r => <span className="text-xs font-mono text-slate-500">{r.capability}</span> },
     { key: 'usedBy', label: 'Used By', render: r => <span className="text-sm text-slate-500">{r.usedBy}개</span>, align: 'center' },
     { key: 'updatedAt', label: '수정일', render: r => <span className="text-xs text-slate-400">{r.updatedAt}</span> },
   ];
@@ -32,13 +41,12 @@ export default function MCPTools() {
         <FilterBar
           search searchPlaceholder="Tool 이름, 서버 검색..."
           filters={[
-            { key: 'status', label: '상태', options: [{ value: 'ACTIVE', label: 'Active' }, { value: 'INACTIVE', label: 'Inactive' }, { value: 'BLOCKED', label: 'Blocked' }, { value: 'MISSING', label: 'Missing' }] },
-            { key: 'risk', label: 'Risk Class', options: [
-              { value: 'READ_ONLY', label: 'Read Only' },
-              { value: 'NON_IDEMPOTENT_WRITE', label: 'Non-Idempotent Write' },
-              { value: 'DESTRUCTIVE', label: 'Destructive' },
-            ]},
-            { key: 'verification', label: 'Verification', options: [{ value: 'VERIFIED', label: 'Verified' }, { value: 'FAILED', label: 'Failed' }, { value: 'EXPIRED', label: 'Expired' }] },
+            { key: 'status', label: 'Tool Status', options: MCP_TOOL_STATUSES.map(v => ({ value: v, label: v })) },
+            { key: 'risk', label: 'Risk Class', options: RISK_CLASSES.map(v => ({ value: v, label: v.replace(/_/g, ' ') })) },
+            { key: 'validation', label: 'Version Validation', options: TOOL_VERSION_VALIDATION_STATUSES.map(v => ({ value: v, label: v })) },
+            { key: 'verification', label: 'Verification', options: TOOL_VERIFICATION_STATUSES.map(v => ({ value: v, label: v })) },
+            { key: 'server', label: 'Server', options: mockMCPServers.map(s => ({ value: s.id, label: s.name })) },
+            { key: 'capability', label: 'Tag / Capability', options: capabilities.map(c => ({ value: c, label: c })) },
           ]}
         />
         <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">

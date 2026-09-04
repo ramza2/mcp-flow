@@ -1,11 +1,12 @@
-import { useState } from 'react';
 import { useNavigate } from 'react-router';
-import { Plus, Calendar } from 'lucide-react';
+import { Plus } from 'lucide-react';
 import PageHeader from '../../components/ui/PageHeader';
 import DataTable, { Column } from '../../components/ui/DataTable';
 import StatusBadge from '../../components/ui/StatusBadge';
+import FilterBar from '../../components/ui/FilterBar';
 import Button from '../../components/ui/Button';
 import { mockSchedules } from '../../data/mock';
+import { SCHEDULE_STATUSES, labelScheduleTarget } from '../../domain';
 
 export default function Schedules() {
   const navigate = useNavigate();
@@ -18,7 +19,11 @@ export default function Schedules() {
         <span className="ml-1.5 text-xs font-mono text-slate-400">{r.version}</span>
       </div>
     )},
-    { key: 'targetType', label: 'Type', render: r => <span className="text-xs bg-slate-100 px-2 py-0.5 rounded text-slate-600">{r.targetType}</span> },
+    { key: 'targetType', label: 'Type', render: r => (
+      <span className="text-xs bg-slate-100 px-2 py-0.5 rounded text-slate-600">
+        {labelScheduleTarget(r.targetType)}
+      </span>
+    )},
     { key: 'schedule', label: 'Schedule', render: r => <span className="font-mono text-xs text-slate-600">{r.schedule}</span> },
     { key: 'timezone', label: 'Timezone', render: r => <span className="text-xs text-slate-500">{r.timezone}</span> },
     { key: 'nextRun', label: 'Next Run', render: r => <span className="text-xs text-slate-600">{r.nextRun}</span> },
@@ -34,7 +39,17 @@ export default function Schedules() {
         description="예약된 Agent 및 Workflow 실행을 관리합니다."
         actions={<Button icon={<Plus size={14} />} onClick={() => navigate('/schedules/new')}>새 Schedule</Button>}
       />
-      <div className="p-6">
+      <div className="p-6 space-y-4">
+        <FilterBar
+          search
+          searchPlaceholder="Schedule 이름 검색..."
+          filters={[
+            { key: 'status', label: '상태', options: SCHEDULE_STATUSES.map(v => ({
+              value: v,
+              label: v.charAt(0) + v.slice(1).toLowerCase(),
+            })) },
+          ]}
+        />
         <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
           <DataTable
             columns={columns}

@@ -7,9 +7,16 @@ import { VersionBadge } from '../../components/ui/StatusBadge';
 import FilterBar from '../../components/ui/FilterBar';
 import Button from '../../components/ui/Button';
 import { mockAgents } from '../../data/mock';
+import { AGENT_STATUSES } from '../../domain';
 
 export default function Agents() {
   const navigate = useNavigate();
+
+  /** Mock UX: create Logical Agent + initial DRAFT Version (Designer falls back if id unknown). */
+  const handleNewAgent = () => {
+    const id = `agt-${Date.now().toString(36)}`;
+    navigate(`/agents/${id}/versions/v1/edit`);
+  };
 
   const columns: Column<typeof mockAgents[0]>[] = [
     { key: 'name', label: 'Name', render: r => (
@@ -38,13 +45,16 @@ export default function Agents() {
       <PageHeader
         title="Agents"
         description="자연어 요청을 처리하는 AI Agent와 버전을 관리합니다."
-        actions={<Button icon={<Plus size={14} />} onClick={() => navigate('/agents/agt-001/versions/new/edit')}>New Agent</Button>}
+        actions={<Button icon={<Plus size={14} />} onClick={handleNewAgent}>New Agent</Button>}
       />
       <div className="p-6 space-y-4">
         <FilterBar
           search searchPlaceholder="Agent 이름 검색..."
           filters={[
-            { key: 'status', label: '상태', options: [{ value: 'ACTIVE', label: 'Active' }, { value: 'INACTIVE', label: 'Inactive' }] },
+            { key: 'status', label: '상태', options: AGENT_STATUSES.map(v => ({
+              value: v,
+              label: v.charAt(0) + v.slice(1).toLowerCase(),
+            })) },
           ]}
         />
         <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">

@@ -7,6 +7,7 @@ import StatusBadge from '../../components/ui/StatusBadge';
 import FilterBar from '../../components/ui/FilterBar';
 import Button from '../../components/ui/Button';
 import { mockExecutions } from '../../data/mock';
+import { EXECUTION_SOURCE_TYPES, labelExecutionSource } from '../../domain';
 
 export default function Executions() {
   const navigate = useNavigate();
@@ -19,7 +20,11 @@ export default function Executions() {
   const columns: Column<typeof mockExecutions[0]>[] = [
     { key: 'id', label: 'Execution ID', render: r => <span className="font-mono text-xs text-slate-500">{r.id}</span> },
     { key: 'name', label: '요청 / 이름', render: r => <span className="font-medium text-slate-800">{r.name}</span> },
-    { key: 'source', label: 'Source', render: r => <span className="text-xs bg-slate-100 px-2 py-0.5 rounded text-slate-600">{r.source}</span> },
+    { key: 'sourceType', label: 'Source', render: r => (
+      <span className="text-xs bg-slate-100 px-2 py-0.5 rounded text-slate-600">
+        {labelExecutionSource(r.sourceType)}
+      </span>
+    )},
     { key: 'user', label: '사용자', render: r => <span className="text-slate-600 font-mono text-xs">{r.user}</span> },
     { key: 'agent', label: 'Agent / Workflow', render: r => <span className="text-sm text-slate-600">{r.agent ?? r.workflow ?? '–'}</span> },
     { key: 'status', label: '상태', render: r => <StatusBadge status={r.status} size="sm" /> },
@@ -47,7 +52,10 @@ export default function Executions() {
               { value: 'FAILED', label: 'Failed' },
               { value: 'WAITING_APPROVAL', label: 'Waiting Approval' },
             ]},
-            { key: 'source', label: 'Source', options: [{ value: 'Agent', label: 'Agent' }, { value: 'Schedule', label: 'Schedule' }, { value: 'Workflow', label: 'Workflow' }] },
+            { key: 'sourceType', label: 'Source', options: EXECUTION_SOURCE_TYPES.map(v => ({
+              value: v,
+              label: labelExecutionSource(v),
+            })) },
           ]}
         />
         <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">

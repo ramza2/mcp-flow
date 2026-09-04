@@ -34,7 +34,7 @@ export default function ApprovalDetail() {
           <div>
             <h1 className="text-lg font-semibold text-slate-900">{approval.purpose}</h1>
             <div className="flex items-center gap-3 mt-1">
-              <StatusBadge status={done ? 'APPROVED' : approval.status === 'PENDING' ? 'WAITING_APPROVAL' : approval.status} />
+              <StatusBadge status={done ? 'APPROVED' : approval.status} />
               <span className="text-xs text-slate-400">Execution: <span className="font-mono">{approval.executionId}</span></span>
             </div>
           </div>

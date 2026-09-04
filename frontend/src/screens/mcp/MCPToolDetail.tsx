@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { useNavigate, useParams } from 'react-router';
-import { ArrowLeft, AlertTriangle, Play } from 'lucide-react';
+import { ArrowLeft, Play } from 'lucide-react';
 import StatusBadge, { RiskBadge, VerificationBadge } from '../../components/ui/StatusBadge';
 import { TabBar } from '../../components/ui/Tabs';
 import Button from '../../components/ui/Button';
@@ -54,6 +54,8 @@ export default function MCPToolDetail() {
             { id: 'verification', label: 'Verification' },
             { id: 'test', label: 'Test Call' },
             { id: 'usedby', label: 'Used By' },
+            { id: 'versions', label: 'Versions' },
+            { id: 'audit', label: 'Audit' },
           ]}
           activeTab={tab}
           onChange={setTab}
@@ -68,6 +70,7 @@ export default function MCPToolDetail() {
               <Row label="Server">{tool.serverName}</Row>
               <Row label="Version" mono>{tool.currentVersion}</Row>
               <Row label="Validation">{tool.validation}</Row>
+              <Row label="Capability" mono>{tool.capability}</Row>
               <Row label="Used By">{tool.usedBy}개 Agent/Workflow</Row>
             </InfoCard>
             <InfoCard title="Risk 설명">
@@ -137,14 +140,22 @@ export default function MCPToolDetail() {
 
         {tab === 'verification' && (
           <div className="space-y-4">
-            <InfoCard title={`Verification — ${tool.currentVersion}`}>
-              <Row label="Status"><VerificationBadge status={tool.verification} /></Row>
+            <InlineAlert
+              type="info"
+              message="Verification은 ToolVersion 단위입니다. Logical Tool이 아니라 특정 ToolVersion에 귀속됩니다."
+            />
+            <InfoCard title={`Verification — ToolVersion ${tool.currentVersion}`}>
+              <Row label="Verification Status"><VerificationBadge status={tool.verification} /></Row>
+              <Row label="ToolVersion" mono>{tool.currentVersion}</Row>
               <Row label="Verified At">2026-08-15 14:00</Row>
               <Row label="Verified By">admin</Row>
-              <Row label="Criteria Version">v1.2</Row>
+              <Row label="Test Execution" mono>EXE-VERIFY-20260815-001</Row>
+              <Row label="Criteria Version" mono>v1.2</Row>
+              <Row label="Evidence">schema_match · sample_call_ok · risk_review</Row>
+              <Row label="Expires At">2026-11-15 14:00</Row>
             </InfoCard>
             {tool.verification === 'EXPIRED' && (
-              <InlineAlert type="warning" message="이 Tool의 Verification이 만료되었습니다. 재검증을 실행하거나 관리자에게 문의하세요." />
+              <InlineAlert type="warning" message="이 ToolVersion의 Verification이 만료되었습니다. 재검증을 실행하거나 관리자에게 문의하세요." />
             )}
           </div>
         )}
@@ -187,6 +198,44 @@ export default function MCPToolDetail() {
             {tool.usedBy === 0 && <p className="text-sm text-slate-400">사용 중인 Agent/Workflow가 없습니다.</p>}
           </InfoCard>
         )}
+
+        {tab === 'versions' && (
+          <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
+            {[
+              { version: tool.currentVersion, status: 'CURRENT', validation: tool.validation, verification: tool.verification, at: tool.updatedAt },
+              { version: 'v0.9.0', status: 'DEPRECATED', validation: 'VALID', verification: 'EXPIRED', at: '2026-07-01' },
+            ].map((v, i) => (
+              <div key={i} className="flex items-center justify-between px-4 py-3 border-b last:border-0">
+                <div>
+                  <p className="text-sm font-mono font-medium text-slate-800">{v.version}</p>
+                  <p className="text-xs text-slate-400">{v.at}</p>
+                </div>
+                <div className="flex items-center gap-2">
+                  <StatusBadge status={v.status === 'CURRENT' ? 'ACTIVE' : 'DEPRECATED'} size="sm" />
+                  <span className="text-xs text-slate-500">{v.validation}</span>
+                  <VerificationBadge status={v.verification} />
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {tab === 'audit' && (
+          <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
+            {[
+              { time: '2026-09-01 10:00', actor: 'admin', action: 'tool.policy.update', result: 'SUCCESS' },
+              { time: '2026-08-15 14:00', actor: 'admin', action: 'tool.version.verify', result: 'SUCCESS' },
+              { time: '2026-08-10 09:30', actor: 'system', action: 'tool.discover', result: 'SUCCESS' },
+            ].map((log, i) => (
+              <div key={i} className="flex gap-4 px-4 py-3 border-b last:border-0 text-sm">
+                <span className="font-mono text-xs text-slate-400 w-36 shrink-0">{log.time}</span>
+                <span className="text-slate-600 w-16 shrink-0">{log.actor}</span>
+                <span className="font-mono text-xs text-indigo-600">{log.action}</span>
+                <span className={`ml-auto text-xs ${log.result === 'SUCCESS' ? 'text-green-600' : 'text-red-600'}`}>{log.result}</span>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
     </div>
   );
@@ -204,7 +253,7 @@ function InfoCard({ title, children }: { title: string; children: React.ReactNod
 function Row({ label, children, mono }: { label: string; children: React.ReactNode; mono?: boolean }) {
   return (
     <div className="flex items-center gap-4">
-      <span className="text-slate-400 w-28 shrink-0 text-xs">{label}</span>
+      <span className="text-slate-400 w-36 shrink-0 text-xs">{label}</span>
       <span className={`text-slate-700 ${mono ? 'font-mono text-xs' : ''}`}>{children}</span>
     </div>
   );

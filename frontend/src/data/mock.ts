@@ -1,69 +1,218 @@
-// MCPFlow Mock Data
+// MCPFlow Mock Data — Canonical Domain values (docs/05)
+
+import {
+  CURRENT_MCP_PROTOCOL_VERSION,
+  type AgentStatus,
+  type AgentVersionStatus,
+  type ApprovalStatus,
+  type ExecutionSourceType,
+  type ExecutionStatus,
+  type MCPAuthType,
+  type MCPDiscoveryMode,
+  type MCPServerStatus,
+  type MCPToolStatus,
+  type RiskClass,
+  type ScheduleMisfirePolicy,
+  type ScheduleOverlapPolicy,
+  type ScheduleStatus,
+  type ScheduleTargetType,
+  type ToolVerificationStatus,
+  type ToolVersionValidationStatus,
+  type WorkflowStatus,
+  type WorkflowVersionStatus,
+} from '../domain';
+
+export const mockSecrets = [
+  { id: 'sec-001', name: 'weather-api-key', type: 'API_KEY', status: 'ACTIVE' },
+  { id: 'sec-002', name: 'email-bearer-token', type: 'BEARER', status: 'ACTIVE' },
+  { id: 'sec-003', name: 'erp-basic-auth', type: 'BASIC', status: 'ACTIVE' },
+];
 
 export const mockMCPServers = [
-  { id: 'srv-001', name: 'Weather MCP', transport: 'Streamable HTTP', status: 'ACTIVE', protocol: 'Current MCP', version: '2025-03-26', discovery: 'Inferred Current', toolCount: 3, lastHealth: '2분 전', updatedAt: '2026-09-02 14:20' },
-  { id: 'srv-002', name: 'Internal Document MCP', transport: 'Streamable HTTP', status: 'ACTIVE', protocol: 'Current MCP', version: '2025-03-26', discovery: 'Listed', toolCount: 8, lastHealth: '5분 전', updatedAt: '2026-09-01 10:05' },
-  { id: 'srv-003', name: 'Email MCP', transport: 'Streamable HTTP', status: 'ACTIVE', protocol: 'Current MCP', version: '2025-03-26', discovery: 'Inferred Current', toolCount: 4, lastHealth: '1분 전', updatedAt: '2026-08-30 09:00' },
-  { id: 'srv-004', name: 'Calendar MCP', transport: 'STDIO', status: 'ACTIVE', protocol: 'Current MCP', version: '2025-03-26', discovery: 'Listed', toolCount: 5, lastHealth: '3분 전', updatedAt: '2026-08-28 11:30' },
-  { id: 'srv-005', name: 'Report MCP', transport: 'Streamable HTTP', status: 'INACTIVE', protocol: 'Current MCP', version: '2025-03-26', discovery: 'Inferred Current', toolCount: 6, lastHealth: '2시간 전', updatedAt: '2026-08-25 16:40' },
-  { id: 'srv-006', name: 'Legacy ERP MCP', transport: 'Legacy HTTP/SSE', status: 'ACTIVE', protocol: 'Legacy MCP', version: '2024-11-05', discovery: 'Listed', toolCount: 12, lastHealth: '10분 전', updatedAt: '2026-08-20 08:15' },
+  { id: 'srv-001', name: 'Weather MCP', transport: 'Streamable HTTP', status: 'ACTIVE' as MCPServerStatus, protocol: 'Current MCP', version: CURRENT_MCP_PROTOCOL_VERSION, discoveryMode: 'INFERRED_CURRENT' as MCPDiscoveryMode, authType: 'API_KEY_HEADER' as MCPAuthType, secretRefId: 'sec-001', toolCount: 3, lastHealth: '2분 전', updatedAt: '2026-09-02 14:20' },
+  { id: 'srv-002', name: 'Internal Document MCP', transport: 'Streamable HTTP', status: 'ACTIVE' as MCPServerStatus, protocol: 'Current MCP', version: CURRENT_MCP_PROTOCOL_VERSION, discoveryMode: 'EXPLICIT_DISCOVERY' as MCPDiscoveryMode, authType: 'BEARER' as MCPAuthType, secretRefId: 'sec-002', toolCount: 8, lastHealth: '5분 전', updatedAt: '2026-09-01 10:05' },
+  { id: 'srv-003', name: 'Email MCP', transport: 'Streamable HTTP', status: 'ACTIVE' as MCPServerStatus, protocol: 'Current MCP', version: CURRENT_MCP_PROTOCOL_VERSION, discoveryMode: 'INFERRED_CURRENT' as MCPDiscoveryMode, authType: 'BEARER' as MCPAuthType, secretRefId: 'sec-002', toolCount: 4, lastHealth: '1분 전', updatedAt: '2026-08-30 09:00' },
+  { id: 'srv-004', name: 'Calendar MCP', transport: 'STDIO', status: 'ACTIVE' as MCPServerStatus, protocol: 'Current MCP', version: CURRENT_MCP_PROTOCOL_VERSION, discoveryMode: 'EXPLICIT_DISCOVERY' as MCPDiscoveryMode, authType: 'STDIO_ENV' as MCPAuthType, secretRefId: null, toolCount: 5, lastHealth: '3분 전', updatedAt: '2026-08-28 11:30' },
+  { id: 'srv-005', name: 'Report MCP', transport: 'Streamable HTTP', status: 'INACTIVE' as MCPServerStatus, protocol: 'Current MCP', version: CURRENT_MCP_PROTOCOL_VERSION, discoveryMode: 'INFERRED_CURRENT' as MCPDiscoveryMode, authType: 'NONE' as MCPAuthType, secretRefId: null, toolCount: 6, lastHealth: '2시간 전', updatedAt: '2026-08-25 16:40' },
+  { id: 'srv-006', name: 'Legacy ERP MCP', transport: 'Legacy HTTP/SSE', status: 'ACTIVE' as MCPServerStatus, protocol: 'Legacy MCP', version: '2024-11-05', discoveryMode: 'LEGACY_HANDSHAKE' as MCPDiscoveryMode, authType: 'BASIC' as MCPAuthType, secretRefId: 'sec-003', toolCount: 12, lastHealth: '10분 전', updatedAt: '2026-08-20 08:15' },
 ];
 
 export const mockTools = [
-  { id: 'tool-001', displayName: 'Get Current Weather', sourceName: 'get_current_weather', serverId: 'srv-001', serverName: 'Weather MCP', status: 'ACTIVE', riskClass: 'READ_ONLY', currentVersion: 'v1.2.0', validation: 'VALID', verification: 'VERIFIED', usedBy: 2, updatedAt: '2026-09-01' },
-  { id: 'tool-002', displayName: 'Search Documents', sourceName: 'search_documents', serverId: 'srv-002', serverName: 'Internal Document MCP', status: 'ACTIVE', riskClass: 'READ_ONLY', currentVersion: 'v2.1.0', validation: 'VALID', verification: 'VERIFIED', usedBy: 4, updatedAt: '2026-09-01' },
-  { id: 'tool-003', displayName: 'Generate Report', sourceName: 'generate_report', serverId: 'srv-005', serverName: 'Report MCP', status: 'INACTIVE', riskClass: 'IDEMPOTENT_WRITE', currentVersion: 'v1.0.3', validation: 'WARNING', verification: 'EXPIRED', usedBy: 1, updatedAt: '2026-08-28' },
-  { id: 'tool-004', displayName: 'Send Email', sourceName: 'send_email', serverId: 'srv-003', serverName: 'Email MCP', status: 'ACTIVE', riskClass: 'NON_IDEMPOTENT_WRITE', currentVersion: 'v3.0.1', validation: 'VALID', verification: 'VERIFIED', usedBy: 3, updatedAt: '2026-08-30' },
-  { id: 'tool-005', displayName: 'Create Calendar Event', sourceName: 'create_calendar_event', serverId: 'srv-004', serverName: 'Calendar MCP', status: 'ACTIVE', riskClass: 'IDEMPOTENT_WRITE', currentVersion: 'v1.4.0', validation: 'VALID', verification: 'VERIFIED', usedBy: 2, updatedAt: '2026-09-01' },
-  { id: 'tool-006', displayName: 'Lookup Employee', sourceName: 'lookup_employee', serverId: 'srv-006', serverName: 'Legacy ERP MCP', status: 'ACTIVE', riskClass: 'READ_ONLY', currentVersion: 'v0.9.2', validation: 'WARNING', verification: 'PENDING', usedBy: 1, updatedAt: '2026-08-20' },
-  { id: 'tool-007', displayName: 'Delete Record', sourceName: 'delete_record', serverId: 'srv-006', serverName: 'Legacy ERP MCP', status: 'BLOCKED', riskClass: 'DESTRUCTIVE', currentVersion: 'v1.0.0', validation: 'VALID', verification: 'FAILED', usedBy: 0, updatedAt: '2026-08-15' },
-  { id: 'tool-008', displayName: 'Get Weather Forecast', sourceName: 'get_weather_forecast', serverId: 'srv-001', serverName: 'Weather MCP', status: 'ACTIVE', riskClass: 'READ_ONLY', currentVersion: 'v1.1.0', validation: 'VALID', verification: 'VERIFIED', usedBy: 1, updatedAt: '2026-09-01' },
+  { id: 'tool-001', displayName: 'Get Current Weather', sourceName: 'get_current_weather', serverId: 'srv-001', serverName: 'Weather MCP', status: 'ACTIVE' as MCPToolStatus, riskClass: 'READ_ONLY' as RiskClass, currentVersion: 'v1.2.0', validation: 'VALID' as ToolVersionValidationStatus, verification: 'VERIFIED' as ToolVerificationStatus, capability: 'weather.lookup', usedBy: 2, updatedAt: '2026-09-01' },
+  { id: 'tool-002', displayName: 'Search Documents', sourceName: 'search_documents', serverId: 'srv-002', serverName: 'Internal Document MCP', status: 'ACTIVE' as MCPToolStatus, riskClass: 'READ_ONLY' as RiskClass, currentVersion: 'v2.1.0', validation: 'VALID' as ToolVersionValidationStatus, verification: 'VERIFIED' as ToolVerificationStatus, capability: 'document.search', usedBy: 4, updatedAt: '2026-09-01' },
+  { id: 'tool-003', displayName: 'Generate Report', sourceName: 'generate_report', serverId: 'srv-005', serverName: 'Report MCP', status: 'INACTIVE' as MCPToolStatus, riskClass: 'IDEMPOTENT_WRITE' as RiskClass, currentVersion: 'v1.0.3', validation: 'WARNING' as ToolVersionValidationStatus, verification: 'EXPIRED' as ToolVerificationStatus, capability: 'report.generate', usedBy: 1, updatedAt: '2026-08-28' },
+  { id: 'tool-004', displayName: 'Send Email', sourceName: 'send_email', serverId: 'srv-003', serverName: 'Email MCP', status: 'ACTIVE' as MCPToolStatus, riskClass: 'NON_IDEMPOTENT_WRITE' as RiskClass, currentVersion: 'v3.0.1', validation: 'VALID' as ToolVersionValidationStatus, verification: 'VERIFIED' as ToolVerificationStatus, capability: 'email.send', usedBy: 3, updatedAt: '2026-08-30' },
+  { id: 'tool-005', displayName: 'Create Calendar Event', sourceName: 'create_calendar_event', serverId: 'srv-004', serverName: 'Calendar MCP', status: 'ACTIVE' as MCPToolStatus, riskClass: 'IDEMPOTENT_WRITE' as RiskClass, currentVersion: 'v1.4.0', validation: 'VALID' as ToolVersionValidationStatus, verification: 'VERIFIED' as ToolVerificationStatus, capability: 'calendar.write', usedBy: 2, updatedAt: '2026-09-01' },
+  { id: 'tool-006', displayName: 'Lookup Employee', sourceName: 'lookup_employee', serverId: 'srv-006', serverName: 'Legacy ERP MCP', status: 'ACTIVE' as MCPToolStatus, riskClass: 'READ_ONLY' as RiskClass, currentVersion: 'v0.9.2', validation: 'WARNING' as ToolVersionValidationStatus, verification: 'PENDING' as ToolVerificationStatus, capability: 'hr.lookup', usedBy: 1, updatedAt: '2026-08-20' },
+  { id: 'tool-007', displayName: 'Delete Record', sourceName: 'delete_record', serverId: 'srv-006', serverName: 'Legacy ERP MCP', status: 'BLOCKED' as MCPToolStatus, riskClass: 'DESTRUCTIVE' as RiskClass, currentVersion: 'v1.0.0', validation: 'VALID' as ToolVersionValidationStatus, verification: 'FAILED' as ToolVerificationStatus, capability: 'data.delete', usedBy: 0, updatedAt: '2026-08-15' },
+  { id: 'tool-008', displayName: 'Get Weather Forecast', sourceName: 'get_weather_forecast', serverId: 'srv-001', serverName: 'Weather MCP', status: 'ACTIVE' as MCPToolStatus, riskClass: 'READ_ONLY' as RiskClass, currentVersion: 'v1.1.0', validation: 'VALID' as ToolVersionValidationStatus, verification: 'VERIFIED' as ToolVerificationStatus, capability: 'weather.forecast', usedBy: 1, updatedAt: '2026-09-01' },
+  { id: 'tool-009', displayName: 'Archive Document', sourceName: 'archive_document', serverId: 'srv-002', serverName: 'Internal Document MCP', status: 'MISSING' as MCPToolStatus, riskClass: 'IDEMPOTENT_WRITE' as RiskClass, currentVersion: 'v0.2.0', validation: 'INVALID' as ToolVersionValidationStatus, verification: 'FAILED' as ToolVerificationStatus, capability: 'document.archive', usedBy: 0, updatedAt: '2026-08-10' },
+  { id: 'tool-010', displayName: 'List Channels', sourceName: 'list_channels', serverId: 'srv-003', serverName: 'Email MCP', status: 'DISCOVERED' as MCPToolStatus, riskClass: 'READ_ONLY' as RiskClass, currentVersion: 'v0.1.0', validation: 'WARNING' as ToolVersionValidationStatus, verification: 'PENDING' as ToolVerificationStatus, capability: 'email.list', usedBy: 0, updatedAt: '2026-09-02' },
 ];
 
 export const mockAgents = [
-  { id: 'agt-001', name: 'General Work Assistant', status: 'ACTIVE', publishedVersion: 'v2', allowedTools: 6, modelProfile: 'Claude 3.5 Sonnet', owner: 'admin', updatedAt: '2026-09-01', versions: [
-    { version: 'v3', status: 'DRAFT', createdAt: '2026-09-02', author: 'admin' },
-    { version: 'v2', status: 'PUBLISHED', createdAt: '2026-08-31', author: 'admin' },
-    { version: 'v1', status: 'DEPRECATED', createdAt: '2026-08-20', author: 'admin' },
+  { id: 'agt-001', name: 'General Work Assistant', status: 'ACTIVE' as AgentStatus, publishedVersion: 'v3', allowedTools: 6, modelProfile: 'Claude 3.5 Sonnet', owner: 'admin', updatedAt: '2026-09-01', versions: [
+    { version: 'v4', status: 'DRAFT' as AgentVersionStatus, createdAt: '2026-09-02', author: 'admin' },
+    { version: 'v3', status: 'PUBLISHED' as AgentVersionStatus, createdAt: '2026-08-31', author: 'admin' },
+    { version: 'v2', status: 'DEPRECATED' as AgentVersionStatus, createdAt: '2026-08-20', author: 'admin' },
   ]},
-  { id: 'agt-002', name: 'Report Assistant', status: 'ACTIVE', publishedVersion: 'v1', allowedTools: 4, modelProfile: 'Claude 3.5 Sonnet', owner: 'admin', updatedAt: '2026-08-31', versions: [
-    { version: 'v2', status: 'DRAFT', createdAt: '2026-09-01', author: 'jkim' },
-    { version: 'v1', status: 'PUBLISHED', createdAt: '2026-08-25', author: 'admin' },
+  { id: 'agt-002', name: 'Report Assistant', status: 'ACTIVE' as AgentStatus, publishedVersion: 'v2', allowedTools: 4, modelProfile: 'Claude 3.5 Sonnet', owner: 'admin', updatedAt: '2026-08-31', versions: [
+    { version: 'v3', status: 'DRAFT' as AgentVersionStatus, createdAt: '2026-09-01', author: 'jkim' },
+    { version: 'v2', status: 'PUBLISHED' as AgentVersionStatus, createdAt: '2026-08-25', author: 'admin' },
   ]},
-  { id: 'agt-003', name: 'Research Assistant', status: 'ACTIVE', publishedVersion: 'v1', allowedTools: 3, modelProfile: 'Claude 3 Haiku', owner: 'jkim', updatedAt: '2026-08-28' , versions: [
-    { version: 'v1', status: 'PUBLISHED', createdAt: '2026-08-20', author: 'jkim' },
+  { id: 'agt-003', name: 'Research Assistant', status: 'ACTIVE' as AgentStatus, publishedVersion: 'v1', allowedTools: 3, modelProfile: 'Claude 3 Haiku', owner: 'jkim', updatedAt: '2026-08-28', versions: [
+    { version: 'v1', status: 'PUBLISHED' as AgentVersionStatus, createdAt: '2026-08-20', author: 'jkim' },
   ]},
-  { id: 'agt-004', name: 'Operations Assistant', status: 'INACTIVE', publishedVersion: null, allowedTools: 8, modelProfile: 'Claude 3.5 Sonnet', owner: 'admin', updatedAt: '2026-08-10', versions: [
-    { version: 'v1', status: 'DRAFT', createdAt: '2026-08-10', author: 'admin' },
+  { id: 'agt-004', name: 'Operations Assistant', status: 'INACTIVE' as AgentStatus, publishedVersion: null, allowedTools: 2, modelProfile: 'Claude 3.5 Sonnet', owner: 'admin', updatedAt: '2026-08-10', versions: [
+    { version: 'v1', status: 'DRAFT' as AgentVersionStatus, createdAt: '2026-08-10', author: 'admin' },
   ]},
 ];
 
+/** Logical Workflow status — never PUBLISHED (that is WorkflowVersion only). */
 export const mockWorkflows = [
-  { id: 'wf-001', name: 'Weekly Report Workflow', status: 'PUBLISHED', publishedVersion: 'v2', steps: 5, owner: 'admin', lastPublished: '2026-08-31', updatedAt: '2026-09-01' },
-  { id: 'wf-002', name: 'Document Review Workflow', status: 'PUBLISHED', publishedVersion: 'v1', steps: 4, owner: 'jkim', lastPublished: '2026-08-28', updatedAt: '2026-08-29' },
-  { id: 'wf-003', name: 'Approval & Send Workflow', status: 'DRAFT', publishedVersion: null, steps: 6, owner: 'admin', lastPublished: null, updatedAt: '2026-09-02' },
+  { id: 'wf-001', name: 'Weekly Report Workflow', status: 'ACTIVE' as WorkflowStatus, publishedVersion: 'v5', steps: 5, owner: 'admin', lastPublished: '2026-08-31', updatedAt: '2026-09-01' },
+  { id: 'wf-002', name: 'Document Review Workflow', status: 'ACTIVE' as WorkflowStatus, publishedVersion: 'v3', steps: 4, owner: 'jkim', lastPublished: '2026-08-28', updatedAt: '2026-08-29' },
+  { id: 'wf-003', name: 'Approval & Send Workflow', status: 'DRAFT' as WorkflowStatus, publishedVersion: null, steps: 6, owner: 'admin', lastPublished: null, updatedAt: '2026-09-02' },
 ];
 
 export const mockExecutions = [
-  { id: 'EXE-20260902-00125', name: '주간 보고서 생성 및 발송', source: 'Agent', user: 'admin', agent: 'Report Assistant', workflow: null, status: 'RUNNING', stepCount: 3, totalSteps: 5, duration: '1m 23s', startedAt: '2026-09-02 14:30', updatedAt: '2026-09-02 14:31' },
-  { id: 'EXE-20260902-00124', name: '문서 검색: Q3 시장분석', source: 'Agent', user: 'jkim', agent: 'Research Assistant', workflow: null, status: 'SUCCEEDED', stepCount: 2, totalSteps: 2, duration: '12s', startedAt: '2026-09-02 14:10', updatedAt: '2026-09-02 14:10' },
-  { id: 'EXE-20260902-00123', name: '고객 이메일 발송', source: 'Agent', user: 'admin', agent: 'General Work Assistant', workflow: null, status: 'WAITING_APPROVAL', stepCount: 2, totalSteps: 3, duration: '45s', startedAt: '2026-09-02 13:55', updatedAt: '2026-09-02 13:56' },
-  { id: 'EXE-20260902-00122', name: 'Weekly Report Workflow', source: 'Schedule', user: 'system', agent: null, workflow: 'Weekly Report Workflow', status: 'PARTIALLY_SUCCEEDED', stepCount: 4, totalSteps: 5, duration: '3m 12s', startedAt: '2026-09-02 09:00', updatedAt: '2026-09-02 09:03' },
-  { id: 'EXE-20260901-00121', name: '인사팀 직원 조회', source: 'Agent', user: 'mpark', agent: 'General Work Assistant', workflow: null, status: 'FAILED', stepCount: 1, totalSteps: 2, duration: '5s', startedAt: '2026-09-01 17:30', updatedAt: '2026-09-01 17:30' },
-  { id: 'EXE-20260901-00120', name: '문서 리뷰 워크플로우', source: 'Workflow', user: 'jkim', agent: null, workflow: 'Document Review Workflow', status: 'SUCCEEDED', stepCount: 4, totalSteps: 4, duration: '8m 44s', startedAt: '2026-09-01 14:00', updatedAt: '2026-09-01 14:08' },
-  { id: 'EXE-20260901-00119', name: '캘린더 이벤트 생성', source: 'Agent', user: 'admin', agent: 'General Work Assistant', workflow: null, status: 'CANCELLED', stepCount: 1, totalSteps: 2, duration: '–', startedAt: '2026-09-01 11:20', updatedAt: '2026-09-01 11:21' },
+  { id: 'EXE-20260902-00125', name: '주간 보고서 생성 및 발송', sourceType: 'AGENT_REQUEST' as ExecutionSourceType, user: 'admin', agent: 'Report Assistant', workflow: null, status: 'RUNNING' as ExecutionStatus, stepCount: 3, totalSteps: 5, duration: '1m 23s', startedAt: '2026-09-02 14:30', updatedAt: '2026-09-02 14:31', canRetry: false },
+  { id: 'EXE-20260902-00124', name: '문서 검색: Q3 시장분석', sourceType: 'AGENT_REQUEST' as ExecutionSourceType, user: 'jkim', agent: 'Research Assistant', workflow: null, status: 'SUCCEEDED' as ExecutionStatus, stepCount: 2, totalSteps: 2, duration: '12s', startedAt: '2026-09-02 14:10', updatedAt: '2026-09-02 14:10', canRetry: false },
+  { id: 'EXE-20260902-00123', name: '고객 이메일 발송', sourceType: 'AGENT_REQUEST' as ExecutionSourceType, user: 'admin', agent: 'General Work Assistant', workflow: null, status: 'WAITING_APPROVAL' as ExecutionStatus, stepCount: 2, totalSteps: 3, duration: '45s', startedAt: '2026-09-02 13:55', updatedAt: '2026-09-02 13:56', canRetry: false, approvalId: 'apr-001' },
+  { id: 'EXE-20260902-00122', name: 'Weekly Report Workflow', sourceType: 'SCHEDULE_OCCURRENCE' as ExecutionSourceType, user: 'system', agent: null, workflow: 'Weekly Report Workflow', status: 'PARTIALLY_SUCCEEDED' as ExecutionStatus, stepCount: 4, totalSteps: 5, duration: '3m 12s', startedAt: '2026-09-02 09:00', updatedAt: '2026-09-02 09:03', canRetry: true },
+  { id: 'EXE-20260901-00121', name: '인사팀 직원 조회', sourceType: 'AGENT_REQUEST' as ExecutionSourceType, user: 'mpark', agent: 'General Work Assistant', workflow: null, status: 'FAILED' as ExecutionStatus, stepCount: 1, totalSteps: 2, duration: '5s', startedAt: '2026-09-01 17:30', updatedAt: '2026-09-01 17:30', canRetry: true },
+  { id: 'EXE-20260901-00120', name: '문서 리뷰 워크플로우', sourceType: 'WORKFLOW_VERSION' as ExecutionSourceType, user: 'jkim', agent: null, workflow: 'Document Review Workflow', status: 'SUCCEEDED' as ExecutionStatus, stepCount: 4, totalSteps: 4, duration: '8m 44s', startedAt: '2026-09-01 14:00', updatedAt: '2026-09-01 14:08', canRetry: false },
+  { id: 'EXE-20260901-00119', name: '캘린더 이벤트 생성', sourceType: 'AGENT_REQUEST' as ExecutionSourceType, user: 'admin', agent: 'General Work Assistant', workflow: null, status: 'CANCELLED' as ExecutionStatus, stepCount: 1, totalSteps: 2, duration: '–', startedAt: '2026-09-01 11:20', updatedAt: '2026-09-01 11:21', canRetry: false },
+  { id: 'EXE-20260902-00126', name: '런타임 입력 대기 (MRTR)', sourceType: 'AGENT_REQUEST' as ExecutionSourceType, user: 'admin', agent: 'General Work Assistant', workflow: null, status: 'WAITING_INPUT' as ExecutionStatus, stepCount: 1, totalSteps: 3, duration: '20s', startedAt: '2026-09-02 15:00', updatedAt: '2026-09-02 15:00', canRetry: false },
 ];
 
 export const mockApprovals = [
-  { id: 'apr-001', purpose: '고객사 이메일 발송 승인', requester: 'admin', agent: 'General Work Assistant', tool: 'Send Email', riskClass: 'NON_IDEMPOTENT_WRITE', requestedAt: '2026-09-02 13:55', expiresAt: '2026-09-02 14:55', status: 'PENDING', executionId: 'EXE-20260902-00123' },
-  { id: 'apr-002', purpose: '주간 보고서 파일 삭제', requester: 'system', agent: 'Report Assistant', tool: 'Delete Record', riskClass: 'DESTRUCTIVE', requestedAt: '2026-09-01 09:00', expiresAt: '2026-09-01 10:00', status: 'APPROVED', executionId: 'EXE-20260901-00118' },
-  { id: 'apr-003', purpose: '임직원 정보 일괄 조회', requester: 'mpark', agent: 'General Work Assistant', tool: 'Lookup Employee', riskClass: 'READ_ONLY', requestedAt: '2026-08-31 16:30', expiresAt: '2026-08-31 17:30', status: 'REJECTED', executionId: 'EXE-20260831-00117' },
+  {
+    id: 'apr-001',
+    purpose: '고객사 이메일 발송 승인',
+    originalRequest: '고객사(Acme)에 Q3 주간 보고서를 이메일로 발송해 주세요.',
+    requester: 'admin',
+    executor: 'admin',
+    agent: 'General Work Assistant',
+    tool: 'Send Email',
+    toolVersion: 'v3.0.1',
+    serverName: 'Email MCP',
+    riskClass: 'NON_IDEMPOTENT_WRITE' as RiskClass,
+    maskedInput: { to: 'c***@acme.com', subject: 'Q3 Weekly Report', body: '[masked]' },
+    externalSideEffect: true,
+    toolPolicy: 'Require approval for NON_IDEMPOTENT_WRITE',
+    approvalPolicyId: 'pol-001',
+    approvalPolicyName: 'Standard Email Approval',
+    rejectCommentRequired: true,
+    completedPriorSteps: ['주간 데이터 조회', '보고서 파일 생성'],
+    requestedAt: '2026-09-02 13:55',
+    expiresAt: '2026-09-02 14:55',
+    status: 'PENDING' as ApprovalStatus,
+    executionId: 'EXE-20260902-00123',
+  },
+  {
+    id: 'apr-002',
+    purpose: '주간 보고서 파일 삭제',
+    originalRequest: '임시 보고서 파일을 삭제합니다.',
+    requester: 'system',
+    executor: 'system',
+    agent: 'Report Assistant',
+    tool: 'Delete Record',
+    toolVersion: 'v1.0.0',
+    serverName: 'Legacy ERP MCP',
+    riskClass: 'DESTRUCTIVE' as RiskClass,
+    maskedInput: { record_id: 'rpt-****' },
+    externalSideEffect: true,
+    toolPolicy: 'Destructive actions require dual approval',
+    approvalPolicyId: 'pol-002',
+    approvalPolicyName: 'Destructive Action Approval',
+    rejectCommentRequired: true,
+    completedPriorSteps: ['파일 조회'],
+    requestedAt: '2026-09-01 09:00',
+    expiresAt: '2026-09-01 10:00',
+    status: 'APPROVED' as ApprovalStatus,
+    executionId: 'EXE-20260901-00118',
+  },
+  {
+    id: 'apr-003',
+    purpose: '임직원 정보 일괄 조회',
+    originalRequest: '인사팀 직원 목록을 조회합니다.',
+    requester: 'mpark',
+    executor: 'mpark',
+    agent: 'General Work Assistant',
+    tool: 'Lookup Employee',
+    toolVersion: 'v0.9.2',
+    serverName: 'Legacy ERP MCP',
+    riskClass: 'READ_ONLY' as RiskClass,
+    maskedInput: { dept: 'HR' },
+    externalSideEffect: false,
+    toolPolicy: 'Read-only lookup',
+    approvalPolicyId: 'pol-003',
+    approvalPolicyName: 'Read-Only Self Approval',
+    rejectCommentRequired: false,
+    completedPriorSteps: [],
+    requestedAt: '2026-08-31 16:30',
+    expiresAt: '2026-08-31 17:30',
+    status: 'REJECTED' as ApprovalStatus,
+    executionId: 'EXE-20260831-00117',
+  },
 ];
 
 export const mockSchedules = [
-  { id: 'sch-001', name: '주간 보고서 자동 실행', targetType: 'Workflow', target: 'Weekly Report Workflow', version: 'v2', schedule: 'Mondays 09:00', timezone: 'Asia/Seoul', nextRun: '2026-09-09 09:00', lastRun: '2026-09-02 09:00', lastResult: 'PARTIALLY_SUCCEEDED', status: 'ACTIVE' },
-  { id: 'sch-002', name: '일일 날씨 알림', targetType: 'Agent', target: 'General Work Assistant', version: 'v2', schedule: 'Daily 08:00', timezone: 'Asia/Seoul', nextRun: '2026-09-03 08:00', lastRun: '2026-09-02 08:00', lastResult: 'SUCCEEDED', status: 'ACTIVE' },
-  { id: 'sch-003', name: '월말 정산 보고서', targetType: 'Workflow', target: 'Document Review Workflow', version: 'v1', schedule: 'Last day of month 23:00', timezone: 'Asia/Seoul', nextRun: '2026-09-30 23:00', lastRun: '2026-08-31 23:00', lastResult: 'SUCCEEDED', status: 'INACTIVE' },
+  {
+    id: 'sch-001',
+    name: '주간 보고서 자동 실행',
+    targetType: 'WORKFLOW_VERSION' as ScheduleTargetType,
+    targetId: 'wf-001',
+    target: 'Weekly Report Workflow',
+    version: 'v5',
+    scheduleKind: 'RECURRING' as const,
+    schedule: '0 9 * * 1',
+    timezone: 'Asia/Seoul',
+    overlapPolicy: 'SKIP' as ScheduleOverlapPolicy,
+    misfirePolicy: 'RUN_ONCE' as ScheduleMisfirePolicy,
+    nextRun: '2026-09-09 09:00',
+    nextRunsPreview: ['2026-09-09 09:00 KST', '2026-09-16 09:00 KST', '2026-09-23 09:00 KST'],
+    lastRun: '2026-09-02 09:00',
+    lastResult: 'PARTIALLY_SUCCEEDED' as ExecutionStatus,
+    status: 'ACTIVE' as ScheduleStatus,
+  },
+  {
+    id: 'sch-002',
+    name: '일일 날씨 알림',
+    targetType: 'AGENT_VERSION' as ScheduleTargetType,
+    targetId: 'agt-001',
+    target: 'General Work Assistant',
+    version: 'v3',
+    scheduleKind: 'RECURRING' as const,
+    schedule: '0 8 * * *',
+    timezone: 'Asia/Seoul',
+    overlapPolicy: 'QUEUE' as ScheduleOverlapPolicy,
+    misfirePolicy: 'SKIP' as ScheduleMisfirePolicy,
+    nextRun: '2026-09-03 08:00',
+    nextRunsPreview: ['2026-09-03 08:00 KST', '2026-09-04 08:00 KST', '2026-09-05 08:00 KST'],
+    lastRun: '2026-09-02 08:00',
+    lastResult: 'SUCCEEDED' as ExecutionStatus,
+    status: 'ACTIVE' as ScheduleStatus,
+  },
+  {
+    id: 'sch-003',
+    name: '월말 정산 보고서',
+    targetType: 'WORKFLOW_VERSION' as ScheduleTargetType,
+    targetId: 'wf-002',
+    target: 'Document Review Workflow',
+    version: 'v3',
+    scheduleKind: 'RECURRING' as const,
+    schedule: '0 23 L * *',
+    timezone: 'Asia/Seoul',
+    overlapPolicy: 'REPLACE' as ScheduleOverlapPolicy,
+    misfirePolicy: 'CATCH_UP_LIMITED' as ScheduleMisfirePolicy,
+    nextRun: '2026-09-30 23:00',
+    nextRunsPreview: ['2026-09-30 23:00 KST', '2026-10-31 23:00 KST'],
+    lastRun: '2026-08-31 23:00',
+    lastResult: 'SUCCEEDED' as ExecutionStatus,
+    status: 'PAUSED' as ScheduleStatus,
+  },
 ];
 
 export const mockUsers = [
@@ -83,7 +232,7 @@ export const mockAuditLogs = [
   { id: 'aud-001', time: '2026-09-02 14:30:01', actor: 'admin', action: 'execution.start', resource: 'Execution EXE-20260902-00125', result: 'SUCCESS', requestId: 'req-abc123' },
   { id: 'aud-002', time: '2026-09-02 14:10:05', actor: 'jkim', action: 'execution.start', resource: 'Execution EXE-20260902-00124', result: 'SUCCESS', requestId: 'req-def456' },
   { id: 'aud-003', time: '2026-09-02 13:55:12', actor: 'admin', action: 'approval.request', resource: 'Approval apr-001', result: 'SUCCESS', requestId: 'req-ghi789' },
-  { id: 'aud-004', time: '2026-09-02 11:00:00', actor: 'admin', action: 'agent.publish', resource: 'Agent agt-001 v2', result: 'SUCCESS', requestId: 'req-jkl012' },
+  { id: 'aud-004', time: '2026-09-02 11:00:00', actor: 'admin', action: 'agent.publish', resource: 'Agent agt-001 v3', result: 'SUCCESS', requestId: 'req-jkl012' },
   { id: 'aud-005', time: '2026-09-01 17:30:55', actor: 'mpark', action: 'execution.start', resource: 'Execution EXE-20260901-00121', result: 'FAILED', requestId: 'req-mno345' },
   { id: 'aud-006', time: '2026-09-01 16:00:00', actor: 'admin', action: 'mcp_server.register', resource: 'Server srv-002', result: 'SUCCESS', requestId: 'req-pqr678' },
 ];
@@ -125,8 +274,8 @@ export const mockAgentFull: Record<string, {
   allowedToolIds: string[];
   instructions: string;
   versions: {
-    version: string; status: string; changeSummary: string;
-    validation: string | null; createdBy: string;
+    version: string; status: AgentVersionStatus; changeSummary: string;
+    validation: ToolVersionValidationStatus | null; createdBy: string;
     createdAt: string; publishedAt: string | null;
     toolCount?: number; maxPlanSteps?: number; modelProfile?: string;
   }[];
@@ -195,15 +344,15 @@ export const mockWorkflowFull: Record<string, {
   createdAt: string;
   lastPublished: string | null;
   versions: {
-    version: string; status: string; steps: number; changeSummary: string;
-    validation: string | null; createdBy: string;
+    version: string; status: WorkflowVersionStatus; steps: number; changeSummary: string;
+    validation: ToolVersionValidationStatus | null; createdBy: string;
     createdAt: string; publishedAt: string | null;
   }[];
   tools: {
     toolId: string; toolName: string; serverName: string;
-    version: string; riskClass: string; verification: string; step: string;
+    version: string; riskClass: RiskClass; verification: ToolVerificationStatus; step: string;
   }[];
-  schedules: { id: string; name: string; schedule: string; timezone: string; nextRun: string; status: string }[];
+  schedules: { id: string; name: string; schedule: string; timezone: string; nextRun: string; status: ScheduleStatus }[];
 }> = {
   'wf-001': {
     description: '주간 데이터를 조회하고 보고서를 생성하여 승인 후 전달합니다.',

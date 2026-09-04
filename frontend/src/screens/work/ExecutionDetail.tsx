@@ -5,6 +5,7 @@ import StatusBadge, { RiskBadge } from '../../components/ui/StatusBadge';
 import { TabBar } from '../../components/ui/Tabs';
 import Button from '../../components/ui/Button';
 import { mockExecutions } from '../../data/mock';
+import { labelExecutionSource } from '../../domain';
 
 const STEP_DATA = [
   { id: 's1', name: '주간 데이터 조회', type: 'Tool', status: 'SUCCEEDED', tool: 'Search Documents', version: 'v2.1.0', attempts: 1, started: '14:30:01', ended: '14:30:08', duration: '7s', inputs: { query: '주간 보고 데이터 2026-09-02', limit: 10 }, outputs: { count: 8, documents: ['doc-001', 'doc-002'] }, error: null },
@@ -35,7 +36,7 @@ export default function ExecutionDetail() {
               <StatusBadge status={execution.status} />
             </div>
             <div className="flex flex-wrap gap-x-6 gap-y-1 text-xs text-slate-500">
-              <span>Source: <span className="text-slate-700">{execution.source}</span></span>
+              <span>Source: <span className="text-slate-700">{labelExecutionSource(execution.sourceType)}</span></span>
               <span>Agent: <span className="text-slate-700">{execution.agent ?? execution.workflow ?? '–'}</span></span>
               <span>시작자: <span className="text-slate-700">{execution.user}</span></span>
               <span>시작: <span className="text-slate-700">{execution.startedAt}</span></span>

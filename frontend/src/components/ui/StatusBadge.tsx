@@ -44,6 +44,13 @@ const STATUS_MAP: Record<string, { category: StatusCategory; label?: string }> =
   TIMED_OUT: { category: 'error', label: 'Timed Out' },
   BLOCKED: { category: 'error' },
   INVALID: { category: 'error' },
+  // Schedule / Occurrence
+  PAUSED: { category: 'waiting' },
+  COMPLETED: { category: 'success' },
+  ERROR: { category: 'error' },
+  PLANNED: { category: 'neutral' },
+  ENQUEUED: { category: 'processing' },
+  SKIPPED: { category: 'disabled' },
   // Disabled
   INACTIVE: { category: 'disabled' },
   CANCELLED: { category: 'disabled' },

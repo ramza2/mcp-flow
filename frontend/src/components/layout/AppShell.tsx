@@ -7,12 +7,16 @@ import {
   ChevronDown, ChevronRight, Menu, X, Bell, User,
   LogOut, ChevronLeft, Zap, Activity
 } from 'lucide-react';
+import PermissionGate from '../PermissionGate';
+import type { Permission } from '../../domain';
 
 interface NavItem {
   label: string;
   path?: string;
   icon?: React.ReactNode;
   children?: NavItem[];
+  /** Frontend PermissionGate is UX only. Backend authorization remains authoritative. */
+  permission?: Permission;
 }
 
 const navConfig: NavItem[] = [
@@ -22,40 +26,42 @@ const navConfig: NavItem[] = [
     icon: <Briefcase size={16} />,
     children: [
       { label: 'Agent Run', path: '/run', icon: <Play size={14} /> },
-      { label: 'Executions', path: '/executions', icon: <Activity size={14} /> },
-      { label: 'Schedules', path: '/schedules', icon: <Calendar size={14} /> },
-      { label: 'Approvals', path: '/approvals', icon: <CheckSquare size={14} /> },
+      { label: 'Executions', path: '/executions', icon: <Activity size={14} />, permission: 'execution.view' },
+      { label: 'Schedules', path: '/schedules', icon: <Calendar size={14} />, permission: 'schedule.view' },
+      { label: 'Approvals', path: '/approvals', icon: <CheckSquare size={14} />, permission: 'approval.view' },
     ],
   },
   {
     label: 'Build',
     icon: <Zap size={16} />,
     children: [
-      { label: 'Agents', path: '/agents', icon: <Bot size={14} /> },
-      { label: 'Workflows', path: '/workflows', icon: <GitBranch size={14} /> },
+      { label: 'Agents', path: '/agents', icon: <Bot size={14} />, permission: 'agent.view' },
+      { label: 'Workflows', path: '/workflows', icon: <GitBranch size={14} />, permission: 'workflow.view' },
     ],
   },
   {
     label: 'MCP',
     icon: <Server size={16} />,
+    permission: 'mcp.view',
     children: [
-      { label: 'MCP Servers', path: '/mcp/servers', icon: <Server size={14} /> },
-      { label: 'MCP Tools', path: '/mcp/tools', icon: <Wrench size={14} /> },
-      { label: 'External Discovery', path: '/mcp/discovery', icon: <Globe size={14} /> },
-      { label: 'Tool Factory', path: '/tool-factory', icon: <Factory size={14} /> },
+      { label: 'MCP Servers', path: '/mcp/servers', icon: <Server size={14} />, permission: 'mcp.view' },
+      { label: 'MCP Tools', path: '/mcp/tools', icon: <Wrench size={14} />, permission: 'mcp.view' },
+      { label: 'External Discovery', path: '/mcp/discovery', icon: <Globe size={14} />, permission: 'mcp.view' },
+      { label: 'Tool Factory', path: '/tool-factory', icon: <Factory size={14} />, permission: 'mcp.view' },
     ],
   },
   {
     label: 'Administration',
     icon: <Shield size={16} />,
+    permission: 'admin.view',
     children: [
-      { label: 'Users & Roles', path: '/admin/users', icon: <Users size={14} /> },
-      { label: 'Roles & Permissions', path: '/admin/roles', icon: <Shield size={14} /> },
-      { label: 'Approval Policies', path: '/admin/approval-policies', icon: <CheckSquare size={14} /> },
-      { label: 'Model Profiles', path: '/admin/model-profiles', icon: <Bot size={14} /> },
-      { label: 'Audit Logs', path: '/admin/audit-logs', icon: <ScrollText size={14} /> },
-      { label: 'Jobs', path: '/admin/jobs', icon: <Clock size={14} /> },
-      { label: 'System Settings', path: '/admin/settings', icon: <Settings size={14} /> },
+      { label: 'Users & Roles', path: '/admin/users', icon: <Users size={14} />, permission: 'admin.view' },
+      { label: 'Roles & Permissions', path: '/admin/roles', icon: <Shield size={14} />, permission: 'admin.view' },
+      { label: 'Approval Policies', path: '/admin/approval-policies', icon: <CheckSquare size={14} />, permission: 'admin.view' },
+      { label: 'Model Profiles', path: '/admin/model-profiles', icon: <Bot size={14} />, permission: 'admin.view' },
+      { label: 'Audit Logs', path: '/admin/audit-logs', icon: <ScrollText size={14} />, permission: 'admin.view' },
+      { label: 'Jobs', path: '/admin/jobs', icon: <Clock size={14} />, permission: 'admin.view' },
+      { label: 'System Settings', path: '/admin/settings', icon: <Settings size={14} />, permission: 'admin.view' },
     ],
   },
 ];
@@ -67,11 +73,17 @@ function NavSection({ item, collapsed, level = 0 }: { item: NavItem; collapsed: 
     return item.children.some(c => c.path && location.pathname.startsWith(c.path));
   });
 
+  const wrapPermission = (node: React.ReactNode) => {
+    if (!item.permission) return node;
+    // Frontend PermissionGate is UX only. Backend authorization remains authoritative.
+    return <PermissionGate permission={item.permission}>{node}</PermissionGate>;
+  };
+
   if (item.path) {
     const isActive = item.path === '/'
       ? location.pathname === '/'
       : location.pathname.startsWith(item.path);
-    return (
+    return wrapPermission(
       <NavLink
         to={item.path}
         title={collapsed ? item.label : undefined}
@@ -90,7 +102,7 @@ function NavSection({ item, collapsed, level = 0 }: { item: NavItem; collapsed: 
 
   const hasActiveChild = item.children?.some(c => c.path && location.pathname.startsWith(c.path));
 
-  return (
+  return wrapPermission(
     <div>
       <button
         onClick={() => setOpen(v => !v)}
