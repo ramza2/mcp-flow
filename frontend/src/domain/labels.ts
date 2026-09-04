@@ -1,7 +1,10 @@
 import type {
   ExecutionSourceType,
   MCPAuthType,
+  MCPCheckStatus,
   MCPDiscoveryMode,
+  MCPProtocolEra,
+  MCPTransportType,
   ScheduleTargetType,
 } from './types';
 
@@ -36,6 +39,23 @@ export const MCP_AUTH_LABELS: Record<MCPAuthType, string> = {
   STDIO_ENV: 'STDIO Env',
 };
 
+export const MCP_TRANSPORT_LABELS: Record<MCPTransportType, string> = {
+  STREAMABLE_HTTP: 'Streamable HTTP',
+  STDIO: 'STDIO',
+  LEGACY_HTTP_SSE: 'Legacy HTTP/SSE',
+};
+
+export const MCP_PROTOCOL_ERA_LABELS: Record<MCPProtocolEra, string> = {
+  CURRENT: 'Current MCP',
+  LEGACY: 'Legacy MCP',
+};
+
+export const MCP_CHECK_STATUS_LABELS: Record<MCPCheckStatus, string> = {
+  SUCCEEDED: 'Succeeded',
+  FAILED: 'Failed',
+  TIMED_OUT: 'Timed Out',
+};
+
 export function labelExecutionSource(value: string): string {
   return EXECUTION_SOURCE_LABELS[value as ExecutionSourceType] ?? value;
 }
@@ -50,4 +70,31 @@ export function labelDiscoveryMode(value: string): string {
 
 export function labelAuthType(value: string): string {
   return MCP_AUTH_LABELS[value as MCPAuthType] ?? value;
+}
+
+export function labelTransport(value: string): string {
+  return MCP_TRANSPORT_LABELS[value as MCPTransportType] ?? value;
+}
+
+export function labelProtocolEra(value: string): string {
+  return MCP_PROTOCOL_ERA_LABELS[value as MCPProtocolEra] ?? value;
+}
+
+export function labelCheckStatus(value: string): string {
+  return MCP_CHECK_STATUS_LABELS[value as MCPCheckStatus] ?? value;
+}
+
+/** Format Backend ISO-8601 timestamps for presentation only. */
+export function formatTimestamp(value: string | null | undefined): string {
+  if (!value) return '—';
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return value;
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+export function shortenId(value: string | null | undefined, keep = 8): string {
+  if (!value) return '—';
+  if (value.length <= keep + 1) return value;
+  return `${value.slice(0, keep)}…`;
 }

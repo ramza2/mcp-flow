@@ -124,6 +124,22 @@ export const MCP_AUTH_TYPES = [
 ] as const;
 export type MCPAuthType = (typeof MCP_AUTH_TYPES)[number];
 
+/** docs/05 mcp_servers.transport_type */
+export const MCP_TRANSPORT_TYPES = ['STDIO', 'STREAMABLE_HTTP', 'LEGACY_HTTP_SSE'] as const;
+export type MCPTransportType = (typeof MCP_TRANSPORT_TYPES)[number];
+
+/** docs/05 mcp_servers.protocol_era */
+export const MCP_PROTOCOL_ERAS = ['CURRENT', 'LEGACY'] as const;
+export type MCPProtocolEra = (typeof MCP_PROTOCOL_ERAS)[number];
+
+/** docs/05 mcp_server_checks.check_type */
+export const MCP_CHECK_TYPES = ['MANUAL', 'SCHEDULED', 'PRE_ACTIVATION'] as const;
+export type MCPCheckType = (typeof MCP_CHECK_TYPES)[number];
+
+/** docs/05 mcp_server_checks.status */
+export const MCP_CHECK_STATUSES = ['SUCCEEDED', 'FAILED', 'TIMED_OUT'] as const;
+export type MCPCheckStatus = (typeof MCP_CHECK_STATUSES)[number];
+
 /** Authorable Execution Plan v1 Step Types (docs/04). Visual PARALLEL/END are not persisted. */
 export const AUTHORABLE_STEP_TYPES = ['TOOL', 'CONDITION', 'JOIN', 'APPROVAL', 'LOOP'] as const;
 export type AuthorableStepType = (typeof AUTHORABLE_STEP_TYPES)[number];
