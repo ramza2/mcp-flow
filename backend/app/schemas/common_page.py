@@ -26,7 +26,12 @@ class Page(BaseModel):
     has_next: bool
 
 
-def parse_sort(sort: str, *, allowed: set[str], default_field: str = "updated_at") -> tuple[str, SortDirection]:
+def parse_sort(
+    sort: str,
+    *,
+    allowed: set[str],
+    default_field: str = "updated_at",
+) -> tuple[str, SortDirection]:
     raw = (sort or f"-{default_field}").strip()
     direction: SortDirection = "desc"
     field = raw

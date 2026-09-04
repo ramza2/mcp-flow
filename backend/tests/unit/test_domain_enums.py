@@ -17,9 +17,13 @@ from app.domain.enums import (
     JoinPolicy,
     LoopMode,
     MCPAuthType,
+    MCPCheckStatus,
+    MCPCheckType,
     MCPDiscoveryMode,
+    MCPProtocolEra,
     MCPServerStatus,
     MCPToolStatus,
+    MCPTransportType,
     OccurrenceStatus,
     ParameterProvenance,
     PredicateOperator,
@@ -143,6 +147,22 @@ def expect_exact(enum_cls: type[Enum], expected: set[str]) -> None:
         (
             MCPDiscoveryMode,
             {"EXPLICIT_DISCOVERY", "INFERRED_CURRENT", "LEGACY_HANDSHAKE"},
+        ),
+        (
+            MCPTransportType,
+            {"STDIO", "STREAMABLE_HTTP", "LEGACY_HTTP_SSE"},
+        ),
+        (
+            MCPProtocolEra,
+            {"CURRENT", "LEGACY"},
+        ),
+        (
+            MCPCheckType,
+            {"MANUAL", "SCHEDULED", "PRE_ACTIVATION"},
+        ),
+        (
+            MCPCheckStatus,
+            {"SUCCEEDED", "FAILED", "TIMED_OUT"},
         ),
         (
             MCPAuthType,

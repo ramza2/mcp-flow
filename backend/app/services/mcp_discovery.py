@@ -157,7 +157,10 @@ class MCPDiscoveryService:
     async def connection_test(self, server_id: uuid.UUID) -> ConnectionTestResponse:
         server = await self._require_server(server_id)
         config = _server_config(server)
+        prior_discovery_mode = server.discovery_mode
         _reject_unsupported_transport(config)
+        # End DB transaction before any remote HTTP work.
+        await self._session.commit()
 
         if config.auth_type != MCPAuthType.NONE and config.auth_secret_id is None:
             check = await self._discoveries.create_check(
@@ -168,11 +171,11 @@ class MCPDiscoveryService:
                 error_code="MCP_AUTH_SECRET_UNAVAILABLE",
                 error_message="auth_secret_id is required for authenticated MCP servers.",
             )
+            server = await self._require_server(config.id)
             server.last_error_at = datetime.now(UTC)
-            await self._session.flush()
             await self._session.commit()
             await self._session.refresh(check)
-            return _check_to_response(check, discovery_mode=server.discovery_mode)
+            return _check_to_response(check, discovery_mode=prior_discovery_mode)
 
         if not config.endpoint_url:
             check = await self._discoveries.create_check(
@@ -183,11 +186,11 @@ class MCPDiscoveryService:
                 error_code="VALIDATION_ERROR",
                 error_message="endpoint_url is required for HTTP connection tests.",
             )
+            server = await self._require_server(config.id)
             server.last_error_at = datetime.now(UTC)
-            await self._session.flush()
             await self._session.commit()
             await self._session.refresh(check)
-            return _check_to_response(check, discovery_mode=server.discovery_mode)
+            return _check_to_response(check, discovery_mode=prior_discovery_mode)
 
         started = time.perf_counter()
         discovery_mode: str | None = None
@@ -218,10 +221,11 @@ class MCPDiscoveryService:
                 latency_ms=latency_ms,
                 protocol_version=protocol_version,
             )
+            server = await self._require_server(config.id)
+            # Do not auto-activate; only record health metadata.
             server.last_healthy_at = datetime.now(UTC)
             server.negotiated_protocol_version = protocol_version
             server.discovery_mode = str(discovery_mode)
-            await self._session.flush()
             await self._session.commit()
             await self._session.refresh(check)
             return _check_to_response(check, discovery_mode=str(discovery_mode))
@@ -243,11 +247,11 @@ class MCPDiscoveryService:
                 error_message=exc.message,
             )
             # Do not set server.status=ERROR automatically.
+            server = await self._require_server(config.id)
             server.last_error_at = datetime.now(UTC)
-            await self._session.flush()
             await self._session.commit()
             await self._session.refresh(check)
-            return _check_to_response(check, discovery_mode=server.discovery_mode)
+            return _check_to_response(check, discovery_mode=prior_discovery_mode)
 
     async def discover(
         self,
@@ -281,7 +285,9 @@ class MCPDiscoveryService:
             success=False,
             requested_versions=[CURRENT_MCP_PROTOCOL_VERSION],
         )
-        await self._session.flush()
+        discovery_id = discovery.id
+        # Commit stub discovery before remote HTTP — never hold a DB txn over network I/O.
+        await self._session.commit()
 
         capabilities: dict[str, Any] | None = None
         discovery_mode = MCPDiscoveryMode.INFERRED_CURRENT
@@ -306,6 +312,8 @@ class MCPDiscoveryService:
             )
         except MCPClientError as exc:
             finished = datetime.now(UTC)
+            discovery = await self._discoveries.get_discovery(discovery_id)
+            assert discovery is not None
             discovery.success = False
             discovery.error_code = (
                 "MCP_CONNECTION_TIMEOUT"
@@ -321,13 +329,13 @@ class MCPDiscoveryService:
                 "diff": {"added": 0, "changed": 0, "missing": 0, "unchanged": 0},
                 "tool_summaries": [],
             }
+            server = await self._require_server(config.id)
             server.last_error_at = finished
-            await self._session.flush()
             await self._session.commit()
             await self._session.refresh(discovery)
             return _discovery_to_response(discovery)
 
-        # Build descriptor digests outside mutation path.
+        # Normalize / validate / fingerprint outside of apply mutations.
         remote_by_name: dict[str, RemoteToolDescriptor] = {}
         remote_meta: dict[str, dict[str, Any]] = {}
         for desc in remote_tools:
@@ -370,7 +378,7 @@ class MCPDiscoveryService:
             else:
                 changed.append(name)
 
-        for name, tool in existing_by_name.items():
+        for name in existing_by_name:
             if name not in remote_by_name:
                 missing.append(name)
 
@@ -410,6 +418,8 @@ class MCPDiscoveryService:
 
         negotiated = CURRENT_MCP_PROTOCOL_VERSION
         finished = datetime.now(UTC)
+        discovery = await self._discoveries.get_discovery(discovery_id)
+        assert discovery is not None
         discovery.success = True
         discovery.discovery_mode = str(discovery_mode)
         discovery.selected_version = negotiated
@@ -424,11 +434,11 @@ class MCPDiscoveryService:
             "tool_summaries": tool_summaries,
         }
 
+        server = await self._require_server(config.id)
         server.discovery_mode = str(discovery_mode)
         server.capabilities = capabilities
         server.negotiated_protocol_version = negotiated
         server.last_healthy_at = finished
-        await self._session.flush()
         await self._session.commit()
         await self._session.refresh(discovery)
         return _discovery_to_response(discovery)
@@ -453,19 +463,7 @@ class MCPDiscoveryService:
                 remote_name=name,
                 status=MCPToolStatus.DISCOVERED,
             )
-            version_no = await self._tools.next_version_no(tool.id)
-            version = await self._tools.create_version(
-                mcp_tool_id=tool.id,
-                version_no=version_no,
-                content_hash=meta["content_hash"],
-                validation_status=meta["validation_status"],
-                remote_description=desc.description,
-                input_schema=desc.input_schema,
-                output_schema=desc.output_schema,
-                annotations=desc.annotations,
-                raw_descriptor=desc.raw,
-                validation_errors=meta["validation_errors"],
-            )
+            version = await self._ensure_version(tool.id, desc, meta)
             tool.current_version_id = version.id
             await self._session.flush()
 
@@ -473,19 +471,7 @@ class MCPDiscoveryService:
             desc = remote_by_name[name]
             meta = remote_meta[name]
             tool = existing_by_name[name]
-            version_no = await self._tools.next_version_no(tool.id)
-            version = await self._tools.create_version(
-                mcp_tool_id=tool.id,
-                version_no=version_no,
-                content_hash=meta["content_hash"],
-                validation_status=meta["validation_status"],
-                remote_description=desc.description,
-                input_schema=desc.input_schema,
-                output_schema=desc.output_schema,
-                annotations=desc.annotations,
-                raw_descriptor=desc.raw,
-                validation_errors=meta["validation_errors"],
-            )
+            version = await self._ensure_version(tool.id, desc, meta)
             tool.current_version_id = version.id
             if tool.status == MCPToolStatus.MISSING:
                 tool.status = MCPToolStatus.DISCOVERED
@@ -501,6 +487,29 @@ class MCPDiscoveryService:
             tool = existing_by_name[name]
             tool.status = MCPToolStatus.MISSING
             await self._session.flush()
+
+    async def _ensure_version(
+        self,
+        tool_id: uuid.UUID,
+        desc: RemoteToolDescriptor,
+        meta: dict[str, Any],
+    ):
+        existing = await self._tools.get_version_by_hash(tool_id, meta["content_hash"])
+        if existing is not None:
+            return existing
+        version_no = await self._tools.next_version_no(tool_id)
+        return await self._tools.create_version(
+            mcp_tool_id=tool_id,
+            version_no=version_no,
+            content_hash=meta["content_hash"],
+            validation_status=meta["validation_status"],
+            remote_description=desc.description,
+            input_schema=desc.input_schema,
+            output_schema=desc.output_schema,
+            annotations=desc.annotations,
+            raw_descriptor=desc.raw,
+            validation_errors=meta["validation_errors"],
+        )
 
     async def list_discoveries(
         self,
