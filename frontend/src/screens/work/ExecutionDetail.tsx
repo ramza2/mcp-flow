@@ -130,10 +130,10 @@ export default function ExecutionDetail() {
             </div>
           </div>
           <div className="flex gap-2 shrink-0">
-            {canCancel && (
+            {(canCancel || status === 'CANCEL_REQUESTED') && (
               <PermissionGate permission="execution.cancel">
-                <Button variant="danger" size="sm" icon={<X size={13} />} loading={cancelling || status === 'CANCEL_REQUESTED'} onClick={handleCancel}>
-                  실행 취소
+                <Button variant="danger" size="sm" icon={<X size={13} />} loading={cancelling || status === 'CANCEL_REQUESTED'} onClick={handleCancel} disabled={status === 'CANCEL_REQUESTED'}>
+                  {status === 'CANCEL_REQUESTED' ? '취소 요청됨' : '실행 취소'}
                 </Button>
               </PermissionGate>
             )}
