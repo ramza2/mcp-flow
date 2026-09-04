@@ -69,7 +69,10 @@ python infra/scripts/generate_local_secrets.py
 
 Secrets are written under `infra/secrets/local/` (gitignored). Values are never printed.
 
-Use `--force` only when you intentionally want to rotate secrets (requires `docker compose ... down -v` to re-bootstrap Postgres roles).
+Use `--force` only when you intentionally want to rotate secrets.
+For Postgres role password rotation, reset **only**
+`mcpflow_postgres-data` (see `infra/secrets/README.md`) — do not use
+blanket `down -v` for routine rotation.
 
 See `infra/secrets/README.md`.
 
@@ -153,13 +156,26 @@ docker compose -f compose.yaml -f compose.local.yaml down
 
 Volumes are kept.
 
-## Reset volumes (destructive)
+## Reset volumes
+
+### Postgres-only reset (secret rotation / DB re-bootstrap)
+
+```bash
+docker compose -f compose.yaml -f compose.local.yaml down
+docker volume rm mcpflow_postgres-data
+docker compose -f compose.yaml -f compose.local.yaml up -d --build
+```
+
+Keeps Redis and Object Storage data.
+
+### Full local reset (destructive)
+
+WARNING: Deletes PostgreSQL, Redis, Object Storage, and local frontend
+`node_modules` volumes.
 
 ```bash
 docker compose -f compose.yaml -f compose.local.yaml down -v
 ```
-
-Deletes Postgres/Redis/Object Storage data. Re-run secret generation only if rotating credentials; then `up` again so Postgres bootstrap recreates roles.
 
 ## Backend dependency lock
 

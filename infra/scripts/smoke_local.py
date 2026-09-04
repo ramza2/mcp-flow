@@ -86,6 +86,38 @@ def check_api_not_frontend(base: str) -> None:
     _ok("GET /api/v1/__infra-smoke-missing → Backend JSON 404")
 
 
+def _looks_like_backend_json(headers: dict[str, str], body: bytes) -> bool:
+    content_type = headers.get("content-type", "")
+    if "application/json" not in content_type:
+        return False
+    try:
+        payload: dict[str, Any] = json.loads(body.decode("utf-8"))
+    except json.JSONDecodeError:
+        return False
+    # Backend docs/06 error contract or health JSON — either means API routed.
+    if isinstance(payload.get("error"), dict) and "code" in payload["error"]:
+        return True
+    if "status" in payload and ("checks" in payload or payload.get("status") in {"ok", "unavailable"}):
+        return True
+    return False
+
+
+def check_non_canonical_prefixes_not_api(base: str) -> None:
+    """Non-canonical prefixes must not hit Backend API JSON routes (SPA HTML OK)."""
+    cases = (
+        "/api/v10/__infra-smoke",
+        "/healthy",
+    )
+    for path in cases:
+        status, headers, body = _request(f"{base}{path}")
+        if _looks_like_backend_json(headers, body):
+            _fail(
+                f"{path} was routed to Backend API JSON "
+                f"(status={status}, content-type={headers.get('content-type')!r})"
+            )
+        _ok(f"GET {path} → not Backend API JSON (status={status})")
+
+
 def check_spa_routes(base: str, paths: list[str]) -> None:
     for path in paths:
         status, headers, body = _request(f"{base}{path}")
@@ -115,6 +147,7 @@ def main(argv: list[str] | None = None) -> int:
     check_live(base)
     check_ready(base)
     check_api_not_frontend(base)
+    check_non_canonical_prefixes_not_api(base)
     check_spa_routes(base, ["/agents", "/workflows", "/executions", "/mcp/servers"])
     print("ALL SMOKE CHECKS PASSED")
     return 0
