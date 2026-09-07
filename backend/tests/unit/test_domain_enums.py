@@ -8,6 +8,8 @@ from app.domain.enums import (
     AgentRequestStatus,
     AgentStatus,
     AgentVersionStatus,
+    ApprovalDecisionMode,
+    ApprovalPolicyStatus,
     ApprovalStatus,
     AuthorableStepType,
     BindingKind,
@@ -112,6 +114,8 @@ def expect_exact(enum_cls: type[Enum], expected: set[str]) -> None:
             },
         ),
         (ApprovalStatus, {"PENDING", "APPROVED", "REJECTED", "EXPIRED", "CANCELLED"}),
+        (ApprovalPolicyStatus, {"ACTIVE", "INACTIVE"}),
+        (ApprovalDecisionMode, {"ANY", "ALL", "QUORUM"}),
         (
             JobStatus,
             {"PENDING", "QUEUED", "RUNNING", "SUCCEEDED", "FAILED", "CANCELLED", "TIMED_OUT"},

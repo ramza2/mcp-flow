@@ -117,6 +117,21 @@ class ApprovalStatus(StrEnum):
     CANCELLED = "CANCELLED"
 
 
+class ApprovalPolicyStatus(StrEnum):
+    """docs/05 approval_policies.status."""
+
+    ACTIVE = "ACTIVE"
+    INACTIVE = "INACTIVE"
+
+
+class ApprovalDecisionMode(StrEnum):
+    """docs/05 approval_policies.decision_mode."""
+
+    ANY = "ANY"
+    ALL = "ALL"
+    QUORUM = "QUORUM"
+
+
 class JobStatus(StrEnum):
     PENDING = "PENDING"
     QUEUED = "QUEUED"

@@ -6,7 +6,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import Select, func, or_, select
+from sqlalchemy import Select, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.mcp import MCPTool, MCPToolVersion
@@ -24,6 +24,92 @@ class MCPToolRepository:
         stmt = self._live_tools().where(MCPTool.id == tool_id)
         result = await self._session.execute(stmt)
         return result.scalar_one_or_none()
+
+    async def lock_for_update(self, tool_id: uuid.UUID) -> MCPTool | None:
+        """Lock live MCP Tool row and refresh identity-map attributes from DB."""
+
+        stmt = (
+            self._live_tools()
+            .where(MCPTool.id == tool_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        result = await self._session.execute(stmt)
+        return result.scalar_one_or_none()
+
+    async def update_atomic(
+        self,
+        tool_id: uuid.UUID,
+        *,
+        expected_lock_version: int,
+        updated_by: uuid.UUID | None = None,
+        **fields: Any,
+    ) -> MCPTool | None:
+        """Compare-and-swap update on ``lock_version`` (docs/05 optimistic lock)."""
+
+        values: dict[str, Any] = {
+            key: value
+            for key, value in fields.items()
+            if hasattr(MCPTool, key) and key not in {"id", "lock_version"}
+        }
+        values["lock_version"] = MCPTool.lock_version + 1
+        values["updated_at"] = func.now()
+        if updated_by is not None:
+            values["updated_by"] = updated_by
+
+        stmt = (
+            update(MCPTool)
+            .where(
+                MCPTool.id == tool_id,
+                MCPTool.lock_version == expected_lock_version,
+                MCPTool.deleted_at.is_(None),
+            )
+            .values(**values)
+            .returning(MCPTool)
+        )
+        result = await self._session.execute(stmt)
+        row = result.scalar_one_or_none()
+        if row is None:
+            return None
+        await self._session.refresh(row)
+        return row
+
+    async def update_status_atomic(
+        self,
+        tool_id: uuid.UUID,
+        *,
+        expected_lock_version: int,
+        new_status: str,
+        allowed_from_statuses: set[str] | frozenset[str] | list[str],
+        updated_by: uuid.UUID | None = None,
+    ) -> MCPTool | None:
+        """Atomic status transition with lock_version CAS and status guard in WHERE."""
+
+        values: dict[str, Any] = {
+            "status": new_status,
+            "lock_version": MCPTool.lock_version + 1,
+            "updated_at": func.now(),
+        }
+        if updated_by is not None:
+            values["updated_by"] = updated_by
+
+        stmt = (
+            update(MCPTool)
+            .where(
+                MCPTool.id == tool_id,
+                MCPTool.lock_version == expected_lock_version,
+                MCPTool.deleted_at.is_(None),
+                MCPTool.status.in_(list(allowed_from_statuses)),
+            )
+            .values(**values)
+            .returning(MCPTool)
+        )
+        result = await self._session.execute(stmt)
+        row = result.scalar_one_or_none()
+        if row is None:
+            return None
+        await self._session.refresh(row)
+        return row
 
     async def get_by_server_and_remote_name(
         self,

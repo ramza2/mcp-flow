@@ -8,6 +8,7 @@ from typing import Any
 
 from sqlalchemy import (
     Boolean,
+    CheckConstraint,
     DateTime,
     ForeignKey,
     Index,
@@ -212,3 +213,90 @@ class MCPToolVersion(Base):
         back_populates="versions",
         foreign_keys=[mcp_tool_id],
     )
+
+
+class MCPToolPolicy(Base, LockVersionMixin):
+    """Logical Tool Policy (docs/05 §8.3) — one row per mcp_tool_id."""
+
+    __tablename__ = "mcp_tool_policies"
+    __table_args__ = (
+        UniqueConstraint("mcp_tool_id", name="uq_mcp_tool_policies_mcp_tool_id"),
+        CheckConstraint(
+            "risk_class IN ("
+            "'READ_ONLY', 'IDEMPOTENT_WRITE', 'NON_IDEMPOTENT_WRITE', "
+            "'DESTRUCTIVE', 'UNKNOWN')",
+            name="ck_mcp_tool_policies_risk_class",
+        ),
+        CheckConstraint("timeout_ms > 0", name="ck_mcp_tool_policies_timeout_ms"),
+        CheckConstraint("max_attempts >= 1", name="ck_mcp_tool_policies_max_attempts"),
+        CheckConstraint("max_result_bytes > 0", name="ck_mcp_tool_policies_max_result_bytes"),
+        CheckConstraint(
+            "(requires_approval = false) OR (approval_policy_id IS NOT NULL)",
+            name="ck_mcp_tool_policies_approval_required",
+        ),
+        CheckConstraint("lock_version >= 1", name="ck_mcp_tool_policies_lock_version"),
+        Index("ix_mcp_tool_policies_mcp_tool_id", "mcp_tool_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    mcp_tool_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("mcp_tools.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    risk_class: Mapped[str] = mapped_column(String(32), nullable=False)
+    requires_confirmation: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    requires_approval: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # RESTRICT: do not cascade-destroy ToolPolicy when ApprovalPolicy is deleted.
+    approval_policy_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("approval_policies.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    timeout_ms: Mapped[int] = mapped_column(Integer, nullable=False)
+    max_attempts: Mapped[int] = mapped_column(Integer, nullable=False)
+    backoff_policy: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    max_result_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
+    allow_auto_select: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    data_classification: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    policy_metadata: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+    updated_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+
+
+class MCPToolVerification(Base):
+    """ToolVersion verification evidence (docs/05 §8.4) — never inherits across versions."""
+
+    __tablename__ = "mcp_tool_verifications"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('PENDING', 'VERIFIED', 'FAILED', 'EXPIRED')",
+            name="ck_mcp_tool_verifications_status",
+        ),
+        Index("ix_mcp_tool_verifications_version_id", "mcp_tool_version_id"),
+        Index("ix_mcp_tool_verifications_verified_at", "verified_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    mcp_tool_version_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("mcp_tool_versions.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    # Soft UUID refs until users / executions / object-storage Domain tables exist.
+    verified_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    verified_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    test_execution_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    criteria_version: Mapped[str] = mapped_column(String(128), nullable=False)
+    result_summary: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    evidence_blob_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
