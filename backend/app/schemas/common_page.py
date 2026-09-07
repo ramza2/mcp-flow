@@ -10,6 +10,8 @@ SortDirection = Literal["asc", "desc"]
 
 ALLOWED_SERVER_SORT = {"updated_at", "created_at", "name", "status"}
 ALLOWED_TOOL_SORT = {"updated_at", "created_at", "remote_name", "status"}
+ALLOWED_AGENT_SORT = {"updated_at", "created_at", "name", "status", "code"}
+ALLOWED_AGENT_VERSION_SORT = {"version_no", "created_at", "status"}
 
 
 class PageParams(BaseModel):

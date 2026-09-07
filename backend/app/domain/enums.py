@@ -46,10 +46,32 @@ class AgentStatus(StrEnum):
     ARCHIVED = "ARCHIVED"
 
 
+class AgentVisibility(StrEnum):
+    """docs/05 agents.visibility."""
+
+    PRIVATE = "PRIVATE"
+    RESTRICTED = "RESTRICTED"
+    INTERNAL = "INTERNAL"
+
+
 class AgentVersionStatus(StrEnum):
     DRAFT = "DRAFT"
     PUBLISHED = "PUBLISHED"
     DEPRECATED = "DEPRECATED"
+
+
+class AgentVersionValidationStatus(StrEnum):
+    """docs/05 agent_versions.validation_status — not ToolVersion WARNING."""
+
+    VALID = "VALID"
+    INVALID = "INVALID"
+
+
+class AgentToolGrantEffect(StrEnum):
+    """docs/05 agent_tool_grants.effect."""
+
+    ALLOW = "ALLOW"
+    DENY = "DENY"
 
 
 class WorkflowStatus(StrEnum):
