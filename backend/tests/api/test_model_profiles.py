@@ -254,6 +254,130 @@ async def test_inactive_embedding_dimension_patch_allowed(db_client: AsyncClient
 
 
 @pytest.mark.asyncio
+async def test_llm_patch_rejects_explicit_null_required_fields(
+    db_client: AsyncClient,
+) -> None:
+    secret_id = str(uuid.uuid4())
+    created = await db_client.post(
+        LLM_API,
+        json=_llm_body(
+            name="Null Guard LLM",
+            credential_secret_id=secret_id,
+            parameters={"temperature": 0.1},
+        ),
+    )
+    assert created.status_code == 201, created.text
+    profile_id = created.json()["id"]
+    before = created.json()
+
+    for field in ("name", "provider", "model", "base_url"):
+        response = await db_client.patch(
+            f"{LLM_API}/{profile_id}",
+            headers={"If-Match": "1"},
+            json={field: None, "lock_version": 1},
+        )
+        assert response.status_code == 422, field
+        body = response.json()
+        assert "error" in body
+        assert body["error"]["code"] == "VALIDATION_ERROR"
+        assert "IntegrityError" not in response.text
+        assert "NOT NULL" not in response.text.upper()
+
+    detail = await db_client.get(f"{LLM_API}/{profile_id}")
+    assert detail.status_code == 200
+    after = detail.json()
+    assert after["lock_version"] == before["lock_version"] == 1
+    assert after["name"] == before["name"]
+    assert after["provider"] == before["provider"]
+    assert after["model"] == before["model"]
+    assert after["base_url"] == before["base_url"]
+    assert after["credential_secret_id"] == secret_id
+    assert after["parameters"] == {"temperature": 0.1}
+
+    blank = await db_client.patch(
+        f"{LLM_API}/{profile_id}",
+        headers={"If-Match": "1"},
+        json={"model": "   ", "lock_version": 1},
+    )
+    assert blank.status_code == 422
+
+    cleared = await db_client.patch(
+        f"{LLM_API}/{profile_id}",
+        headers={"If-Match": "1"},
+        json={
+            "credential_secret_id": None,
+            "parameters": None,
+            "lock_version": 1,
+        },
+    )
+    assert cleared.status_code == 200, cleared.text
+    assert cleared.json()["credential_secret_id"] is None
+    assert cleared.json()["parameters"] is None
+    assert cleared.json()["lock_version"] == 2
+
+
+@pytest.mark.asyncio
+async def test_embedding_patch_rejects_explicit_null_required_fields(
+    db_client: AsyncClient,
+) -> None:
+    secret_id = str(uuid.uuid4())
+    created = await db_client.post(
+        EMB_API,
+        json=_emb_body(name="Null Guard Emb", credential_secret_id=secret_id),
+    )
+    assert created.status_code == 201, created.text
+    profile_id = created.json()["id"]
+    before = created.json()
+
+    for field in (
+        "name",
+        "provider",
+        "model",
+        "base_url",
+        "dimension",
+        "distance_metric",
+    ):
+        response = await db_client.patch(
+            f"{EMB_API}/{profile_id}",
+            headers={"If-Match": "1"},
+            json={field: None, "lock_version": 1},
+        )
+        assert response.status_code == 422, field
+        body = response.json()
+        assert body["error"]["code"] == "VALIDATION_ERROR"
+        assert "IntegrityError" not in response.text
+        assert "NOT NULL" not in response.text.upper()
+
+    detail = await db_client.get(f"{EMB_API}/{profile_id}")
+    assert detail.status_code == 200
+    after = detail.json()
+    assert after["lock_version"] == 1
+    assert after["name"] == before["name"]
+    assert after["provider"] == before["provider"]
+    assert after["model"] == before["model"]
+    assert after["base_url"] == before["base_url"]
+    assert after["dimension"] == before["dimension"]
+    assert after["distance_metric"] == before["distance_metric"]
+    assert after["credential_secret_id"] == secret_id
+
+    blank = await db_client.patch(
+        f"{EMB_API}/{profile_id}",
+        headers={"If-Match": "1"},
+        json={"provider": "", "lock_version": 1},
+    )
+    assert blank.status_code == 422
+
+    cleared = await db_client.patch(
+        f"{EMB_API}/{profile_id}",
+        headers={"If-Match": "1"},
+        json={"credential_secret_id": None, "lock_version": 1},
+    )
+    assert cleared.status_code == 200, cleared.text
+    assert cleared.json()["credential_secret_id"] is None
+    assert cleared.json()["lock_version"] == 2
+
+
+@pytest.mark.asyncio
 async def test_llm_connection_test_mock_transport(db_app, db_session_factory) -> None:
     calls: list[httpx.Request] = []
 

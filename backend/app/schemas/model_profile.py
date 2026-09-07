@@ -6,7 +6,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class LLMProfileCreate(BaseModel):
@@ -70,6 +70,14 @@ class LLMProfileUpdate(BaseModel):
         if not isinstance(value, dict):
             raise ValueError("parameters must be a JSON object or null")
         return value
+
+    @model_validator(mode="after")
+    def _reject_explicit_null_required_fields(self) -> LLMProfileUpdate:
+        # Omitted fields are fine; explicit JSON null on NOT NULL columns is not.
+        for field_name in ("name", "provider", "model", "base_url"):
+            if field_name in self.model_fields_set and getattr(self, field_name) is None:
+                raise ValueError(f"{field_name} cannot be null")
+        return self
 
 
 class LLMProfileResponse(BaseModel):
@@ -140,6 +148,20 @@ class EmbeddingProfileUpdate(BaseModel):
         if not stripped:
             raise ValueError("must be a non-empty string")
         return stripped
+
+    @model_validator(mode="after")
+    def _reject_explicit_null_required_fields(self) -> EmbeddingProfileUpdate:
+        for field_name in (
+            "name",
+            "provider",
+            "model",
+            "base_url",
+            "dimension",
+            "distance_metric",
+        ):
+            if field_name in self.model_fields_set and getattr(self, field_name) is None:
+                raise ValueError(f"{field_name} cannot be null")
+        return self
 
 
 class EmbeddingProfileResponse(BaseModel):
