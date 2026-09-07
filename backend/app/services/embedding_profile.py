@@ -11,8 +11,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import AppError
 from app.core.url_validation import validate_model_base_url
-from app.models.model_profile import EmbeddingProfile
 from app.model_provider.client import EmbeddingConnectionTarget, ModelProviderClient
+from app.models.model_profile import EmbeddingProfile
 from app.repositories.embedding_profile import EmbeddingProfileRepository
 from app.schemas.model_profile import (
     EmbeddingProfileCreate,

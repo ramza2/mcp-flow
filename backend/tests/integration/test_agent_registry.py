@@ -13,6 +13,7 @@ from app.domain.enums import AgentStatus, AgentVisibility
 from app.repositories.agent import AgentRepository
 from app.repositories.agent_tool_grant import AgentToolGrantRepository
 from app.repositories.agent_version import AgentVersionRepository
+from app.repositories.llm_profile import LLMProfileRepository
 from app.repositories.mcp_server import MCPServerRepository
 from app.repositories.mcp_tool import MCPToolRepository
 from app.schemas.agent import (
@@ -26,7 +27,6 @@ from app.schemas.agent import (
 from app.services.agent import AgentService
 from app.services.agent_content import agent_version_content_hash
 from app.services.agent_version import AgentVersionService, canonical_grant_fingerprint
-from app.repositories.llm_profile import LLMProfileRepository
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker

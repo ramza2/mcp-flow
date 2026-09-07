@@ -10,8 +10,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import AppError
 from app.core.url_validation import validate_model_base_url
-from app.models.model_profile import LLMProfile
 from app.model_provider.client import LLMConnectionTarget, ModelProviderClient
+from app.models.model_profile import LLMProfile
 from app.repositories.llm_profile import LLMProfileRepository
 from app.schemas.model_profile import (
     LLMProfileCreate,
