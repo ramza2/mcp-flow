@@ -14,8 +14,12 @@ import {
   EXECUTION_STATUSES,
   JOB_STATUSES,
   MCP_AUTH_TYPES,
+  MCP_CHECK_STATUSES,
+  MCP_CHECK_TYPES,
   MCP_DISCOVERY_MODES,
+  MCP_PROTOCOL_ERAS,
   MCP_SERVER_STATUSES,
+  MCP_TRANSPORT_TYPES,
   MCP_TOOL_STATUSES,
   OCCURRENCE_STATUSES,
   RISK_CLASSES,
@@ -190,6 +194,22 @@ describe('Canonical Domain Contract (docs/04/05)', () => {
     ]);
   });
 
+  it('MCPTransportType', () => {
+    expectExact(MCP_TRANSPORT_TYPES, ['STDIO', 'STREAMABLE_HTTP', 'LEGACY_HTTP_SSE']);
+  });
+
+  it('MCPProtocolEra', () => {
+    expectExact(MCP_PROTOCOL_ERAS, ['CURRENT', 'LEGACY']);
+  });
+
+  it('MCPCheckType', () => {
+    expectExact(MCP_CHECK_TYPES, ['MANUAL', 'SCHEDULED', 'PRE_ACTIVATION']);
+  });
+
+  it('MCPCheckStatus', () => {
+    expectExact(MCP_CHECK_STATUSES, ['SUCCEEDED', 'FAILED', 'TIMED_OUT']);
+  });
+
   it('Current MCP protocol version', () => {
     expect(CURRENT_MCP_PROTOCOL_VERSION).toBe('2026-07-28');
   });
@@ -225,6 +245,14 @@ describe('Negative Canonical Contract — forbidden Domain values', () => {
     for (const bad of ['USER_INPUT', 'PARALLEL', 'END', 'SCRIPT', 'PYTHON', 'JAVASCRIPT'] as const) {
       expect(AUTHORABLE_STEP_TYPES).not.toContain(bad);
     }
+  });
+
+  it('MCPServerStatus must not include CONNECTED or transport labels', () => {
+    for (const bad of ['CONNECTED', 'DISCONNECTED', 'STREAMABLE_HTTP', 'STDIO'] as const) {
+      expect(MCP_SERVER_STATUSES).not.toContain(bad);
+    }
+    expect(MCP_TRANSPORT_TYPES).not.toContain('Streamable HTTP');
+    expect(MCP_TRANSPORT_TYPES).not.toContain('CONNECTED');
   });
 });
 

@@ -1,71 +1,132 @@
-import { describe, expect, it } from 'vitest';
-import { screen, within } from '@testing-library/react';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import MCPServerNew from '@/screens/mcp/MCPServerNew';
 import { CURRENT_MCP_PROTOCOL_VERSION } from '@/domain';
+import { draftServer } from '../fixtures/mcp-api';
 import { renderWithRouter } from '../test-utils';
 
-function footerNext(): HTMLButtonElement {
-  const buttons = screen.getAllByRole('button', { name: /^다음$/ });
-  const enabled = buttons.find(b => !(b as HTMLButtonElement).disabled) as HTMLButtonElement | undefined;
-  if (!enabled) throw new Error(`No enabled Next button among ${buttons.length}`);
+function jsonResponse(body: unknown, status = 200) {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { 'Content-Type': 'application/json' },
+  });
+}
+
+function footerNext(container: HTMLElement): HTMLButtonElement {
+  const buttons = within(container).getAllByRole('button', { name: /^다음$/ });
+  const enabled = buttons.find(b => !(b as HTMLButtonElement).disabled) as HTMLButtonElement;
+  if (!enabled) throw new Error('No enabled Next button');
   return enabled;
 }
 
-describe('MCP Server New — Current MCP contract', () => {
-  it('shows Current MCP 2026-07-28, INFERRED_CURRENT, optional server/discover', async () => {
-    const user = userEvent.setup();
-    renderWithRouter(<MCPServerNew />, {
-      path: '/mcp/servers/new',
-      route: '/mcp/servers/new',
-    });
-
-    await user.click(footerNext());
-    expect(screen.getByText('Transport Type')).toBeInTheDocument();
-    await user.click(footerNext());
-    expect(screen.getByText('인증 방식')).toBeInTheDocument();
-    await user.click(footerNext());
-    expect(screen.getByText(/연결 테스트 실행/i)).toBeInTheDocument();
-
-    await user.click(screen.getByRole('button', { name: /연결 테스트 실행/i }));
-    await screen.findByText(/연결 성공/i, {}, { timeout: 5000 });
-    await user.click(footerNext());
-
-    expect(screen.getByText('Protocol Version')).toBeInTheDocument();
-    expect(screen.getByText(CURRENT_MCP_PROTOCOL_VERSION)).toBeInTheDocument();
-    expect(CURRENT_MCP_PROTOCOL_VERSION).toBe('2026-07-28');
-    expect(screen.getByText('INFERRED_CURRENT')).toBeInTheDocument();
-    expect(screen.getByText(/server\/discover는 optional/i)).toBeInTheDocument();
-    expect(screen.queryByText(/initialize 응답에서 Tool 목록 추론/i)).not.toBeInTheDocument();
+describe('MCPServerNew — API wizard', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
   });
 
-  it('uses LEGACY_HANDSHAKE when Legacy transport is selected', async () => {
+  it('shows Current MCP protocol info without connection test gate', async () => {
     const user = userEvent.setup();
     const view = renderWithRouter(<MCPServerNew />, {
       path: '/mcp/servers/new',
       route: '/mcp/servers/new',
     });
 
-    const nextInView = () => {
-      const buttons = within(view.container).getAllByRole('button', { name: /^다음$/ });
-      const enabled = buttons.find(b => !(b as HTMLButtonElement).disabled) as HTMLButtonElement | undefined;
-      if (!enabled) throw new Error(`No enabled Next in view (${buttons.length})`);
-      return enabled;
-    };
+    await user.click(footerNext(view.container));
+    await user.click(footerNext(view.container));
+    await user.click(footerNext(view.container));
 
-    await user.click(nextInView());
-    expect(within(view.container).getByText('Transport Type')).toBeInTheDocument();
+    expect(within(view.container).getByText(/Connection Test는 DRAFT 서버 등록 후/i)).toBeInTheDocument();
+    expect(within(view.container).queryByRole('button', { name: /연결 테스트 실행/i })).not.toBeInTheDocument();
 
-    await user.click(within(view.container).getByText('Legacy HTTP/SSE'));
-    expect(within(view.container).getByText(/Legacy MCP 지원/i)).toBeInTheDocument();
+    await user.click(footerNext(view.container));
+    expect(within(view.container).getByText(CURRENT_MCP_PROTOCOL_VERSION)).toBeInTheDocument();
+    expect(within(view.container).getByText(/server\/discover는 optional/i)).toBeInTheDocument();
+  });
 
-    await user.click(nextInView()); // Auth
-    await user.click(nextInView()); // Connection
-    await user.click(within(view.container).getByRole('button', { name: /연결 테스트 실행/i }));
-    await within(view.container).findByText(/연결 성공/i, {}, { timeout: 5000 });
-    await user.click(nextInView());
+  it('shows NONE auth only and disabled secret auth types', async () => {
+    const user = userEvent.setup();
+    const view = renderWithRouter(<MCPServerNew />, {
+      path: '/mcp/servers/new',
+      route: '/mcp/servers/new',
+    });
 
-    expect(within(view.container).getByText('LEGACY_HANDSHAKE')).toBeInTheDocument();
-    expect(within(view.container).getByText(/LEGACY_HANDSHAKE Discovery Mode/i)).toBeInTheDocument();
+    await user.click(footerNext(view.container));
+    await user.click(footerNext(view.container));
+
+    expect(within(view.container).getByText('None')).toBeInTheDocument();
+    expect(within(view.container).getAllByText(/Secret Store 연동 후 사용 가능/i).length).toBeGreaterThan(0);
+  });
+
+  it('POST createMCPServer and navigates to detail on success', async () => {
+    const user = userEvent.setup();
+    const fetchMock = vi.fn((input: RequestInfo) => {
+      const url = typeof input === 'string' ? input : input.url;
+      if (url.includes('/mcp/servers') && !url.match(/\/mcp\/servers\//)) {
+        return Promise.resolve(jsonResponse(draftServer, 201));
+      }
+      return Promise.resolve(new Response('Not found', { status: 404 }));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const view = renderWithRouter(<MCPServerNew />, {
+      path: '/mcp/servers/new',
+      route: '/mcp/servers/new',
+      routes: [
+        { path: '/mcp/servers/new', element: <MCPServerNew /> },
+        { path: '/mcp/servers/:serverId', element: <div>Server Detail</div> },
+      ],
+    });
+
+    await user.type(screen.getByPlaceholderText('Weather MCP'), 'Test MCP');
+    await user.click(footerNext(view.container));
+    await user.type(screen.getByPlaceholderText('https://mcp.example.com/mcp'), 'https://example.com/mcp');
+
+    for (let i = 0; i < 5; i++) {
+      await user.click(footerNext(view.container));
+    }
+
+    await user.click(screen.getByRole('button', { name: /서버 등록/i }));
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith(
+        expect.stringContaining('/api/v1/mcp/servers'),
+        expect.objectContaining({ method: 'POST' }),
+      );
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText('Server Detail')).toBeInTheDocument();
+    });
+  });
+
+  it('shows 422 error and keeps form on validation failure', async () => {
+    const user = userEvent.setup();
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        jsonResponse(
+          { error: { code: 'VALIDATION_ERROR', message: 'name is required', request_id: 'req-1' } },
+          422,
+        ),
+      ),
+    );
+
+    const view = renderWithRouter(<MCPServerNew />, {
+      path: '/mcp/servers/new',
+      route: '/mcp/servers/new',
+    });
+
+    await user.type(screen.getByPlaceholderText('Weather MCP'), 'Bad');
+    await user.click(footerNext(view.container));
+    await user.type(screen.getByPlaceholderText('https://mcp.example.com/mcp'), 'https://example.com/mcp');
+
+    for (let i = 0; i < 5; i++) {
+      await user.click(footerNext(view.container));
+    }
+
+    await user.click(screen.getByRole('button', { name: /서버 등록/i }));
+    expect(await screen.findByText('name is required')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /서버 등록/i })).toBeInTheDocument();
   });
 });
