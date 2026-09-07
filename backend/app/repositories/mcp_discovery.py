@@ -135,3 +135,25 @@ class MCPDiscoveryRepository:
         )
         rows = list((await self._session.execute(rows_stmt)).scalars().all())
         return rows, total
+
+    async def has_succeeded_check(self, mcp_server_id: uuid.UUID) -> bool:
+        stmt = (
+            select(func.count())
+            .select_from(MCPServerCheck)
+            .where(
+                MCPServerCheck.mcp_server_id == mcp_server_id,
+                MCPServerCheck.status == "SUCCEEDED",
+            )
+        )
+        return int((await self._session.execute(stmt)).scalar_one()) > 0
+
+    async def has_successful_discovery(self, mcp_server_id: uuid.UUID) -> bool:
+        stmt = (
+            select(func.count())
+            .select_from(MCPServerDiscovery)
+            .where(
+                MCPServerDiscovery.mcp_server_id == mcp_server_id,
+                MCPServerDiscovery.success.is_(True),
+            )
+        )
+        return int((await self._session.execute(stmt)).scalar_one()) > 0

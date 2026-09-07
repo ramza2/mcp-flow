@@ -6,7 +6,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import Select, func, or_, select
+from sqlalchemy import Select, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.mcp import MCPTool, MCPToolVersion
@@ -24,6 +24,58 @@ class MCPToolRepository:
         stmt = self._live_tools().where(MCPTool.id == tool_id)
         result = await self._session.execute(stmt)
         return result.scalar_one_or_none()
+
+    async def update_atomic(
+        self,
+        tool_id: uuid.UUID,
+        *,
+        expected_lock_version: int,
+        updated_by: uuid.UUID | None = None,
+        **fields: Any,
+    ) -> MCPTool | None:
+        """Compare-and-swap update on ``lock_version`` (docs/05 optimistic lock)."""
+
+        values: dict[str, Any] = {
+            key: value
+            for key, value in fields.items()
+            if hasattr(MCPTool, key) and key not in {"id", "lock_version"}
+        }
+        values["lock_version"] = MCPTool.lock_version + 1
+        values["updated_at"] = func.now()
+        if updated_by is not None:
+            values["updated_by"] = updated_by
+
+        stmt = (
+            update(MCPTool)
+            .where(
+                MCPTool.id == tool_id,
+                MCPTool.lock_version == expected_lock_version,
+                MCPTool.deleted_at.is_(None),
+            )
+            .values(**values)
+            .returning(MCPTool)
+        )
+        result = await self._session.execute(stmt)
+        row = result.scalar_one_or_none()
+        if row is None:
+            return None
+        await self._session.refresh(row)
+        return row
+
+    async def update_status(
+        self,
+        tool: MCPTool,
+        *,
+        status: str,
+        updated_by: uuid.UUID | None = None,
+    ) -> MCPTool:
+        tool.status = status
+        tool.lock_version = int(tool.lock_version) + 1
+        if updated_by is not None:
+            tool.updated_by = updated_by
+        await self._session.flush()
+        await self._session.refresh(tool)
+        return tool
 
     async def get_by_server_and_remote_name(
         self,
