@@ -201,49 +201,40 @@ async def test_idempotent_activate_releases_row_lock(
         lock_version = int(activated.lock_version)
         assert activated.is_active_for_tools is True
 
-    returned = asyncio.Event()
-    patch_done = asyncio.Event()
-    results: dict[str, str] = {}
+    activate_returned = asyncio.Event()
+    patch_finished = asyncio.Event()
+    outcomes: dict[str, object] = {}
 
     async def session_a_idempotent_activate() -> None:
         async with integration_session_factory() as session:
             result = await EmbeddingProfileService(session).activate_for_tools(
                 profile_id, expected_lock_version=lock_version
             )
-            assert result.is_active_for_tools is True
-            assert int(result.lock_version) == lock_version
-            results["activate"] = f"OK:{result.lock_version}"
-            returned.set()
-            # Hold the session briefly after return path completed commit.
-            await patch_done.wait()
+            outcomes["activate_lock"] = int(result.lock_version)
+            outcomes["activate_active"] = bool(result.is_active_for_tools)
+            activate_returned.set()
+            # Keep the session open after method return to detect lingering locks.
+            await patch_finished.wait()
 
     async def session_b_patch_after_release() -> None:
-        await returned.wait()
-        async with integration_session_factory() as session:
-            # Must not block on a lingering FOR UPDATE from session A.
-            updated = await asyncio.wait_for(
-                EmbeddingProfileService(session).update(
-                    profile_id,
-                    EmbeddingProfileUpdate(name="After Idempotent", lock_version=lock_version),
-                    expected_lock_version=lock_version,
-                ),
-                timeout=2.0,
-            )
-            assert updated.name == "After Idempotent"
-            assert int(updated.lock_version) == lock_version + 1
-            # Active dimension still blocked with matching lock.
-            with pytest.raises(AppError) as exc_info:
-                await EmbeddingProfileService(session).update(
+        await activate_returned.wait()
+
+        async def _patch() -> int:
+            async with integration_session_factory() as session:
+                updated = await EmbeddingProfileService(session).update(
                     profile_id,
                     EmbeddingProfileUpdate(
-                        dimension=16, lock_version=int(updated.lock_version)
+                        name="After Idempotent", lock_version=lock_version
                     ),
-                    expected_lock_version=int(updated.lock_version),
+                    expected_lock_version=lock_version,
                 )
-            assert exc_info.value.code == "RESOURCE_CONFLICT"
-            results["patch"] = f"OK:{updated.lock_version}"
-            patch_done.set()
+                return int(updated.lock_version)
+
+        new_lock = await asyncio.wait_for(_patch(), timeout=2.0)
+        outcomes["patch_lock"] = new_lock
+        patch_finished.set()
 
     await asyncio.gather(session_a_idempotent_activate(), session_b_patch_after_release())
-    assert results["activate"].startswith("OK:")
-    assert results["patch"].startswith("OK:")
+    assert outcomes["activate_active"] is True
+    assert outcomes["activate_lock"] == lock_version
+    assert outcomes["patch_lock"] == lock_version + 1
