@@ -26,9 +26,22 @@ from app.schemas.agent import (
 from app.services.agent import AgentService
 from app.services.agent_content import agent_version_content_hash
 from app.services.agent_version import AgentVersionService, canonical_grant_fingerprint
+from app.repositories.llm_profile import LLMProfileRepository
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+
+async def _seed_llm_profile(session: AsyncSession) -> uuid.UUID:
+    profile = await LLMProfileRepository(session).create(
+        code=f"llm-{uuid.uuid4().hex[:8]}",
+        name="Integration LLM",
+        provider="OPENAI_COMPATIBLE",
+        model="gpt-test",
+        base_url="https://llm.test/v1",
+    )
+    await session.flush()
+    return profile.id
 
 
 def _version_create(**overrides):
@@ -286,8 +299,13 @@ async def test_concurrent_publish(
         version_service = AgentVersionService(session)
         agent = await service.create(AgentCreate(name="PubRace"))
         agent_id = agent.id
-        v2 = await version_service.create_version(agent_id, _version_create(change_summary="v2"))
-        v3 = await version_service.create_version(agent_id, _version_create(change_summary="v3"))
+        profile_id = await _seed_llm_profile(session)
+        v2 = await version_service.create_version(
+            agent_id, _version_create(change_summary="v2", llm_profile_id=profile_id)
+        )
+        v3 = await version_service.create_version(
+            agent_id, _version_create(change_summary="v3", llm_profile_id=profile_id)
+        )
         await version_service.validate(agent_id, v2.id)
         await version_service.validate(agent_id, v3.id)
         v2_id, v3_id = v2.id, v3.id

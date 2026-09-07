@@ -21,6 +21,7 @@ from app.models.agent import Agent, AgentToolGrant, AgentVersion
 from app.repositories.agent import AgentRepository
 from app.repositories.agent_tool_grant import AgentToolGrantRepository
 from app.repositories.agent_version import AgentVersionRepository
+from app.repositories.llm_profile import LLMProfileRepository
 from app.repositories.mcp_tool import MCPToolRepository
 from app.schemas.agent import (
     CANONICAL_PLAN_SCHEMA_VERSION,
@@ -68,6 +69,7 @@ class AgentVersionService:
         self._versions = AgentVersionRepository(session)
         self._grants = AgentToolGrantRepository(session)
         self._tools = MCPToolRepository(session)
+        self._llm_profiles = LLMProfileRepository(session)
 
     async def _require_agent(self, agent_id: uuid.UUID) -> Agent:
         agent = await self._agents.get(agent_id)
@@ -270,6 +272,19 @@ class AgentVersionService:
                     "message": "llm_profile_id is required.",
                 }
             )
+            llm_profile_check = "MISSING"
+        elif await self._llm_profiles.exists(version.llm_profile_id):
+            llm_profile_check = "OK"
+        else:
+            errors.append(
+                {
+                    "code": "LLM_PROFILE_NOT_FOUND",
+                    "message": (
+                        f"llm_profile_id {version.llm_profile_id} does not exist."
+                    ),
+                }
+            )
+            llm_profile_check = "NOT_FOUND"
 
         try:
             SelectionSettings.model_validate(version.selection_settings or {})
@@ -325,8 +340,7 @@ class AgentVersionService:
             "valid": valid,
             "errors": errors,
             "dependency_checks": {
-                "llm_profile": "DEFERRED",
-                "provider_reference_validation": "deferred",
+                "llm_profile": llm_profile_check,
             },
         }
         status_value = (
@@ -371,6 +385,13 @@ class AgentVersionService:
             raise AppError(
                 code="RESOURCE_CONFLICT",
                 message="AgentVersion must be VALID before publish.",
+                status_code=status.HTTP_409_CONFLICT,
+            )
+        # Guard stale VALID drafts whose llm_profile soft-reference no longer exists.
+        if not await self._llm_profiles.exists(version.llm_profile_id):
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message="llm_profile_id does not reference an existing LLM Profile.",
                 status_code=status.HTTP_409_CONFLICT,
             )
 

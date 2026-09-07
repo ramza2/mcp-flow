@@ -11,12 +11,15 @@ from app.models.mcp import (
     MCPToolVerification,
     MCPToolVersion,
 )
+from app.models.model_profile import EmbeddingProfile, LLMProfile
 
 __all__ = [
     "Agent",
     "AgentToolGrant",
     "AgentVersion",
     "ApprovalPolicy",
+    "EmbeddingProfile",
+    "LLMProfile",
     "MCPServer",
     "MCPServerCheck",
     "MCPServerDiscovery",

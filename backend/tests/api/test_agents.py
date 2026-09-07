@@ -9,8 +9,7 @@ import pytest
 from httpx import AsyncClient
 
 API = "/api/v1/agents"
-
-PROFILE_ID = str(uuid.uuid4())
+PROFILES_API = "/api/v1/model-profiles/llm"
 
 
 def _selection(**overrides: Any) -> dict[str, Any]:
@@ -26,7 +25,7 @@ def _selection(**overrides: Any) -> dict[str, Any]:
 def _version_body(**overrides: Any) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "system_instruction": "허용된 Tool만 사용하여 안전하게 업무를 계획한다.",
-        "llm_profile_id": PROFILE_ID,
+        "llm_profile_id": str(uuid.uuid4()),
         "request_schema_version": "1.0",
         "plan_schema_version": "1.0",
         "selection_settings": _selection(),
@@ -42,6 +41,20 @@ async def _create_agent(client: AsyncClient, **overrides: Any) -> dict[str, Any]
     body = {"name": "Ops Agent", "description": "ops", "visibility": "PRIVATE"}
     body.update(overrides)
     response = await client.post(API, json=body)
+    assert response.status_code == 201, response.text
+    return response.json()
+
+
+async def _create_llm_profile(client: AsyncClient, **overrides: Any) -> dict[str, Any]:
+    body = {
+        "name": "Test LLM",
+        "provider": "OPENAI_COMPATIBLE",
+        "model": "gpt-test",
+        "base_url": "https://llm.test/v1",
+        "parameters": {"temperature": 0.2},
+    }
+    body.update(overrides)
+    response = await client.post(PROFILES_API, json=body)
     assert response.status_code == 201, response.text
     return response.json()
 
@@ -134,6 +147,7 @@ async def test_agent_active_and_archived_rules(
 ) -> None:
     created = await _create_agent(db_client)
     agent_id = created["id"]
+    profile = await _create_llm_profile(db_client)
 
     active_reject = await db_client.patch(
         f"{API}/{agent_id}",
@@ -144,7 +158,7 @@ async def test_agent_active_and_archived_rules(
 
     version = await db_client.post(
         f"{API}/{agent_id}/versions",
-        json=_version_body(),
+        json=_version_body(llm_profile_id=profile["id"]),
     )
     assert version.status_code == 201, version.text
     version_id = version.json()["id"]
@@ -238,7 +252,11 @@ async def test_tool_grants_replace_and_draft_only(
 
     agent = await _create_agent(db_client)
     agent_id = agent["id"]
-    version = await db_client.post(f"{API}/{agent_id}/versions", json=_version_body())
+    profile = await _create_llm_profile(db_client)
+    version = await db_client.post(
+        f"{API}/{agent_id}/versions",
+        json=_version_body(llm_profile_id=profile["id"]),
+    )
     version_id = version.json()["id"]
 
     put = await db_client.put(
@@ -305,10 +323,12 @@ async def test_tool_grants_replace_and_draft_only(
 async def test_validation_rules(db_client: AsyncClient) -> None:
     agent = await _create_agent(db_client)
     agent_id = agent["id"]
+    profile = await _create_llm_profile(db_client)
+    profile_id = profile["id"]
 
     blank = await db_client.post(
         f"{API}/{agent_id}/versions",
-        json=_version_body(system_instruction="   "),
+        json=_version_body(llm_profile_id=profile_id, system_instruction="   "),
     )
     # Field min_length=1 may reject at schema; blank spaces pass min_length then INVALID
     if blank.status_code == 201:
@@ -320,7 +340,7 @@ async def test_validation_rules(db_client: AsyncClient) -> None:
 
     bad_schema = await db_client.post(
         f"{API}/{agent_id}/versions",
-        json=_version_body(request_schema_version="2.0"),
+        json=_version_body(llm_profile_id=profile_id, request_schema_version="2.0"),
     )
     assert bad_schema.status_code == 201
     result = await db_client.post(
@@ -330,7 +350,7 @@ async def test_validation_rules(db_client: AsyncClient) -> None:
 
     bad_plan = await db_client.post(
         f"{API}/{agent_id}/versions",
-        json=_version_body(plan_schema_version="9.9"),
+        json=_version_body(llm_profile_id=profile_id, plan_schema_version="9.9"),
     )
     result = await db_client.post(
         f"{API}/{agent_id}/versions/{bad_plan.json()['id']}/validate"
@@ -340,14 +360,31 @@ async def test_validation_rules(db_client: AsyncClient) -> None:
     bad_threshold = await db_client.post(
         f"{API}/{agent_id}/versions",
         json=_version_body(
+            llm_profile_id=profile_id,
             selection_settings=_selection(
                 auto_select_threshold=0.2, confirmation_threshold=0.8
-            )
+            ),
         ),
     )
     assert bad_threshold.status_code == 422
 
-    ok = await db_client.post(f"{API}/{agent_id}/versions", json=_version_body())
+    missing_profile = await db_client.post(
+        f"{API}/{agent_id}/versions",
+        json=_version_body(llm_profile_id=str(uuid.uuid4())),
+    )
+    missing_validated = await db_client.post(
+        f"{API}/{agent_id}/versions/{missing_profile.json()['id']}/validate"
+    )
+    assert missing_validated.status_code == 200
+    assert missing_validated.json()["validation_status"] == "INVALID"
+    missing_report = missing_validated.json()["validation_report"]
+    assert missing_report["dependency_checks"]["llm_profile"] == "NOT_FOUND"
+    assert any(err["code"] == "LLM_PROFILE_NOT_FOUND" for err in missing_report["errors"])
+
+    ok = await db_client.post(
+        f"{API}/{agent_id}/versions",
+        json=_version_body(llm_profile_id=profile_id),
+    )
     validated = await db_client.post(
         f"{API}/{agent_id}/versions/{ok.json()['id']}/validate"
     )
@@ -355,7 +392,55 @@ async def test_validation_rules(db_client: AsyncClient) -> None:
     assert validated.json()["validation_status"] == "VALID"
     report = validated.json()["validation_report"]
     assert report["valid"] is True
-    assert report["dependency_checks"]["llm_profile"] == "DEFERRED"
+    assert report["dependency_checks"]["llm_profile"] == "OK"
+
+
+@pytest.mark.asyncio
+async def test_publish_blocks_when_llm_profile_missing_after_valid(
+    db_client: AsyncClient, db_session_factory
+) -> None:
+    """Pre-existing VALID draft with deleted/missing profile must not publish."""
+
+    from app.domain.enums import AgentVersionValidationStatus
+    from app.repositories.agent_version import AgentVersionRepository
+
+    agent = await _create_agent(db_client)
+    agent_id = agent["id"]
+    missing_profile_id = uuid.uuid4()
+    version = await db_client.post(
+        f"{API}/{agent_id}/versions",
+        json=_version_body(llm_profile_id=str(missing_profile_id)),
+    )
+    version_id = uuid.UUID(version.json()["id"])
+
+    async with db_session_factory() as session:
+        row = await AgentVersionRepository(session).get_for_agent(
+            uuid.UUID(agent_id), version_id
+        )
+        assert row is not None
+        await AgentVersionRepository(session).set_validation(
+            row,
+            validation_status=str(AgentVersionValidationStatus.VALID),
+            validation_report={"schema_version": "1.0", "valid": True, "errors": []},
+        )
+        await session.commit()
+
+    blocked = await db_client.post(f"{API}/{agent_id}/versions/{version_id}/publish")
+    assert blocked.status_code == 409
+    assert blocked.json()["error"]["code"] == "RESOURCE_CONFLICT"
+
+    profile = await _create_llm_profile(db_client)
+    version_ok = await db_client.post(
+        f"{API}/{agent_id}/versions",
+        json=_version_body(llm_profile_id=profile["id"]),
+    )
+    await db_client.post(
+        f"{API}/{agent_id}/versions/{version_ok.json()['id']}/validate"
+    )
+    published = await db_client.post(
+        f"{API}/{agent_id}/versions/{version_ok.json()['id']}/publish"
+    )
+    assert published.status_code == 200
 
 
 @pytest.mark.asyncio
@@ -363,8 +448,12 @@ async def test_publish_deprecate_and_clone(db_client: AsyncClient, db_session_fa
     tool_id = await _seed_tool(db_session_factory)
     agent = await _create_agent(db_client)
     agent_id = agent["id"]
+    profile = await _create_llm_profile(db_client)
 
-    v1 = await db_client.post(f"{API}/{agent_id}/versions", json=_version_body())
+    v1 = await db_client.post(
+        f"{API}/{agent_id}/versions",
+        json=_version_body(llm_profile_id=profile["id"]),
+    )
     v1_id = v1.json()["id"]
     await db_client.put(
         f"{API}/{agent_id}/versions/{v1_id}/tool-grants",
@@ -443,7 +532,10 @@ async def test_publish_deprecate_and_clone(db_client: AsyncClient, db_session_fa
     assert idem.status_code == 200
     assert idem.json()["status"] == "DEPRECATED"
 
-    draft = await db_client.post(f"{API}/{agent_id}/versions", json=_version_body())
+    draft = await db_client.post(
+        f"{API}/{agent_id}/versions",
+        json=_version_body(llm_profile_id=profile["id"]),
+    )
     draft_dep2 = await db_client.post(
         f"{API}/{agent_id}/versions/{draft.json()['id']}/deprecate"
     )
@@ -458,7 +550,11 @@ async def test_grant_change_invalidates_validation_and_blocks_publish(
     tool_b = await _seed_tool(db_session_factory, status="INACTIVE")
     agent = await _create_agent(db_client)
     agent_id = agent["id"]
-    version = await db_client.post(f"{API}/{agent_id}/versions", json=_version_body())
+    profile = await _create_llm_profile(db_client)
+    version = await db_client.post(
+        f"{API}/{agent_id}/versions",
+        json=_version_body(llm_profile_id=profile["id"]),
+    )
     version_id = version.json()["id"]
 
     grant_a = {
