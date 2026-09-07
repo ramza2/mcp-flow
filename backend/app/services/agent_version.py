@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import uuid
 from datetime import UTC, datetime
 from typing import Any
@@ -29,6 +30,35 @@ from app.schemas.agent import (
     SelectionSettings,
 )
 from app.services.agent_content import agent_version_content_hash
+
+
+def _canonical_constraints(value: Any) -> str | None:
+    """Stable JSON form for parameter_constraints comparison."""
+
+    if value is None:
+        return None
+    return json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
+
+
+def canonical_grant_fingerprint(items: list[dict[str, Any]]) -> tuple[tuple[Any, ...], ...]:
+    """Order-independent fingerprint of a Tool Grant set."""
+
+    rows: list[tuple[Any, ...]] = []
+    for item in items:
+        rows.append(
+            (
+                str(item["mcp_tool_id"]),
+                str(item["effect"]),
+                _canonical_constraints(item.get("parameter_constraints")),
+                bool(item.get("requires_confirmation", False)),
+            )
+        )
+    return tuple(sorted(rows))
 
 
 class AgentVersionService:
@@ -92,7 +122,9 @@ class AgentVersionService:
             )
 
         if data.source_version_id is not None:
-            source = await self._versions.get_for_agent(agent_id, data.source_version_id)
+            source = await self._versions.lock_for_update(
+                agent_id, data.source_version_id
+            )
             if source is None:
                 raise AppError(
                     code="NOT_FOUND",
@@ -447,6 +479,17 @@ class AgentVersionService:
                 status_code=status.HTTP_409_CONFLICT,
             )
 
+        existing = await self._grants.list_for_version(version.id)
+        existing_payload = [
+            {
+                "mcp_tool_id": grant.mcp_tool_id,
+                "effect": grant.effect,
+                "parameter_constraints": grant.parameter_constraints,
+                "requires_confirmation": grant.requires_confirmation,
+            }
+            for grant in existing
+        ]
+
         seen: set[uuid.UUID] = set()
         payload: list[dict[str, Any]] = []
         for item in data.items:
@@ -473,8 +516,18 @@ class AgentVersionService:
                 }
             )
 
+        grants_changed = canonical_grant_fingerprint(
+            existing_payload
+        ) != canonical_grant_fingerprint(payload)
+
         try:
             grants = await self._grants.replace_all(version.id, payload)
+            if grants_changed:
+                await self._versions.set_validation(
+                    version,
+                    validation_status=str(AgentVersionValidationStatus.INVALID),
+                    validation_report=None,
+                )
             await self._session.commit()
         except IntegrityError as exc:
             await self._session.rollback()

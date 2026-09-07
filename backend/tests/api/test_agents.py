@@ -448,3 +448,105 @@ async def test_publish_deprecate_and_clone(db_client: AsyncClient, db_session_fa
         f"{API}/{agent_id}/versions/{draft.json()['id']}/deprecate"
     )
     assert draft_dep2.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_grant_change_invalidates_validation_and_blocks_publish(
+    db_client: AsyncClient, db_session_factory
+) -> None:
+    tool_a = await _seed_tool(db_session_factory, status="ACTIVE")
+    tool_b = await _seed_tool(db_session_factory, status="INACTIVE")
+    agent = await _create_agent(db_client)
+    agent_id = agent["id"]
+    version = await db_client.post(f"{API}/{agent_id}/versions", json=_version_body())
+    version_id = version.json()["id"]
+
+    grant_a = {
+        "items": [
+            {
+                "mcp_tool_id": str(tool_a),
+                "effect": "ALLOW",
+                "parameter_constraints": {"max": 1},
+                "requires_confirmation": False,
+            }
+        ]
+    }
+    put_a = await db_client.put(
+        f"{API}/{agent_id}/versions/{version_id}/tool-grants",
+        json=grant_a,
+    )
+    assert put_a.status_code == 200
+
+    validated = await db_client.post(
+        f"{API}/{agent_id}/versions/{version_id}/validate"
+    )
+    assert validated.status_code == 200
+    assert validated.json()["validation_status"] == "VALID"
+    assert validated.json()["validation_report"]["valid"] is True
+
+    # identical PUT preserves VALID
+    same = await db_client.put(
+        f"{API}/{agent_id}/versions/{version_id}/tool-grants",
+        json=grant_a,
+    )
+    assert same.status_code == 200
+    detail_same = await db_client.get(f"{API}/{agent_id}/versions/{version_id}")
+    assert detail_same.json()["validation_status"] == "VALID"
+    assert detail_same.json()["validation_report"] is not None
+
+    # attribute change (ALLOW → DENY) invalidates
+    attr_change = await db_client.put(
+        f"{API}/{agent_id}/versions/{version_id}/tool-grants",
+        json={
+            "items": [
+                {
+                    "mcp_tool_id": str(tool_a),
+                    "effect": "DENY",
+                    "parameter_constraints": {"max": 1},
+                    "requires_confirmation": False,
+                }
+            ]
+        },
+    )
+    assert attr_change.status_code == 200
+    detail_attr = await db_client.get(f"{API}/{agent_id}/versions/{version_id}")
+    assert detail_attr.json()["validation_status"] == "INVALID"
+    assert detail_attr.json()["validation_report"] is None
+
+    await db_client.post(f"{API}/{agent_id}/versions/{version_id}/validate")
+    assert (
+        await db_client.get(f"{API}/{agent_id}/versions/{version_id}")
+    ).json()["validation_status"] == "VALID"
+
+    # membership change invalidates and blocks publish until revalidate
+    changed = await db_client.put(
+        f"{API}/{agent_id}/versions/{version_id}/tool-grants",
+        json={
+            "items": [
+                {
+                    "mcp_tool_id": str(tool_b),
+                    "effect": "ALLOW",
+                    "parameter_constraints": {},
+                    "requires_confirmation": True,
+                }
+            ]
+        },
+    )
+    assert changed.status_code == 200
+    detail = await db_client.get(f"{API}/{agent_id}/versions/{version_id}")
+    assert detail.json()["validation_status"] == "INVALID"
+    assert detail.json()["validation_report"] is None
+
+    blocked = await db_client.post(f"{API}/{agent_id}/versions/{version_id}/publish")
+    assert blocked.status_code == 409
+    assert blocked.json()["error"]["code"] == "RESOURCE_CONFLICT"
+
+    revalidated = await db_client.post(
+        f"{API}/{agent_id}/versions/{version_id}/validate"
+    )
+    assert revalidated.status_code == 200
+    assert revalidated.json()["validation_status"] == "VALID"
+
+    published = await db_client.post(f"{API}/{agent_id}/versions/{version_id}/publish")
+    assert published.status_code == 200
+    assert published.json()["status"] == "PUBLISHED"
