@@ -307,3 +307,128 @@ async def test_concurrent_tool_atomic_patch(
         assert final is not None
         assert final.lock_version == 2
         assert final.display_name in {"Winner A", "Winner B"}
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_concurrent_tool_deactivate_cas(
+    integration_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from app.core.errors import AppError
+    from app.domain.enums import MCPToolStatus
+    from app.services.mcp_tool import MCPToolService
+
+    async with integration_session_factory() as session:
+        server = await MCPServerRepository(session).create(
+            code=f"deact-{uuid.uuid4().hex[:8]}",
+            name="Deactivate CAS Server",
+            transport_type="STREAMABLE_HTTP",
+            endpoint_url="https://mcp.test/mcp",
+        )
+        tools = MCPToolRepository(session)
+        tool = await tools.create_tool(
+            mcp_server_id=server.id,
+            remote_name="echo",
+            status=MCPToolStatus.ACTIVE,
+        )
+        version = await tools.create_version(
+            mcp_tool_id=tool.id,
+            version_no=1,
+            content_hash="hash-active",
+            validation_status=ToolVersionValidationStatus.VALID,
+        )
+        tool.current_version_id = version.id
+        await session.commit()
+        tool_id = tool.id
+        assert tool.lock_version == 1
+
+    async def deactivate_once() -> tuple[str, int | None]:
+        async with integration_session_factory() as session:
+            service = MCPToolService(session)
+            try:
+                row = await service.deactivate(tool_id, expected_lock_version=1)
+                return ("ok", int(row.lock_version))
+            except AppError as exc:
+                return (exc.code, None)
+
+    result_a, result_b = await asyncio.gather(deactivate_once(), deactivate_once())
+    codes = sorted(code for code, _ in (result_a, result_b))
+    assert codes == ["RESOURCE_VERSION_CONFLICT", "ok"]
+    success_locks = [lock for code, lock in (result_a, result_b) if code == "ok"]
+    assert success_locks == [2]
+
+    async with integration_session_factory() as session:
+        final = await MCPToolRepository(session).get(tool_id)
+        assert final is not None
+        assert final.status == MCPToolStatus.INACTIVE
+        assert final.lock_version == 2
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_concurrent_policy_first_create(
+    integration_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from app.core.errors import AppError
+    from app.models.mcp import MCPToolPolicy
+    from app.schemas.mcp_tool import MCPToolPolicyPut
+    from app.services.mcp_tool_policy import MCPToolPolicyService
+    from sqlalchemy import func, select
+
+    async with integration_session_factory() as session:
+        server = await MCPServerRepository(session).create(
+            code=f"pcreate-{uuid.uuid4().hex[:8]}",
+            name="Policy Create Server",
+            transport_type="STREAMABLE_HTTP",
+            endpoint_url="https://mcp.test/mcp",
+        )
+        tool = await MCPToolRepository(session).create_tool(
+            mcp_server_id=server.id,
+            remote_name="echo",
+        )
+        await session.commit()
+        tool_id = tool.id
+
+    payload = MCPToolPolicyPut(
+        risk_class="READ_ONLY",
+        requires_confirmation=False,
+        requires_approval=False,
+        timeout_ms=1000,
+        max_attempts=1,
+        max_result_bytes=100,
+        allow_auto_select=True,
+    )
+
+    async def put_once() -> tuple[str, int | None]:
+        async with integration_session_factory() as session:
+            service = MCPToolPolicyService(session)
+            try:
+                row = await service.put(
+                    tool_id,
+                    payload,
+                    expected_lock_version=None,
+                )
+                return ("ok", int(row.lock_version))
+            except AppError as exc:
+                return (exc.code, None)
+
+    result_a, result_b = await asyncio.gather(put_once(), put_once())
+    codes = sorted(code for code, _ in (result_a, result_b))
+    assert codes == ["RESOURCE_CONFLICT", "ok"]
+    success_locks = [lock for code, lock in (result_a, result_b) if code == "ok"]
+    assert success_locks == [1]
+
+    async with integration_session_factory() as session:
+        count = int(
+            (
+                await session.execute(
+                    select(func.count()).select_from(MCPToolPolicy).where(
+                        MCPToolPolicy.mcp_tool_id == tool_id
+                    )
+                )
+            ).scalar_one()
+        )
+        assert count == 1
+        policy = await MCPToolPolicyRepository(session).get_by_tool_id(tool_id)
+        assert policy is not None
+        assert policy.lock_version == 1

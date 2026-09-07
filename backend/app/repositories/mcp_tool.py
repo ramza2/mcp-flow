@@ -25,6 +25,13 @@ class MCPToolRepository:
         result = await self._session.execute(stmt)
         return result.scalar_one_or_none()
 
+    async def lock_for_update(self, tool_id: uuid.UUID) -> MCPTool | None:
+        """Lock live MCP Tool row for short critical sections (SELECT ... FOR UPDATE)."""
+
+        stmt = self._live_tools().where(MCPTool.id == tool_id).with_for_update()
+        result = await self._session.execute(stmt)
+        return result.scalar_one_or_none()
+
     async def update_atomic(
         self,
         tool_id: uuid.UUID,
@@ -62,20 +69,42 @@ class MCPToolRepository:
         await self._session.refresh(row)
         return row
 
-    async def update_status(
+    async def update_status_atomic(
         self,
-        tool: MCPTool,
+        tool_id: uuid.UUID,
         *,
-        status: str,
+        expected_lock_version: int,
+        new_status: str,
+        allowed_from_statuses: set[str] | frozenset[str] | list[str],
         updated_by: uuid.UUID | None = None,
-    ) -> MCPTool:
-        tool.status = status
-        tool.lock_version = int(tool.lock_version) + 1
+    ) -> MCPTool | None:
+        """Atomic status transition with lock_version CAS and status guard in WHERE."""
+
+        values: dict[str, Any] = {
+            "status": new_status,
+            "lock_version": MCPTool.lock_version + 1,
+            "updated_at": func.now(),
+        }
         if updated_by is not None:
-            tool.updated_by = updated_by
-        await self._session.flush()
-        await self._session.refresh(tool)
-        return tool
+            values["updated_by"] = updated_by
+
+        stmt = (
+            update(MCPTool)
+            .where(
+                MCPTool.id == tool_id,
+                MCPTool.lock_version == expected_lock_version,
+                MCPTool.deleted_at.is_(None),
+                MCPTool.status.in_(list(allowed_from_statuses)),
+            )
+            .values(**values)
+            .returning(MCPTool)
+        )
+        result = await self._session.execute(stmt)
+        row = result.scalar_one_or_none()
+        if row is None:
+            return None
+        await self._session.refresh(row)
+        return row
 
     async def get_by_server_and_remote_name(
         self,

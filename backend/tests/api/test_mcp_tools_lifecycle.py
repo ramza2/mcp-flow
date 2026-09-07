@@ -144,28 +144,105 @@ async def test_tool_activate_deactivate_lifecycle(
     _server, tool = await _discover_tools(db_client, override_mcp_client)
     tool_id = tool["id"]
     assert tool["status"] == MCPToolStatus.DISCOVERED
+    lock = int(tool["lock_version"])
 
-    activated = await db_client.post(f"{API_TOOLS}/{tool_id}/activate")
+    activated = await db_client.post(
+        f"{API_TOOLS}/{tool_id}/activate",
+        headers={"If-Match": str(lock)},
+    )
     assert activated.status_code == 200
     assert activated.json()["status"] == MCPToolStatus.ACTIVE
+    lock = int(activated.json()["lock_version"])
+    assert lock == tool["lock_version"] + 1
 
-    again = await db_client.post(f"{API_TOOLS}/{tool_id}/activate")
+    again = await db_client.post(
+        f"{API_TOOLS}/{tool_id}/activate",
+        headers={"If-Match": str(lock)},
+    )
     assert again.status_code == 200
     assert again.json()["status"] == MCPToolStatus.ACTIVE
+    assert again.json()["lock_version"] == lock
 
-    deactivated = await db_client.post(f"{API_TOOLS}/{tool_id}/deactivate")
+    deactivated = await db_client.post(
+        f"{API_TOOLS}/{tool_id}/deactivate",
+        headers={"If-Match": str(lock)},
+    )
     assert deactivated.status_code == 200
     assert deactivated.json()["status"] == MCPToolStatus.INACTIVE
+    lock = int(deactivated.json()["lock_version"])
 
-    reactivated = await db_client.post(f"{API_TOOLS}/{tool_id}/activate")
+    reactivated = await db_client.post(
+        f"{API_TOOLS}/{tool_id}/activate",
+        headers={"If-Match": str(lock)},
+    )
     assert reactivated.status_code == 200
     assert reactivated.json()["status"] == MCPToolStatus.ACTIVE
+    lock = int(reactivated.json()["lock_version"])
 
-    idle = await db_client.post(f"{API_TOOLS}/{tool_id}/deactivate")
+    idle = await db_client.post(
+        f"{API_TOOLS}/{tool_id}/deactivate",
+        headers={"If-Match": str(lock)},
+    )
     assert idle.status_code == 200
-    idle2 = await db_client.post(f"{API_TOOLS}/{tool_id}/deactivate")
+    lock = int(idle.json()["lock_version"])
+    idle2 = await db_client.post(
+        f"{API_TOOLS}/{tool_id}/deactivate",
+        headers={"If-Match": str(lock)},
+    )
     assert idle2.status_code == 200
     assert idle2.json()["status"] == MCPToolStatus.INACTIVE
+    assert idle2.json()["lock_version"] == lock
+
+
+@pytest.mark.asyncio
+async def test_tool_activate_stale_if_match_conflict(
+    db_client: AsyncClient,
+    override_mcp_client,
+) -> None:
+    _server, tool = await _discover_tools(db_client, override_mcp_client)
+    tool_id = tool["id"]
+    lock = int(tool["lock_version"])
+    assert lock == 1
+
+    activated = await db_client.post(
+        f"{API_TOOLS}/{tool_id}/activate",
+        headers={"If-Match": "1"},
+    )
+    assert activated.status_code == 200
+    assert activated.json()["status"] == MCPToolStatus.ACTIVE
+    assert activated.json()["lock_version"] == 2
+
+    stale = await db_client.post(
+        f"{API_TOOLS}/{tool_id}/activate",
+        headers={"If-Match": "1"},
+    )
+    assert stale.status_code == 409
+    assert stale.json()["error"]["code"] == "RESOURCE_VERSION_CONFLICT"
+
+
+@pytest.mark.asyncio
+async def test_tool_deactivate_requires_if_match(
+    db_client: AsyncClient,
+    override_mcp_client,
+) -> None:
+    _server, tool = await _discover_tools(db_client, override_mcp_client)
+    tool_id = tool["id"]
+    activated = await db_client.post(
+        f"{API_TOOLS}/{tool_id}/activate",
+        headers={"If-Match": str(tool["lock_version"])},
+    )
+    assert activated.status_code == 200
+
+    missing = await db_client.post(f"{API_TOOLS}/{tool_id}/deactivate")
+    assert missing.status_code == 422
+    assert missing.json()["error"]["code"] == "VALIDATION_ERROR"
+
+    bad = await db_client.post(
+        f"{API_TOOLS}/{tool_id}/deactivate",
+        headers={"If-Match": "not-an-int"},
+    )
+    assert bad.status_code == 422
+    assert bad.json()["error"]["code"] == "VALIDATION_ERROR"
 
 
 @pytest.mark.asyncio
@@ -180,14 +257,26 @@ async def test_tool_missing_blocked_activate_conflict(
     async with db_session_factory() as session:
         row = await MCPToolRepository(session).get(tool_id)
         assert row is not None
-        await MCPToolRepository(session).update_status(row, status=MCPToolStatus.MISSING)
+        updated = await MCPToolRepository(session).update_atomic(
+            tool_id,
+            expected_lock_version=int(row.lock_version),
+            status=MCPToolStatus.MISSING,
+        )
+        assert updated is not None
         await session.commit()
+        lock = int(updated.lock_version)
 
-    conflict = await db_client.post(f"{API_TOOLS}/{tool_id}/activate")
+    conflict = await db_client.post(
+        f"{API_TOOLS}/{tool_id}/activate",
+        headers={"If-Match": str(lock)},
+    )
     assert conflict.status_code == 409
     assert conflict.json()["error"]["code"] == "RESOURCE_CONFLICT"
 
-    preserved = await db_client.post(f"{API_TOOLS}/{tool_id}/deactivate")
+    preserved = await db_client.post(
+        f"{API_TOOLS}/{tool_id}/deactivate",
+        headers={"If-Match": str(lock)},
+    )
     assert preserved.status_code == 409
     detail = await db_client.get(f"{API_TOOLS}/{tool_id}")
     assert detail.json()["status"] == MCPToolStatus.MISSING
@@ -195,12 +284,24 @@ async def test_tool_missing_blocked_activate_conflict(
     async with db_session_factory() as session:
         row = await MCPToolRepository(session).get(tool_id)
         assert row is not None
-        await MCPToolRepository(session).update_status(row, status=MCPToolStatus.BLOCKED)
+        updated = await MCPToolRepository(session).update_atomic(
+            tool_id,
+            expected_lock_version=int(row.lock_version),
+            status=MCPToolStatus.BLOCKED,
+        )
+        assert updated is not None
         await session.commit()
+        lock = int(updated.lock_version)
 
-    blocked_act = await db_client.post(f"{API_TOOLS}/{tool_id}/activate")
+    blocked_act = await db_client.post(
+        f"{API_TOOLS}/{tool_id}/activate",
+        headers={"If-Match": str(lock)},
+    )
     assert blocked_act.status_code == 409
-    blocked_deact = await db_client.post(f"{API_TOOLS}/{tool_id}/deactivate")
+    blocked_deact = await db_client.post(
+        f"{API_TOOLS}/{tool_id}/deactivate",
+        headers={"If-Match": str(lock)},
+    )
     assert blocked_deact.status_code == 409
     assert (await db_client.get(f"{API_TOOLS}/{tool_id}")).json()["status"] == MCPToolStatus.BLOCKED
 
@@ -211,7 +312,10 @@ async def test_discovered_deactivate_conflict(
     override_mcp_client,
 ) -> None:
     _server, tool = await _discover_tools(db_client, override_mcp_client)
-    response = await db_client.post(f"{API_TOOLS}/{tool['id']}/deactivate")
+    response = await db_client.post(
+        f"{API_TOOLS}/{tool['id']}/deactivate",
+        headers={"If-Match": str(tool["lock_version"])},
+    )
     assert response.status_code == 409
     assert response.json()["error"]["code"] == "RESOURCE_CONFLICT"
 

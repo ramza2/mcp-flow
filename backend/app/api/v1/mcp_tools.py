@@ -50,6 +50,19 @@ def _parse_if_match(if_match: str | None) -> int | None:
     return value
 
 
+def _require_if_match(if_match: str | None) -> int:
+    """Action endpoints (no body) require an If-Match lock_version header."""
+
+    value = _parse_if_match(if_match)
+    if value is None:
+        raise AppError(
+            code="VALIDATION_ERROR",
+            message="Requires If-Match header.",
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        )
+    return value
+
+
 def _resolve_expected_lock_version(
     if_match: str | None,
     body_lock_version: int | None,
@@ -138,9 +151,11 @@ async def patch_tool(
 async def activate_tool(
     tool_id: uuid.UUID,
     session: DbSessionDep,
+    if_match: Annotated[str | None, Header(alias="If-Match")] = None,
 ) -> MCPToolResponse:
+    expected = _require_if_match(if_match)
     service = MCPToolService(session)
-    tool = await service.activate(tool_id)
+    tool = await service.activate(tool_id, expected_lock_version=expected)
     return MCPToolResponse.model_validate(tool)
 
 
@@ -148,9 +163,11 @@ async def activate_tool(
 async def deactivate_tool(
     tool_id: uuid.UUID,
     session: DbSessionDep,
+    if_match: Annotated[str | None, Header(alias="If-Match")] = None,
 ) -> MCPToolResponse:
+    expected = _require_if_match(if_match)
     service = MCPToolService(session)
-    tool = await service.deactivate(tool_id)
+    tool = await service.deactivate(tool_id, expected_lock_version=expected)
     return MCPToolResponse.model_validate(tool)
 
 

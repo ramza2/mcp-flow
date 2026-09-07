@@ -5,6 +5,7 @@ from __future__ import annotations
 import uuid
 
 from fastapi import status
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import AppError
@@ -31,6 +32,16 @@ class MCPToolPolicyService:
                 message="MCP tool not found.",
                 status_code=status.HTTP_404_NOT_FOUND,
             )
+
+    def _raise_concurrent_create(self) -> None:
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message=(
+                "MCP tool policy was created concurrently; "
+                "refetch and update with lock_version."
+            ),
+            status_code=status.HTTP_409_CONFLICT,
+        )
 
     async def get(self, tool_id: uuid.UUID) -> MCPToolPolicy:
         await self._require_tool(tool_id)
@@ -74,6 +85,33 @@ class MCPToolPolicyService:
             )
         return None
 
+    async def _create_under_tool_lock(
+        self,
+        tool_id: uuid.UUID,
+        fields: dict,
+    ) -> MCPToolPolicy:
+        locked = await self._tools.lock_for_update(tool_id)
+        if locked is None:
+            raise AppError(
+                code="NOT_FOUND",
+                message="MCP tool not found.",
+                status_code=status.HTTP_404_NOT_FOUND,
+            )
+
+        existing = await self._policies.get_by_tool_id(tool_id)
+        if existing is not None:
+            self._raise_concurrent_create()
+
+        try:
+            created = await self._policies.create(mcp_tool_id=tool_id, **fields)
+            await self._session.commit()
+        except IntegrityError:
+            await self._session.rollback()
+            self._raise_concurrent_create()
+
+        await self._session.refresh(created)
+        return created
+
     async def put(
         self,
         tool_id: uuid.UUID,
@@ -100,10 +138,7 @@ class MCPToolPolicyService:
         }
 
         if existing is None:
-            created = await self._policies.create(mcp_tool_id=tool_id, **fields)
-            await self._session.commit()
-            await self._session.refresh(created)
-            return created
+            return await self._create_under_tool_lock(tool_id, fields)
 
         if expected_lock_version is None:
             raise AppError(
