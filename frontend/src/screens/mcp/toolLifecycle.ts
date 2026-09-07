@@ -22,17 +22,28 @@ export function stringTags(tags: JsonValue[] | null | undefined): string[] {
   return tags.filter((t): t is string => typeof t === 'string');
 }
 
-export function normalizeTagInput(raw: string): string[] {
+export type TagParseResult =
+  | { ok: true; tags: string[] }
+  | { ok: false; error: string };
+
+/** Normalize tags; reject oversize/overcount instead of silent truncate. */
+export function parseTagInput(raw: string): TagParseResult {
   const cleaned: string[] = [];
   const seen = new Set<string>();
   for (const part of raw.split(/[,\n]/)) {
     const value = part.trim();
-    if (!value || value.length > 64 || seen.has(value)) continue;
+    if (!value) continue;
+    if (value.length > 64) {
+      return { ok: false, error: '각 태그는 최대 64자까지 입력할 수 있습니다.' };
+    }
+    if (seen.has(value)) continue;
     seen.add(value);
     cleaned.push(value);
-    if (cleaned.length >= 32) break;
   }
-  return cleaned;
+  if (cleaned.length > 32) {
+    return { ok: false, error: '태그는 최대 32개까지 입력할 수 있습니다.' };
+  }
+  return { ok: true, tags: cleaned };
 }
 
 export type ToolLifecycleAction = 'activate' | 'deactivate' | null;

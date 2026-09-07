@@ -23,7 +23,7 @@ import ToolVerificationTab from './ToolVerificationTab';
 import {
   isLifecycleActionDisabled,
   isVersionConflict,
-  normalizeTagInput,
+  parseTagInput,
   stringTags,
   toFeedbackError,
   toolLifecycleAction,
@@ -207,6 +207,11 @@ export default function MCPToolDetail() {
   const saveMetadata = async () => {
     if (!tool) return;
     setEditError(null);
+    const parsedTags = parseTagInput(tagsInput);
+    if (!parsedTags.ok) {
+      setEditError(parsedTags.error);
+      return;
+    }
     setEditSaving(true);
     try {
       const updated = await updateMCPTool(
@@ -214,20 +219,24 @@ export default function MCPToolDetail() {
         {
           display_name: displayName.trim() || null,
           description_override: descriptionOverride.trim() || null,
-          tags: normalizeTagInput(tagsInput),
+          tags: parsedTags.tags,
         },
         tool.lock_version,
       );
       if (!mountedRef.current) return;
+      setMutationError(null);
       setTool(updated);
       setEditOpen(false);
     } catch (err) {
       if (!mountedRef.current) return;
       if (isVersionConflict(err)) {
-        setEditError(
-          '다른 작업으로 Tool이 변경되었습니다. 최신 상태를 다시 불러옵니다. ' +
+        setMutationError({
+          message:
+            '다른 작업으로 Tool이 변경되었습니다. 최신 상태를 다시 불러옵니다. ' +
             (isApiError(err) ? err.message : ''),
-        );
+          requestId: isApiError(err) ? err.requestId ?? undefined : undefined,
+          code: isApiError(err) ? err.code : undefined,
+        });
         setEditOpen(false);
         await refetchToolOnly();
       } else {

@@ -223,4 +223,118 @@ describe('MCPTools — API list + lifecycle', () => {
       );
     });
   });
+
+  it('tracks per-tool mutation pending independently for concurrent A/B lifecycle', async () => {
+    const user = userEvent.setup();
+    let resolveActivate!: (value: Response) => void;
+    let resolveDeactivate!: (value: Response) => void;
+    const pendingActivate = new Promise<Response>(resolve => {
+      resolveActivate = resolve;
+    });
+    const pendingDeactivate = new Promise<Response>(resolve => {
+      resolveDeactivate = resolve;
+    });
+
+    const toolA = { ...discoveredTool, display_name: 'Tool A Docs' };
+    const toolB = { ...activeTool, display_name: 'Tool B Active' };
+    const list = {
+      items: [toolA, toolB],
+      page: 1,
+      page_size: 20,
+      total: 2,
+      has_next: false,
+    };
+    const fetchMock = vi.fn((input: RequestInfo, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input.url;
+      if (url.includes(`/mcp/tools/${toolA.id}/activate`) && init?.method === 'POST') {
+        return pendingActivate;
+      }
+      if (url.includes(`/mcp/tools/${toolB.id}/deactivate`) && init?.method === 'POST') {
+        return pendingDeactivate;
+      }
+      if (url.includes('/mcp/tools')) return Promise.resolve(jsonResponse(list));
+      if (url.includes('/mcp/servers')) return Promise.resolve(jsonResponse(serverList));
+      return Promise.resolve(new Response('Not found', { status: 404 }));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    renderWithRouter(<MCPTools />, { path: '/mcp/tools', route: '/mcp/tools' });
+    await screen.findByText('Tool A Docs');
+    await screen.findByText('Tool B Active');
+
+    const activateBtn = screen.getByRole('button', { name: 'Activate' });
+    const deactivateBtn = screen.getByRole('button', { name: 'Deactivate' });
+    await user.click(activateBtn);
+    await user.click(deactivateBtn);
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'Activate' })).toBeDisabled();
+      expect(screen.getByRole('button', { name: 'Deactivate' })).toBeDisabled();
+    });
+
+    resolveActivate(jsonResponse({ ...toolA, status: 'ACTIVE', lock_version: 2 }));
+
+    // A finished → its new Deactivate is enabled; B's pending Deactivate stays disabled.
+    await waitFor(() => {
+      const deactivateButtons = screen.getAllByRole('button', { name: 'Deactivate' });
+      expect(deactivateButtons).toHaveLength(2);
+      expect(deactivateButtons.filter(btn => (btn as HTMLButtonElement).disabled)).toHaveLength(1);
+      expect(deactivateButtons.filter(btn => !(btn as HTMLButtonElement).disabled)).toHaveLength(1);
+    });
+
+    resolveDeactivate(jsonResponse({ ...toolB, status: 'INACTIVE', lock_version: 3 }));
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'Deactivate' })).toBeEnabled();
+      expect(screen.getByRole('button', { name: 'Activate' })).toBeEnabled();
+    });
+  });
+
+  it('ignores duplicate clicks on the same tool while mutation is pending', async () => {
+    const user = userEvent.setup();
+    let resolveActivate!: (value: Response) => void;
+    const pendingActivate = new Promise<Response>(resolve => {
+      resolveActivate = resolve;
+    });
+    let activatePosts = 0;
+
+    const fetchMock = vi.fn((input: RequestInfo, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input.url;
+      if (url.includes('/activate') && init?.method === 'POST') {
+        activatePosts += 1;
+        return pendingActivate;
+      }
+      if (url.includes('/mcp/tools')) {
+        return Promise.resolve(
+          jsonResponse({
+            items: [discoveredTool],
+            page: 1,
+            page_size: 20,
+            total: 1,
+            has_next: false,
+          }),
+        );
+      }
+      if (url.includes('/mcp/servers')) return Promise.resolve(jsonResponse(serverList));
+      return Promise.resolve(new Response('Not found', { status: 404 }));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    renderWithRouter(<MCPTools />, { path: '/mcp/tools', route: '/mcp/tools' });
+    await screen.findByText('Search Docs');
+
+    const btn = screen.getByRole('button', { name: 'Activate' });
+    await user.click(btn);
+    await user.click(btn);
+    await user.click(btn);
+
+    await waitFor(() => expect(activatePosts).toBe(1));
+    expect(activatePosts).toBe(1);
+
+    resolveActivate(jsonResponse({ ...discoveredTool, status: 'ACTIVE', lock_version: 2 }));
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'Deactivate' })).toBeEnabled();
+    });
+    expect(activatePosts).toBe(1);
+  });
 });

@@ -82,7 +82,6 @@ export default function ToolPolicyTab({ toolId, active }: Props) {
     requestRef.current = controller;
     setLoading(true);
     setError(null);
-    setMutationError(null);
 
     getMCPToolPolicy(toolId, controller.signal)
       .then(data => {

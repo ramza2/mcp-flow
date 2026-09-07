@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router';
 import PageHeader from '../../components/ui/PageHeader';
 import DataTable, { Column } from '../../components/ui/DataTable';
@@ -36,7 +36,8 @@ export default function MCPTools() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<FeedbackError | null>(null);
   const [actionError, setActionError] = useState<FeedbackError | null>(null);
-  const [mutatingId, setMutatingId] = useState<string | null>(null);
+  const [mutatingIds, setMutatingIds] = useState<Set<string>>(() => new Set());
+  const mutatingIdsRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     const timer = setTimeout(() => {
@@ -101,7 +102,9 @@ export default function MCPTools() {
   const serverName = (id: string) => servers.find(s => s.id === id)?.name ?? shortenServerId(id);
 
   const runLifecycle = async (tool: MCPToolDto, action: 'activate' | 'deactivate') => {
-    setMutatingId(tool.id);
+    if (mutatingIdsRef.current.has(tool.id)) return;
+    mutatingIdsRef.current.add(tool.id);
+    setMutatingIds(new Set(mutatingIdsRef.current));
     setActionError(null);
     try {
       const updated =
@@ -128,7 +131,8 @@ export default function MCPTools() {
         setActionError(toFeedbackError(err, `${action}에 실패했습니다.`));
       }
     } finally {
-      setMutatingId(null);
+      mutatingIdsRef.current.delete(tool.id);
+      setMutatingIds(new Set(mutatingIdsRef.current));
     }
   };
 
@@ -163,7 +167,7 @@ export default function MCPTools() {
       render: r => {
         const action = toolLifecycleAction(r.status);
         const disabled = isLifecycleActionDisabled(r.status);
-        const busy = mutatingId === r.id;
+        const busy = mutatingIds.has(r.id);
         if (disabled || !action) {
           return (
             <Button
