@@ -1,15 +1,24 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router';
 import PageHeader from '../../components/ui/PageHeader';
 import DataTable, { Column } from '../../components/ui/DataTable';
 import StatusBadge from '../../components/ui/StatusBadge';
 import FilterBar from '../../components/ui/FilterBar';
 import Pagination from '../../components/ui/Pagination';
-import { EmptyState, ErrorState, LoadingSkeleton } from '../../components/ui/EmptyState';
-import { listMCPServers, listMCPTools } from '../../api/mcp';
+import Button from '../../components/ui/Button';
+import { EmptyState, ErrorState, InlineAlert, LoadingSkeleton } from '../../components/ui/EmptyState';
+import { activateMCPTool, deactivateMCPTool, getMCPTool, listMCPServers, listMCPTools } from '../../api/mcp';
 import { isAbortError, isApiError } from '../../api/client';
 import type { MCPServerDto, MCPToolDto } from '../../api/types';
 import { formatTimestamp, MCP_TOOL_STATUSES } from '../../domain';
+import {
+  isLifecycleActionDisabled,
+  isVersionConflict,
+  mergeToolRow,
+  toFeedbackError,
+  toolLifecycleAction,
+  type FeedbackError,
+} from './toolLifecycle';
 
 const PAGE_SIZE = 20;
 
@@ -25,7 +34,10 @@ export default function MCPTools() {
   const [total, setTotal] = useState(0);
   const [hasNext, setHasNext] = useState(false);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<{ message: string; requestId?: string } | null>(null);
+  const [error, setError] = useState<FeedbackError | null>(null);
+  const [actionError, setActionError] = useState<FeedbackError | null>(null);
+  const [mutatingIds, setMutatingIds] = useState<Set<string>>(() => new Set());
+  const mutatingIdsRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     const timer = setTimeout(() => {
@@ -68,11 +80,7 @@ export default function MCPTools() {
       })
       .catch(err => {
         if (isAbortError(err) || cancelled) return;
-        const apiErr = isApiError(err) ? err : null;
-        setError({
-          message: apiErr?.message ?? 'Tool 목록을 불러오지 못했습니다.',
-          requestId: apiErr?.requestId ?? undefined,
-        });
+        setError(toFeedbackError(err, 'Tool 목록을 불러오지 못했습니다.'));
         setTools([]);
         setTotal(0);
         setHasNext(false);
@@ -92,6 +100,41 @@ export default function MCPTools() {
   }, [loadTools]);
 
   const serverName = (id: string) => servers.find(s => s.id === id)?.name ?? shortenServerId(id);
+
+  const runLifecycle = async (tool: MCPToolDto, action: 'activate' | 'deactivate') => {
+    if (mutatingIdsRef.current.has(tool.id)) return;
+    mutatingIdsRef.current.add(tool.id);
+    setMutatingIds(new Set(mutatingIdsRef.current));
+    setActionError(null);
+    try {
+      const updated =
+        action === 'activate'
+          ? await activateMCPTool(tool.id, tool.lock_version)
+          : await deactivateMCPTool(tool.id, tool.lock_version);
+      setTools(prev => mergeToolRow(prev, updated));
+    } catch (err) {
+      if (isVersionConflict(err)) {
+        setActionError({
+          message:
+            '다른 작업으로 Tool 상태가 변경되었습니다. 최신 상태를 다시 불러옵니다. ' +
+            (isApiError(err) ? err.message : ''),
+          requestId: isApiError(err) ? err.requestId ?? undefined : undefined,
+          code: isApiError(err) ? err.code : undefined,
+        });
+        try {
+          const latest = await getMCPTool(tool.id);
+          setTools(prev => mergeToolRow(prev, latest));
+        } catch {
+          loadTools();
+        }
+      } else {
+        setActionError(toFeedbackError(err, `${action}에 실패했습니다.`));
+      }
+    } finally {
+      mutatingIdsRef.current.delete(tool.id);
+      setMutatingIds(new Set(mutatingIdsRef.current));
+    }
+  };
 
   const columns: Column<MCPToolDto>[] = [
     {
@@ -116,6 +159,42 @@ export default function MCPTools() {
       key: 'updatedAt',
       label: '수정일',
       render: r => <span className="text-xs text-slate-400">{formatTimestamp(r.updated_at)}</span>,
+    },
+    {
+      key: 'actions',
+      label: 'Action',
+      width: 'w-28',
+      render: r => {
+        const action = toolLifecycleAction(r.status);
+        const disabled = isLifecycleActionDisabled(r.status);
+        const busy = mutatingIds.has(r.id);
+        if (disabled || !action) {
+          return (
+            <Button
+              variant="ghost"
+              size="sm"
+              disabled
+              title="현재 상태에서는 활성화/비활성화할 수 없습니다."
+              onClick={e => e.stopPropagation()}
+            >
+              —
+            </Button>
+          );
+        }
+        return (
+          <Button
+            variant="outline"
+            size="sm"
+            loading={busy}
+            onClick={e => {
+              e.stopPropagation();
+              void runLifecycle(r, action);
+            }}
+          >
+            {action === 'activate' ? 'Activate' : 'Deactivate'}
+          </Button>
+        );
+      },
     },
   ];
 
@@ -147,6 +226,14 @@ export default function MCPTools() {
           ]}
           onFilter={handleFilter}
         />
+        {actionError && (
+          <div className="space-y-1">
+            <InlineAlert type="error" message={actionError.message} />
+            {actionError.requestId && (
+              <p className="font-mono text-xs text-slate-400">Request ID: {actionError.requestId}</p>
+            )}
+          </div>
+        )}
         <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
           {loading ? (
             <LoadingSkeleton rows={6} />

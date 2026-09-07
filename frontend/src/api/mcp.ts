@@ -12,8 +12,14 @@ import type {
   MCPServerListDto,
   MCPToolDto,
   MCPToolListDto,
+  MCPToolPolicyDto,
+  MCPToolPolicyPutRequest,
+  MCPToolUpdateRequest,
   MCPToolVersionDto,
   MCPToolVersionListDto,
+  ToolVerificationCreateRequest,
+  ToolVerificationDto,
+  ToolVerificationListDto,
 } from './types';
 
 function pageQuery(params: ListParams = {}) {
@@ -26,6 +32,10 @@ function pageQuery(params: ListParams = {}) {
     transport_type: params.transport_type,
     mcp_server_id: params.mcp_server_id,
   };
+}
+
+function ifMatchHeaders(lockVersion: number): Record<string, string> {
+  return { 'If-Match': String(lockVersion) };
 }
 
 export function listMCPServers(params: ListParams = {}) {
@@ -134,4 +144,97 @@ export function getToolVersion(toolId: string, versionId: string, signal?: Abort
   return apiRequest<MCPToolVersionDto>(`/mcp/tools/${toolId}/versions/${versionId}`, {
     signal,
   });
+}
+
+export function updateMCPTool(
+  toolId: string,
+  body: MCPToolUpdateRequest,
+  lockVersion: number,
+  signal?: AbortSignal,
+) {
+  return apiRequest<MCPToolDto>(`/mcp/tools/${toolId}`, {
+    method: 'PATCH',
+    body,
+    headers: ifMatchHeaders(lockVersion),
+    signal,
+  });
+}
+
+export function activateMCPTool(toolId: string, lockVersion: number, signal?: AbortSignal) {
+  return apiRequest<MCPToolDto>(`/mcp/tools/${toolId}/activate`, {
+    method: 'POST',
+    headers: ifMatchHeaders(lockVersion),
+    signal,
+  });
+}
+
+export function deactivateMCPTool(toolId: string, lockVersion: number, signal?: AbortSignal) {
+  return apiRequest<MCPToolDto>(`/mcp/tools/${toolId}/deactivate`, {
+    method: 'POST',
+    headers: ifMatchHeaders(lockVersion),
+    signal,
+  });
+}
+
+export function getMCPToolPolicy(toolId: string, signal?: AbortSignal) {
+  return apiRequest<MCPToolPolicyDto>(`/mcp/tools/${toolId}/policy`, { signal });
+}
+
+export function putMCPToolPolicy(
+  toolId: string,
+  body: MCPToolPolicyPutRequest,
+  options: { lockVersion?: number; signal?: AbortSignal } = {},
+) {
+  return apiRequest<MCPToolPolicyDto>(`/mcp/tools/${toolId}/policy`, {
+    method: 'PUT',
+    body,
+    headers:
+      options.lockVersion !== undefined ? ifMatchHeaders(options.lockVersion) : undefined,
+    signal: options.signal,
+  });
+}
+
+export function listToolVerifications(
+  toolId: string,
+  versionId: string,
+  params: Pick<ListParams, 'page' | 'page_size' | 'signal'> = {},
+) {
+  return apiRequest<ToolVerificationListDto>(
+    `/mcp/tools/${toolId}/versions/${versionId}/verifications`,
+    {
+      query: {
+        page: params.page ?? 1,
+        page_size: params.page_size ?? 20,
+      },
+      signal: params.signal,
+    },
+  );
+}
+
+export function createToolVerification(
+  toolId: string,
+  versionId: string,
+  body: ToolVerificationCreateRequest,
+  signal?: AbortSignal,
+) {
+  return apiRequest<ToolVerificationDto>(
+    `/mcp/tools/${toolId}/versions/${versionId}/verifications`,
+    {
+      method: 'POST',
+      body,
+      signal,
+    },
+  );
+}
+
+export function getToolVerification(
+  toolId: string,
+  versionId: string,
+  verificationId: string,
+  signal?: AbortSignal,
+) {
+  return apiRequest<ToolVerificationDto>(
+    `/mcp/tools/${toolId}/versions/${versionId}/verifications/${verificationId}`,
+    { signal },
+  );
 }

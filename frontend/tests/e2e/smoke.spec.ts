@@ -5,7 +5,9 @@ import {
   discoveryList,
   serverList,
   toolList,
+  toolPolicy,
   validVersion,
+  verificationList,
   versionList,
 } from '../fixtures/mcp-api';
 
@@ -46,8 +48,22 @@ async function stubMcpApi(page: import('@playwright/test').Page) {
     if (url.includes('/mcp/tools') && method === 'GET' && !url.match(/\/mcp\/tools\/[^/?]+/)) {
       return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(toolList) });
     }
-    if (url.includes(`/mcp/tools/${discoveredTool.id}`) && !url.includes('/versions')) {
+    if (url.includes(`/mcp/tools/${discoveredTool.id}`) && !url.includes('/versions') && !url.includes('/policy')) {
       return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(discoveredTool) });
+    }
+    if (url.includes(`/mcp/tools/${discoveredTool.id}/policy`)) {
+      return route.fulfill({
+        status: 404,
+        contentType: 'application/json',
+        body: JSON.stringify({ error: { code: 'NOT_FOUND', message: 'policy missing' } }),
+      });
+    }
+    if (url.includes(`/mcp/tools/${discoveredTool.id}/versions`) && url.includes('/verifications')) {
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify(verificationList),
+      });
     }
     if (url.includes(`/mcp/tools/${discoveredTool.id}/versions`) && url.includes(validVersion.id)) {
       return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(validVersion) });
@@ -86,4 +102,20 @@ test('smoke: /mcp/tools/:id loads with API stub', async ({ page }) => {
   expect(response?.ok() ?? true).toBeTruthy();
   await expect(page.locator('body')).toContainText(/Search Docs/i);
   await expect(page.locator('body')).not.toContainText(/데이터를 불러오지 못했습니다/i);
+});
+
+test('smoke: /mcp/tools/:id Policy and Verification tabs open', async ({ page }) => {
+  await stubMcpApi(page);
+  await page.goto(`/mcp/tools/${discoveredTool.id}`);
+  await expect(page.locator('body')).toContainText(/Search Docs/i);
+
+  await page.getByRole('button', { name: /^Policy$/i }).click();
+  await expect(page.locator('body')).toContainText(/아직 Tool Policy가 설정되지 않았습니다/i);
+
+  await page.getByRole('button', { name: /^Verification$/i }).click();
+  await expect(page.locator('body')).toContainText(/Current|Historical/i);
+  await expect(page.locator('body')).not.toContainText(/Something went wrong|Application Error|Fatal/i);
+
+  // keep fixture referenced for type alignment
+  expect(toolPolicy.risk_class).toBe('READ_ONLY');
 });

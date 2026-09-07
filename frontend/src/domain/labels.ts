@@ -5,6 +5,7 @@ import type {
   MCPDiscoveryMode,
   MCPProtocolEra,
   MCPTransportType,
+  RiskClass,
   ScheduleTargetType,
 } from './types';
 
@@ -56,6 +57,14 @@ export const MCP_CHECK_STATUS_LABELS: Record<MCPCheckStatus, string> = {
   TIMED_OUT: 'Timed Out',
 };
 
+export const RISK_CLASS_LABELS: Record<RiskClass, string> = {
+  READ_ONLY: 'Read only',
+  IDEMPOTENT_WRITE: 'Idempotent write',
+  NON_IDEMPOTENT_WRITE: 'Non-idempotent write',
+  DESTRUCTIVE: 'Destructive',
+  UNKNOWN: 'Unknown',
+};
+
 export function labelExecutionSource(value: string): string {
   return EXECUTION_SOURCE_LABELS[value as ExecutionSourceType] ?? value;
 }
@@ -82,6 +91,10 @@ export function labelProtocolEra(value: string): string {
 
 export function labelCheckStatus(value: string): string {
   return MCP_CHECK_STATUS_LABELS[value as MCPCheckStatus] ?? value;
+}
+
+export function labelRiskClass(value: string): string {
+  return RISK_CLASS_LABELS[value as RiskClass] ?? value;
 }
 
 /** Format Backend ISO-8601 timestamps for presentation only. */

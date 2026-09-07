@@ -12,6 +12,8 @@ import type {
   MCPServerStatus,
   MCPToolStatus,
   MCPTransportType,
+  RiskClass,
+  ToolVerificationStatus,
   ToolVersionValidationStatus,
 } from '../domain/types';
 
@@ -161,6 +163,71 @@ export interface MCPToolVersionDto {
 }
 
 export type MCPToolVersionListDto = PageDto<MCPToolVersionDto>;
+
+/** Operator-editable metadata only — status uses activate/deactivate. */
+export interface MCPToolUpdateRequest {
+  display_name?: string | null;
+  description_override?: string | null;
+  tags?: string[] | null;
+}
+
+export interface MCPToolPolicyPutRequest {
+  risk_class: RiskClass;
+  requires_confirmation?: boolean;
+  requires_approval?: boolean;
+  approval_policy_id?: string | null;
+  timeout_ms: number;
+  max_attempts: number;
+  backoff_policy?: Record<string, JsonValue> | null;
+  max_result_bytes: number;
+  allow_auto_select?: boolean;
+  data_classification?: string | null;
+  policy_metadata?: Record<string, JsonValue> | null;
+}
+
+export interface MCPToolPolicyDto {
+  id: string;
+  mcp_tool_id: string;
+  risk_class: RiskClass;
+  requires_confirmation: boolean;
+  requires_approval: boolean;
+  approval_policy_id: string | null;
+  timeout_ms: number;
+  max_attempts: number;
+  backoff_policy: Record<string, JsonValue> | null;
+  max_result_bytes: number;
+  allow_auto_select: boolean;
+  data_classification: string | null;
+  policy_metadata: Record<string, JsonValue> | null;
+  updated_at: string;
+  updated_by: string | null;
+  lock_version: number;
+}
+
+/** Frontend create form supports PENDING / FAILED only (VERIFIED deferred). */
+export interface ToolVerificationCreateRequest {
+  status: ToolVerificationStatus;
+  criteria_version: string;
+  test_execution_id?: string | null;
+  result_summary?: Record<string, JsonValue> | null;
+  evidence_blob_id?: string | null;
+  expires_at?: string | null;
+}
+
+export interface ToolVerificationDto {
+  id: string;
+  mcp_tool_version_id: string;
+  status: ToolVerificationStatus;
+  verified_by: string | null;
+  verified_at: string;
+  test_execution_id: string | null;
+  criteria_version: string;
+  result_summary: Record<string, JsonValue> | null;
+  evidence_blob_id: string | null;
+  expires_at: string | null;
+}
+
+export type ToolVerificationListDto = PageDto<ToolVerificationDto>;
 
 export interface ListParams {
   page?: number;

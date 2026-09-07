@@ -4,23 +4,31 @@ import { ArrowLeft } from 'lucide-react';
 import StatusBadge from '../../components/ui/StatusBadge';
 import { TabBar } from '../../components/ui/Tabs';
 import JsonViewer from '../../components/ui/JsonViewer';
+import Button from '../../components/ui/Button';
+import Dialog from '../../components/ui/Dialog';
 import { EmptyState, ErrorState, InlineAlert, LoadingSkeleton } from '../../components/ui/EmptyState';
-import { getMCPTool, getToolVersion, listToolVersions } from '../../api/mcp';
+import {
+  activateMCPTool,
+  deactivateMCPTool,
+  getMCPTool,
+  getToolVersion,
+  listToolVersions,
+  updateMCPTool,
+} from '../../api/mcp';
 import { isAbortError, isApiError } from '../../api/client';
 import type { MCPToolDto, MCPToolVersionDto } from '../../api/types';
 import { formatTimestamp, shortenId } from '../../domain';
-
-type FeedbackError = { message: string; requestId?: string };
-
-function toFeedbackError(err: unknown, fallback: string): FeedbackError {
-  if (isApiError(err)) {
-    return {
-      message: err.message,
-      requestId: err.requestId ?? undefined,
-    };
-  }
-  return { message: fallback };
-}
+import ToolPolicyTab from './ToolPolicyTab';
+import ToolVerificationTab from './ToolVerificationTab';
+import {
+  isLifecycleActionDisabled,
+  isVersionConflict,
+  parseTagInput,
+  stringTags,
+  toFeedbackError,
+  toolLifecycleAction,
+  type FeedbackError,
+} from './toolLifecycle';
 
 export default function MCPToolDetail() {
   const { toolId } = useParams();
@@ -37,6 +45,14 @@ export default function MCPToolDetail() {
   const [error, setError] = useState<FeedbackError | null>(null);
   const [versionLoading, setVersionLoading] = useState(false);
   const [versionError, setVersionError] = useState<FeedbackError | null>(null);
+  const [statusMutating, setStatusMutating] = useState(false);
+  const [mutationError, setMutationError] = useState<FeedbackError | null>(null);
+  const [editOpen, setEditOpen] = useState(false);
+  const [editSaving, setEditSaving] = useState(false);
+  const [editError, setEditError] = useState<string | null>(null);
+  const [displayName, setDisplayName] = useState('');
+  const [descriptionOverride, setDescriptionOverride] = useState('');
+  const [tagsInput, setTagsInput] = useState('');
 
   useEffect(() => {
     mountedRef.current = true;
@@ -138,6 +154,99 @@ export default function MCPToolDetail() {
     return loadTool();
   }, [loadTool]);
 
+  const refetchToolOnly = async () => {
+    if (!toolId) return;
+    try {
+      const latest = await getMCPTool(toolId);
+      if (mountedRef.current) setTool(latest);
+    } catch (err) {
+      if (mountedRef.current) {
+        setMutationError(toFeedbackError(err, '최신 Tool 상태를 불러오지 못했습니다.'));
+      }
+    }
+  };
+
+  const handleLifecycle = async (action: 'activate' | 'deactivate') => {
+    if (!tool) return;
+    setStatusMutating(true);
+    setMutationError(null);
+    try {
+      const updated =
+        action === 'activate'
+          ? await activateMCPTool(tool.id, tool.lock_version)
+          : await deactivateMCPTool(tool.id, tool.lock_version);
+      if (mountedRef.current) setTool(updated);
+    } catch (err) {
+      if (!mountedRef.current) return;
+      if (isVersionConflict(err)) {
+        setMutationError({
+          message:
+            '다른 작업으로 Tool 상태가 변경되었습니다. 최신 상태를 다시 불러옵니다. ' +
+            (isApiError(err) ? err.message : ''),
+          requestId: isApiError(err) ? err.requestId ?? undefined : undefined,
+          code: isApiError(err) ? err.code : undefined,
+        });
+        await refetchToolOnly();
+      } else {
+        setMutationError(toFeedbackError(err, `${action}에 실패했습니다.`));
+      }
+    } finally {
+      if (mountedRef.current) setStatusMutating(false);
+    }
+  };
+
+  const openEdit = () => {
+    if (!tool) return;
+    setDisplayName(tool.display_name ?? '');
+    setDescriptionOverride(tool.description_override ?? '');
+    setTagsInput(stringTags(tool.tags).join(', '));
+    setEditError(null);
+    setEditOpen(true);
+  };
+
+  const saveMetadata = async () => {
+    if (!tool) return;
+    setEditError(null);
+    const parsedTags = parseTagInput(tagsInput);
+    if (!parsedTags.ok) {
+      setEditError(parsedTags.error);
+      return;
+    }
+    setEditSaving(true);
+    try {
+      const updated = await updateMCPTool(
+        tool.id,
+        {
+          display_name: displayName.trim() || null,
+          description_override: descriptionOverride.trim() || null,
+          tags: parsedTags.tags,
+        },
+        tool.lock_version,
+      );
+      if (!mountedRef.current) return;
+      setMutationError(null);
+      setTool(updated);
+      setEditOpen(false);
+    } catch (err) {
+      if (!mountedRef.current) return;
+      if (isVersionConflict(err)) {
+        setMutationError({
+          message:
+            '다른 작업으로 Tool이 변경되었습니다. 최신 상태를 다시 불러옵니다. ' +
+            (isApiError(err) ? err.message : ''),
+          requestId: isApiError(err) ? err.requestId ?? undefined : undefined,
+          code: isApiError(err) ? err.code : undefined,
+        });
+        setEditOpen(false);
+        await refetchToolOnly();
+      } else {
+        setEditError(toFeedbackError(err, 'Metadata 저장에 실패했습니다.').message);
+      }
+    } finally {
+      if (mountedRef.current) setEditSaving(false);
+    }
+  };
+
   const selectVersion = (versionId: string) => {
     void loadVersionDetail(versionId);
   };
@@ -166,8 +275,11 @@ export default function MCPToolDetail() {
     );
   }
 
-  const displayName = tool.display_name ?? tool.remote_name;
+  const title = tool.display_name ?? tool.remote_name;
   const validationStatus = selectedVersion?.validation_status;
+  const lifecycle = toolLifecycleAction(tool.status);
+  const lifecycleDisabled = isLifecycleActionDisabled(tool.status);
+  const tags = stringTags(tool.tags);
 
   return (
     <div>
@@ -178,9 +290,9 @@ export default function MCPToolDetail() {
         >
           <ArrowLeft size={14} /> MCP Tools
         </button>
-        <div className="flex items-start justify-between">
+        <div className="flex items-start justify-between gap-4">
           <div>
-            <h1 className="text-lg font-semibold text-slate-900">{displayName}</h1>
+            <h1 className="text-lg font-semibold text-slate-900">{title}</h1>
             <p className="text-xs font-mono text-slate-400 mt-0.5">{tool.remote_name}</p>
             <div className="flex items-center gap-3 mt-2">
               <StatusBadge status={tool.status} />
@@ -188,12 +300,54 @@ export default function MCPToolDetail() {
               <span className="text-xs text-slate-400 font-mono">{shortenId(tool.mcp_server_id)}</span>
             </div>
           </div>
+          <div className="flex items-center gap-2">
+            {lifecycle === 'activate' && (
+              <Button
+                variant="primary"
+                size="sm"
+                loading={statusMutating}
+                onClick={() => void handleLifecycle('activate')}
+              >
+                Activate
+              </Button>
+            )}
+            {lifecycle === 'deactivate' && (
+              <Button
+                variant="outline"
+                size="sm"
+                loading={statusMutating}
+                onClick={() => void handleLifecycle('deactivate')}
+              >
+                Deactivate
+              </Button>
+            )}
+            {lifecycleDisabled && (
+              <Button
+                variant="ghost"
+                size="sm"
+                disabled
+                title="현재 상태에서는 활성화/비활성화할 수 없습니다."
+              >
+                Unavailable
+              </Button>
+            )}
+          </div>
         </div>
         {versionError && (
           <div className="mt-3 space-y-1">
             <InlineAlert type="error" message={versionError.message} />
             {versionError.requestId && (
               <p className="font-mono text-xs text-slate-400">Request ID: {versionError.requestId}</p>
+            )}
+          </div>
+        )}
+        {mutationError && (
+          <div className="mt-3 space-y-1">
+            <InlineAlert type="error" message={mutationError.message} />
+            {mutationError.requestId && (
+              <p className="font-mono text-xs text-slate-400">
+                Request ID: {mutationError.requestId}
+              </p>
             )}
           </div>
         )}
@@ -218,33 +372,47 @@ export default function MCPToolDetail() {
       </div>
 
       <div className="p-6 max-w-3xl">
-        {versionLoading && <LoadingSkeleton rows={3} />}
+        {versionLoading && tab !== 'policy' && tab !== 'verification' && (
+          <LoadingSkeleton rows={3} />
+        )}
 
         {tab === 'overview' && !versionLoading && (
-          <div className="grid grid-cols-2 gap-4">
-            <InfoCard title="Tool 정보">
-              <Row label="Source Name" mono>
-                {tool.remote_name}
-              </Row>
-              <Row label="Display Name">{tool.display_name ?? '—'}</Row>
-              <Row label="Server ID" mono>
-                {shortenId(tool.mcp_server_id)}
-              </Row>
-              <Row label="Tool Status">
-                <StatusBadge status={tool.status} size="sm" />
-              </Row>
-              <Row label="Current Version">{selectedVersion ? `v${selectedVersion.version_no}` : '—'}</Row>
-              <Row label="Version Validation">
-                {validationStatus ? <ValidationBadge status={validationStatus} /> : '—'}
-              </Row>
-              <Row label="First Seen">{formatTimestamp(tool.first_seen_at)}</Row>
-              <Row label="Last Seen">{formatTimestamp(tool.last_seen_at)}</Row>
-            </InfoCard>
-            {selectedVersion?.validation_errors && selectedVersion.validation_errors.length > 0 && (
-              <InfoCard title="Validation Errors">
-                <JsonViewer value={selectedVersion.validation_errors} />
+          <div className="space-y-4">
+            <div className="flex justify-end">
+              <Button variant="outline" size="sm" onClick={openEdit}>
+                Edit metadata
+              </Button>
+            </div>
+            <div className="grid grid-cols-2 gap-4">
+              <InfoCard title="Tool 정보">
+                <Row label="Source Name" mono>
+                  {tool.remote_name}
+                </Row>
+                <Row label="Display Name">{tool.display_name ?? '—'}</Row>
+                <Row label="Description">{tool.description_override ?? '—'}</Row>
+                <Row label="Tags">{tags.length ? tags.join(', ') : '—'}</Row>
+                <Row label="Server ID" mono>
+                  {shortenId(tool.mcp_server_id)}
+                </Row>
+                <Row label="Tool Status">
+                  <StatusBadge status={tool.status} size="sm" />
+                </Row>
+                <Row label="Current Version">
+                  {selectedVersion ? `v${selectedVersion.version_no}` : '—'}
+                </Row>
+                <Row label="Version Validation">
+                  {validationStatus ? <ValidationBadge status={validationStatus} /> : '—'}
+                </Row>
+                <Row label="lock_version">{tool.lock_version}</Row>
+                <Row label="First Seen">{formatTimestamp(tool.first_seen_at)}</Row>
+                <Row label="Last Seen">{formatTimestamp(tool.last_seen_at)}</Row>
               </InfoCard>
-            )}
+              {selectedVersion?.validation_errors && selectedVersion.validation_errors.length > 0 && (
+                <InfoCard title="Validation Errors">
+                  <JsonViewer value={selectedVersion.validation_errors} />
+                </InfoCard>
+              )}
+            </div>
           </div>
         )}
 
@@ -258,24 +426,36 @@ export default function MCPToolDetail() {
         {tab === 'output' && !versionLoading && (
           <div className="bg-white rounded-xl border border-slate-200 p-4">
             <h3 className="text-sm font-semibold text-slate-800 mb-3">Output Schema</h3>
-            <JsonViewer value={selectedVersion?.output_schema ?? null} emptyLabel="Output schema가 없습니다." />
+            <JsonViewer
+              value={selectedVersion?.output_schema ?? null}
+              emptyLabel="Output schema가 없습니다."
+            />
           </div>
         )}
 
-        {tab === 'policy' && (
-          <EmptyState title="Tool Policy deferred" description="Policy API는 아직 제공되지 않습니다." />
-        )}
+        {tab === 'policy' && toolId && <ToolPolicyTab toolId={toolId} active={tab === 'policy'} />}
 
-        {tab === 'verification' && (
-          <EmptyState title="Verification deferred" description="Verification API는 아직 제공되지 않습니다." />
+        {tab === 'verification' && toolId && (
+          <ToolVerificationTab
+            toolId={toolId}
+            selectedVersion={selectedVersion}
+            currentVersionId={tool.current_version_id}
+            active={tab === 'verification'}
+          />
         )}
 
         {tab === 'test' && (
-          <EmptyState title="Test Call deferred" description="Manual Tool Test API는 아직 제공되지 않습니다." />
+          <EmptyState
+            title="Test Call deferred"
+            description="Manual Tool Test API는 아직 제공되지 않습니다."
+          />
         )}
 
         {tab === 'usedby' && (
-          <EmptyState title="Used By deferred" description="Agent/Workflow 사용 이력 API는 아직 제공되지 않습니다." />
+          <EmptyState
+            title="Used By deferred"
+            description="Agent/Workflow 사용 이력 API는 아직 제공되지 않습니다."
+          />
         )}
 
         {tab === 'versions' && (
@@ -312,6 +492,52 @@ export default function MCPToolDetail() {
           <EmptyState title="Audit deferred" description="Tool Audit 이력 API는 아직 제공되지 않습니다." />
         )}
       </div>
+
+      <Dialog
+        open={editOpen}
+        onClose={() => !editSaving && setEditOpen(false)}
+        title="Edit metadata"
+        description="display_name, description_override, tags만 수정합니다."
+        footer={
+          <>
+            <Button variant="outline" onClick={() => setEditOpen(false)} disabled={editSaving}>
+              취소
+            </Button>
+            <Button variant="primary" loading={editSaving} onClick={() => void saveMetadata()}>
+              Save
+            </Button>
+          </>
+        }
+      >
+        <div className="space-y-3 text-sm">
+          {editError && <InlineAlert type="error" message={editError} />}
+          <label className="block space-y-1">
+            <span className="text-xs text-slate-500">Display Name</span>
+            <input
+              className="w-full border border-slate-300 rounded-md px-2 py-1.5"
+              value={displayName}
+              onChange={e => setDisplayName(e.target.value)}
+            />
+          </label>
+          <label className="block space-y-1">
+            <span className="text-xs text-slate-500">Description Override</span>
+            <textarea
+              className="w-full border border-slate-300 rounded-md px-2 py-1.5 min-h-[80px]"
+              value={descriptionOverride}
+              onChange={e => setDescriptionOverride(e.target.value)}
+            />
+          </label>
+          <label className="block space-y-1">
+            <span className="text-xs text-slate-500">Tags (comma-separated, max 32 × 64 chars)</span>
+            <input
+              className="w-full border border-slate-300 rounded-md px-2 py-1.5"
+              value={tagsInput}
+              onChange={e => setTagsInput(e.target.value)}
+              placeholder="ops, search"
+            />
+          </label>
+        </div>
+      </Dialog>
     </div>
   );
 }
