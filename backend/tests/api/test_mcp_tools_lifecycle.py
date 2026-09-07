@@ -221,6 +221,61 @@ async def test_tool_activate_stale_if_match_conflict(
 
 
 @pytest.mark.asyncio
+async def test_tool_same_status_idempotent_and_stale_lock(
+    db_client: AsyncClient,
+    override_mcp_client,
+) -> None:
+    _server, tool = await _discover_tools(db_client, override_mcp_client)
+    tool_id = tool["id"]
+
+    activated = await db_client.post(
+        f"{API_TOOLS}/{tool_id}/activate",
+        headers={"If-Match": str(tool["lock_version"])},
+    )
+    assert activated.status_code == 200
+    lock = int(activated.json()["lock_version"])
+    assert activated.json()["status"] == MCPToolStatus.ACTIVE
+
+    same = await db_client.post(
+        f"{API_TOOLS}/{tool_id}/activate",
+        headers={"If-Match": str(lock)},
+    )
+    assert same.status_code == 200
+    assert same.json()["status"] == MCPToolStatus.ACTIVE
+    assert same.json()["lock_version"] == lock
+
+    stale_active = await db_client.post(
+        f"{API_TOOLS}/{tool_id}/activate",
+        headers={"If-Match": str(lock - 1)},
+    )
+    assert stale_active.status_code == 409
+    assert stale_active.json()["error"]["code"] == "RESOURCE_VERSION_CONFLICT"
+
+    deactivated = await db_client.post(
+        f"{API_TOOLS}/{tool_id}/deactivate",
+        headers={"If-Match": str(lock)},
+    )
+    assert deactivated.status_code == 200
+    lock = int(deactivated.json()["lock_version"])
+    assert deactivated.json()["status"] == MCPToolStatus.INACTIVE
+
+    same_idle = await db_client.post(
+        f"{API_TOOLS}/{tool_id}/deactivate",
+        headers={"If-Match": str(lock)},
+    )
+    assert same_idle.status_code == 200
+    assert same_idle.json()["status"] == MCPToolStatus.INACTIVE
+    assert same_idle.json()["lock_version"] == lock
+
+    stale_idle = await db_client.post(
+        f"{API_TOOLS}/{tool_id}/deactivate",
+        headers={"If-Match": str(lock - 1)},
+    )
+    assert stale_idle.status_code == 409
+    assert stale_idle.json()["error"]["code"] == "RESOURCE_VERSION_CONFLICT"
+
+
+@pytest.mark.asyncio
 async def test_tool_deactivate_requires_if_match(
     db_client: AsyncClient,
     override_mcp_client,

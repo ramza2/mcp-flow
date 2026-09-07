@@ -366,6 +366,246 @@ async def test_concurrent_tool_deactivate_cas(
 
 @pytest.mark.integration
 @pytest.mark.asyncio
+async def test_idempotent_activate_vs_deactivate_no_stale_success(
+    integration_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """ACTIVE/N Activate vs Deactivate must not return stale ACTIVE after Deactivate wins."""
+
+    from app.core.errors import AppError
+    from app.domain.enums import MCPToolStatus
+    from app.services.mcp_tool import MCPToolService
+
+    async with integration_session_factory() as session:
+        server = await MCPServerRepository(session).create(
+            code=f"race-{uuid.uuid4().hex[:8]}",
+            name="Idempotent Race Server",
+            transport_type="STREAMABLE_HTTP",
+            endpoint_url="https://mcp.test/mcp",
+        )
+        tools = MCPToolRepository(session)
+        tool = await tools.create_tool(
+            mcp_server_id=server.id,
+            remote_name="echo",
+            status=MCPToolStatus.ACTIVE,
+        )
+        version = await tools.create_version(
+            mcp_tool_id=tool.id,
+            version_no=1,
+            content_hash="hash-race",
+            validation_status=ToolVersionValidationStatus.VALID,
+        )
+        tool.current_version_id = version.id
+        await session.commit()
+        tool_id = tool.id
+        assert tool.lock_version == 1
+
+    # Deterministic: Deactivate commits before Activate's FOR UPDATE.
+    activate_after_cas = asyncio.Event()
+    deactivate_done = asyncio.Event()
+
+    async def activate_pause_before_lock() -> tuple[str, str | None, int | None]:
+        async with integration_session_factory() as session:
+            tools = MCPToolRepository(session)
+            updated = await tools.update_status_atomic(
+                tool_id,
+                expected_lock_version=1,
+                new_status=MCPToolStatus.ACTIVE,
+                allowed_from_statuses={
+                    MCPToolStatus.DISCOVERED,
+                    MCPToolStatus.INACTIVE,
+                },
+            )
+            assert updated is None
+            activate_after_cas.set()
+            await deactivate_done.wait()
+            locked = await tools.lock_for_update(tool_id)
+            assert locked is not None
+            if int(locked.lock_version) != 1:
+                return ("RESOURCE_VERSION_CONFLICT", None, None)
+            if locked.status == MCPToolStatus.ACTIVE:
+                await session.commit()
+                return ("ok", locked.status, int(locked.lock_version))
+            return ("RESOURCE_CONFLICT", locked.status, int(locked.lock_version))
+
+    async def deactivate_after_activate_cas() -> tuple[str, str | None, int | None]:
+        await activate_after_cas.wait()
+        async with integration_session_factory() as session:
+            service = MCPToolService(session)
+            try:
+                row = await service.deactivate(tool_id, expected_lock_version=1)
+                result = ("ok", row.status, int(row.lock_version))
+            except AppError as exc:
+                result = (exc.code, None, None)
+        deactivate_done.set()
+        return result
+
+    activate_result, deactivate_result = await asyncio.gather(
+        activate_pause_before_lock(),
+        deactivate_after_activate_cas(),
+    )
+    assert deactivate_result == ("ok", MCPToolStatus.INACTIVE, 2)
+    assert activate_result[0] == "RESOURCE_VERSION_CONFLICT"
+
+    async with integration_session_factory() as session:
+        final = await MCPToolRepository(session).get(tool_id)
+        assert final is not None
+        assert final.status == MCPToolStatus.INACTIVE
+        assert final.lock_version == 2
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_idempotent_activate_holds_lock_then_deactivate(
+    integration_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Activate same-status under FOR UPDATE must observe ACTIVE until it commits."""
+
+    from app.core.errors import AppError
+    from app.domain.enums import MCPToolStatus
+    from app.services.mcp_tool import MCPToolService
+
+    async with integration_session_factory() as session:
+        server = await MCPServerRepository(session).create(
+            code=f"hold-{uuid.uuid4().hex[:8]}",
+            name="Hold Lock Server",
+            transport_type="STREAMABLE_HTTP",
+            endpoint_url="https://mcp.test/mcp",
+        )
+        tools = MCPToolRepository(session)
+        tool = await tools.create_tool(
+            mcp_server_id=server.id,
+            remote_name="echo",
+            status=MCPToolStatus.ACTIVE,
+        )
+        version = await tools.create_version(
+            mcp_tool_id=tool.id,
+            version_no=1,
+            content_hash="hash-hold",
+            validation_status=ToolVersionValidationStatus.VALID,
+        )
+        tool.current_version_id = version.id
+        await session.commit()
+        tool_id = tool.id
+
+    activate_holding = asyncio.Event()
+    deactivate_started = asyncio.Event()
+
+    async def activate_hold() -> tuple[str, int]:
+        async with integration_session_factory() as session:
+            tools = MCPToolRepository(session)
+            updated = await tools.update_status_atomic(
+                tool_id,
+                expected_lock_version=1,
+                new_status=MCPToolStatus.ACTIVE,
+                allowed_from_statuses={
+                    MCPToolStatus.DISCOVERED,
+                    MCPToolStatus.INACTIVE,
+                },
+            )
+            assert updated is None
+            locked = await tools.lock_for_update(tool_id)
+            assert locked is not None
+            assert locked.status == MCPToolStatus.ACTIVE
+            assert int(locked.lock_version) == 1
+            activate_holding.set()
+            await deactivate_started.wait()
+            await asyncio.sleep(0.05)
+            # Still ACTIVE/1 under our lock — not a stale success.
+            assert int(locked.lock_version) == 1
+            assert locked.status == MCPToolStatus.ACTIVE
+            await session.commit()
+            return (locked.status, int(locked.lock_version))
+
+    async def deactivate_blocked() -> tuple[str, str | None, int | None]:
+        await activate_holding.wait()
+        deactivate_started.set()
+        async with integration_session_factory() as session:
+            service = MCPToolService(session)
+            try:
+                row = await service.deactivate(tool_id, expected_lock_version=1)
+                return ("ok", row.status, int(row.lock_version))
+            except AppError as exc:
+                return (exc.code, None, None)
+
+    activate_result, deactivate_result = await asyncio.gather(
+        activate_hold(),
+        deactivate_blocked(),
+    )
+    assert activate_result == (MCPToolStatus.ACTIVE, 1)
+    assert deactivate_result == ("ok", MCPToolStatus.INACTIVE, 2)
+
+    async with integration_session_factory() as session:
+        final = await MCPToolRepository(session).get(tool_id)
+        assert final is not None
+        assert final.status == MCPToolStatus.INACTIVE
+        assert final.lock_version == 2
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_service_idempotent_same_status_fresh_lock(
+    integration_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from app.core.errors import AppError
+    from app.domain.enums import MCPToolStatus
+    from app.services.mcp_tool import MCPToolService
+
+    async with integration_session_factory() as session:
+        server = await MCPServerRepository(session).create(
+            code=f"idem-{uuid.uuid4().hex[:8]}",
+            name="Idempotent Service Server",
+            transport_type="STREAMABLE_HTTP",
+            endpoint_url="https://mcp.test/mcp",
+        )
+        tools = MCPToolRepository(session)
+        tool = await tools.create_tool(
+            mcp_server_id=server.id,
+            remote_name="echo",
+            status=MCPToolStatus.ACTIVE,
+        )
+        version = await tools.create_version(
+            mcp_tool_id=tool.id,
+            version_no=1,
+            content_hash="hash-idem",
+            validation_status=ToolVersionValidationStatus.VALID,
+        )
+        tool.current_version_id = version.id
+        await session.commit()
+        tool_id = tool.id
+
+    async with integration_session_factory() as session:
+        service = MCPToolService(session)
+        row = await service.activate(tool_id, expected_lock_version=1)
+        assert row.status == MCPToolStatus.ACTIVE
+        assert row.lock_version == 1
+
+    async with integration_session_factory() as session:
+        service = MCPToolService(session)
+        with pytest.raises(AppError) as exc_info:
+            await service.activate(tool_id, expected_lock_version=0)
+        assert exc_info.value.code == "RESOURCE_VERSION_CONFLICT"
+
+    async with integration_session_factory() as session:
+        service = MCPToolService(session)
+        row = await service.deactivate(tool_id, expected_lock_version=1)
+        assert row.status == MCPToolStatus.INACTIVE
+        assert row.lock_version == 2
+
+    async with integration_session_factory() as session:
+        service = MCPToolService(session)
+        row = await service.deactivate(tool_id, expected_lock_version=2)
+        assert row.status == MCPToolStatus.INACTIVE
+        assert row.lock_version == 2
+
+    async with integration_session_factory() as session:
+        service = MCPToolService(session)
+        with pytest.raises(AppError) as exc_info:
+            await service.deactivate(tool_id, expected_lock_version=1)
+        assert exc_info.value.code == "RESOURCE_VERSION_CONFLICT"
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
 async def test_concurrent_policy_first_create(
     integration_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:

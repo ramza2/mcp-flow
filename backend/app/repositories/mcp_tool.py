@@ -26,9 +26,14 @@ class MCPToolRepository:
         return result.scalar_one_or_none()
 
     async def lock_for_update(self, tool_id: uuid.UUID) -> MCPTool | None:
-        """Lock live MCP Tool row for short critical sections (SELECT ... FOR UPDATE)."""
+        """Lock live MCP Tool row and refresh identity-map attributes from DB."""
 
-        stmt = self._live_tools().where(MCPTool.id == tool_id).with_for_update()
+        stmt = (
+            self._live_tools()
+            .where(MCPTool.id == tool_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
         result = await self._session.execute(stmt)
         return result.scalar_one_or_none()
 
