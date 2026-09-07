@@ -208,12 +208,15 @@ created_at, updated_at, lock_version
 
 ```text
 id, code, name
-provider, model, dimension, distance_metric
+provider, model, base_url
+dimension, distance_metric
 credential_secret_id
 status
 is_active_for_tools
 created_at, updated_at, lock_version
 ```
+
+`base_url`은 OpenAI-compatible 등 Provider endpoint 연결을 위한 API root/reference이다.
 
 Tool 검색용 active embedding profile은 한 시점에 하나를 기본으로 한다. dimension 변경은 migration과 전체 re-embedding을 동반한다.
 

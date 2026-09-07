@@ -12,7 +12,7 @@ from alembic.config import Config
 from app.core.errors import AppError
 from app.repositories.embedding_profile import EmbeddingProfileRepository
 from app.repositories.llm_profile import LLMProfileRepository
-from app.schemas.model_profile import EmbeddingProfileCreate
+from app.schemas.model_profile import EmbeddingProfileCreate, EmbeddingProfileUpdate
 from app.services.embedding_profile import EmbeddingProfileService
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
@@ -173,3 +173,77 @@ async def test_concurrent_activate_for_tools(
     async with integration_session_factory() as session:
         count = await EmbeddingProfileRepository(session).count_active_for_tools()
         assert count == 1
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_idempotent_activate_releases_row_lock(
+    integration_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Idempotent activate must commit so a subsequent session can PATCH promptly."""
+
+    async with integration_session_factory() as session:
+        service = EmbeddingProfileService(session)
+        profile = await service.create(
+            EmbeddingProfileCreate(
+                name="Lock Release",
+                provider="OPENAI_COMPATIBLE",
+                model="e",
+                base_url="https://emb.test/v1",
+                dimension=8,
+                distance_metric="cosine",
+            )
+        )
+        activated = await service.activate_for_tools(
+            profile.id, expected_lock_version=int(profile.lock_version)
+        )
+        profile_id = activated.id
+        lock_version = int(activated.lock_version)
+        assert activated.is_active_for_tools is True
+
+    returned = asyncio.Event()
+    patch_done = asyncio.Event()
+    results: dict[str, str] = {}
+
+    async def session_a_idempotent_activate() -> None:
+        async with integration_session_factory() as session:
+            result = await EmbeddingProfileService(session).activate_for_tools(
+                profile_id, expected_lock_version=lock_version
+            )
+            assert result.is_active_for_tools is True
+            assert int(result.lock_version) == lock_version
+            results["activate"] = f"OK:{result.lock_version}"
+            returned.set()
+            # Hold the session briefly after return path completed commit.
+            await patch_done.wait()
+
+    async def session_b_patch_after_release() -> None:
+        await returned.wait()
+        async with integration_session_factory() as session:
+            # Must not block on a lingering FOR UPDATE from session A.
+            updated = await asyncio.wait_for(
+                EmbeddingProfileService(session).update(
+                    profile_id,
+                    EmbeddingProfileUpdate(name="After Idempotent", lock_version=lock_version),
+                    expected_lock_version=lock_version,
+                ),
+                timeout=2.0,
+            )
+            assert updated.name == "After Idempotent"
+            assert int(updated.lock_version) == lock_version + 1
+            # Active dimension still blocked with matching lock.
+            with pytest.raises(AppError) as exc_info:
+                await EmbeddingProfileService(session).update(
+                    profile_id,
+                    EmbeddingProfileUpdate(
+                        dimension=16, lock_version=int(updated.lock_version)
+                    ),
+                    expected_lock_version=int(updated.lock_version),
+                )
+            assert exc_info.value.code == "RESOURCE_CONFLICT"
+            results["patch"] = f"OK:{updated.lock_version}"
+            patch_done.set()
+
+    await asyncio.gather(session_a_idempotent_activate(), session_b_patch_after_release())
+    assert results["activate"].startswith("OK:")
+    assert results["patch"].startswith("OK:")

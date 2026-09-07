@@ -102,14 +102,42 @@ class EmbeddingProfileService:
         *,
         expected_lock_version: int,
     ) -> EmbeddingProfile:
-        profile = await self._require(profile_id)
+        # Lock first so stale If-Match is evaluated before domain guards.
+        profile = await self._profiles.lock_for_update(profile_id)
+        if profile is None:
+            raise AppError(
+                code="NOT_FOUND",
+                message="Embedding profile not found.",
+                status_code=status.HTTP_404_NOT_FOUND,
+            )
+        if profile.lock_version != expected_lock_version:
+            await self._session.rollback()
+            self._raise_version_conflict()
+
         payload = data.model_dump(exclude_unset=True, exclude={"lock_version"})
         if "base_url" in payload and payload["base_url"] is not None:
             payload["base_url"] = validate_model_base_url(payload["base_url"])
+
+        if (
+            "dimension" in payload
+            and payload["dimension"] is not None
+            and int(payload["dimension"]) != int(profile.dimension)
+            and profile.is_active_for_tools
+        ):
+            await self._session.rollback()
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message=(
+                    "Active Tool-search Embedding Profile dimension cannot be changed. "
+                    "Activate another profile before changing dimension."
+                ),
+                status_code=status.HTTP_409_CONFLICT,
+            )
+
         if not payload:
-            if profile.lock_version != expected_lock_version:
-                self._raise_version_conflict()
+            await self._session.commit()
             return profile
+
         updated = await self._profiles.update_atomic(
             profile_id,
             expected_lock_version=expected_lock_version,
@@ -143,10 +171,13 @@ class EmbeddingProfileService:
                 status_code=status.HTTP_404_NOT_FOUND,
             )
         if target.lock_version != expected_lock_version:
+            await self._session.rollback()
             self._raise_version_conflict()
 
         # Idempotent: already active with matching If-Match — no lock bump.
+        # Commit releases FOR UPDATE so other sessions are not blocked.
         if target.is_active_for_tools:
+            await self._session.commit()
             return target
 
         previous = await self._profiles.lock_active_for_tools()

@@ -191,6 +191,69 @@ async def test_embedding_crud_activation_and_injections(db_client: AsyncClient) 
 
 
 @pytest.mark.asyncio
+async def test_active_embedding_dimension_patch_blocked(db_client: AsyncClient) -> None:
+    created = await db_client.post(EMB_API, json=_emb_body(name="Dim Guard", dimension=1536))
+    assert created.status_code == 201
+    profile_id = created.json()["id"]
+    lock = created.json()["lock_version"]
+
+    activated = await db_client.post(
+        f"{EMB_API}/{profile_id}/activate-for-tools",
+        headers={"If-Match": str(lock)},
+    )
+    assert activated.status_code == 200
+    assert activated.json()["is_active_for_tools"] is True
+    latest_lock = activated.json()["lock_version"]
+    assert latest_lock == 2
+    assert activated.json()["dimension"] == 1536
+
+    blocked = await db_client.patch(
+        f"{EMB_API}/{profile_id}",
+        headers={"If-Match": str(latest_lock)},
+        json={"dimension": 1024, "lock_version": latest_lock},
+    )
+    assert blocked.status_code == 409
+    assert blocked.json()["error"]["code"] == "RESOURCE_CONFLICT"
+    assert "dimension cannot be changed" in blocked.json()["error"]["message"].lower()
+
+    detail = await db_client.get(f"{EMB_API}/{profile_id}")
+    assert detail.json()["dimension"] == 1536
+    assert detail.json()["lock_version"] == latest_lock
+
+    # Stale If-Match must win over active-dimension guard.
+    stale = await db_client.patch(
+        f"{EMB_API}/{profile_id}",
+        headers={"If-Match": "1"},
+        json={"dimension": 1024, "lock_version": 1},
+    )
+    assert stale.status_code == 409
+    assert stale.json()["error"]["code"] == "RESOURCE_VERSION_CONFLICT"
+    unchanged = await db_client.get(f"{EMB_API}/{profile_id}")
+    assert unchanged.json()["dimension"] == 1536
+    assert unchanged.json()["lock_version"] == latest_lock
+
+
+@pytest.mark.asyncio
+async def test_inactive_embedding_dimension_patch_allowed(db_client: AsyncClient) -> None:
+    created = await db_client.post(
+        EMB_API, json=_emb_body(name="Dim Inactive", dimension=1536)
+    )
+    assert created.status_code == 201
+    profile_id = created.json()["id"]
+    assert created.json()["is_active_for_tools"] is False
+
+    patched = await db_client.patch(
+        f"{EMB_API}/{profile_id}",
+        headers={"If-Match": "1"},
+        json={"dimension": 1024, "lock_version": 1},
+    )
+    assert patched.status_code == 200
+    assert patched.json()["dimension"] == 1024
+    assert patched.json()["lock_version"] == 2
+    assert patched.json()["is_active_for_tools"] is False
+
+
+@pytest.mark.asyncio
 async def test_llm_connection_test_mock_transport(db_app, db_session_factory) -> None:
     calls: list[httpx.Request] = []
 
