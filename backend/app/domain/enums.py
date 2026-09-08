@@ -317,3 +317,36 @@ class PredicateOperator(StrEnum):
     AND = "and"
     OR = "or"
     NOT = "not"
+
+
+class UserStatus(StrEnum):
+    """docs/05 users.status."""
+
+    ACTIVE = "ACTIVE"
+    INACTIVE = "INACTIVE"
+    LOCKED = "LOCKED"
+
+
+class ResourceGrantResourceType(StrEnum):
+    """docs/05 resource_grants.resource_type — exact resource match only."""
+
+    AGENT = "AGENT"
+    WORKFLOW = "WORKFLOW"
+    MCP_SERVER = "MCP_SERVER"
+    MCP_TOOL = "MCP_TOOL"
+
+
+# Bootstrap permission catalog (docs/06 §6). Seeded by migration; not API-mutable.
+BOOTSTRAP_PERMISSION_CODES: tuple[str, ...] = (
+    "mcp.server.read",
+    "mcp.server.manage",
+    "mcp.tool.read",
+    "mcp.tool.execute",
+    "agent.read",
+    "agent.manage",
+    "workflow.execute",
+    "execution.read",
+    "execution.cancel",
+    "approval.decide",
+    "audit.read",
+)

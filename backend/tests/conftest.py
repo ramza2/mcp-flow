@@ -99,6 +99,12 @@ async def db_session_factory(
         expire_on_commit=False,
         autoflush=False,
     )
+    # SQLite create_all does not run Alembic permission seeds.
+    from app.bootstrap.permissions import seed_bootstrap_permissions
+
+    async with factory() as session:
+        await seed_bootstrap_permissions(session)
+        await session.commit()
     yield factory
     async with db_engine.begin() as conn:
         await conn.run_sync(metadata.drop_all)

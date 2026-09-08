@@ -4,6 +4,7 @@ from enum import Enum
 
 import pytest
 from app.domain.enums import (
+    BOOTSTRAP_PERMISSION_CODES,
     CURRENT_MCP_PROTOCOL_VERSION,
     AgentRequestStatus,
     AgentStatus,
@@ -32,6 +33,7 @@ from app.domain.enums import (
     OccurrenceStatus,
     ParameterProvenance,
     PredicateOperator,
+    ResourceGrantResourceType,
     RiskClass,
     ScheduleMisfirePolicy,
     ScheduleOverlapPolicy,
@@ -40,6 +42,7 @@ from app.domain.enums import (
     StepStatus,
     ToolVerificationStatus,
     ToolVersionValidationStatus,
+    UserStatus,
     WorkflowStatus,
     WorkflowVersionStatus,
 )
@@ -59,6 +62,11 @@ def expect_exact(enum_cls: type[Enum], expected: set[str]) -> None:
     ("enum_cls", "expected"),
     [
         (MCPServerStatus, {"DRAFT", "ACTIVE", "INACTIVE", "ERROR"}),
+        (UserStatus, {"ACTIVE", "INACTIVE", "LOCKED"}),
+        (
+            ResourceGrantResourceType,
+            {"AGENT", "WORKFLOW", "MCP_SERVER", "MCP_TOOL"},
+        ),
         (MCPToolStatus, {"DISCOVERED", "ACTIVE", "INACTIVE", "MISSING", "BLOCKED"}),
         (ToolVersionValidationStatus, {"VALID", "INVALID", "WARNING"}),
         (ToolVerificationStatus, {"PENDING", "VERIFIED", "FAILED", "EXPIRED"}),
@@ -269,3 +277,18 @@ def test_approval_excludes_waiting_approval() -> None:
 )
 def test_authorable_step_excludes_visual_or_script_types(forbidden: str) -> None:
     assert forbidden not in _values(AuthorableStepType)
+
+
+def test_bootstrap_permission_codes_include_tool_execute() -> None:
+    assert "mcp.tool.execute" in BOOTSTRAP_PERMISSION_CODES
+    assert len(BOOTSTRAP_PERMISSION_CODES) == len(set(BOOTSTRAP_PERMISSION_CODES))
+
+
+def test_user_status_excludes_non_canonical() -> None:
+    for forbidden in ("DISABLED", "SUSPENDED", "DELETED", "PENDING"):
+        assert forbidden not in _values(UserStatus)
+
+
+def test_resource_grant_type_excludes_wildcards() -> None:
+    for forbidden in ("ALL", "ANY", "GLOBAL", "TOOL_GROUP", "SERVER_TREE", "*"):
+        assert forbidden not in _values(ResourceGrantResourceType)
