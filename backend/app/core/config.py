@@ -34,6 +34,12 @@ class Settings(BaseSettings):
     request_id_header: str = "X-Request-ID"
     request_id_max_length: int = 128
 
+    session_cookie_name: str = "mcpflow_session"
+    session_ttl_seconds: int = Field(default=28800, gt=0)
+    session_cookie_secure: bool = True
+    session_cookie_samesite: str = "lax"
+    csrf_header_name: str = "X-CSRF-Token"
+
 
 @lru_cache
 def get_settings() -> Settings:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from datetime import datetime
 from typing import Any
 
 from sqlalchemy import Select, func, or_, select, update
@@ -140,4 +141,26 @@ class UserRepository:
     ) -> User | None:
         return await self.update_atomic(
             user_id, expected_lock_version=expected_lock_version
+        )
+
+    async def set_password_hash(self, user_id: uuid.UUID, password_hash: str) -> User | None:
+        stmt = (
+            update(User)
+            .where(User.id == user_id, User.deleted_at.is_(None))
+            .values(
+                password_hash=password_hash,
+                updated_at=func.now(),
+                lock_version=User.lock_version + 1,
+            )
+            .returning(User)
+        )
+        return (await self._session.execute(stmt)).scalar_one_or_none()
+
+    async def set_last_login_at(
+        self, user_id: uuid.UUID, *, when: datetime
+    ) -> None:
+        await self._session.execute(
+            update(User)
+            .where(User.id == user_id, User.deleted_at.is_(None))
+            .values(last_login_at=when, updated_at=func.now())
         )

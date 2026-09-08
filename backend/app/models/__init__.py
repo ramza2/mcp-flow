@@ -20,6 +20,7 @@ from app.models.mcp import (
     MCPToolVersion,
 )
 from app.models.model_profile import EmbeddingProfile, LLMProfile
+from app.models.session import Session
 
 __all__ = [
     "Agent",
@@ -39,6 +40,7 @@ __all__ = [
     "ResourceGrant",
     "Role",
     "RolePermission",
+    "Session",
     "User",
     "UserRole",
 ]
