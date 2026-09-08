@@ -12,6 +12,9 @@ services:
         PYTHON_IMAGE: python:3.12.10-slim-bookworm
     # Hot reload needs writable bind mounts — disable base read_only for local.
     read_only: false
+    environment:
+      # Local HTTP (no TLS) — production Settings default remains Secure=true.
+      MCPFLOW_SESSION_COOKIE_SECURE: ${MCPFLOW_SESSION_COOKIE_SECURE:-false}
     volumes:
       - ./backend/app:/app/app
       - ./backend/alembic:/app/alembic

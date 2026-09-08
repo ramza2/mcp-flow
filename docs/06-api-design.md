@@ -103,9 +103,53 @@ GET  /auth/session
 GET  /auth/csrf
 ```
 
-로그인 성공 시 Session cookie를 발급한다. Password, hash, Session secret은 Response에 포함하지 않는다.
+### 3.2 Login
+
+Request body:
+
+```json
+{
+  "username": "operator01",
+  "password": "..."
+}
+```
+
+로그인 성공 시 Session cookie를 발급한다. Cookie 이름:
+
+```text
+mcpflow_session
+```
+
+Password, hash, Session secret, Session raw token은 Response에 포함하지 않는다.
+
+Auth Session Response 예:
+
+```json
+{
+  "session_id": "...",
+  "user": {
+    "id": "...",
+    "username": "operator01",
+    "display_name": "Operator",
+    "email": "operator01@example.com",
+    "status": "ACTIVE"
+  },
+  "issued_at": "...",
+  "expires_at": "..."
+}
+```
+
+### 3.3 CSRF
 
 상태변경 Method(`POST`, `PUT`, `PATCH`, `DELETE`)는 Cookie Session 사용 시 CSRF 검증을 적용한다.
+
+CSRF Synchronizer Token header:
+
+```text
+X-CSRF-Token
+```
+
+`GET /auth/csrf`는 authenticated Session이 필요하며 raw CSRF token을 반환한다. CSRF raw token은 DB에 저장하지 않고 hash만 저장한다.
 
 ---
 

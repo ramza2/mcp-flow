@@ -73,6 +73,7 @@ def db_settings() -> Settings:
         debug=False,
         docs_enabled=True,
         database_url="sqlite+aiosqlite:///:memory:",
+        session_cookie_secure=False,
     )
 
 

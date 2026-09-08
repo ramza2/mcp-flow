@@ -201,6 +201,37 @@ ResourceGrant는 positive scope만 표현한다. Grant가 있으면 해당 `reso
 
 Session payload는 Redis TTL로 관리할 수 있으나 PostgreSQL에는 발급·만료·폐기·보안감사에 필요한 durable metadata를 저장한다.
 
+`sessions` durable schema:
+
+```text
+id uuid PK
+user_id uuid FK users.id
+
+token_hash char(64)
+
+csrf_token_hash char(64) nullable
+
+issued_at timestamptz
+expires_at timestamptz
+revoked_at timestamptz nullable
+
+created_at timestamptz
+```
+
+raw Session token과 raw CSRF token은 저장하지 않는다.
+
+```text
+token_hash = SHA-256(raw session token)
+csrf_token_hash = SHA-256(raw csrf token)
+```
+
+Session 활성 여부는 별도 Domain status enum 없이 계산한다.
+
+```text
+revoked_at IS NULL
+AND expires_at > now()
+```
+
 ### 5.3 Secret
 
 `secret_records`:
