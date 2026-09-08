@@ -140,17 +140,28 @@ async def test_csrf_rotate_vs_logout_race(
                 return f"ERR:{exc.code}"
 
     results = await asyncio.gather(rotate(), logout())
-    assert any(r == "ok" or not str(r).startswith("ERR:") for r in results) or True
+    # Logout always wins against an active Session (rotate does not revoke).
+    assert "ok" in results
 
     async with integration_session_factory() as session:
-        # Session must never become valid again after a revoke wins.
-        valid = await SessionRepository(session).get_valid_by_token_hash(sha256_hex(raw))
         row = await SessionRepository(session).get(session_id)
         assert row is not None
-        if row.revoked_at is not None:
-            assert valid is None
-            # CSRF rotate must not clear revoke
-            assert row.revoked_at is not None
+        assert row.revoked_at is not None
+        valid = await SessionRepository(session).get_valid_by_token_hash(sha256_hex(raw))
+        assert valid is None
+
+        # CSRF rotate after revoke must not resurrect the Session.
+        with pytest.raises(AppError) as exc_info:
+            await AuthenticationService(session, settings).issue_csrf(
+                session_id=session_id
+            )
+        assert exc_info.value.code == "AUTH_SESSION_INVALID"
+        row_after = await SessionRepository(session).get(session_id)
+        assert row_after is not None
+        assert row_after.revoked_at is not None
+        assert (
+            await SessionRepository(session).get_valid_by_token_hash(sha256_hex(raw))
+        ) is None
 
 
 @pytest.mark.integration

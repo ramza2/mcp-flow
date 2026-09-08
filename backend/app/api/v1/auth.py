@@ -102,10 +102,10 @@ async def get_csrf(
 )
 async def logout(
     principal: CurrentPrincipalDep,
-    response: Response,
     session: DbSessionDep,
     settings: SettingsDep,
 ) -> Response:
     await AuthenticationService(session, settings).logout(session_id=principal.session_id)
+    response = Response(status_code=status.HTTP_204_NO_CONTENT)
     _clear_session_cookie(response, settings=settings)
-    return Response(status_code=status.HTTP_204_NO_CONTENT)
+    return response

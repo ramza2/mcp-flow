@@ -182,9 +182,55 @@ async def test_session_csrf_logout_flow(
     )
     assert ok.status_code == 204
 
+    set_cookie = ok.headers.get_list("set-cookie") if hasattr(ok.headers, "get_list") else []
+    if not set_cookie:
+        raw_header = ok.headers.get("set-cookie")
+        set_cookie = [raw_header] if raw_header else []
+    joined = " ".join(set_cookie).lower()
+    assert "mcpflow_session=" in joined
+    assert "max-age=0" in joined or "expires=" in joined
+    assert "path=/" in joined
+
+    # httpx applies Set-Cookie delete directives to the client jar.
+    assert db_client.cookies.get("mcpflow_session") is None
+
     after = await db_client.get(f"{AUTH}/session")
     assert after.status_code == 401
     assert after.json()["error"]["code"] == "AUTH_SESSION_INVALID"
+
+
+@pytest.mark.asyncio
+async def test_logout_clears_session_cookie_from_jar(
+    db_client: AsyncClient, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    user = await _provision_user(db_session_factory)
+    login = await db_client.post(
+        f"{AUTH}/login",
+        json={"username": user["username"], "password": PASSWORD},
+    )
+    assert login.status_code == 200
+    assert db_client.cookies.get("mcpflow_session")
+
+    csrf = await db_client.get(f"{AUTH}/csrf")
+    assert csrf.status_code == 200
+    token = csrf.json()["csrf_token"]
+
+    logout = await db_client.post(
+        f"{AUTH}/logout", headers={"X-CSRF-Token": token}
+    )
+    assert logout.status_code == 204
+    set_cookie_values: list[str] = []
+    if hasattr(logout.headers, "get_list"):
+        set_cookie_values = list(logout.headers.get_list("set-cookie"))
+    elif logout.headers.get("set-cookie"):
+        set_cookie_values = [logout.headers["set-cookie"]]
+    assert set_cookie_values, "logout must emit Set-Cookie delete directive"
+    joined = " ".join(set_cookie_values).lower()
+    assert "mcpflow_session=" in joined
+    assert ("max-age=0" in joined) or ("expires=" in joined)
+    assert db_client.cookies.get("mcpflow_session") is None
+
+    assert (await db_client.get(f"{AUTH}/session")).status_code == 401
 
 
 @pytest.mark.asyncio
