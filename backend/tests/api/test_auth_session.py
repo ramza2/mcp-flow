@@ -409,9 +409,12 @@ async def test_bootstrap_set_password_and_session_revoke(
         )
     ).status_code == 200
 
-    # password still not accepted on User create API
+    # password still not accepted on User create API (needs Session + CSRF to reach handler)
+    csrf = await db_client.get(f"{AUTH}/csrf")
+    assert csrf.status_code == 200
     inject = await db_client.post(
         USERS,
+        headers={"X-CSRF-Token": csrf.json()["csrf_token"]},
         json={
             "username": f"u_{uuid.uuid4().hex[:6]}",
             "display_name": "x",
@@ -425,13 +428,58 @@ async def test_bootstrap_set_password_and_session_revoke(
 
 
 @pytest.mark.asyncio
-async def test_existing_apis_remain_unauthenticated(
+async def test_protected_apis_require_session(
     db_client: AsyncClient,
 ) -> None:
-    # No cookie — still reachable (auth enforcement deferred to next PR)
     users = await db_client.get(USERS)
-    assert users.status_code == 200
-    roles = await db_client.get("/api/v1/roles")
-    assert roles.status_code == 200
-    perms = await db_client.get("/api/v1/permissions")
-    assert perms.status_code == 200
+    assert users.status_code == 401
+    assert users.json()["error"]["code"] == "AUTH_SESSION_INVALID"
+
+    agents = await db_client.get("/api/v1/agents")
+    assert agents.status_code == 401
+    assert agents.json()["error"]["code"] == "AUTH_SESSION_INVALID"
+
+    tools = await db_client.get("/api/v1/mcp/tools")
+    assert tools.status_code == 401
+    assert tools.json()["error"]["code"] == "AUTH_SESSION_INVALID"
+
+
+@pytest.mark.asyncio
+async def test_protected_apis_require_csrf_on_unsafe(
+    authenticated_db_client: AsyncClient,
+) -> None:
+    client = authenticated_db_client
+    # Drop CSRF header to prove Session alone is insufficient for unsafe methods.
+    client.headers.pop("X-CSRF-Token", None)
+
+    no_csrf = await client.post(
+        USERS,
+        json={
+            "username": f"csrf-{uuid.uuid4().hex[:8]}",
+            "display_name": "CSRF Check",
+            "email": f"csrf-{uuid.uuid4().hex[:8]}@example.com",
+            "status": "ACTIVE",
+        },
+    )
+    assert no_csrf.status_code == 403
+    assert no_csrf.json()["error"]["code"] == "AUTH_CSRF_INVALID"
+
+    # GET still works with Session only.
+    listing = await client.get(USERS)
+    assert listing.status_code == 200
+
+    csrf = await client.get(f"{AUTH}/csrf")
+    assert csrf.status_code == 200
+    client.headers["X-CSRF-Token"] = csrf.json()["csrf_token"]
+
+    created = await client.post(
+        USERS,
+        json={
+            "username": f"ok-{uuid.uuid4().hex[:8]}",
+            "display_name": "OK User",
+            "email": f"ok-{uuid.uuid4().hex[:8]}@example.com",
+            "status": "ACTIVE",
+        },
+    )
+    assert created.status_code == 201
+    assert created.json()["id"]

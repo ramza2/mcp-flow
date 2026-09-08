@@ -11,10 +11,16 @@ from app.api.v1.model_profiles import get_model_provider_client
 from app.core.secrets import UnimplementedSecretResolver
 from app.model_provider.client import ModelProviderClient
 from app.model_provider.openai_compatible import OPENAI_COMPATIBLE_PROVIDER
-from httpx import ASGITransport, AsyncClient
+from httpx import AsyncClient
 
 LLM_API = "/api/v1/model-profiles/llm"
 EMB_API = "/api/v1/model-profiles/embeddings"
+
+
+@pytest.fixture
+async def db_client(authenticated_db_client):
+    """Protected API tests use a real Session + CSRF (no auth bypass)."""
+    return authenticated_db_client
 
 
 def _llm_body(**overrides: Any) -> dict[str, Any]:
@@ -378,7 +384,9 @@ async def test_embedding_patch_rejects_explicit_null_required_fields(
 
 
 @pytest.mark.asyncio
-async def test_llm_connection_test_mock_transport(db_app, db_session_factory) -> None:
+async def test_llm_connection_test_mock_transport(
+    db_app, authenticated_db_client: AsyncClient
+) -> None:
     calls: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -401,9 +409,10 @@ async def test_llm_connection_test_mock_transport(db_app, db_session_factory) ->
             await provider.aclose()
 
     db_app.dependency_overrides[get_model_provider_client] = _override_provider
-    transport_client = ASGITransport(app=db_app)
-    async with AsyncClient(transport=transport_client, base_url="http://test") as client:
+    client = authenticated_db_client
+    try:
         created = await client.post(LLM_API, json=_llm_body())
+        assert created.status_code == 201, created.text
         profile_id = created.json()["id"]
         result = await client.post(f"{LLM_API}/{profile_id}/connection-tests")
         assert result.status_code == 200
@@ -420,13 +429,14 @@ async def test_llm_connection_test_mock_transport(db_app, db_session_factory) ->
         missing = await client.post(f"{LLM_API}/{profile_id}/connection-tests")
         assert missing.json()["success"] is False
         assert missing.json()["error_code"] == "MODEL_NOT_FOUND"
-
-    db_app.dependency_overrides.pop(get_model_provider_client, None)
+    finally:
+        db_app.dependency_overrides.pop(get_model_provider_client, None)
 
 
 @pytest.mark.asyncio
 async def test_llm_connection_errors_and_credential_fail_closed(
     db_app,
+    authenticated_db_client: AsyncClient,
 ) -> None:
     scenarios: dict[str, Any] = {"mode": "timeout"}
 
@@ -453,9 +463,10 @@ async def test_llm_connection_errors_and_credential_fail_closed(
             await provider.aclose()
 
     db_app.dependency_overrides[get_model_provider_client] = _override_provider
-    transport_client = ASGITransport(app=db_app)
-    async with AsyncClient(transport=transport_client, base_url="http://test") as client:
+    client = authenticated_db_client
+    try:
         created = await client.post(LLM_API, json=_llm_body())
+        assert created.status_code == 201, created.text
         profile_id = created.json()["id"]
 
         scenarios["mode"] = "timeout"
@@ -516,13 +527,14 @@ async def test_llm_connection_errors_and_credential_fail_closed(
         unsupported_id = unsupported.json()["id"]
         fail = await client.post(f"{LLM_API}/{unsupported_id}/connection-tests")
         assert fail.json()["error_code"] == "UNSUPPORTED_PROVIDER"
-
-    db_app.dependency_overrides.pop(get_model_provider_client, None)
+    finally:
+        db_app.dependency_overrides.pop(get_model_provider_client, None)
 
 
 @pytest.mark.asyncio
 async def test_embedding_connection_test_dimension(
     db_app,
+    authenticated_db_client: AsyncClient,
 ) -> None:
     scenarios: dict[str, Any] = {"dim": 8}
 
@@ -549,9 +561,10 @@ async def test_embedding_connection_test_dimension(
             await provider.aclose()
 
     db_app.dependency_overrides[get_model_provider_client] = _override_provider
-    transport_client = ASGITransport(app=db_app)
-    async with AsyncClient(transport=transport_client, base_url="http://test") as client:
+    client = authenticated_db_client
+    try:
         created = await client.post(EMB_API, json=_emb_body(dimension=8))
+        assert created.status_code == 201, created.text
         profile_id = created.json()["id"]
         ok = await client.post(f"{EMB_API}/{profile_id}/connection-tests")
         assert ok.status_code == 200
@@ -594,8 +607,8 @@ async def test_embedding_connection_test_dimension(
         db_app.dependency_overrides[get_model_provider_client] = _override_bad
         malformed = await client.post(f"{EMB_API}/{profile_id}/connection-tests")
         assert malformed.json()["error_code"] == "PROTOCOL"
-
-    db_app.dependency_overrides.pop(get_model_provider_client, None)
+    finally:
+        db_app.dependency_overrides.pop(get_model_provider_client, None)
 
 
 @pytest.mark.asyncio

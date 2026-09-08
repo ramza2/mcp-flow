@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { apiRequest, ApiError, isAbortError, isApiError, API_V1_PREFIX } from '../client';
+import { clearCsrfCache, setCachedCsrfTokenForTests } from '../csrf';
 
 function jsonResponse(body: unknown, status = 200, headers: Record<string, string> = {}) {
   return new Response(JSON.stringify(body), {
@@ -11,6 +12,7 @@ function jsonResponse(body: unknown, status = 200, headers: Record<string, strin
 describe('apiRequest', () => {
   afterEach(() => {
     vi.unstubAllGlobals();
+    clearCsrfCache();
   });
 
   it('returns parsed JSON on success', async () => {
@@ -19,11 +21,12 @@ describe('apiRequest', () => {
     expect(result).toEqual({ ok: true });
     expect(fetch).toHaveBeenCalledWith(
       `${API_V1_PREFIX}/mcp/servers`,
-      expect.objectContaining({ method: 'GET' }),
+      expect.objectContaining({ method: 'GET', credentials: 'same-origin' }),
     );
   });
 
   it('throws ApiError with canonical error body and request_id', async () => {
+    setCachedCsrfTokenForTests('csrf-test');
     vi.stubGlobal(
       'fetch',
       vi.fn().mockResolvedValue(
@@ -107,6 +110,7 @@ describe('apiRequest', () => {
   });
 
   it('returns undefined for 204 No Content', async () => {
+    setCachedCsrfTokenForTests('csrf-test');
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(null, { status: 204 })));
     const result = await apiRequest('/mcp/servers/srv-1', { method: 'DELETE' });
     expect(result).toBeUndefined();

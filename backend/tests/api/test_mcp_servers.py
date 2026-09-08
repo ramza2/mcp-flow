@@ -42,6 +42,12 @@ class SpyMCPHttpClient(MCPHttpClient):
         raise AssertionError("list_tools should not be called")
 
 
+@pytest.fixture
+async def db_client(authenticated_db_client):
+    """Protected API tests use a real Session + CSRF (no auth bypass)."""
+    return authenticated_db_client
+
+
 def _server_payload(**overrides: Any) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "name": "Weather MCP",

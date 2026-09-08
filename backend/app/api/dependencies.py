@@ -75,8 +75,8 @@ async def require_csrf_for_unsafe_request(
 ) -> None:
     """CSRF check for unsafe methods when Cookie Session is used.
 
-    Login is exempt (no Session yet). Mount on endpoints that opt in
-    (e.g. POST /auth/logout). Existing Agent/MCP routers are not locked yet.
+    Safe methods (GET/HEAD/OPTIONS) skip CSRF. Login is exempt because it
+    has no Session yet and is mounted outside the protected application router.
     """
     method = request.method.upper()
     if method in {"GET", "HEAD", "OPTIONS"}:
@@ -86,3 +86,23 @@ async def require_csrf_for_unsafe_request(
         session_id=principal.session_id,
         provided_token=provided,
     )
+
+
+async def require_authenticated_api_request(
+    request: Request,
+    principal: CurrentPrincipalDep,
+    session: DbSessionDep,
+    settings: SettingsDep,
+) -> CurrentPrincipal:
+    """Require a valid Session; enforce CSRF on unsafe methods.
+
+    Used by the protected application router under /api/v1 (excluding /auth/*).
+    Authentication only — endpoint Permission/RBAC enforcement is deferred.
+    """
+    await require_csrf_for_unsafe_request(
+        request=request,
+        principal=principal,
+        session=session,
+        settings=settings,
+    )
+    return principal

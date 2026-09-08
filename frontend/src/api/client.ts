@@ -1,49 +1,24 @@
 /**
  * Shared fetch client for /api/v1 (same-origin Traefik routing).
  * No Axios / React Query — native fetch only.
+ *
+ * Cookie Session: credentials: 'same-origin'
+ * CSRF: auto-attach X-CSRF-Token on unsafe methods (except csrf: 'omit')
  */
 
 import type { ApiErrorBody } from './types';
+import {
+  API_V1_PREFIX,
+  ApiError,
+  isAbortError,
+  isApiError,
+} from './clientCore';
+import { clearCsrfCache, ensureCsrfToken } from './csrf';
+import { notifySessionInvalid } from './sessionEvents';
 
-export const API_V1_PREFIX = '/api/v1';
+export { API_V1_PREFIX, ApiError, isAbortError, isApiError };
 
-export class ApiError extends Error {
-  readonly status: number;
-  readonly code: string;
-  readonly details: unknown[];
-  readonly requestId: string | null;
-  readonly retryable: boolean;
-
-  constructor(opts: {
-    status: number;
-    code: string;
-    message: string;
-    details?: unknown[];
-    requestId?: string | null;
-    retryable?: boolean;
-  }) {
-    super(opts.message);
-    this.name = 'ApiError';
-    this.status = opts.status;
-    this.code = opts.code;
-    this.details = opts.details ?? [];
-    this.requestId = opts.requestId ?? null;
-    this.retryable = opts.retryable ?? false;
-  }
-}
-
-export function isAbortError(error: unknown): boolean {
-  if (error instanceof DOMException && error.name === 'AbortError') return true;
-  if (error instanceof Error && error.name === 'AbortError') return true;
-  return false;
-}
-
-export function isApiError(error: unknown): error is ApiError {
-  if (error instanceof ApiError) return true;
-  if (typeof error !== 'object' || error === null) return false;
-  const e = error as Partial<ApiError>;
-  return typeof e.status === 'number' && typeof e.code === 'string' && typeof e.message === 'string';
-}
+const UNSAFE_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 
 function buildUrl(path: string, query?: Record<string, string | number | boolean | undefined | null>): string {
   const normalized = path.startsWith('/') ? path : `/${path}`;
@@ -85,28 +60,58 @@ async function parseError(response: Response): Promise<ApiError> {
   });
 }
 
+export type CsrfMode = 'auto' | 'omit';
+
 export interface RequestOptions {
   method?: string;
   query?: Record<string, string | number | boolean | undefined | null>;
   body?: unknown;
   signal?: AbortSignal;
   headers?: Record<string, string>;
+  /** CSRF attachment policy. Login uses 'omit'. Default 'auto'. */
+  csrf?: CsrfMode;
+  /**
+   * When true, AUTH_SESSION_INVALID does not fire the global invalidation callback.
+   * Used for login failure and session bootstrap 401.
+   */
+  suppressSessionInvalidation?: boolean;
+  /** Internal: skip CSRF retry (already retried once). */
+  _csrfRetried?: boolean;
 }
 
-export async function apiRequest<T>(path: string, options: RequestOptions = {}): Promise<T> {
-  const { method = 'GET', query, body, signal, headers } = options;
-  const url = buildUrl(path, query);
-
-  let response: Response;
+async function parseSuccessBody<T>(response: Response): Promise<T> {
+  if (response.status === 204) {
+    return undefined as T;
+  }
+  const text = await response.text();
+  if (!text) {
+    return undefined as T;
+  }
   try {
-    response = await fetch(url, {
+    return JSON.parse(text) as T;
+  } catch {
+    throw new ApiError({
+      status: response.status,
+      code: 'NON_JSON_RESPONSE',
+      message: 'Server returned non-JSON response',
+      requestId: response.headers.get('X-Request-ID'),
+    });
+  }
+}
+
+async function executeFetch(
+  url: string,
+  method: string,
+  headers: Record<string, string>,
+  body: unknown | undefined,
+  signal?: AbortSignal,
+): Promise<Response> {
+  try {
+    return await fetch(url, {
       method,
       signal,
-      headers: {
-        Accept: 'application/json',
-        ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
-        ...headers,
-      },
+      credentials: 'same-origin',
+      headers,
       body: body === undefined ? undefined : JSON.stringify(body),
     });
   } catch (error) {
@@ -118,28 +123,66 @@ export async function apiRequest<T>(path: string, options: RequestOptions = {}):
       retryable: true,
     });
   }
+}
 
-  if (response.status === 204) {
-    return undefined as T;
+function handleSessionInvalidation(error: ApiError, options: RequestOptions): void {
+  if (options.suppressSessionInvalidation) return;
+  if (error.status === 401 && error.code === 'AUTH_SESSION_INVALID') {
+    clearCsrfCache();
+    notifySessionInvalid();
+  }
+}
+
+export async function apiRequest<T>(path: string, options: RequestOptions = {}): Promise<T> {
+  const method = (options.method ?? 'GET').toUpperCase();
+  const { query, body, signal, headers: extraHeaders } = options;
+  const csrfMode = options.csrf ?? 'auto';
+  const url = buildUrl(path, query);
+
+  if (signal?.aborted) {
+    throw new DOMException('Aborted', 'AbortError');
   }
 
-  if (!response.ok) {
-    throw await parseError(response);
+  const headers: Record<string, string> = {
+    Accept: 'application/json',
+    ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
+    ...extraHeaders,
+  };
+
+  if (csrfMode === 'auto' && UNSAFE_METHODS.has(method) && !headers['X-CSRF-Token']) {
+    const token = await ensureCsrfToken(signal);
+    if (signal?.aborted) {
+      throw new DOMException('Aborted', 'AbortError');
+    }
+    headers['X-CSRF-Token'] = token;
   }
 
-  const text = await response.text();
-  if (!text) {
-    return undefined as T;
+  const response = await executeFetch(url, method, headers, body, signal);
+
+  if (response.ok || response.status === 204) {
+    return parseSuccessBody<T>(response);
   }
 
-  try {
-    return JSON.parse(text) as T;
-  } catch {
-    throw new ApiError({
-      status: response.status,
-      code: 'NON_JSON_RESPONSE',
-      message: 'Server returned non-JSON response',
-      requestId: response.headers.get('X-Request-ID'),
+  const error = await parseError(response);
+
+  if (
+    error.status === 403 &&
+    error.code === 'AUTH_CSRF_INVALID' &&
+    csrfMode === 'auto' &&
+    UNSAFE_METHODS.has(method) &&
+    !options._csrfRetried
+  ) {
+    if (signal?.aborted) {
+      throw new DOMException('Aborted', 'AbortError');
+    }
+    clearCsrfCache();
+    return apiRequest<T>(path, {
+      ...options,
+      _csrfRetried: true,
+      headers: { ...extraHeaders },
     });
   }
+
+  handleSessionInvalidation(error, options);
+  throw error;
 }
