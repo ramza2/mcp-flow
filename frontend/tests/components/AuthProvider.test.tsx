@@ -101,4 +101,14 @@ describe('AuthProvider', () => {
     await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('unauthenticated'));
     expect(screen.getByTestId('user')).toHaveTextContent('');
   });
+
+  it('clears to unauthenticated on session-invalid event', async () => {
+    const { notifySessionInvalid } = await import('../../src/api/sessionEvents');
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(mockAuthSession)));
+    renderAuthApp();
+    await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('authenticated'));
+    notifySessionInvalid();
+    await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('unauthenticated'));
+    expect(screen.getByTestId('user')).toHaveTextContent('');
+  });
 });

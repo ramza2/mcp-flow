@@ -7,6 +7,7 @@
 
 import { API_V1_PREFIX, ApiError, isAbortError } from './clientCore';
 import type { CsrfTokenResponse } from './authTypes';
+import { notifySessionInvalid } from './sessionEvents';
 
 let cachedToken: string | null = null;
 let inflight: Promise<string> | null = null;
@@ -59,7 +60,13 @@ async function fetchCsrfToken(signal?: AbortSignal): Promise<string> {
     } catch {
       // keep defaults
     }
-    throw new ApiError({ status: response.status, code, message, requestId, retryable });
+    const error = new ApiError({ status: response.status, code, message, requestId, retryable });
+    // CSRF acquisition bypasses apiRequest, so propagate Session invalidation here.
+    if (error.status === 401 && error.code === 'AUTH_SESSION_INVALID') {
+      clearCsrfCache();
+      notifySessionInvalid();
+    }
+    throw error;
   }
 
   const data = (await response.json()) as CsrfTokenResponse;

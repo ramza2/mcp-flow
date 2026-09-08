@@ -153,6 +153,59 @@ describe('apiRequest auth/csrf', () => {
     unsubscribe();
   });
 
+  it('notifies once when CSRF acquisition returns AUTH_SESSION_INVALID and skips business POST', async () => {
+    const spy = vi.fn();
+    const unsubscribe = onSessionInvalid(spy);
+    const fetchMock = vi.fn().mockImplementation((url: string) => {
+      if (String(url).includes('/auth/csrf')) {
+        return Promise.resolve(jsonResponse(sessionUnauthorizedBody(), 401));
+      }
+      return Promise.resolve(jsonResponse({ ok: true }));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(
+      apiRequest('/users', { method: 'POST', body: { username: 'x' } }),
+    ).rejects.toMatchObject({
+      status: 401,
+      code: 'AUTH_SESSION_INVALID',
+    });
+
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls.filter(c => String(c[0]).includes('/auth/csrf'))).toHaveLength(1);
+    expect(fetchMock.mock.calls.filter(c => String(c[0]).includes('/users'))).toHaveLength(0);
+    unsubscribe();
+  });
+
+  it('notifies once for concurrent POSTs when shared CSRF acquisition is session-invalid', async () => {
+    const spy = vi.fn();
+    const unsubscribe = onSessionInvalid(spy);
+    let csrfCalls = 0;
+    const fetchMock = vi.fn().mockImplementation((url: string) => {
+      if (String(url).includes('/auth/csrf')) {
+        csrfCalls += 1;
+        return Promise.resolve(jsonResponse(sessionUnauthorizedBody(), 401));
+      }
+      return Promise.resolve(jsonResponse({ ok: true }));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const results = await Promise.allSettled([
+      apiRequest('/users', { method: 'POST', body: { a: 1 } }),
+      apiRequest('/agents', { method: 'POST', body: { b: 2 } }),
+    ]);
+
+    expect(csrfCalls).toBe(1);
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(results.every(r => r.status === 'rejected')).toBe(true);
+    expect(
+      fetchMock.mock.calls.filter(
+        c => String(c[0]).includes('/users') || String(c[0]).includes('/agents'),
+      ),
+    ).toHaveLength(0);
+    unsubscribe();
+  });
+
   it('does not notify when suppressSessionInvalidation is set', async () => {
     const spy = vi.fn();
     const unsubscribe = onSessionInvalid(spy);
@@ -162,6 +215,24 @@ describe('apiRequest auth/csrf', () => {
     await expect(
       apiRequest('/auth/session', { suppressSessionInvalidation: true }),
     ).rejects.toMatchObject({ code: 'AUTH_SESSION_INVALID' });
+    expect(spy).not.toHaveBeenCalled();
+    unsubscribe();
+  });
+
+  it('does not notify session invalidation for AUTH_CSRF_INVALID', async () => {
+    const spy = vi.fn();
+    const unsubscribe = onSessionInvalid(spy);
+    const fetchMock = vi.fn().mockImplementation((url: string) => {
+      if (String(url).includes('/auth/csrf')) {
+        return Promise.resolve(jsonResponse({ csrf_token: 'csrf-x' }));
+      }
+      return Promise.resolve(jsonResponse(csrfInvalidBody(), 403));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(apiRequest('/mcp/servers', { method: 'POST', body: {} })).rejects.toMatchObject({
+      code: 'AUTH_CSRF_INVALID',
+    });
     expect(spy).not.toHaveBeenCalled();
     unsubscribe();
   });
