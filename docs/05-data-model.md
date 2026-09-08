@@ -167,6 +167,34 @@ last_login_at
 created_at, updated_at, lock_version
 ```
 
+`resource_grants`:
+
+```text
+id uuid PK
+
+user_id uuid nullable
+role_id uuid nullable
+
+resource_type
+resource_id uuid
+
+created_at
+created_by nullable
+```
+
+`user_id` / `role_id` 중 정확히 하나만 존재한다. 별도 principal_type enum은 두지 않는다.
+
+`resource_type` Canonical 값:
+
+```text
+AGENT
+WORKFLOW
+MCP_SERVER
+MCP_TOOL
+```
+
+ResourceGrant는 positive scope만 표현한다. Grant가 있으면 해당 `resource_type` + `resource_id` 범위가 허용되고, 없으면 허용되지 않는다. ALLOW/DENY effect나 wildcard/계층 inheritance는 두지 않는다. Exact resource match만 적용한다.
+
 `resource_grants`는 사용자/Role이 Agent, Workflow, MCP Server, MCP Tool 등에 대해 갖는 자원 범위를 표현한다.
 
 ### 5.2 Session

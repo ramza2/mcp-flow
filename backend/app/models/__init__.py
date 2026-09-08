@@ -2,6 +2,14 @@
 
 from app.models.agent import Agent, AgentToolGrant, AgentVersion
 from app.models.approval import ApprovalPolicy
+from app.models.auth import (
+    Permission,
+    ResourceGrant,
+    Role,
+    RolePermission,
+    User,
+    UserRole,
+)
 from app.models.mcp import (
     MCPServer,
     MCPServerCheck,
@@ -27,4 +35,10 @@ __all__ = [
     "MCPToolPolicy",
     "MCPToolVerification",
     "MCPToolVersion",
+    "Permission",
+    "ResourceGrant",
+    "Role",
+    "RolePermission",
+    "User",
+    "UserRole",
 ]

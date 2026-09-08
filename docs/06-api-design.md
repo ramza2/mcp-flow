@@ -225,6 +225,9 @@ GET   /roles/{role_id}
 PATCH /roles/{role_id}
 GET   /roles/{role_id}/permissions
 PUT   /roles/{role_id}/permissions
+GET   /roles/{role_id}/resource-grants
+POST  /roles/{role_id}/resource-grants
+DELETE /roles/{role_id}/resource-grants/{grant_id}
 GET   /permissions
 ```
 
