@@ -12,6 +12,7 @@ from app.core.errors import AppError
 from app.domain.enums import ResourceGrantResourceType, UserStatus
 from app.models.auth import ResourceGrant
 from app.repositories.agent import AgentRepository
+from app.repositories.authorization import AuthorizationRepository
 from app.repositories.mcp_server import MCPServerRepository
 from app.repositories.mcp_tool import MCPToolRepository
 from app.repositories.resource_grant import ResourceGrantRepository
@@ -181,6 +182,7 @@ class AuthorizationResolver:
         self._user_roles = UserRoleRepository(session)
         self._role_permissions = RolePermissionRepository(session)
         self._grants = ResourceGrantRepository(session)
+        self._authorization = AuthorizationRepository(session)
 
     async def get_effective_permission_codes(self, user_id: uuid.UUID) -> set[str]:
         user = await self._users.get(user_id)
@@ -219,24 +221,24 @@ class AuthorizationResolver:
         resource_type: str | ResourceGrantResourceType,
         resource_id: uuid.UUID,
     ) -> AuthorizationDecision:
-        user = await self._users.get(user_id)
-        if user is None:
-            return AuthorizationDecision(allowed=False, reason_code="USER_NOT_FOUND")
-        if user.status != UserStatus.ACTIVE:
-            return AuthorizationDecision(allowed=False, reason_code="USER_NOT_ACTIVE")
+        """Final security boundary — one SQL snapshot (no multi-query TOCTOU)."""
 
-        if not await self.has_permission(user_id, permission_code):
+        snapshot = await self._authorization.get_resource_authorization_snapshot(
+            user_id,
+            permission_code=permission_code,
+            resource_type=str(resource_type),
+            resource_id=resource_id,
+        )
+        if not snapshot.user_exists:
+            return AuthorizationDecision(allowed=False, reason_code="USER_NOT_FOUND")
+        if not snapshot.user_active:
+            return AuthorizationDecision(allowed=False, reason_code="USER_NOT_ACTIVE")
+        if not snapshot.permission_present:
             return AuthorizationDecision(
                 allowed=False, reason_code="PERMISSION_MISSING"
             )
-
-        if not await self._grants.has_effective_grant(
-            user_id,
-            resource_type=str(resource_type),
-            resource_id=resource_id,
-        ):
+        if not snapshot.resource_grant_present:
             return AuthorizationDecision(
                 allowed=False, reason_code="RESOURCE_GRANT_MISSING"
             )
-
         return AuthorizationDecision(allowed=True, reason_code="ALLOWED")

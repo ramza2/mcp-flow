@@ -185,7 +185,9 @@ class UserRoleRepository:
 
     async def list_role_ids(self, user_id: uuid.UUID) -> list[uuid.UUID]:
         result = await self._session.execute(
-            select(UserRole.role_id).where(UserRole.user_id == user_id)
+            select(UserRole.role_id)
+            .join(Role, Role.id == UserRole.role_id)
+            .where(UserRole.user_id == user_id, Role.deleted_at.is_(None))
         )
         return list(result.scalars().all())
 

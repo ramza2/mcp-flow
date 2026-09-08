@@ -7,7 +7,7 @@ import uuid
 from sqlalchemy import Select, and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.auth import ResourceGrant, UserRole
+from app.models.auth import ResourceGrant, Role, UserRole
 
 
 class ResourceGrantRepository:
@@ -122,9 +122,13 @@ class ResourceGrantRepository:
         resource_type: str,
         resource_id: uuid.UUID,
     ) -> bool:
-        """Direct User grant OR any Role grant for the user's current roles."""
+        """Direct User grant OR Role grant for the user's current live roles."""
 
-        role_ids_subq = select(UserRole.role_id).where(UserRole.user_id == user_id)
+        live_role_ids = (
+            select(UserRole.role_id)
+            .join(Role, Role.id == UserRole.role_id)
+            .where(UserRole.user_id == user_id, Role.deleted_at.is_(None))
+        )
         stmt = select(func.count()).select_from(ResourceGrant).where(
             ResourceGrant.resource_type == resource_type,
             ResourceGrant.resource_id == resource_id,
@@ -132,7 +136,7 @@ class ResourceGrantRepository:
                 ResourceGrant.user_id == user_id,
                 and_(
                     ResourceGrant.role_id.is_not(None),
-                    ResourceGrant.role_id.in_(role_ids_subq),
+                    ResourceGrant.role_id.in_(live_role_ids),
                 ),
             ),
         )

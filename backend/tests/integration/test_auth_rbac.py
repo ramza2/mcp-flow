@@ -436,3 +436,212 @@ async def test_authorization_resolver_postgres_smoke(
         )
         assert decision.allowed is True
         assert decision.reason_code == "ALLOWED"
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_authorization_revocation_and_soft_deleted_role(
+    integration_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from datetime import UTC, datetime
+
+    from app.models.auth import Role
+    from sqlalchemy import update
+
+    async with integration_session_factory() as session:
+        user = await UserService(session).create(
+            UserCreate(
+                username=f"rev-{uuid.uuid4().hex[:8]}",
+                display_name="Rev",
+                email=f"rev-{uuid.uuid4().hex[:8]}@example.com",
+                status=UserStatus.ACTIVE,
+            )
+        )
+        perm_role = await RoleService(session).create(
+            RoleCreate(code=f"perm-{uuid.uuid4().hex[:8]}", name="Perm Role")
+        )
+        grant_role = await RoleService(session).create(
+            RoleCreate(code=f"grant-{uuid.uuid4().hex[:8]}", name="Grant Role")
+        )
+        execute = await PermissionRepository(session).get_by_code("mcp.tool.execute")
+        assert execute is not None
+        await RoleService(session).replace_permissions(
+            perm_role.id,
+            RolePermissionReplaceRequest(permission_ids=[execute.id]),
+            expected_lock_version=1,
+        )
+        await UserService(session).replace_roles(
+            user.id,
+            UserRoleReplaceRequest(role_ids=[perm_role.id, grant_role.id]),
+            expected_lock_version=1,
+        )
+        server = await MCPServerRepository(session).create(
+            code=f"srv-{uuid.uuid4().hex[:8]}",
+            name="Rev Server",
+            transport_type="STREAMABLE_HTTP",
+            endpoint_url="https://mcp.test/mcp",
+        )
+        tool = await MCPToolRepository(session).create_tool(
+            mcp_server_id=server.id,
+            remote_name=f"tool_{uuid.uuid4().hex[:6]}",
+            status="ACTIVE",
+        )
+        await ResourceGrantService(session).create_for_role(
+            grant_role.id,
+            ResourceGrantCreate(
+                resource_type=ResourceGrantResourceType.MCP_TOOL,
+                resource_id=tool.id,
+            ),
+        )
+        user_id = user.id
+        tool_id = tool.id
+        perm_role_id = perm_role.id
+        grant_role_id = grant_role.id
+        execute_id = execute.id
+
+    async with integration_session_factory() as session:
+        allowed = await AuthorizationResolver(session).authorize_resource(
+            user_id, "mcp.tool.execute", "MCP_TOOL", tool_id
+        )
+        assert allowed.allowed is True
+
+    async with integration_session_factory() as session:
+        role = await RoleService(session).get(perm_role_id)
+        await RoleService(session).replace_permissions(
+            perm_role_id,
+            RolePermissionReplaceRequest(permission_ids=[]),
+            expected_lock_version=int(role.lock_version),
+        )
+
+    async with integration_session_factory() as session:
+        missing_perm = await AuthorizationResolver(session).authorize_resource(
+            user_id, "mcp.tool.execute", "MCP_TOOL", tool_id
+        )
+        assert missing_perm.allowed is False
+        assert missing_perm.reason_code == "PERMISSION_MISSING"
+
+    async with integration_session_factory() as session:
+        role = await RoleService(session).get(perm_role_id)
+        await RoleService(session).replace_permissions(
+            perm_role_id,
+            RolePermissionReplaceRequest(permission_ids=[execute_id]),
+            expected_lock_version=int(role.lock_version),
+        )
+        grants = await ResourceGrantService(session).list_for_role(grant_role_id)
+        assert grants[1] == 1
+        await ResourceGrantService(session).delete_for_role(
+            grant_role_id, grants[0][0].id
+        )
+
+    async with integration_session_factory() as session:
+        missing_grant = await AuthorizationResolver(session).authorize_resource(
+            user_id, "mcp.tool.execute", "MCP_TOOL", tool_id
+        )
+        assert missing_grant.allowed is False
+        assert missing_grant.reason_code == "RESOURCE_GRANT_MISSING"
+
+    # Soft-deleted Role carrying only permission → PERMISSION_MISSING
+    async with integration_session_factory() as session:
+        other_perm_role = await RoleService(session).create(
+            RoleCreate(code=f"live-p-{uuid.uuid4().hex[:8]}", name="Live Perm")
+        )
+        dead_perm_role = await RoleService(session).create(
+            RoleCreate(code=f"dead-p-{uuid.uuid4().hex[:8]}", name="Dead Perm")
+        )
+        await RoleService(session).replace_permissions(
+            dead_perm_role.id,
+            RolePermissionReplaceRequest(permission_ids=[execute_id]),
+            expected_lock_version=1,
+        )
+        await ResourceGrantService(session).create_for_user(
+            user_id,
+            ResourceGrantCreate(
+                resource_type=ResourceGrantResourceType.MCP_TOOL,
+                resource_id=tool_id,
+            ),
+        )
+        user = await UserService(session).get(user_id)
+        await UserService(session).replace_roles(
+            user_id,
+            UserRoleReplaceRequest(role_ids=[dead_perm_role.id]),
+            expected_lock_version=int(user.lock_version),
+        )
+        await session.execute(
+            update(Role)
+            .where(Role.id == dead_perm_role.id)
+            .values(deleted_at=datetime.now(UTC))
+        )
+        await session.commit()
+        dead_perm_role_id = dead_perm_role.id
+        other_perm_role_id = other_perm_role.id
+
+    async with integration_session_factory() as session:
+        decision = await AuthorizationResolver(session).authorize_resource(
+            user_id, "mcp.tool.execute", "MCP_TOOL", tool_id
+        )
+        assert decision.allowed is False
+        assert decision.reason_code == "PERMISSION_MISSING"
+
+    # Permission via live Role; grant only on soft-deleted Role → RESOURCE_GRANT_MISSING
+    async with integration_session_factory() as session:
+        await RoleService(session).replace_permissions(
+            other_perm_role_id,
+            RolePermissionReplaceRequest(permission_ids=[execute_id]),
+            expected_lock_version=1,
+        )
+        dead_grant_role = await RoleService(session).create(
+            RoleCreate(code=f"dead-g-{uuid.uuid4().hex[:8]}", name="Dead Grant")
+        )
+        # clear direct user grants
+        user_grants, _ = await ResourceGrantService(session).list_for_user(user_id)
+        for grant in user_grants:
+            await ResourceGrantService(session).delete_for_user(user_id, grant.id)
+        await ResourceGrantService(session).create_for_role(
+            dead_grant_role.id,
+            ResourceGrantCreate(
+                resource_type=ResourceGrantResourceType.MCP_TOOL,
+                resource_id=tool_id,
+            ),
+        )
+        user = await UserService(session).get(user_id)
+        await UserService(session).replace_roles(
+            user_id,
+            UserRoleReplaceRequest(
+                role_ids=[other_perm_role_id, dead_grant_role.id]
+            ),
+            expected_lock_version=int(user.lock_version),
+        )
+        await session.execute(
+            update(Role)
+            .where(Role.id == dead_grant_role.id)
+            .values(deleted_at=datetime.now(UTC))
+        )
+        await session.commit()
+
+    async with integration_session_factory() as session:
+        decision = await AuthorizationResolver(session).authorize_resource(
+            user_id, "mcp.tool.execute", "MCP_TOOL", tool_id
+        )
+        assert decision.allowed is False
+        assert decision.reason_code == "RESOURCE_GRANT_MISSING"
+
+    # Soft-deleted user → USER_NOT_FOUND
+    async with integration_session_factory() as session:
+        from app.models.auth import User
+
+        await session.execute(
+            update(User)
+            .where(User.id == user_id)
+            .values(deleted_at=datetime.now(UTC))
+        )
+        await session.commit()
+
+    async with integration_session_factory() as session:
+        decision = await AuthorizationResolver(session).authorize_resource(
+            user_id, "mcp.tool.execute", "MCP_TOOL", tool_id
+        )
+        assert decision.allowed is False
+        assert decision.reason_code == "USER_NOT_FOUND"
+
+    # silence unused in soft-delete-only-permission path
+    assert dead_perm_role_id is not None
