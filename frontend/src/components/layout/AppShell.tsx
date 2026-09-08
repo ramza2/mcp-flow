@@ -9,6 +9,8 @@ import {
 } from 'lucide-react';
 import PermissionGate from '../PermissionGate';
 import type { Permission } from '../../domain';
+import { useAuth } from '../../auth/useAuth';
+import { isApiError } from '../../api/client';
 
 interface NavItem {
   label: string;
@@ -129,14 +131,40 @@ function NavSection({ item, collapsed, level = 0 }: { item: NavItem; collapsed: 
   );
 }
 
+function userInitial(displayName: string | undefined, username: string | undefined): string {
+  const source = (displayName || username || '?').trim();
+  return source.charAt(0).toUpperCase() || '?';
+}
+
 export default function AppShell() {
   const [collapsed, setCollapsed] = useState(false);
   const [userMenuOpen, setUserMenuOpen] = useState(false);
+  const [logoutError, setLogoutError] = useState('');
+  const [logoutLoading, setLogoutLoading] = useState(false);
   const navigate = useNavigate();
+  const { user, logout } = useAuth();
 
-  const handleLogout = () => {
-    navigate('/login');
+  const handleLogout = async () => {
+    if (logoutLoading) return;
+    setLogoutError('');
+    setLogoutLoading(true);
+    try {
+      await logout();
+      navigate('/login', { replace: true });
+    } catch (error) {
+      if (isApiError(error) && error.status === 401 && error.code === 'AUTH_SESSION_INVALID') {
+        navigate('/login', { replace: true });
+        return;
+      }
+      setLogoutError(isApiError(error) ? error.message : '로그아웃에 실패했습니다. 다시 시도하세요.');
+    } finally {
+      setLogoutLoading(false);
+    }
   };
+
+  const displayName = user?.display_name || user?.username || 'User';
+  const email = user?.email ?? '';
+  const initial = userInitial(user?.display_name, user?.username);
 
   return (
     <div className="flex h-full bg-slate-50">
@@ -193,28 +221,35 @@ export default function AppShell() {
                 onClick={() => setUserMenuOpen(v => !v)}
                 className="flex items-center gap-2 px-2.5 py-1.5 rounded-md text-sm text-slate-700 hover:bg-slate-100 transition-colors"
               >
-                <div className="w-6 h-6 rounded-full bg-indigo-600 flex items-center justify-center text-white text-xs font-medium">A</div>
+                <div className="w-6 h-6 rounded-full bg-indigo-600 flex items-center justify-center text-white text-xs font-medium">
+                  {initial}
+                </div>
                 <div className="text-left hidden sm:block">
-                  <div className="text-xs font-medium leading-none">Admin</div>
-                  <div className="text-[10px] text-slate-400 leading-none mt-0.5">KST</div>
+                  <div className="text-xs font-medium leading-none">{displayName}</div>
+                  <div className="text-[10px] text-slate-400 leading-none mt-0.5">{user?.username ?? ''}</div>
                 </div>
                 <ChevronDown size={12} className="text-slate-400" />
               </button>
               {userMenuOpen && (
                 <div className="absolute right-0 top-full mt-1 w-48 bg-white rounded-lg shadow-lg border border-slate-200 py-1 z-50">
                   <div className="px-3 py-2 border-b border-slate-100">
-                    <div className="text-xs font-semibold text-slate-800">Administrator</div>
-                    <div className="text-xs text-slate-500">admin@mcpflow.io</div>
-                    <div className="text-xs text-indigo-600 mt-0.5">Super Admin</div>
+                    <div className="text-xs font-semibold text-slate-800">{displayName}</div>
+                    {email ? <div className="text-xs text-slate-500">{email}</div> : null}
+                    {user?.username ? <div className="text-xs text-slate-400 mt-0.5">@{user.username}</div> : null}
                   </div>
-                  <button className="w-full flex items-center gap-2 px-3 py-2 text-sm text-slate-700 hover:bg-slate-50">
+                  <button type="button" className="w-full flex items-center gap-2 px-3 py-2 text-sm text-slate-700 hover:bg-slate-50">
                     <User size={13} /> 프로필
                   </button>
+                  {logoutError ? (
+                    <div className="px-3 py-2 text-xs text-red-600 border-t border-slate-100">{logoutError}</div>
+                  ) : null}
                   <button
-                    onClick={handleLogout}
-                    className="w-full flex items-center gap-2 px-3 py-2 text-sm text-red-600 hover:bg-red-50"
+                    type="button"
+                    onClick={() => void handleLogout()}
+                    disabled={logoutLoading}
+                    className="w-full flex items-center gap-2 px-3 py-2 text-sm text-red-600 hover:bg-red-50 disabled:opacity-60"
                   >
-                    <LogOut size={13} /> 로그아웃
+                    <LogOut size={13} /> {logoutLoading ? '로그아웃 중…' : '로그아웃'}
                   </button>
                 </div>
               )}

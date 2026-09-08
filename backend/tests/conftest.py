@@ -151,10 +151,58 @@ async def db_app(
 
 
 @pytest.fixture
-async def db_client(db_app) -> AsyncIterator[AsyncClient]:
+async def unauthenticated_db_client(db_app) -> AsyncIterator[AsyncClient]:
     transport = ASGITransport(app=db_app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
         yield ac
+
+
+@pytest.fixture
+async def db_client(unauthenticated_db_client: AsyncClient) -> AsyncClient:
+    """Unauthenticated ASGI client (Auth API tests and explicit negative cases)."""
+    return unauthenticated_db_client
+
+
+@pytest.fixture
+async def authenticated_db_client(
+    unauthenticated_db_client: AsyncClient,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> AsyncIterator[AsyncClient]:
+    """Real User + Session cookie + CSRF header (no fake auth bypass)."""
+    import uuid
+
+    from app.auth.passwords import hash_password
+    from app.domain.enums import UserStatus
+    from app.repositories.user import UserRepository
+
+    client = unauthenticated_db_client
+    username = f"authz-{uuid.uuid4().hex[:10]}"
+    password = "correct-horse-battery-staple"
+    async with db_session_factory() as session:
+        user = await UserRepository(session).create(
+            username=username,
+            display_name="API Test User",
+            email=f"{username}@example.com",
+            status=UserStatus.ACTIVE,
+        )
+        await UserRepository(session).set_password_hash(
+            user.id, hash_password(password)
+        )
+        await session.commit()
+
+    login = await client.post(
+        "/api/v1/auth/login",
+        json={"username": username, "password": password},
+    )
+    assert login.status_code == 200, login.text
+    assert client.cookies.get("mcpflow_session")
+
+    csrf = await client.get("/api/v1/auth/csrf")
+    assert csrf.status_code == 200, csrf.text
+    token = csrf.json()["csrf_token"]
+    assert token
+    client.headers["X-CSRF-Token"] = token
+    yield client
 
 
 @pytest.fixture

@@ -12,6 +12,12 @@ API = "/api/v1/agents"
 PROFILES_API = "/api/v1/model-profiles/llm"
 
 
+@pytest.fixture
+async def db_client(authenticated_db_client):
+    """Protected API tests use a real Session + CSRF (no auth bypass)."""
+    return authenticated_db_client
+
+
 def _selection(**overrides: Any) -> dict[str, Any]:
     payload = {
         "auto_select_threshold": 0.82,

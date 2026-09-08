@@ -10,10 +10,11 @@ import {
   verificationList,
   versionList,
 } from '../fixtures/mcp-api';
+import { mockAuthSession, sessionUnauthorizedBody } from '../fixtures/auth-api';
 
 /**
  * Smoke E2E only — verify routes load without fatal errors.
- * Do not replay full Mock workflows here.
+ * Auth uses contract-shaped /auth/session mocks (no localStorage fake auth).
  */
 const ROUTES: Array<{ path: string; expectText: RegExp }> = [
   { path: '/', expectText: /Dashboard|MCPFlow|최근|실행/i },
@@ -27,6 +28,40 @@ const ROUTES: Array<{ path: string; expectText: RegExp }> = [
   { path: '/mcp/tools', expectText: /MCP Tools|Tool/i },
   { path: '/admin/model-profiles', expectText: /Model Profile/i },
 ];
+
+async function stubAuthSession(page: import('@playwright/test').Page, mode: 'ok' | 'unauthorized' = 'ok') {
+  await page.route('**/api/v1/auth/session', async route => {
+    if (mode === 'unauthorized') {
+      return route.fulfill({
+        status: 401,
+        contentType: 'application/json',
+        body: JSON.stringify(sessionUnauthorizedBody()),
+      });
+    }
+    return route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify(mockAuthSession),
+    });
+  });
+  await page.route('**/api/v1/auth/csrf', async route => {
+    return route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ csrf_token: 'e2e-csrf-token' }),
+    });
+  });
+  await page.route('**/api/v1/auth/logout', async route => {
+    return route.fulfill({ status: 204, body: '' });
+  });
+  await page.route('**/api/v1/auth/login', async route => {
+    return route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify(mockAuthSession),
+    });
+  });
+}
 
 async function stubMcpApi(page: import('@playwright/test').Page) {
   await page.route('**/api/v1/mcp/**', async route => {
@@ -78,6 +113,7 @@ async function stubMcpApi(page: import('@playwright/test').Page) {
 
 for (const { path, expectText } of ROUTES) {
   test(`smoke: ${path} loads`, async ({ page }) => {
+    await stubAuthSession(page, 'ok');
     if (path.startsWith('/mcp/')) {
       await stubMcpApi(page);
     }
@@ -89,6 +125,7 @@ for (const { path, expectText } of ROUTES) {
 }
 
 test('smoke: /mcp/servers/:id loads with API stub', async ({ page }) => {
+  await stubAuthSession(page, 'ok');
   await stubMcpApi(page);
   const response = await page.goto(`/mcp/servers/${activeServer.id}`);
   expect(response?.ok() ?? true).toBeTruthy();
@@ -97,6 +134,7 @@ test('smoke: /mcp/servers/:id loads with API stub', async ({ page }) => {
 });
 
 test('smoke: /mcp/tools/:id loads with API stub', async ({ page }) => {
+  await stubAuthSession(page, 'ok');
   await stubMcpApi(page);
   const response = await page.goto(`/mcp/tools/${discoveredTool.id}`);
   expect(response?.ok() ?? true).toBeTruthy();
@@ -105,6 +143,7 @@ test('smoke: /mcp/tools/:id loads with API stub', async ({ page }) => {
 });
 
 test('smoke: /mcp/tools/:id Policy and Verification tabs open', async ({ page }) => {
+  await stubAuthSession(page, 'ok');
   await stubMcpApi(page);
   await page.goto(`/mcp/tools/${discoveredTool.id}`);
   await expect(page.locator('body')).toContainText(/Search Docs/i);
@@ -116,6 +155,5 @@ test('smoke: /mcp/tools/:id Policy and Verification tabs open', async ({ page })
   await expect(page.locator('body')).toContainText(/Current|Historical/i);
   await expect(page.locator('body')).not.toContainText(/Something went wrong|Application Error|Fatal/i);
 
-  // keep fixture referenced for type alignment
   expect(toolPolicy.risk_class).toBe('READ_ONLY');
 });

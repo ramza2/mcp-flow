@@ -19,6 +19,11 @@ API_SERVERS = "/api/v1/mcp/servers"
 API_TOOLS = "/api/v1/mcp/tools"
 
 
+@pytest.fixture
+async def db_client(authenticated_db_client):
+    """Protected API tests use a real Session + CSRF (no auth bypass)."""
+    return authenticated_db_client
+
 async def _create_server(client: AsyncClient) -> dict[str, Any]:
     response = await client.post(
         API_SERVERS,

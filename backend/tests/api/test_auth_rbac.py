@@ -17,6 +17,12 @@ PERMS = "/api/v1/permissions"
 AGENTS = "/api/v1/agents"
 
 
+@pytest.fixture
+async def db_client(authenticated_db_client):
+    """Protected API tests use a real Session + CSRF (no auth bypass)."""
+    return authenticated_db_client
+
+
 def _user_body(**overrides: Any) -> dict[str, Any]:
     suffix = uuid.uuid4().hex[:8]
     payload = {

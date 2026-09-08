@@ -1,5 +1,6 @@
 import { createBrowserRouter } from 'react-router';
 import AppShell from './components/layout/AppShell';
+import RequireAuth from './components/RequireAuth';
 
 // Auth
 import Login from './screens/Login';
@@ -52,51 +53,56 @@ export const router = createBrowserRouter([
   },
   {
     path: '/',
-    Component: AppShell,
+    Component: RequireAuth,
     children: [
-      { index: true, Component: Dashboard },
+      {
+        Component: AppShell,
+        children: [
+          { index: true, Component: Dashboard },
 
-      // Work
-      { path: 'run', Component: AgentRun },
-      { path: 'run/:conversationId', Component: AgentRun },
-      { path: 'executions', Component: Executions },
-      { path: 'executions/:executionId', Component: ExecutionDetail },
-      { path: 'approvals', Component: Approvals },
-      { path: 'approvals/:approvalId', Component: ApprovalDetail },
-      { path: 'schedules', Component: Schedules },
-      { path: 'schedules/new', Component: ScheduleEdit },
-      { path: 'schedules/:id/edit', Component: ScheduleEdit },
+          // Work
+          { path: 'run', Component: AgentRun },
+          { path: 'run/:conversationId', Component: AgentRun },
+          { path: 'executions', Component: Executions },
+          { path: 'executions/:executionId', Component: ExecutionDetail },
+          { path: 'approvals', Component: Approvals },
+          { path: 'approvals/:approvalId', Component: ApprovalDetail },
+          { path: 'schedules', Component: Schedules },
+          { path: 'schedules/new', Component: ScheduleEdit },
+          { path: 'schedules/:id/edit', Component: ScheduleEdit },
 
-      // Build
-      { path: 'agents', Component: Agents },
-      { path: 'agents/:agentId', Component: AgentDetail },
-      { path: 'agents/:agentId/versions/:versionId/edit', Component: AgentEdit },
-      { path: 'workflows', Component: Workflows },
-      { path: 'workflows/:workflowId', Component: WorkflowDetail },
-      { path: 'workflows/:workflowId/versions/:versionId/edit', Component: WorkflowDesigner },
+          // Build
+          { path: 'agents', Component: Agents },
+          { path: 'agents/:agentId', Component: AgentDetail },
+          { path: 'agents/:agentId/versions/:versionId/edit', Component: AgentEdit },
+          { path: 'workflows', Component: Workflows },
+          { path: 'workflows/:workflowId', Component: WorkflowDetail },
+          { path: 'workflows/:workflowId/versions/:versionId/edit', Component: WorkflowDesigner },
 
-      // MCP
-      { path: 'mcp/servers', Component: MCPServers },
-      { path: 'mcp/servers/new', Component: MCPServerNew },
-      { path: 'mcp/servers/:serverId', Component: MCPServerDetail },
-      { path: 'mcp/tools', Component: MCPTools },
-      { path: 'mcp/tools/:toolId', Component: MCPToolDetail },
-      { path: 'mcp/discovery', Component: ExternalDiscovery },
-      { path: 'tool-factory', Component: ToolFactory },
-      { path: 'tool-factory/new', Component: ToolFactoryNew },
-      { path: 'tool-factory/:buildId', Component: FactoryBuildDetail },
+          // MCP
+          { path: 'mcp/servers', Component: MCPServers },
+          { path: 'mcp/servers/new', Component: MCPServerNew },
+          { path: 'mcp/servers/:serverId', Component: MCPServerDetail },
+          { path: 'mcp/tools', Component: MCPTools },
+          { path: 'mcp/tools/:toolId', Component: MCPToolDetail },
+          { path: 'mcp/discovery', Component: ExternalDiscovery },
+          { path: 'tool-factory', Component: ToolFactory },
+          { path: 'tool-factory/new', Component: ToolFactoryNew },
+          { path: 'tool-factory/:buildId', Component: FactoryBuildDetail },
 
-      // Admin
-      { path: 'admin/users', Component: Users },
-      { path: 'admin/users/:userId', Component: UserDetail },
-      { path: 'admin/roles', Component: Roles },
-      { path: 'admin/approval-policies', Component: ApprovalPolicies },
-      { path: 'admin/model-profiles', Component: ModelProfiles },
-      { path: 'admin/model-profiles/:profileId', Component: ModelProfileDetail },
-      { path: 'admin/audit-logs', Component: AuditLogs },
-      { path: 'admin/jobs', Component: Jobs },
-      { path: 'admin/jobs/:jobId', Component: JobDetail },
-      { path: 'admin/settings', Component: SystemSettings },
+          // Admin
+          { path: 'admin/users', Component: Users },
+          { path: 'admin/users/:userId', Component: UserDetail },
+          { path: 'admin/roles', Component: Roles },
+          { path: 'admin/approval-policies', Component: ApprovalPolicies },
+          { path: 'admin/model-profiles', Component: ModelProfiles },
+          { path: 'admin/model-profiles/:profileId', Component: ModelProfileDetail },
+          { path: 'admin/audit-logs', Component: AuditLogs },
+          { path: 'admin/jobs', Component: Jobs },
+          { path: 'admin/jobs/:jobId', Component: JobDetail },
+          { path: 'admin/settings', Component: SystemSettings },
+        ],
+      },
     ],
   },
 ]);
