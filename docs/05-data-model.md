@@ -434,14 +434,65 @@ UNCHANGED
 `tool_embeddings`는 ToolVersion + EmbeddingProfile 조합으로 관리한다.
 
 ```text
-search_text
-search_tsv
-dimension-fixed vector
-content_hash
-status(READY/STALE/FAILED)
+id uuid PK
+
+mcp_tool_version_id uuid FK → mcp_tool_versions.id
+embedding_profile_id uuid FK → embedding_profiles.id
+
+search_text text
+search_tsv tsvector
+
+embedding vector nullable
+
+content_hash char(64)
+
+status
+  READY
+  STALE
+  FAILED
+
+created_at
+updated_at
 ```
 
+UNIQUE:
+
+```text
+(mcp_tool_version_id, embedding_profile_id)
+```
+
+의미:
+
+```text
+READY
+→ search_text/content_hash와 embedding이 현재 생성기준에 일치
+
+STALE
+→ Tool 운영 metadata 변경 등으로 재생성 필요
+
+FAILED
+→ 최신 search_text는 존재하지만 embedding 생성 실패
+```
+
+FAILED row에서는 `embedding = null`을 허용한다.
+
+`embedding` 컬럼은 Profile별 `dimension` 차이를 수용하기 위해 dimension-fixed DDL로 고정하지 않는다.
+Service가 `len(vector) == embedding_profile.dimension`을 검증하며,
+비교 query는 항상 단일 EmbeddingProfile scope로만 수행한다.
+
 초기에는 exact cosine을 우선하고 HNSW는 성능시험 결과로 도입한다.
+
+Indexes:
+
+```text
+UNIQUE(mcp_tool_version_id, embedding_profile_id)
+GIN(search_tsv)
+ix(embedding_profile_id)
+ix(status)
+ix(mcp_tool_version_id)
+```
+
+HNSW / IVFFlat index는 이 단계에 두지 않는다.
 
 ---
 

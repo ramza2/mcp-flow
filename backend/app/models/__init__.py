@@ -18,6 +18,7 @@ from app.models.mcp import (
     MCPToolPolicy,
     MCPToolVerification,
     MCPToolVersion,
+    ToolEmbedding,
 )
 from app.models.model_profile import EmbeddingProfile, LLMProfile
 from app.models.session import Session
@@ -41,6 +42,7 @@ __all__ = [
     "Role",
     "RolePermission",
     "Session",
+    "ToolEmbedding",
     "User",
     "UserRole",
 ]

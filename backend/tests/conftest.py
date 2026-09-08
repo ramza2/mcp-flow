@@ -37,6 +37,22 @@ def _compile_uuid_sqlite(_element, _compiler, **_kw) -> str:
     return "CHAR(36)"
 
 
+@compiles(postgresql.TSVECTOR, "sqlite")
+def _compile_tsvector_sqlite(_element, _compiler, **_kw) -> str:
+    return "TEXT"
+
+
+try:
+    from pgvector.sqlalchemy import Vector as PgVector
+
+    @compiles(PgVector, "sqlite")
+    def _compile_vector_sqlite(_element, _compiler, **_kw) -> str:
+        return "TEXT"
+
+except ImportError:  # pragma: no cover
+    pass
+
+
 @pytest.fixture
 def settings() -> Settings:
     return Settings(
