@@ -13,6 +13,7 @@ from app.models.mcp import MCPTool
 from app.repositories.mcp_tool import MCPToolRepository
 from app.repositories.tool_embedding import ToolEmbeddingRepository
 from app.schemas.mcp_tool import MCPToolUpdate
+from app.search.tool_document import normalize_search_tags
 
 _ACTIVATE_FROM = frozenset(
     {
@@ -25,22 +26,10 @@ _PRESERVED = frozenset({MCPToolStatus.MISSING, MCPToolStatus.BLOCKED})
 _SEARCH_SEMANTIC_FIELDS = frozenset({"display_name", "description_override", "tags"})
 
 
-def _normalized_tags(value: object) -> list[str]:
-    if not isinstance(value, list):
-        return []
-    out: list[str] = []
-    for item in value:
-        if isinstance(item, str):
-            text = " ".join(item.split()).strip()
-            if text:
-                out.append(text)
-    return sorted(out, key=str.casefold)
-
-
 def _semantic_value_changed(tool: MCPTool, field: str, new_value: object) -> bool:
     old_value = getattr(tool, field)
     if field == "tags":
-        return _normalized_tags(old_value) != _normalized_tags(new_value)
+        return normalize_search_tags(old_value) != normalize_search_tags(new_value)
     old_text = old_value if isinstance(old_value, str) or old_value is None else old_value
     new_text = new_value if isinstance(new_value, str) or new_value is None else new_value
     if isinstance(old_text, str):

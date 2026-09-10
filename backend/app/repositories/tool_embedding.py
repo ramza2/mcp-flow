@@ -164,6 +164,67 @@ class ToolEmbeddingRepository:
         )
         return int(result.rowcount or 0)
 
+    async def mark_stale_for_profile(self, profile_id: uuid.UUID) -> int:
+        from sqlalchemy import update
+
+        from app.domain.enums import ToolEmbeddingStatus
+
+        result = await self._session.execute(
+            update(ToolEmbedding)
+            .where(
+                ToolEmbedding.embedding_profile_id == profile_id,
+                ToolEmbedding.status != ToolEmbeddingStatus.STALE,
+            )
+            .values(status=ToolEmbeddingStatus.STALE)
+        )
+        return int(result.rowcount or 0)
+
+    async def upsert_stale(
+        self,
+        *,
+        tool_version_id: uuid.UUID,
+        embedding_profile_id: uuid.UUID,
+        search_text: str,
+        content_hash: str,
+    ) -> ToolEmbedding:
+        stmt = text(
+            """
+            INSERT INTO tool_embeddings (
+              id, mcp_tool_version_id, embedding_profile_id,
+              search_text, search_tsv, embedding, content_hash, status
+            ) VALUES (
+              :id, :tool_version_id, :profile_id,
+              :search_text, to_tsvector('simple', :search_text),
+              NULL, :content_hash, 'STALE'
+            )
+            ON CONFLICT (mcp_tool_version_id, embedding_profile_id)
+            DO UPDATE SET
+              search_text = EXCLUDED.search_text,
+              search_tsv = EXCLUDED.search_tsv,
+              content_hash = EXCLUDED.content_hash,
+              status = 'STALE',
+              updated_at = now()
+            RETURNING id
+            """
+        )
+        await self._session.execute(
+            stmt,
+            {
+                "id": uuid.uuid4(),
+                "tool_version_id": tool_version_id,
+                "profile_id": embedding_profile_id,
+                "search_text": search_text,
+                "content_hash": content_hash,
+            },
+        )
+        await self._session.flush()
+        row = await self.get(
+            tool_version_id=tool_version_id,
+            embedding_profile_id=embedding_profile_id,
+        )
+        assert row is not None
+        return row
+
     async def list_missing_or_stale_for_profile(
         self, profile_id: uuid.UUID
     ) -> list[uuid.UUID]:
@@ -207,6 +268,7 @@ class ToolEmbeddingRepository:
                    ts_rank_cd(te.search_tsv, plainto_tsquery('simple', :query)) AS score
             FROM tool_embeddings AS te
             WHERE te.embedding_profile_id = :profile_id
+              AND te.status IN ('READY', 'FAILED')
               AND te.search_tsv @@ plainto_tsquery('simple', :query)
             ORDER BY score DESC, te.mcp_tool_version_id
             LIMIT :limit

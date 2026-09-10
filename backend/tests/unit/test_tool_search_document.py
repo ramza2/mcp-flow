@@ -159,6 +159,17 @@ def test_malformed_schema_does_not_crash() -> None:
     assert doc.content_hash
 
 
+def test_tag_casefold_dedupe_same_hash() -> None:
+    builder = ToolSearchDocumentBuilder()
+    tool = _tool(tags=["Weather", "ops"])
+    version = _version(mcp_tool_id=tool.id)
+    a = builder.build(tool, version)
+    tool.tags = ["weather", "Weather", "ops"]
+    b = builder.build(tool, version)
+    assert a.content_hash == b.content_hash
+    assert "tags: ops, weather" in a.search_text
+
+
 def test_secrets_and_endpoints_not_embedded() -> None:
     builder = ToolSearchDocumentBuilder()
     tool = _tool()

@@ -259,23 +259,65 @@ class OpenAICompatibleAdapter:
                 retryable=False,
             )
 
-        # OpenAI-compatible responses may include index; sort by index when present.
-        indexed: list[tuple[int, Any]] = []
-        for i, item in enumerate(data):
-            if not isinstance(item, dict):
+        # OpenAI-compatible responses may include index; validate mapping strictly.
+        present_flags = [("index" in item) if isinstance(item, dict) else False for item in data]
+        if any(present_flags) and not all(present_flags):
+            raise ModelProviderError(
+                error_code=PROTOCOL,
+                message="Embedding data entries must either all include index or all omit it.",
+                retryable=False,
+            )
+
+        ordered_items: list[Any]
+        if all(present_flags):
+            by_index: dict[int, Any] = {}
+            for item in data:
+                if not isinstance(item, dict):
+                    raise ModelProviderError(
+                        error_code=PROTOCOL,
+                        message="Embedding data entry must be an object.",
+                        retryable=False,
+                    )
+                idx = item.get("index")
+                if isinstance(idx, bool) or not isinstance(idx, int):
+                    raise ModelProviderError(
+                        error_code=PROTOCOL,
+                        message="Embedding index must be an integer.",
+                        retryable=False,
+                    )
+                if idx < 0 or idx >= len(inputs):
+                    raise ModelProviderError(
+                        error_code=PROTOCOL,
+                        message="Embedding index is out of range.",
+                        retryable=False,
+                    )
+                if idx in by_index:
+                    raise ModelProviderError(
+                        error_code=PROTOCOL,
+                        message="Embedding response contains duplicate index values.",
+                        retryable=False,
+                    )
+                by_index[idx] = item
+            if set(by_index.keys()) != set(range(len(inputs))):
                 raise ModelProviderError(
                     error_code=PROTOCOL,
-                    message="Embedding data entry must be an object.",
+                    message="Embedding indexes must cover 0..n-1 exactly.",
                     retryable=False,
                 )
-            idx = item.get("index", i)
-            if not isinstance(idx, int):
-                idx = i
-            indexed.append((idx, item))
-        indexed.sort(key=lambda pair: pair[0])
+            ordered_items = [by_index[i] for i in range(len(inputs))]
+        else:
+            ordered_items = []
+            for item in data:
+                if not isinstance(item, dict):
+                    raise ModelProviderError(
+                        error_code=PROTOCOL,
+                        message="Embedding data entry must be an object.",
+                        retryable=False,
+                    )
+                ordered_items.append(item)
 
         vectors: list[list[float]] = []
-        for _, item in indexed:
+        for item in ordered_items:
             vector = item.get("embedding")
             if not isinstance(vector, list) or len(vector) == 0:
                 raise ModelProviderError(

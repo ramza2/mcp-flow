@@ -43,7 +43,7 @@ def upgrade() -> None:
         sa.Column("search_tsv", postgresql.TSVECTOR(), nullable=False),
         # Dimension is validated in Service against embedding_profiles.dimension.
         sa.Column("embedding", Vector(), nullable=True),
-        sa.Column("content_hash", sa.String(length=64), nullable=False),
+        sa.Column("content_hash", sa.CHAR(length=64), nullable=False),
         sa.Column("status", sa.String(length=32), nullable=False),
         sa.Column(
             "created_at",

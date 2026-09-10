@@ -33,7 +33,12 @@ def _norm_text(value: Any) -> str | None:
     return normalized or None
 
 
-def _norm_tags(tags: Any) -> list[str]:
+def normalize_search_tags(tags: Any) -> list[str]:
+    """Deterministic tag normalization shared by search documents and STALE checks.
+
+    Tags are whitespace-normalized, casefold-deduped, sorted, and stored in
+    casefold form so equivalent casing produces identical search documents.
+    """
     if not isinstance(tags, list):
         return []
     out: list[str] = []
@@ -46,9 +51,13 @@ def _norm_tags(tags: Any) -> list[str]:
         if key in seen:
             continue
         seen.add(key)
-        out.append(text)
-    out.sort(key=lambda s: s.casefold())
+        out.append(key)
+    out.sort()
     return out
+
+
+# Backwards-compatible alias for internal builder use.
+_norm_tags = normalize_search_tags
 
 
 def _schema_property_lines(schema: Any, *, role: str) -> list[str]:

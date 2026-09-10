@@ -112,6 +112,21 @@ async def test_tool_embeddings_schema_and_vector_extension(
         assert "uq_tool_embeddings_version_profile" in indexes
         assert "ix_tool_embeddings_search_tsv" in indexes
 
+        col_type = (
+            await session.execute(
+                text(
+                    """
+                    SELECT data_type, character_maximum_length
+                    FROM information_schema.columns
+                    WHERE table_name = 'tool_embeddings'
+                      AND column_name = 'content_hash'
+                    """
+                )
+            )
+        ).one()
+        assert col_type[0] in {"character", "char"}
+        assert int(col_type[1]) == 64
+
 
 async def _seed_tool(
     session: AsyncSession,
@@ -627,3 +642,366 @@ async def test_lexical_includes_failed_rows(
             limit=5,
         )
         assert any(hit.tool_version_id == version_id for hit in hits)
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_lexical_excludes_stale_includes_ready_failed(
+    integration_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with integration_session_factory() as session:
+        profile_id = await _seed_profile(session, dimension=2)
+        _t1, v_ready = await _seed_tool(
+            session, remote_name="ready_kw_tool", description="readykeyword alpha"
+        )
+        _t2, v_failed = await _seed_tool(
+            session, remote_name="failed_kw_tool", description="failedkeyword beta"
+        )
+        _t3, v_stale = await _seed_tool(
+            session, remote_name="stale_kw_tool", description="stalekeyword gamma"
+        )
+        repo = ToolEmbeddingRepository(session)
+        await repo.upsert_ready_if_current(
+            tool_version_id=v_ready,
+            embedding_profile_id=profile_id,
+            search_text="readykeyword document",
+            content_hash="1" * 64,
+            embedding=[1.0, 0.0],
+        )
+        await repo.upsert_failed(
+            tool_version_id=v_failed,
+            embedding_profile_id=profile_id,
+            search_text="failedkeyword document",
+            content_hash="2" * 64,
+        )
+        await repo.upsert_stale(
+            tool_version_id=v_stale,
+            embedding_profile_id=profile_id,
+            search_text="stalekeyword document",
+            content_hash="3" * 64,
+        )
+        await session.commit()
+
+        ready_hits = await repo.lexical_search(
+            query="readykeyword", profile_id=profile_id, limit=5
+        )
+        failed_hits = await repo.lexical_search(
+            query="failedkeyword", profile_id=profile_id, limit=5
+        )
+        stale_hits = await repo.lexical_search(
+            query="stalekeyword", profile_id=profile_id, limit=5
+        )
+        assert any(h.tool_version_id == v_ready for h in ready_hits)
+        assert any(h.tool_version_id == v_failed for h in failed_hits)
+        assert stale_hits == []
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_final_write_lock_blocks_metadata_until_ready_then_stale(
+    integration_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """T1 holds Profile+Tool locks before upsert; T2 PATCH waits; final is STALE."""
+    async with integration_session_factory() as session:
+        profile_id = await _seed_profile(session, dimension=4)
+        tool_id, version_id = await _seed_tool(
+            session,
+            remote_name="final_lock_tool",
+            description="Final lock race",
+            display_name="Original",
+        )
+        await session.commit()
+
+    locks_held = asyncio.Event()
+    allow_upsert = asyncio.Event()
+    patch_started = asyncio.Event()
+    patch_done = asyncio.Event()
+
+    class _ImmediateClient(ModelProviderClient):
+        async def embed_texts(self, target, inputs):  # type: ignore[no-untyped-def]
+            return [[0.1, 0.2, 0.3, 0.4] for _ in inputs]
+
+    client = _ImmediateClient(
+        http=httpx.AsyncClient(
+            transport=httpx.MockTransport(lambda r: httpx.Response(500)),
+            follow_redirects=False,
+        )
+    )
+
+    async def _after_locks() -> None:
+        locks_held.set()
+        await allow_upsert.wait()
+
+    async def _ensure() -> Any:
+        async with integration_session_factory() as session:
+            service = ToolEmbeddingService(
+                session,
+                session_factory=integration_session_factory,
+                model_provider=client,
+                after_row_locks=_after_locks,
+            )
+            return await service.ensure_embedding(version_id, profile_id)
+
+    async def _patch() -> None:
+        await locks_held.wait()
+        patch_started.set()
+        async with integration_session_factory() as session:
+            tool = await MCPToolRepository(session).get(tool_id)
+            assert tool is not None
+            await MCPToolService(session).update(
+                tool_id,
+                MCPToolUpdate(
+                    display_name="Patched After Lock",
+                    lock_version=tool.lock_version,
+                ),
+                expected_lock_version=tool.lock_version,
+            )
+        patch_done.set()
+
+    ensure_task = asyncio.create_task(_ensure())
+    patch_task = asyncio.create_task(_patch())
+
+    await locks_held.wait()
+    await asyncio.sleep(0.05)
+    assert patch_started.is_set()
+    assert not patch_done.is_set()
+
+    allow_upsert.set()
+    result = await ensure_task
+    assert result.status == ToolEmbeddingStatus.READY
+    await patch_task
+    assert patch_done.is_set()
+
+    async with integration_session_factory() as session:
+        row = await ToolEmbeddingRepository(session).get(
+            tool_version_id=version_id,
+            embedding_profile_id=profile_id,
+        )
+        assert row is not None
+        assert row.status == ToolEmbeddingStatus.STALE
+
+    await client.aclose()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_failed_provider_after_metadata_change_writes_stale(
+    integration_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with integration_session_factory() as session:
+        profile_id = await _seed_profile(session, dimension=4)
+        tool_id, version_id = await _seed_tool(
+            session,
+            remote_name="failed_meta_race",
+            description="Original failed race",
+            display_name="Original",
+        )
+        await session.commit()
+
+    gate = asyncio.Event()
+    release = asyncio.Event()
+
+    class _FailClient(ModelProviderClient):
+        async def embed_texts(self, target, inputs):  # type: ignore[no-untyped-def]
+            from app.model_provider.errors import PROTOCOL, ModelProviderError
+
+            gate.set()
+            await release.wait()
+            raise ModelProviderError(
+                error_code=PROTOCOL, message="provider down", retryable=False
+            )
+
+    client = _FailClient(
+        http=httpx.AsyncClient(
+            transport=httpx.MockTransport(lambda r: httpx.Response(500)),
+            follow_redirects=False,
+        )
+    )
+
+    async def _ensure() -> Any:
+        async with integration_session_factory() as session:
+            service = ToolEmbeddingService(
+                session,
+                session_factory=integration_session_factory,
+                model_provider=client,
+            )
+            return await service.ensure_embedding(version_id, profile_id)
+
+    task = asyncio.create_task(_ensure())
+    await gate.wait()
+
+    async with integration_session_factory() as session:
+        tool = await MCPToolRepository(session).get(tool_id)
+        assert tool is not None
+        await MCPToolService(session).update(
+            tool_id,
+            MCPToolUpdate(display_name="Changed B", lock_version=tool.lock_version),
+            expected_lock_version=tool.lock_version,
+        )
+
+    release.set()
+    result = await task
+    assert result.status == ToolEmbeddingStatus.STALE
+
+    async with integration_session_factory() as session:
+        tool = await MCPToolRepository(session).get(tool_id)
+        version = await MCPToolRepository(session).get_version(version_id)
+        assert tool is not None and version is not None
+        live = ToolSearchDocumentBuilder().build(tool, version)
+        row = await ToolEmbeddingRepository(session).get(
+            tool_version_id=version_id,
+            embedding_profile_id=profile_id,
+        )
+        assert row is not None
+        assert row.status == ToolEmbeddingStatus.STALE
+        assert row.content_hash == live.content_hash
+        assert row.search_text == live.search_text
+
+    await client.aclose()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_profile_update_after_ready_marks_stale(
+    integration_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """T1 READY commits first; T2 Profile model PATCH marks STALE."""
+    async with integration_session_factory() as session:
+        profile_id = await _seed_profile(session, dimension=4)
+        _tool_id, version_id = await _seed_tool(
+            session, remote_name="profile_after_ready", description="Profile after ready"
+        )
+        await session.commit()
+
+    locks_held = asyncio.Event()
+    allow_upsert = asyncio.Event()
+
+    class _ImmediateClient(ModelProviderClient):
+        async def embed_texts(self, target, inputs):  # type: ignore[no-untyped-def]
+            return [[0.4, 0.3, 0.2, 0.1] for _ in inputs]
+
+    client = _ImmediateClient(
+        http=httpx.AsyncClient(
+            transport=httpx.MockTransport(lambda r: httpx.Response(500)),
+            follow_redirects=False,
+        )
+    )
+
+    async def _after_locks() -> None:
+        locks_held.set()
+        await allow_upsert.wait()
+
+    async def _ensure() -> Any:
+        async with integration_session_factory() as session:
+            service = ToolEmbeddingService(
+                session,
+                session_factory=integration_session_factory,
+                model_provider=client,
+                after_row_locks=_after_locks,
+            )
+            return await service.ensure_embedding(version_id, profile_id)
+
+    ensure_task = asyncio.create_task(_ensure())
+    await locks_held.wait()
+
+    async def _profile_patch() -> None:
+        async with integration_session_factory() as session:
+            profile = await EmbeddingProfileRepository(session).get(profile_id)
+            assert profile is not None
+            from app.schemas.model_profile import EmbeddingProfileUpdate
+            from app.services.embedding_profile import EmbeddingProfileService
+
+            await EmbeddingProfileService(session).update(
+                profile_id,
+                EmbeddingProfileUpdate(model="emb-after", lock_version=profile.lock_version),
+                expected_lock_version=profile.lock_version,
+            )
+
+    # Profile PATCH waits on Profile FOR UPDATE held by ensure.
+    patch_task = asyncio.create_task(_profile_patch())
+    await asyncio.sleep(0.05)
+    assert not patch_task.done()
+
+    allow_upsert.set()
+    result = await ensure_task
+    assert result.status == ToolEmbeddingStatus.READY
+    await patch_task
+
+    async with integration_session_factory() as session:
+        row = await ToolEmbeddingRepository(session).get(
+            tool_version_id=version_id,
+            embedding_profile_id=profile_id,
+        )
+        assert row is not None
+        assert row.status == ToolEmbeddingStatus.STALE
+        profile = await EmbeddingProfileRepository(session).get(profile_id)
+        assert profile is not None
+        assert profile.model == "emb-after"
+
+    await client.aclose()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_profile_update_before_final_write_skips_ready(
+    integration_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with integration_session_factory() as session:
+        profile_id = await _seed_profile(session, dimension=4)
+        _tool_id, version_id = await _seed_tool(
+            session, remote_name="profile_before_ready", description="Profile before ready"
+        )
+        await session.commit()
+
+    gate = asyncio.Event()
+    release = asyncio.Event()
+
+    class _DelayedClient(ModelProviderClient):
+        async def embed_texts(self, target, inputs):  # type: ignore[no-untyped-def]
+            gate.set()
+            await release.wait()
+            return [[0.2, 0.2, 0.2, 0.2] for _ in inputs]
+
+    delayed = _DelayedClient(
+        http=httpx.AsyncClient(
+            transport=httpx.MockTransport(lambda r: httpx.Response(500)),
+            follow_redirects=False,
+        )
+    )
+
+    async def _ensure() -> Any:
+        async with integration_session_factory() as session:
+            service = ToolEmbeddingService(
+                session,
+                session_factory=integration_session_factory,
+                model_provider=delayed,
+            )
+            return await service.ensure_embedding(version_id, profile_id)
+
+    task = asyncio.create_task(_ensure())
+    await gate.wait()
+
+    async with integration_session_factory() as session:
+        from app.schemas.model_profile import EmbeddingProfileUpdate
+        from app.services.embedding_profile import EmbeddingProfileService
+
+        profile = await EmbeddingProfileRepository(session).get(profile_id)
+        assert profile is not None
+        await EmbeddingProfileService(session).update(
+            profile_id,
+            EmbeddingProfileUpdate(model="emb-changed", lock_version=profile.lock_version),
+            expected_lock_version=profile.lock_version,
+        )
+
+    release.set()
+    result = await task
+    assert result.skipped is True
+
+    async with integration_session_factory() as session:
+        row = await ToolEmbeddingRepository(session).get(
+            tool_version_id=version_id,
+            embedding_profile_id=profile_id,
+        )
+        assert row is None or row.status != ToolEmbeddingStatus.READY
+
+    await delayed.aclose()

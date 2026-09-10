@@ -269,3 +269,112 @@ async def test_embed_texts_does_not_log_vectors(caplog: pytest.LogCaptureFixture
     assert "0.123456789" not in joined
     assert "0.987654321" not in joined
     await adapter.aclose()
+
+
+@pytest.mark.asyncio
+async def test_embed_texts_reorders_by_index() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "data": [
+                    {"index": 1, "embedding": [0.0, 1.0, 0.0]},
+                    {"index": 0, "embedding": [1.0, 0.0, 0.0]},
+                ]
+            },
+        )
+
+    http = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), follow_redirects=False
+    )
+    adapter = OpenAICompatibleAdapter(http=http)
+    result = await adapter.embed_texts(
+        base_url="https://llm.test/v1",
+        model="m",
+        inputs=["a", "b"],
+        expected_dimension=3,
+    )
+    assert result == [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]
+    await adapter.aclose()
+
+
+@pytest.mark.asyncio
+async def test_embed_texts_omitted_index_keeps_response_order() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "data": [
+                    {"embedding": [1.0, 0.0, 0.0]},
+                    {"embedding": [0.0, 1.0, 0.0]},
+                ]
+            },
+        )
+
+    http = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), follow_redirects=False
+    )
+    adapter = OpenAICompatibleAdapter(http=http)
+    result = await adapter.embed_texts(
+        base_url="https://llm.test/v1",
+        model="m",
+        inputs=["a", "b"],
+        expected_dimension=3,
+    )
+    assert result == [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]
+    await adapter.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {
+            "data": [
+                {"index": 0, "embedding": [1.0, 0.0, 0.0]},
+                {"index": 0, "embedding": [0.0, 1.0, 0.0]},
+            ]
+        },
+        {
+            "data": [
+                {"index": 0, "embedding": [1.0, 0.0, 0.0]},
+                {"index": 2, "embedding": [0.0, 1.0, 0.0]},
+            ]
+        },
+        {
+            "data": [
+                {"index": 0, "embedding": [1.0, 0.0, 0.0]},
+                {"embedding": [0.0, 1.0, 0.0]},
+            ]
+        },
+        {
+            "data": [
+                {"index": "0", "embedding": [1.0, 0.0, 0.0]},
+                {"index": 1, "embedding": [0.0, 1.0, 0.0]},
+            ]
+        },
+        {
+            "data": [
+                {"index": True, "embedding": [1.0, 0.0, 0.0]},
+                {"index": 1, "embedding": [0.0, 1.0, 0.0]},
+            ]
+        },
+    ],
+)
+async def test_embed_texts_invalid_index_mapping(payload: dict) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=payload)
+
+    http = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), follow_redirects=False
+    )
+    adapter = OpenAICompatibleAdapter(http=http)
+    with pytest.raises(ModelProviderError) as exc:
+        await adapter.embed_texts(
+            base_url="https://llm.test/v1",
+            model="m",
+            inputs=["a", "b"],
+            expected_dimension=3,
+        )
+    assert exc.value.error_code == PROTOCOL
+    await adapter.aclose()

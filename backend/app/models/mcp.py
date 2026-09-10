@@ -8,6 +8,7 @@ from typing import Any
 
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
+    CHAR,
     Boolean,
     CheckConstraint,
     DateTime,
@@ -341,7 +342,7 @@ class ToolEmbedding(Base, TimestampMixin):
     search_tsv: Mapped[Any] = mapped_column(TSVECTOR, nullable=False)
     # Dimension validated in Service against EmbeddingProfile.dimension.
     embedding: Mapped[list[float] | None] = mapped_column(Vector(), nullable=True)
-    content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    content_hash: Mapped[str] = mapped_column(CHAR(length=64), nullable=False)
     status: Mapped[str] = mapped_column(
         String(32), nullable=False, default=ToolEmbeddingStatus.STALE
     )
