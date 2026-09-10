@@ -204,6 +204,155 @@ class OpenAICompatibleAdapter:
         latency_ms = int((time.perf_counter() - started) * 1000)
         return ConnectionProbeResult(success=True, latency_ms=latency_ms)
 
+    async def embed_texts(
+        self,
+        *,
+        base_url: str,
+        model: str,
+        inputs: list[str],
+        expected_dimension: int,
+        bearer_token: str | None = None,
+        timeout_ms: int = _DEFAULT_TIMEOUT_MS,
+    ) -> list[list[float]]:
+        """Production embeddings call — never logs vectors or credentials."""
+        if not inputs:
+            return []
+        if expected_dimension <= 0:
+            raise ModelProviderError(
+                error_code=PROTOCOL,
+                message="expected_dimension must be positive.",
+                retryable=False,
+            )
+
+        api_root = normalize_openai_compatible_root(base_url)
+        url = join_api_path(api_root, "embeddings")
+        headers = self._auth_headers(bearer_token)
+        body = {"model": model, "input": inputs}
+        response = await self._request(
+            method="POST",
+            url=url,
+            headers=headers,
+            timeout_ms=timeout_ms,
+            json_body=body,
+        )
+        payload = self._parse_json(response)
+        if not isinstance(payload, dict):
+            raise ModelProviderError(
+                error_code=PROTOCOL,
+                message="Embedding response must be a JSON object.",
+                retryable=False,
+            )
+        data = payload.get("data")
+        if not isinstance(data, list):
+            raise ModelProviderError(
+                error_code=PROTOCOL,
+                message="Embedding response missing data array.",
+                retryable=False,
+            )
+        if len(data) != len(inputs):
+            raise ModelProviderError(
+                error_code=PROTOCOL,
+                message=(
+                    f"Embedding result count mismatch: expected {len(inputs)}, "
+                    f"got {len(data)}."
+                ),
+                retryable=False,
+            )
+
+        # OpenAI-compatible responses may include index; validate mapping strictly.
+        present_flags = [("index" in item) if isinstance(item, dict) else False for item in data]
+        if any(present_flags) and not all(present_flags):
+            raise ModelProviderError(
+                error_code=PROTOCOL,
+                message="Embedding data entries must either all include index or all omit it.",
+                retryable=False,
+            )
+
+        ordered_items: list[Any]
+        if all(present_flags):
+            by_index: dict[int, Any] = {}
+            for item in data:
+                if not isinstance(item, dict):
+                    raise ModelProviderError(
+                        error_code=PROTOCOL,
+                        message="Embedding data entry must be an object.",
+                        retryable=False,
+                    )
+                idx = item.get("index")
+                if isinstance(idx, bool) or not isinstance(idx, int):
+                    raise ModelProviderError(
+                        error_code=PROTOCOL,
+                        message="Embedding index must be an integer.",
+                        retryable=False,
+                    )
+                if idx < 0 or idx >= len(inputs):
+                    raise ModelProviderError(
+                        error_code=PROTOCOL,
+                        message="Embedding index is out of range.",
+                        retryable=False,
+                    )
+                if idx in by_index:
+                    raise ModelProviderError(
+                        error_code=PROTOCOL,
+                        message="Embedding response contains duplicate index values.",
+                        retryable=False,
+                    )
+                by_index[idx] = item
+            if set(by_index.keys()) != set(range(len(inputs))):
+                raise ModelProviderError(
+                    error_code=PROTOCOL,
+                    message="Embedding indexes must cover 0..n-1 exactly.",
+                    retryable=False,
+                )
+            ordered_items = [by_index[i] for i in range(len(inputs))]
+        else:
+            ordered_items = []
+            for item in data:
+                if not isinstance(item, dict):
+                    raise ModelProviderError(
+                        error_code=PROTOCOL,
+                        message="Embedding data entry must be an object.",
+                        retryable=False,
+                    )
+                ordered_items.append(item)
+
+        vectors: list[list[float]] = []
+        for item in ordered_items:
+            vector = item.get("embedding")
+            if not isinstance(vector, list) or len(vector) == 0:
+                raise ModelProviderError(
+                    error_code=PROTOCOL,
+                    message="Embedding vector is missing or empty.",
+                    retryable=False,
+                )
+            parsed: list[float] = []
+            for value in vector:
+                if isinstance(value, bool) or not isinstance(value, (int, float)):
+                    raise ModelProviderError(
+                        error_code=PROTOCOL,
+                        message="Embedding vector contains non-numeric values.",
+                        retryable=False,
+                    )
+                number = float(value)
+                if number != number or number in (float("inf"), float("-inf")):
+                    raise ModelProviderError(
+                        error_code=PROTOCOL,
+                        message="Embedding vector contains NaN or Infinity.",
+                        retryable=False,
+                    )
+                parsed.append(number)
+            if len(parsed) != expected_dimension:
+                raise ModelProviderError(
+                    error_code=DIMENSION_MISMATCH,
+                    message=(
+                        f"Embedding dimension mismatch: expected {expected_dimension}, "
+                        f"got {len(parsed)}."
+                    ),
+                    retryable=False,
+                )
+            vectors.append(parsed)
+        return vectors
+
     async def test_embedding(
         self,
         *,

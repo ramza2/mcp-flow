@@ -6,7 +6,9 @@ import uuid
 from datetime import datetime
 from typing import Any
 
+from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
+    CHAR,
     Boolean,
     CheckConstraint,
     DateTime,
@@ -19,10 +21,11 @@ from sqlalchemy import (
     func,
     text,
 )
-from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base, LockVersionMixin, TimestampMixin
+from app.domain.enums import ToolEmbeddingStatus
 
 
 class MutableResourceMixin(TimestampMixin, LockVersionMixin):
@@ -300,3 +303,46 @@ class MCPToolVerification(Base):
     result_summary: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     evidence_blob_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class ToolEmbedding(Base, TimestampMixin):
+    """ToolVersion + EmbeddingProfile search index row (docs/05 §8.6)."""
+
+    __tablename__ = "tool_embeddings"
+    __table_args__ = (
+        UniqueConstraint(
+            "mcp_tool_version_id",
+            "embedding_profile_id",
+            name="uq_tool_embeddings_version_profile",
+        ),
+        CheckConstraint(
+            "status IN ('READY', 'STALE', 'FAILED')",
+            name="ck_tool_embeddings_status",
+        ),
+        Index("ix_tool_embeddings_embedding_profile_id", "embedding_profile_id"),
+        Index("ix_tool_embeddings_status", "status"),
+        Index("ix_tool_embeddings_mcp_tool_version_id", "mcp_tool_version_id"),
+        # GIN(search_tsv) is created in Alembic (PostgreSQL-only).
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    mcp_tool_version_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("mcp_tool_versions.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    embedding_profile_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("embedding_profiles.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    search_text: Mapped[str] = mapped_column(Text, nullable=False)
+    search_tsv: Mapped[Any] = mapped_column(TSVECTOR, nullable=False)
+    # Dimension validated in Service against EmbeddingProfile.dimension.
+    embedding: Mapped[list[float] | None] = mapped_column(Vector(), nullable=True)
+    content_hash: Mapped[str] = mapped_column(CHAR(length=64), nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(32), nullable=False, default=ToolEmbeddingStatus.STALE
+    )

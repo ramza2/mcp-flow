@@ -11,7 +11,9 @@ from app.core.errors import AppError
 from app.domain.enums import MCPToolStatus
 from app.models.mcp import MCPTool
 from app.repositories.mcp_tool import MCPToolRepository
+from app.repositories.tool_embedding import ToolEmbeddingRepository
 from app.schemas.mcp_tool import MCPToolUpdate
+from app.search.tool_document import normalize_search_tags
 
 _ACTIVATE_FROM = frozenset(
     {
@@ -21,6 +23,21 @@ _ACTIVATE_FROM = frozenset(
 )
 _DEACTIVATE_FROM = frozenset({MCPToolStatus.ACTIVE})
 _PRESERVED = frozenset({MCPToolStatus.MISSING, MCPToolStatus.BLOCKED})
+_SEARCH_SEMANTIC_FIELDS = frozenset({"display_name", "description_override", "tags"})
+
+
+def _semantic_value_changed(tool: MCPTool, field: str, new_value: object) -> bool:
+    old_value = getattr(tool, field)
+    if field == "tags":
+        return normalize_search_tags(old_value) != normalize_search_tags(new_value)
+    old_text = old_value if isinstance(old_value, str) or old_value is None else old_value
+    new_text = new_value if isinstance(new_value, str) or new_value is None else new_value
+    if isinstance(old_text, str):
+        old_text = " ".join(old_text.split()).strip() or None
+    if isinstance(new_text, str):
+        new_text = " ".join(new_text.split()).strip() or None
+    return old_text != new_text
+
 
 
 class MCPToolService:
@@ -64,8 +81,13 @@ class MCPToolService:
         *,
         expected_lock_version: int,
     ) -> MCPTool:
-        await self._require(tool_id)
+        tool = await self._require(tool_id)
         payload = data.model_dump(exclude_unset=True, exclude={"lock_version"})
+        stale_needed = any(
+            field in _SEARCH_SEMANTIC_FIELDS
+            and _semantic_value_changed(tool, field, payload[field])
+            for field in payload
+        )
         updated = await self._tools.update_atomic(
             tool_id,
             expected_lock_version=expected_lock_version,
@@ -80,6 +102,9 @@ class MCPToolService:
                     status_code=status.HTTP_404_NOT_FOUND,
                 )
             self._raise_version_conflict()
+
+        if stale_needed:
+            await ToolEmbeddingRepository(self._session).mark_stale_for_tool(tool_id)
 
         await self._session.commit()
         await self._session.refresh(updated)

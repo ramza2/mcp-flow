@@ -327,6 +327,14 @@ class UserStatus(StrEnum):
     LOCKED = "LOCKED"
 
 
+class ToolEmbeddingStatus(StrEnum):
+    """docs/05 §8.6 tool_embeddings.status."""
+
+    READY = "READY"
+    STALE = "STALE"
+    FAILED = "FAILED"
+
+
 class ResourceGrantResourceType(StrEnum):
     """docs/05 resource_grants.resource_type — exact resource match only."""
 

@@ -14,6 +14,7 @@ from app.core.url_validation import validate_model_base_url
 from app.model_provider.client import EmbeddingConnectionTarget, ModelProviderClient
 from app.models.model_profile import EmbeddingProfile
 from app.repositories.embedding_profile import EmbeddingProfileRepository
+from app.repositories.tool_embedding import ToolEmbeddingRepository
 from app.schemas.model_profile import (
     EmbeddingProfileCreate,
     EmbeddingProfileUpdate,
@@ -21,6 +22,17 @@ from app.schemas.model_profile import (
 )
 
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
+
+# Fields that change embedding generation semantics (docs/05 §8.6).
+_EMBEDDING_GENERATION_FIELDS = frozenset(
+    {
+        "provider",
+        "model",
+        "base_url",
+        "dimension",
+        "credential_secret_id",
+    }
+)
 
 
 def _slugify_name(name: str) -> str:
@@ -138,6 +150,12 @@ class EmbeddingProfileService:
             await self._session.commit()
             return profile
 
+        stale_needed = any(
+            field in _EMBEDDING_GENERATION_FIELDS
+            and payload[field] != getattr(profile, field)
+            for field in payload
+        )
+
         updated = await self._profiles.update_atomic(
             profile_id,
             expected_lock_version=expected_lock_version,
@@ -153,6 +171,12 @@ class EmbeddingProfileService:
                     status_code=status.HTTP_404_NOT_FOUND,
                 )
             self._raise_version_conflict()
+
+        if stale_needed:
+            await ToolEmbeddingRepository(self._session).mark_stale_for_profile(
+                profile_id
+            )
+
         await self._session.commit()
         await self._session.refresh(updated)
         return updated
