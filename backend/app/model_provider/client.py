@@ -5,6 +5,7 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import Any
 
 import httpx
 
@@ -49,7 +50,7 @@ def _bearer_from_secret(resolved: ResolvedSecret) -> str | None:
 
 
 class ModelProviderClient:
-    """Facade for Model Profile connection tests and production embeddings."""
+    """Facade for Model Profile connection tests, embeddings, and JSON generation."""
 
     def __init__(
         self,
@@ -198,5 +199,31 @@ class ModelProviderClient:
             model=target.model,
             inputs=inputs,
             expected_dimension=target.dimension,
+            bearer_token=bearer,
+        )
+
+    async def generate_json(
+        self,
+        target: LLMConnectionTarget,
+        *,
+        messages: list[dict[str, Any]],
+        parameters: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Production OpenAI-compatible chat completion → JSON object."""
+
+        if target.provider.strip() != OPENAI_COMPATIBLE_PROVIDER:
+            raise ModelProviderError(
+                error_code=UNSUPPORTED_PROVIDER,
+                message=(
+                    f"No chat JSON adapter is registered for provider '{target.provider}'."
+                ),
+                retryable=False,
+            )
+        bearer = await self._resolve_bearer_or_raise(target.credential_secret_id)
+        return await self._adapter.generate_json(
+            base_url=target.base_url,
+            model=target.model,
+            messages=messages,
+            parameters=parameters,
             bearer_token=bearer,
         )
