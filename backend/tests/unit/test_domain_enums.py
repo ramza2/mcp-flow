@@ -4,6 +4,7 @@ from enum import Enum
 
 import pytest
 from app.domain.enums import (
+    AGENT_REQUEST_TERMINAL_STATUSES,
     BOOTSTRAP_PERMISSION_CODES,
     CURRENT_MCP_PROTOCOL_VERSION,
     AgentRequestStatus,
@@ -17,6 +18,9 @@ from app.domain.enums import (
     ApprovalStatus,
     AuthorableStepType,
     BindingKind,
+    ConversationMessageRole,
+    ConversationMessageVisibility,
+    ConversationStatus,
     ExecutionSourceType,
     ExecutionStatus,
     JobStatus,
@@ -45,6 +49,7 @@ from app.domain.enums import (
     UserStatus,
     WorkflowStatus,
     WorkflowVersionStatus,
+    is_agent_request_terminal,
 )
 
 
@@ -94,6 +99,15 @@ def expect_exact(enum_cls: type[Enum], expected: set[str]) -> None:
                 "FAILED",
                 "CANCELLED",
             },
+        ),
+        (ConversationStatus, {"ACTIVE", "ARCHIVED"}),
+        (
+            ConversationMessageRole,
+            {"USER", "ASSISTANT", "SYSTEM", "TOOL"},
+        ),
+        (
+            ConversationMessageVisibility,
+            {"USER", "OPERATOR", "INTERNAL"},
         ),
         (
             ExecutionStatus,
@@ -292,3 +306,17 @@ def test_user_status_excludes_non_canonical() -> None:
 def test_resource_grant_type_excludes_wildcards() -> None:
     for forbidden in ("ALL", "ANY", "GLOBAL", "TOOL_GROUP", "SERVER_TREE", "*"):
         assert forbidden not in _values(ResourceGrantResourceType)
+
+
+def test_agent_request_terminal_helper() -> None:
+    assert AGENT_REQUEST_TERMINAL_STATUSES == {
+        AgentRequestStatus.READY,
+        AgentRequestStatus.REJECTED,
+        AgentRequestStatus.FAILED,
+        AgentRequestStatus.CANCELLED,
+    }
+    for status in AGENT_REQUEST_TERMINAL_STATUSES:
+        assert is_agent_request_terminal(status) is True
+        assert is_agent_request_terminal(status.value) is True
+    assert is_agent_request_terminal(AgentRequestStatus.RECEIVED) is False
+    assert is_agent_request_terminal(AgentRequestStatus.ANALYZING) is False
