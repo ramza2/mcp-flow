@@ -77,6 +77,12 @@ class EmbeddingProfileRepository:
         result = await self._session.execute(stmt)
         return result.scalar_one_or_none()
 
+    async def get_active_for_tools(self) -> EmbeddingProfile | None:
+        """Return the active tool EmbeddingProfile without row lock."""
+        stmt = self._base().where(EmbeddingProfile.is_active_for_tools.is_(True))
+        result = await self._session.execute(stmt)
+        return result.scalar_one_or_none()
+
     async def count_active_for_tools(self) -> int:
         stmt = (
             select(func.count())
