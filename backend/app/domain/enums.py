@@ -103,6 +103,46 @@ class AgentRequestStatus(StrEnum):
     CANCELLED = "CANCELLED"
 
 
+# Terminal planning statuses (docs/04 §4). Runtime transition graph is out of scope here.
+AGENT_REQUEST_TERMINAL_STATUSES: frozenset[AgentRequestStatus] = frozenset(
+    {
+        AgentRequestStatus.READY,
+        AgentRequestStatus.REJECTED,
+        AgentRequestStatus.FAILED,
+        AgentRequestStatus.CANCELLED,
+    }
+)
+
+
+def is_agent_request_terminal(status: AgentRequestStatus | str) -> bool:
+    value = status if isinstance(status, AgentRequestStatus) else AgentRequestStatus(status)
+    return value in AGENT_REQUEST_TERMINAL_STATUSES
+
+
+class ConversationStatus(StrEnum):
+    """docs/05 §10.1 conversations.status."""
+
+    ACTIVE = "ACTIVE"
+    ARCHIVED = "ARCHIVED"
+
+
+class ConversationMessageRole(StrEnum):
+    """docs/05 §10.2 conversation_messages.role."""
+
+    USER = "USER"
+    ASSISTANT = "ASSISTANT"
+    SYSTEM = "SYSTEM"
+    TOOL = "TOOL"
+
+
+class ConversationMessageVisibility(StrEnum):
+    """docs/05 §10.2 conversation_messages.visibility."""
+
+    USER = "USER"
+    OPERATOR = "OPERATOR"
+    INTERNAL = "INTERNAL"
+
+
 class ExecutionStatus(StrEnum):
     CREATED = "CREATED"
     QUEUED = "QUEUED"

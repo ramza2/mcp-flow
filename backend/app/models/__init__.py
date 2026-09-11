@@ -10,6 +10,7 @@ from app.models.auth import (
     User,
     UserRole,
 )
+from app.models.conversation import AgentRequest, Conversation, ConversationMessage
 from app.models.mcp import (
     MCPServer,
     MCPServerCheck,
@@ -25,8 +26,11 @@ from app.models.session import Session
 
 __all__ = [
     "Agent",
+    "AgentRequest",
     "AgentToolGrant",
     "AgentVersion",
+    "Conversation",
+    "ConversationMessage",
     "ApprovalPolicy",
     "EmbeddingProfile",
     "LLMProfile",
