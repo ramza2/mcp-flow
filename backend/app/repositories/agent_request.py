@@ -14,6 +14,16 @@ from app.models.conversation import AgentRequest
 
 _UNSET = object()
 
+# Analyzer-facing fields that may be written atomically with a status CAS.
+# Identity / creation-snapshot columns are intentionally excluded.
+_AGENT_REQUEST_CAS_MUTABLE_FIELDS = frozenset(
+    {
+        "structured_request",
+        "structured_request_version",
+        "missing_fields",
+    }
+)
+
 
 class AgentRequestRepository:
     def __init__(self, session: AsyncSession) -> None:
@@ -101,17 +111,14 @@ class AgentRequestRepository:
         if rejection_code is not _UNSET:
             values["rejection_code"] = rejection_code
         if extra_values:
+            unknown = set(extra_values) - _AGENT_REQUEST_CAS_MUTABLE_FIELDS
+            if unknown:
+                raise ValueError(
+                    "Unsupported AgentRequest CAS extra_values keys: "
+                    + ", ".join(sorted(unknown))
+                )
             for key, value in extra_values.items():
-                if hasattr(AgentRequest, key) and key not in {
-                    "id",
-                    "status",
-                    "conversation_id",
-                    "requester_id",
-                    "agent_version_id",
-                    "source_message_id",
-                    "raw_request_text",
-                }:
-                    values[key] = value
+                values[key] = value
 
         stmt = (
             update(AgentRequest)

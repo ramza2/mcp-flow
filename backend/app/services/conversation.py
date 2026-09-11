@@ -16,6 +16,7 @@ from app.domain.enums import (
 )
 from app.models.conversation import Conversation, ConversationMessage
 from app.repositories.agent import AgentRepository
+from app.repositories.agent_request import AgentRequestRepository
 from app.repositories.conversation import ConversationRepository
 from app.repositories.conversation_message import ConversationMessageRepository
 
@@ -26,6 +27,7 @@ class ConversationService:
         self._conversations = ConversationRepository(session)
         self._messages = ConversationMessageRepository(session)
         self._agents = AgentRepository(session)
+        self._agent_requests = AgentRequestRepository(session)
 
     async def create_conversation(
         self,
@@ -89,6 +91,26 @@ class ConversationService:
         # Validate enum membership (fail closed on unknown values).
         ConversationMessageRole(role_value)
         ConversationMessageVisibility(visibility_value)
+
+        # Validate agent_request linkage before any append side effects
+        # (sequence allocation / last_message_at bookkeeping).
+        if agent_request_id is not None:
+            linked_request = await self._agent_requests.get(agent_request_id)
+            if linked_request is None:
+                raise AppError(
+                    code="NOT_FOUND",
+                    message="AgentRequest not found.",
+                    status_code=http_status.HTTP_404_NOT_FOUND,
+                )
+            if linked_request.conversation_id != conversation_id:
+                raise AppError(
+                    code="VALIDATION_ERROR",
+                    message=(
+                        "agent_request_id must reference an AgentRequest "
+                        "in the same Conversation."
+                    ),
+                    status_code=http_status.HTTP_400_BAD_REQUEST,
+                )
 
         message = await self._messages.append(
             conversation_id=conversation_id,

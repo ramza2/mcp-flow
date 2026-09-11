@@ -5,6 +5,7 @@ from __future__ import annotations
 import uuid
 from collections.abc import Collection
 from datetime import UTC, datetime
+from typing import Any
 
 from fastapi import status
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -108,8 +109,14 @@ class AgentRequestService:
         completed_at: datetime | None = None,
         analyzed_at: datetime | None = None,
         rejection_code: str | None = None,
+        extra_values: dict[str, Any] | None = None,
     ) -> AgentRequest:
-        """CAS status update. Terminal completed_at is caller-controlled via set_completed_at."""
+        """CAS status update. Terminal completed_at is caller-controlled via set_completed_at.
+
+        ``extra_values`` may only contain Analyzer mutable fields
+        (structured_request / structured_request_version / missing_fields).
+        Historical identity/snapshot columns are rejected fail-closed.
+        """
 
         expected = [
             s.value if isinstance(s, AgentRequestStatus) else str(s)
@@ -122,7 +129,7 @@ class AgentRequestService:
         )
         AgentRequestStatus(new_value)  # fail closed on unknown
 
-        kwargs: dict = {
+        kwargs: dict[str, Any] = {
             "expected_statuses": expected,
             "new_status": new_value,
         }
@@ -135,8 +142,19 @@ class AgentRequestService:
             kwargs["analyzed_at"] = analyzed_at
         if rejection_code is not None:
             kwargs["rejection_code"] = rejection_code
+        if extra_values is not None:
+            kwargs["extra_values"] = extra_values
 
-        updated = await self._requests.compare_and_set_status(request_id, **kwargs)
+        try:
+            updated = await self._requests.compare_and_set_status(
+                request_id, **kwargs
+            )
+        except ValueError as exc:
+            raise AppError(
+                code="VALIDATION_ERROR",
+                message=str(exc),
+                status_code=status.HTTP_400_BAD_REQUEST,
+            ) from exc
         if updated is None:
             raise AppError(
                 code="RESOURCE_CONFLICT",

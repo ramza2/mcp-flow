@@ -388,3 +388,150 @@ async def test_raw_request_text_snapshot_immutable(
         refreshed = await AgentRequestRepository(session).get(request_id)
         assert refreshed is not None
         assert refreshed.raw_request_text == "snapshot me"
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_cross_conversation_agent_request_link_rejected_atomically(
+    integration_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with integration_session_factory() as session:
+        user_a, agent_a, _version_a = await _seed(session)
+        user_b, agent_b, version_b = await _seed(session)
+        conv_svc = ConversationService(session)
+        conversation_a = await conv_svc.create_conversation(
+            owner_id=user_a, agent_id=agent_a, title="A"
+        )
+        conversation_b = await conv_svc.create_conversation(
+            owner_id=user_b, agent_id=agent_b, title="B"
+        )
+        msg_b = await conv_svc.append_message(
+            conversation_id=conversation_b.id,
+            owner_id=user_b,
+            role="USER",
+            content={"text": "b"},
+            content_text="b",
+        )
+        request_b = await AgentRequestService(session).create_received(
+            conversation_id=conversation_b.id,
+            requester_id=user_b,
+            agent_version_id=version_b,
+            source_message_id=msg_b.id,
+        )
+        await session.commit()
+        conversation_a_id = conversation_a.id
+        owner_a = user_a
+        request_b_id = request_b.id
+
+    async with integration_session_factory() as session:
+        conversation = await ConversationRepository(session).get(conversation_a_id)
+        assert conversation is not None
+        last_before = conversation.last_message_at
+        lock_before = conversation.lock_version
+        count_before = len(
+            await ConversationMessageRepository(session).list_for_conversation(
+                conversation_a_id
+            )
+        )
+
+        with pytest.raises(AppError) as cross:
+            await ConversationService(session).append_message(
+                conversation_id=conversation_a_id,
+                owner_id=owner_a,
+                role="ASSISTANT",
+                content={"text": "bad"},
+                content_text="bad",
+                agent_request_id=request_b_id,
+            )
+        assert cross.value.code == "VALIDATION_ERROR"
+        await session.rollback()
+
+        conversation = await ConversationRepository(session).get(conversation_a_id)
+        assert conversation is not None
+        assert conversation.last_message_at == last_before
+        assert conversation.lock_version == lock_before
+        count_after = len(
+            await ConversationMessageRepository(session).list_for_conversation(
+                conversation_a_id
+            )
+        )
+        assert count_after == count_before
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_same_conversation_agent_request_link_and_cas_allowlist(
+    integration_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with integration_session_factory() as session:
+        user_id, agent_id, version_id = await _seed(session)
+        conv_svc = ConversationService(session)
+        req_svc = AgentRequestService(session)
+        conversation = await conv_svc.create_conversation(
+            owner_id=user_id, agent_id=agent_id, title="Link"
+        )
+        source = await conv_svc.append_message(
+            conversation_id=conversation.id,
+            owner_id=user_id,
+            role="USER",
+            content={"text": "ask"},
+            content_text="ask",
+        )
+        request = await req_svc.create_received(
+            conversation_id=conversation.id,
+            requester_id=user_id,
+            agent_version_id=version_id,
+            source_message_id=source.id,
+            trace_id="pg-trace",
+        )
+        linked = await conv_svc.append_message(
+            conversation_id=conversation.id,
+            owner_id=user_id,
+            role="ASSISTANT",
+            content={"text": "ok"},
+            content_text="ok",
+            agent_request_id=request.id,
+        )
+        assert linked.agent_request_id == request.id
+
+        snapshot = {
+            "conversation_id": request.conversation_id,
+            "requester_id": request.requester_id,
+            "agent_version_id": request.agent_version_id,
+            "source_message_id": request.source_message_id,
+            "raw_request_text": request.raw_request_text,
+            "trace_id": request.trace_id,
+            "created_at": request.created_at,
+        }
+
+        with pytest.raises(AppError) as blocked:
+            await req_svc.compare_and_set_status(
+                request.id,
+                expected_statuses=[AgentRequestStatus.RECEIVED],
+                new_status=AgentRequestStatus.ANALYZING,
+                extra_values={"raw_request_text": "nope"},
+            )
+        assert blocked.value.code == "VALIDATION_ERROR"
+
+        updated = await req_svc.compare_and_set_status(
+            request.id,
+            expected_statuses=[AgentRequestStatus.RECEIVED],
+            new_status=AgentRequestStatus.RETRIEVING,
+            analyzed_at=request.created_at,
+            extra_values={
+                "structured_request": {"intent": "weather"},
+                "structured_request_version": "1.0",
+                "missing_fields": [],
+            },
+        )
+        await session.commit()
+        assert updated.status == AgentRequestStatus.RETRIEVING.value
+        assert updated.structured_request == {"intent": "weather"}
+        assert updated.structured_request_version == "1.0"
+        assert updated.conversation_id == snapshot["conversation_id"]
+        assert updated.requester_id == snapshot["requester_id"]
+        assert updated.agent_version_id == snapshot["agent_version_id"]
+        assert updated.source_message_id == snapshot["source_message_id"]
+        assert updated.raw_request_text == snapshot["raw_request_text"]
+        assert updated.trace_id == snapshot["trace_id"]
+        assert updated.created_at == snapshot["created_at"]

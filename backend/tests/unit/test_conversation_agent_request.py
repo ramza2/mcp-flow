@@ -321,3 +321,202 @@ async def test_message_repository_has_no_update_or_delete_api() -> None:
     assert "update" not in methods
     assert "delete" not in methods
     assert "append" in methods
+
+
+@pytest.mark.asyncio
+async def test_append_rejects_cross_conversation_agent_request_link(
+    db_session: AsyncSession,
+) -> None:
+    user_a, agent_a, version_a = await _seed_owner_agent_version(db_session)
+    user_b, agent_b, version_b = await _seed_owner_agent_version(db_session)
+    conv_svc = ConversationService(db_session)
+    req_svc = AgentRequestService(db_session)
+
+    conversation_a = await conv_svc.create_conversation(
+        owner_id=user_a.id, agent_id=agent_a.id, title="A"
+    )
+    conversation_b = await conv_svc.create_conversation(
+        owner_id=user_b.id, agent_id=agent_b.id, title="B"
+    )
+    msg_b = await conv_svc.append_message(
+        conversation_id=conversation_b.id,
+        owner_id=user_b.id,
+        role="USER",
+        content={"text": "b"},
+        content_text="b",
+    )
+    request_b = await req_svc.create_received(
+        conversation_id=conversation_b.id,
+        requester_id=user_b.id,
+        agent_version_id=version_b.id,
+        source_message_id=msg_b.id,
+    )
+
+    await db_session.refresh(conversation_a)
+    last_before = conversation_a.last_message_at
+    lock_before = conversation_a.lock_version
+    messages_before = await ConversationMessageRepository(db_session).list_for_conversation(
+        conversation_a.id
+    )
+
+    with pytest.raises(AppError) as cross:
+        await conv_svc.append_message(
+            conversation_id=conversation_a.id,
+            owner_id=user_a.id,
+            role="ASSISTANT",
+            content={"text": "bad link"},
+            content_text="bad link",
+            agent_request_id=request_b.id,
+        )
+    assert cross.value.code == "VALIDATION_ERROR"
+
+    await db_session.refresh(conversation_a)
+    messages_after = await ConversationMessageRepository(db_session).list_for_conversation(
+        conversation_a.id
+    )
+    assert messages_after == messages_before
+    assert conversation_a.last_message_at == last_before
+    assert conversation_a.lock_version == lock_before
+
+
+@pytest.mark.asyncio
+async def test_append_rejects_missing_agent_request_link(
+    db_session: AsyncSession,
+) -> None:
+    user, agent, _version = await _seed_owner_agent_version(db_session)
+    conv_svc = ConversationService(db_session)
+    conversation = await conv_svc.create_conversation(
+        owner_id=user.id, agent_id=agent.id, title="Missing"
+    )
+
+    with pytest.raises(AppError) as missing:
+        await conv_svc.append_message(
+            conversation_id=conversation.id,
+            owner_id=user.id,
+            role="USER",
+            content={"text": "x"},
+            content_text="x",
+            agent_request_id=uuid.uuid4(),
+        )
+    assert missing.value.code == "NOT_FOUND"
+
+
+@pytest.mark.asyncio
+async def test_append_allows_same_conversation_agent_request_link(
+    db_session: AsyncSession,
+) -> None:
+    user, agent, version = await _seed_owner_agent_version(db_session)
+    conv_svc = ConversationService(db_session)
+    req_svc = AgentRequestService(db_session)
+    conversation = await conv_svc.create_conversation(
+        owner_id=user.id, agent_id=agent.id, title="Same"
+    )
+    source = await conv_svc.append_message(
+        conversation_id=conversation.id,
+        owner_id=user.id,
+        role="USER",
+        content={"text": "ask"},
+        content_text="ask",
+    )
+    request = await req_svc.create_received(
+        conversation_id=conversation.id,
+        requester_id=user.id,
+        agent_version_id=version.id,
+        source_message_id=source.id,
+    )
+
+    linked = await conv_svc.append_message(
+        conversation_id=conversation.id,
+        owner_id=user.id,
+        role="ASSISTANT",
+        content={"text": "reply"},
+        content_text="reply",
+        agent_request_id=request.id,
+    )
+    assert linked.agent_request_id == request.id
+    assert linked.sequence_no == 2
+
+
+@pytest.mark.asyncio
+async def test_agent_request_cas_extra_values_allowlist_and_snapshot_immutable(
+    db_session: AsyncSession,
+) -> None:
+    user, agent, version = await _seed_owner_agent_version(db_session)
+    conv_svc = ConversationService(db_session)
+    req_svc = AgentRequestService(db_session)
+    conversation = await conv_svc.create_conversation(
+        owner_id=user.id, agent_id=agent.id, title="Allowlist"
+    )
+    message = await conv_svc.append_message(
+        conversation_id=conversation.id,
+        owner_id=user.id,
+        role="USER",
+        content={"text": "snapshot"},
+        content_text="snapshot",
+    )
+    request = await req_svc.create_received(
+        conversation_id=conversation.id,
+        requester_id=user.id,
+        agent_version_id=version.id,
+        source_message_id=message.id,
+        trace_id="trace-immutable",
+    )
+    snapshot = {
+        "conversation_id": request.conversation_id,
+        "requester_id": request.requester_id,
+        "agent_version_id": request.agent_version_id,
+        "source_message_id": request.source_message_id,
+        "raw_request_text": request.raw_request_text,
+        "trace_id": request.trace_id,
+        "created_at": request.created_at,
+    }
+
+    for forbidden_key, forbidden_value in (
+        ("created_at", request.created_at),
+        ("raw_request_text", "mutated"),
+        ("trace_id", "hijacked"),
+        ("conversation_id", uuid.uuid4()),
+    ):
+        with pytest.raises(AppError) as blocked:
+            await req_svc.compare_and_set_status(
+                request.id,
+                expected_statuses=[AgentRequestStatus.RECEIVED],
+                new_status=AgentRequestStatus.ANALYZING,
+                extra_values={forbidden_key: forbidden_value},
+            )
+        assert blocked.value.code == "VALIDATION_ERROR"
+
+    # Repository-level ValueError for unknown keys (fail closed, no silent ignore).
+    with pytest.raises(ValueError):
+        await AgentRequestRepository(db_session).compare_and_set_status(
+            request.id,
+            expected_statuses=[AgentRequestStatus.RECEIVED.value],
+            new_status=AgentRequestStatus.ANALYZING.value,
+            extra_values={"created_at": request.created_at},
+        )
+
+    updated = await req_svc.compare_and_set_status(
+        request.id,
+        expected_statuses=[AgentRequestStatus.RECEIVED],
+        new_status=AgentRequestStatus.RETRIEVING,
+        analyzed_at=request.created_at,
+        extra_values={
+            "structured_request": {"intent": "demo"},
+            "structured_request_version": "1.0",
+            "missing_fields": ["location"],
+        },
+    )
+    assert updated.status == AgentRequestStatus.RETRIEVING.value
+    assert updated.structured_request == {"intent": "demo"}
+    assert updated.structured_request_version == "1.0"
+    assert updated.missing_fields == ["location"]
+    assert updated.analyzed_at is not None
+
+    await db_session.refresh(updated)
+    assert updated.conversation_id == snapshot["conversation_id"]
+    assert updated.requester_id == snapshot["requester_id"]
+    assert updated.agent_version_id == snapshot["agent_version_id"]
+    assert updated.source_message_id == snapshot["source_message_id"]
+    assert updated.raw_request_text == snapshot["raw_request_text"]
+    assert updated.trace_id == snapshot["trace_id"]
+    assert updated.created_at == snapshot["created_at"]
