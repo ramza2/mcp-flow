@@ -199,12 +199,22 @@ Request Analyzer에는 다음 순서로 필요한 정보만 제공한다.
 검색 전에 다음을 적용한다.
 
 - 사용자 활성상태 및 `mcp.tool.execute` Permission
-- ResourceGrant 범위
+- ResourceGrant 범위 (`MCP_TOOL` exact match만; `MCP_SERVER` grant는 Tool 권한을 암시하지 않음)
 - AgentVersion Tool allow/deny rule
 - MCP Server `ACTIVE`
 - MCP Tool `ACTIVE`
 - 선택 ToolVersion의 `validation_status = VALID`
 - ToolPolicy 및 환경·시간 정책
+
+AgentVersion Tool Grant는 **fail-closed allowlist**로 평가한다.
+
+| Grant 상태 | 후보 포함 |
+|---|---|
+| `effect = ALLOW` | 가능 |
+| `effect = DENY` | 제외 |
+| 해당 Tool grant row 없음 | 제외 |
+
+동일 `(agent_version_id, mcp_tool_id)`가 PK이므로 한 Tool에 ALLOW/DENY가 동시에 존재하지 않는다. `parameter_constraints`는 Parameter Builder 이전이므로 retrieval Hard Filter에서 평가하지 않는다.
 
 권한 없는 Tool은 이름과 존재 여부도 LLM 후보에 제공하지 않는다.
 
@@ -222,6 +232,31 @@ Request Analyzer에는 다음 순서로 필요한 정보만 제공한다.
 | 최종 shortlist | 5 |
 
 검색대상은 이름·설명·태그·capability·입력 필드 설명·output summary로 구성한다. 전체 raw schema를 embedding하거나 매 요청마다 LLM에 전달하지 않는다.
+
+#### RRF 점수
+
+rank는 **1-based**이다.
+
+```text
+rrf_raw = Σ 1 / (k + rank)
+k = 60
+```
+
+lexical/vector 양쪽에 있으면 두 항을 합산한다. 최종 후보 정렬은 deterministic하게:
+
+```text
+rrf_raw DESC
+tool_version_id ASC
+```
+
+`ToolCandidateDescriptor.retrieval_score`는 이후 confidence 계산을 위해 0..1로 정규화한다.
+
+```text
+theoretical_max = 2 / (k + 1)   # = 2/61
+retrieval_score = min(1.0, rrf_raw / theoretical_max)
+```
+
+따라서 lexical rank 1 + vector rank 1이면 `retrieval_score = 1.0`이고, 한 source에만 있는 후보는 최대 약 0.5이다.
 
 ### 6.3 ToolCandidateDescriptor
 
