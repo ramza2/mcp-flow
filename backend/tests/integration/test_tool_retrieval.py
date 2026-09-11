@@ -23,6 +23,7 @@ from app.domain.enums import (
 )
 from app.model_provider.client import ModelProviderClient
 from app.models.auth import Role
+from app.models.mcp import MCPTool
 from app.repositories.agent import AgentRepository
 from app.repositories.agent_tool_grant import AgentToolGrantRepository
 from app.repositories.agent_version import AgentVersionRepository
@@ -40,6 +41,7 @@ from app.schemas.auth import (
     RolePermissionReplaceRequest,
     UserCreate,
     UserRoleReplaceRequest,
+    UserUpdate,
 )
 from app.search.tool_retrieval import ToolRetrievalService
 from app.services.authorization import AuthorizationResolver, ResourceGrantService
@@ -836,3 +838,396 @@ async def test_profile_race_twice_raises_conflict(
             )
         assert exc.value.code == "RESOURCE_CONFLICT"
         assert "changed during retrieval" in exc.value.message
+
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_permission_missing_excludes_even_with_direct_grant(
+    integration_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with integration_session_factory() as session:
+        profile = await _create_active_profile(session)
+        _, tool_id, ver_id = await _seed_active_tool(
+            session,
+            remote_name="needs_permission_weather",
+            description="weather needs execute permission",
+        )
+        agent_version_id = await _seed_agent_version(
+            session,
+            grants=[
+                {
+                    "mcp_tool_id": tool_id,
+                    "effect": AgentToolGrantEffect.ALLOW.value,
+                }
+            ],
+        )
+        # Grant + agent allow, but no mcp.tool.execute permission on any role.
+        user = await UserService(session).create(
+            UserCreate(
+                username=f"u-{uuid.uuid4().hex[:8]}",
+                display_name="NoPerm",
+                email=f"u-{uuid.uuid4().hex[:8]}@example.com",
+                status=UserStatus.ACTIVE,
+            )
+        )
+        await ResourceGrantService(session).create_for_user(
+            user.id,
+            ResourceGrantCreate(
+                resource_type=ResourceGrantResourceType.MCP_TOOL,
+                resource_id=tool_id,
+            ),
+        )
+        await _seed_embedding(
+            session,
+            tool_version_id=ver_id,
+            profile_id=profile.id,
+            search_text="needs permission weather",
+            embedding=[1.0, 0.0, 0.0, 0.0],
+        )
+        await session.commit()
+        user_id = user.id
+        lock_version = user.lock_version
+
+    query = "weather"
+    async with integration_session_factory() as session:
+        result = await ToolRetrievalService(
+            session, model_provider=_embed_client({query: [1.0, 0.0, 0.0, 0.0]})
+        ).retrieve(
+            user_id=user_id,
+            agent_version_id=agent_version_id,
+            query_text=query,
+        )
+        assert result.candidates == ()
+
+        decision = await AuthorizationResolver(session).authorize_resource(
+            user_id, "mcp.tool.execute", "MCP_TOOL", tool_id
+        )
+        assert decision.allowed is False
+
+        # Restore permission via a new role → candidate appears.
+        role = await RoleService(session).create(
+            RoleCreate(code=f"r-{uuid.uuid4().hex[:8]}", name="Execute")
+        )
+        execute = await PermissionRepository(session).get_by_code("mcp.tool.execute")
+        assert execute is not None
+        await RoleService(session).replace_permissions(
+            role.id,
+            RolePermissionReplaceRequest(permission_ids=[execute.id]),
+            expected_lock_version=1,
+        )
+        user = await UserService(session).get(user_id)
+        assert user is not None
+        await UserService(session).replace_roles(
+            user_id,
+            UserRoleReplaceRequest(role_ids=[role.id]),
+            expected_lock_version=user.lock_version,
+        )
+        await session.commit()
+
+        result2 = await ToolRetrievalService(
+            session, model_provider=_embed_client({query: [1.0, 0.0, 0.0, 0.0]})
+        ).retrieve(
+            user_id=user_id,
+            agent_version_id=agent_version_id,
+            query_text=query,
+        )
+        assert [c.descriptor.name for c in result2.candidates] == [
+            "needs_permission_weather"
+        ]
+        decision2 = await AuthorizationResolver(session).authorize_resource(
+            user_id, "mcp.tool.execute", "MCP_TOOL", tool_id
+        )
+        assert decision2.allowed is True
+        assert lock_version >= 1
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_inactive_and_locked_users_excluded(
+    integration_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with integration_session_factory() as session:
+        profile = await _create_active_profile(session)
+        _, tool_id, ver_id = await _seed_active_tool(
+            session,
+            remote_name="status_gate_weather",
+            description="weather status gate",
+        )
+        agent_version_id = await _seed_agent_version(
+            session,
+            grants=[
+                {
+                    "mcp_tool_id": tool_id,
+                    "effect": AgentToolGrantEffect.ALLOW.value,
+                }
+            ],
+        )
+        user_id, _ = await _seed_authorized_user(session, tool_ids=[tool_id])
+        await _seed_embedding(
+            session,
+            tool_version_id=ver_id,
+            profile_id=profile.id,
+            search_text="status gate weather",
+            embedding=[1.0, 0.0, 0.0, 0.0],
+        )
+        await session.commit()
+
+    query = "weather"
+    provider = _embed_client({query: [1.0, 0.0, 0.0, 0.0]})
+    for status_value in (UserStatus.INACTIVE.value, UserStatus.LOCKED.value):
+        async with integration_session_factory() as session:
+            user = await UserService(session).get(user_id)
+            assert user is not None
+            await UserService(session).update(
+                user_id,
+                UserUpdate(status=status_value),
+                expected_lock_version=user.lock_version,
+            )
+            await session.commit()
+
+            result = await ToolRetrievalService(
+                session, model_provider=provider
+            ).retrieve(
+                user_id=user_id,
+                agent_version_id=agent_version_id,
+                query_text=query,
+            )
+            assert result.candidates == ()
+            decision = await AuthorizationResolver(session).authorize_resource(
+                user_id, "mcp.tool.execute", "MCP_TOOL", tool_id
+            )
+            assert decision.allowed is False
+
+    async with integration_session_factory() as session:
+        user = await UserService(session).get(user_id)
+        assert user is not None
+        await UserService(session).update(
+            user_id,
+            UserUpdate(status=UserStatus.ACTIVE.value),
+            expected_lock_version=user.lock_version,
+        )
+        await session.commit()
+        result = await ToolRetrievalService(
+            session, model_provider=provider
+        ).retrieve(
+            user_id=user_id,
+            agent_version_id=agent_version_id,
+            query_text=query,
+        )
+        assert [c.descriptor.name for c in result.candidates] == ["status_gate_weather"]
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_authorization_resolver_parity_matrix(
+    integration_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """authorize_resource.allowed == False ⇒ retrieval never returns the tool.
+
+    Agent/lifecycle gates are held open so parity isolates auth predicates.
+    """
+
+    async with integration_session_factory() as session:
+        profile = await _create_active_profile(session)
+        _, tool_direct, ver_direct = await _seed_active_tool(
+            session,
+            remote_name="parity_direct_weather",
+            description="parity direct weather",
+        )
+        _, tool_role, ver_role = await _seed_active_tool(
+            session,
+            remote_name="parity_role_weather",
+            description="parity role weather",
+        )
+        agent_version_id = await _seed_agent_version(
+            session,
+            grants=[
+                {
+                    "mcp_tool_id": tool_direct,
+                    "effect": AgentToolGrantEffect.ALLOW.value,
+                },
+                {
+                    "mcp_tool_id": tool_role,
+                    "effect": AgentToolGrantEffect.ALLOW.value,
+                },
+            ],
+        )
+        user_direct, _ = await _seed_authorized_user(
+            session, tool_ids=[tool_direct], via_role_grant=False
+        )
+        user_role, role_id = await _seed_authorized_user(
+            session, tool_ids=[tool_role], via_role_grant=True
+        )
+        for ver, text_value in (
+            (ver_direct, "parity direct weather"),
+            (ver_role, "parity role weather"),
+        ):
+            await _seed_embedding(
+                session,
+                tool_version_id=ver,
+                profile_id=profile.id,
+                search_text=text_value,
+                embedding=[1.0, 0.0, 0.0, 0.0],
+            )
+        await session.commit()
+
+    query = "weather"
+    provider = _embed_client({query: [1.0, 0.0, 0.0, 0.0]})
+
+    async def _names(user: uuid.UUID) -> list[str]:
+        async with integration_session_factory() as session:
+            result = await ToolRetrievalService(
+                session, model_provider=provider
+            ).retrieve(
+                user_id=user,
+                agent_version_id=agent_version_id,
+                query_text=query,
+            )
+            return [c.descriptor.name for c in result.candidates]
+
+    async def _allowed(user: uuid.UUID, tool: uuid.UUID) -> bool:
+        async with integration_session_factory() as session:
+            decision = await AuthorizationResolver(session).authorize_resource(
+                user, "mcp.tool.execute", "MCP_TOOL", tool
+            )
+            return decision.allowed
+
+    assert await _allowed(user_direct, tool_direct) is True
+    assert "parity_direct_weather" in await _names(user_direct)
+
+    assert await _allowed(user_role, tool_role) is True
+    assert "parity_role_weather" in await _names(user_role)
+
+    # Soft-delete role → role grant/permission evaporate together.
+    async with integration_session_factory() as session:
+        await session.execute(
+            update(Role)
+            .where(Role.id == role_id)
+            .values(deleted_at=datetime.now(UTC))
+        )
+        await session.commit()
+
+    assert await _allowed(user_role, tool_role) is False
+    assert await _names(user_role) == []
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_current_version_must_belong_to_same_tool(
+    integration_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with integration_session_factory() as session:
+        profile = await _create_active_profile(session)
+        _, tool_a, ver_a = await _seed_active_tool(
+            session,
+            remote_name="owner_a_weather",
+            description="owner A weather",
+        )
+        _, tool_b, ver_b = await _seed_active_tool(
+            session,
+            remote_name="owner_b_secret",
+            description="owner B secret weather",
+        )
+        # Point tool A current_version_id at tool B's version (inconsistent pointer).
+        tool_a_row = await session.get(MCPTool, tool_a)
+        assert tool_a_row is not None
+        tool_a_row.current_version_id = ver_b
+        agent_version_id = await _seed_agent_version(
+            session,
+            grants=[
+                {
+                    "mcp_tool_id": tool_a,
+                    "effect": AgentToolGrantEffect.ALLOW.value,
+                }
+            ],
+        )
+        user_id, _ = await _seed_authorized_user(session, tool_ids=[tool_a])
+        # Embeddings exist for B's version text — must not leak as tool A.
+        await _seed_embedding(
+            session,
+            tool_version_id=ver_b,
+            profile_id=profile.id,
+            search_text="owner B secret weather",
+            embedding=[1.0, 0.0, 0.0, 0.0],
+        )
+        await _seed_embedding(
+            session,
+            tool_version_id=ver_a,
+            profile_id=profile.id,
+            search_text="owner A weather",
+            embedding=[0.0, 1.0, 0.0, 0.0],
+        )
+        await session.commit()
+
+    query = "secret weather"
+    async with integration_session_factory() as session:
+        result = await ToolRetrievalService(
+            session, model_provider=_embed_client({query: [1.0, 0.0, 0.0, 0.0]})
+        ).retrieve(
+            user_id=user_id,
+            agent_version_id=agent_version_id,
+            query_text=query,
+        )
+        names = [c.descriptor.name for c in result.candidates]
+        assert "owner_a_weather" not in names
+        assert "owner_b_secret" not in names
+        for candidate in result.candidates:
+            assert "secret" not in (candidate.descriptor.description or "").lower()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_historical_valid_current_invalid_excluded(
+    integration_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with integration_session_factory() as session:
+        profile = await _create_active_profile(session)
+        _, tool_id, ver_old = await _seed_active_tool(
+            session,
+            remote_name="history_weather",
+            description="historical valid weather",
+            validation_status=ToolVersionValidationStatus.VALID.value,
+        )
+        tools = MCPToolRepository(session)
+        ver_new = await tools.create_version(
+            mcp_tool_id=tool_id,
+            version_no=2,
+            content_hash=hashlib.sha256(b"history-invalid").hexdigest(),
+            validation_status=ToolVersionValidationStatus.INVALID.value,
+            remote_description="current invalid weather",
+            input_schema={"type": "object", "properties": {"q": {"type": "string"}}},
+            output_schema={"description": "invalid"},
+        )
+        tool_row = await session.get(MCPTool, tool_id)
+        assert tool_row is not None
+        tool_row.current_version_id = ver_new.id
+        agent_version_id = await _seed_agent_version(
+            session,
+            grants=[
+                {
+                    "mcp_tool_id": tool_id,
+                    "effect": AgentToolGrantEffect.ALLOW.value,
+                }
+            ],
+        )
+        user_id, _ = await _seed_authorized_user(session, tool_ids=[tool_id])
+        await _seed_embedding(
+            session,
+            tool_version_id=ver_old,
+            profile_id=profile.id,
+            search_text="historical valid weather",
+            embedding=[1.0, 0.0, 0.0, 0.0],
+        )
+        await session.commit()
+
+    query = "weather"
+    async with integration_session_factory() as session:
+        result = await ToolRetrievalService(
+            session, model_provider=_embed_client({query: [1.0, 0.0, 0.0, 0.0]})
+        ).retrieve(
+            user_id=user_id,
+            agent_version_id=agent_version_id,
+            query_text=query,
+        )
+        assert result.candidates == ()

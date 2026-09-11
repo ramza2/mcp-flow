@@ -1,7 +1,11 @@
 """Authorized hybrid Tool retrieval — single-statement Hard Filter + RRF.
 
-Hard Filter (auth, Agent ALLOW grant, lifecycle) runs BEFORE lexical/vector
-ranking. Post-hoc N+1 authorize_resource filtering is forbidden.
+Hard Filter (auth helpers, Agent ALLOW grant, lifecycle, current-version ownership)
+runs BEFORE lexical/vector ranking. Post-hoc N+1 authorize_resource filtering is
+forbidden.
+
+Authorization predicates are the same SQLAlchemy expressions used by
+AuthorizationRepository.get_resource_authorization_snapshot().
 """
 
 from __future__ import annotations
@@ -11,8 +15,19 @@ import uuid
 from dataclasses import dataclass
 from typing import Any
 
-from sqlalchemy import text
+from pgvector.sqlalchemy import Vector
+from sqlalchemy import (
+    Select,
+    and_,
+    bindparam,
+    exists,
+    func,
+    literal_column,
+    select,
+    true,
+)
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql.expression import over
 
 from app.domain.enums import (
     AgentToolGrantEffect,
@@ -22,6 +37,13 @@ from app.domain.enums import (
     RiskClass,
     ToolEmbeddingStatus,
     ToolVersionValidationStatus,
+)
+from app.models.agent import AgentToolGrant
+from app.models.mcp import MCPServer, MCPTool, MCPToolPolicy, MCPToolVersion, ToolEmbedding
+from app.models.model_profile import EmbeddingProfile
+from app.repositories.authorization import (
+    build_effective_permission_exists,
+    build_effective_resource_grant_exists,
 )
 
 TOOL_EXECUTE_PERMISSION = "mcp.tool.execute"
@@ -85,195 +107,280 @@ def rrf_contribution(rank: int | None, *, k: int = RRF_K) -> float:
     return 1.0 / (k + rank)
 
 
-# Single PostgreSQL statement. profile_current is always returned so callers can
-# distinguish "no eligible tools" from "active EmbeddingProfile raced away".
-_AUTHORIZED_RETRIEVAL_SQL = """
-WITH auth_gate AS (
-  SELECT EXISTS (
-    SELECT 1
-    FROM users AS u
-    JOIN user_roles AS ur ON ur.user_id = u.id
-    JOIN roles AS r ON r.id = ur.role_id
-    JOIN role_permissions AS rp ON rp.role_id = r.id
-    JOIN permissions AS p ON p.id = rp.permission_id
-    WHERE u.id = CAST(:user_id AS uuid)
-      AND u.deleted_at IS NULL
-      AND u.status = 'ACTIVE'
-      AND r.deleted_at IS NULL
-      AND p.code = :permission_code
-  ) AS allowed
-),
-profile_gate AS (
-  SELECT EXISTS (
-    SELECT 1
-    FROM embedding_profiles AS ep
-    WHERE ep.id = CAST(:profile_id AS uuid)
-      AND ep.is_active_for_tools IS TRUE
-      AND ep.lock_version = :profile_lock_version
-  ) AS profile_current
-),
-eligible_tools AS (
-  SELECT
-    t.id AS mcp_tool_id,
-    t.current_version_id AS tool_version_id,
-    t.remote_name,
-    t.description_override,
-    t.tags,
-    v.remote_description,
-    v.input_schema,
-    v.output_schema,
-    g.requires_confirmation AS agent_requires_confirmation,
-    g.parameter_constraints,
-    pol.id AS tool_policy_id,
-    pol.lock_version AS tool_policy_lock_version,
-    pol.risk_class AS policy_risk_class,
-    pol.requires_confirmation AS policy_requires_confirmation,
-    pol.requires_approval AS policy_requires_approval,
-    pol.approval_policy_id,
-    pol.allow_auto_select
-  FROM auth_gate AS ag
-  JOIN profile_gate AS pg ON pg.profile_current IS TRUE
-  JOIN mcp_tools AS t ON ag.allowed IS TRUE
-  JOIN mcp_servers AS s ON s.id = t.mcp_server_id
-  JOIN mcp_tool_versions AS v ON v.id = t.current_version_id
-  JOIN agent_tool_grants AS g
-    ON g.agent_version_id = CAST(:agent_version_id AS uuid)
-   AND g.mcp_tool_id = t.id
-   AND g.effect = :allow_effect
-  LEFT JOIN mcp_tool_policies AS pol ON pol.mcp_tool_id = t.id
-  WHERE t.deleted_at IS NULL
-    AND t.status = :tool_active
-    AND t.current_version_id IS NOT NULL
-    AND s.deleted_at IS NULL
-    AND s.status = :server_active
-    AND v.validation_status = :version_valid
-    AND EXISTS (
-      SELECT 1
-      FROM resource_grants AS rg
-      WHERE rg.resource_type = :resource_type_tool
-        AND rg.resource_id = t.id
-        AND (
-          rg.user_id = CAST(:user_id AS uuid)
-          OR (
-            rg.role_id IS NOT NULL
-            AND EXISTS (
-              SELECT 1
-              FROM user_roles AS ur2
-              JOIN roles AS r2 ON r2.id = ur2.role_id
-              WHERE ur2.user_id = CAST(:user_id AS uuid)
-                AND ur2.role_id = rg.role_id
-                AND r2.deleted_at IS NULL
-            )
-          )
+def _validate_limits(
+    *,
+    lexical_limit: int,
+    vector_limit: int,
+    merged_limit: int,
+    rrf_k: int,
+) -> None:
+    if lexical_limit < 1 or vector_limit < 1 or merged_limit < 1:
+        raise ValueError("lexical_limit, vector_limit, and merged_limit must be >= 1")
+    if rrf_k <= 0:
+        raise ValueError("rrf_k must be > 0")
+
+
+def _build_authorized_retrieval_statement(
+    *,
+    user_id: uuid.UUID,
+    agent_version_id: uuid.UUID,
+    query_text: str,
+    query_vector: list[float],
+    profile_id: uuid.UUID,
+    profile_lock_version: int,
+    lexical_limit: int,
+    vector_limit: int,
+    merged_limit: int,
+    rrf_k: int,
+) -> Select[Any]:
+    """Compose one SELECT: profile gate + Hard Filter + lexical/vector + RRF."""
+
+    permission_exists = build_effective_permission_exists(
+        user_id, TOOL_EXECUTE_PERMISSION
+    )
+    resource_grant_exists = build_effective_resource_grant_exists(
+        user_id,
+        resource_type=ResourceGrantResourceType.MCP_TOOL.value,
+        resource_id=MCPTool.id,
+    )
+
+    profile_current = exists(
+        select(1).where(
+            EmbeddingProfile.id == profile_id,
+            EmbeddingProfile.is_active_for_tools.is_(True),
+            EmbeddingProfile.lock_version == profile_lock_version,
         )
     )
-),
-lexical_ranked AS (
-  SELECT
-    e.*,
-    ROW_NUMBER() OVER (
-      ORDER BY ts_rank_cd(
-               te.search_tsv,
-               plainto_tsquery('simple', :query_text)
-             ) DESC,
-             e.tool_version_id ASC
-    ) AS lexical_rank
-  FROM eligible_tools AS e
-  JOIN tool_embeddings AS te
-    ON te.mcp_tool_version_id = e.tool_version_id
-   AND te.embedding_profile_id = CAST(:profile_id AS uuid)
-   AND te.status IN ('READY', 'FAILED')
-   AND te.search_tsv @@ plainto_tsquery('simple', :query_text)
-),
-lexical_top AS (
-  SELECT * FROM lexical_ranked WHERE lexical_rank <= :lexical_limit
-),
-vector_ranked AS (
-  SELECT
-    e.*,
-    ROW_NUMBER() OVER (
-      ORDER BY (te.embedding <=> CAST(:query_vector AS vector)) ASC,
-               e.tool_version_id ASC
-    ) AS vector_rank
-  FROM eligible_tools AS e
-  JOIN tool_embeddings AS te
-    ON te.mcp_tool_version_id = e.tool_version_id
-   AND te.embedding_profile_id = CAST(:profile_id AS uuid)
-   AND te.status = 'READY'
-   AND te.embedding IS NOT NULL
-),
-vector_top AS (
-  SELECT * FROM vector_ranked WHERE vector_rank <= :vector_limit
-),
-merged AS (
-  SELECT
-    COALESCE(l.mcp_tool_id, v.mcp_tool_id) AS mcp_tool_id,
-    COALESCE(l.tool_version_id, v.tool_version_id) AS tool_version_id,
-    COALESCE(l.remote_name, v.remote_name) AS remote_name,
-    COALESCE(l.description_override, v.description_override) AS description_override,
-    COALESCE(l.remote_description, v.remote_description) AS remote_description,
-    COALESCE(l.tags, v.tags) AS tags,
-    COALESCE(l.input_schema, v.input_schema) AS input_schema,
-    COALESCE(l.output_schema, v.output_schema) AS output_schema,
-    l.lexical_rank,
-    v.vector_rank,
-    (
-      COALESCE(1.0 / (:rrf_k + l.lexical_rank), 0.0)
-      + COALESCE(1.0 / (:rrf_k + v.vector_rank), 0.0)
-    ) AS rrf_raw,
-    COALESCE(l.agent_requires_confirmation, v.agent_requires_confirmation)
-      AS agent_requires_confirmation,
-    COALESCE(l.parameter_constraints, v.parameter_constraints)
-      AS parameter_constraints,
-    COALESCE(l.tool_policy_id, v.tool_policy_id) AS tool_policy_id,
-    COALESCE(l.tool_policy_lock_version, v.tool_policy_lock_version)
-      AS tool_policy_lock_version,
-    COALESCE(l.policy_risk_class, v.policy_risk_class) AS policy_risk_class,
-    COALESCE(l.policy_requires_confirmation, v.policy_requires_confirmation)
-      AS policy_requires_confirmation,
-    COALESCE(l.policy_requires_approval, v.policy_requires_approval)
-      AS policy_requires_approval,
-    COALESCE(l.approval_policy_id, v.approval_policy_id) AS approval_policy_id,
-    COALESCE(l.allow_auto_select, v.allow_auto_select) AS allow_auto_select
-  FROM lexical_top AS l
-  FULL OUTER JOIN vector_top AS v
-    ON v.tool_version_id = l.tool_version_id
-),
-ranked AS (
-  SELECT
-    m.*,
-    ROW_NUMBER() OVER (
-      ORDER BY m.rrf_raw DESC, m.tool_version_id ASC
-    ) AS merge_rank
-  FROM merged AS m
-)
-SELECT
-  pg.profile_current,
-  r.mcp_tool_id,
-  r.tool_version_id,
-  r.remote_name,
-  r.description_override,
-  r.remote_description,
-  r.tags,
-  r.input_schema,
-  r.output_schema,
-  r.lexical_rank,
-  r.vector_rank,
-  r.rrf_raw,
-  r.agent_requires_confirmation,
-  r.parameter_constraints,
-  r.tool_policy_id,
-  r.tool_policy_lock_version,
-  r.policy_risk_class,
-  r.policy_requires_confirmation,
-  r.policy_requires_approval,
-  r.approval_policy_id,
-  r.allow_auto_select
-FROM profile_gate AS pg
-LEFT JOIN ranked AS r
-  ON r.merge_rank <= :merged_limit
-ORDER BY r.rrf_raw DESC NULLS LAST, r.tool_version_id ASC NULLS LAST
-"""
+    profile_gate = select(profile_current.label("profile_current")).cte("profile_gate")
+
+    eligible_tools = (
+        select(
+            MCPTool.id.label("mcp_tool_id"),
+            MCPTool.current_version_id.label("tool_version_id"),
+            MCPTool.remote_name.label("remote_name"),
+            MCPTool.description_override.label("description_override"),
+            MCPTool.tags.label("tags"),
+            MCPToolVersion.remote_description.label("remote_description"),
+            MCPToolVersion.input_schema.label("input_schema"),
+            MCPToolVersion.output_schema.label("output_schema"),
+            AgentToolGrant.requires_confirmation.label(
+                "agent_requires_confirmation"
+            ),
+            AgentToolGrant.parameter_constraints.label("parameter_constraints"),
+            MCPToolPolicy.id.label("tool_policy_id"),
+            MCPToolPolicy.lock_version.label("tool_policy_lock_version"),
+            MCPToolPolicy.risk_class.label("policy_risk_class"),
+            MCPToolPolicy.requires_confirmation.label(
+                "policy_requires_confirmation"
+            ),
+            MCPToolPolicy.requires_approval.label("policy_requires_approval"),
+            MCPToolPolicy.approval_policy_id.label("approval_policy_id"),
+            MCPToolPolicy.allow_auto_select.label("allow_auto_select"),
+        )
+        .select_from(MCPTool)
+        .join(profile_gate, true())
+        .join(MCPServer, MCPServer.id == MCPTool.mcp_server_id)
+        .join(
+            MCPToolVersion,
+            and_(
+                MCPToolVersion.id == MCPTool.current_version_id,
+                MCPToolVersion.mcp_tool_id == MCPTool.id,
+            ),
+        )
+        .join(
+            AgentToolGrant,
+            and_(
+                AgentToolGrant.agent_version_id == agent_version_id,
+                AgentToolGrant.mcp_tool_id == MCPTool.id,
+                AgentToolGrant.effect == AgentToolGrantEffect.ALLOW.value,
+            ),
+        )
+        .outerjoin(MCPToolPolicy, MCPToolPolicy.mcp_tool_id == MCPTool.id)
+        .where(
+            permission_exists,
+            profile_gate.c.profile_current.is_(True),
+            resource_grant_exists,
+            MCPTool.deleted_at.is_(None),
+            MCPTool.status == MCPToolStatus.ACTIVE.value,
+            MCPTool.current_version_id.is_not(None),
+            MCPServer.deleted_at.is_(None),
+            MCPServer.status == MCPServerStatus.ACTIVE.value,
+            MCPToolVersion.validation_status
+            == ToolVersionValidationStatus.VALID.value,
+        )
+    ).cte("eligible_tools")
+
+    tsquery = func.plainto_tsquery(literal_column("'simple'"), query_text)
+    lexical_rank = over(
+        func.row_number(),
+        order_by=(
+            func.ts_rank_cd(ToolEmbedding.search_tsv, tsquery).desc(),
+            eligible_tools.c.tool_version_id.asc(),
+        ),
+    ).label("lexical_rank")
+
+    lexical_ranked = (
+        select(eligible_tools, lexical_rank)
+        .select_from(
+            eligible_tools.join(
+                ToolEmbedding,
+                and_(
+                    ToolEmbedding.mcp_tool_version_id
+                    == eligible_tools.c.tool_version_id,
+                    ToolEmbedding.embedding_profile_id == profile_id,
+                    ToolEmbedding.status.in_(
+                        (
+                            ToolEmbeddingStatus.READY.value,
+                            ToolEmbeddingStatus.FAILED.value,
+                        )
+                    ),
+                    ToolEmbedding.search_tsv.op("@@")(tsquery),
+                ),
+            )
+        )
+    ).cte("lexical_ranked")
+
+    lexical_top = (
+        select(lexical_ranked).where(
+            lexical_ranked.c.lexical_rank <= lexical_limit
+        )
+    ).cte("lexical_top")
+
+    query_vec = bindparam("query_vector", value=list(map(float, query_vector)), type_=Vector())
+    vector_rank = over(
+        func.row_number(),
+        order_by=(
+            ToolEmbedding.embedding.op("<=>")(query_vec).asc(),
+            eligible_tools.c.tool_version_id.asc(),
+        ),
+    ).label("vector_rank")
+
+    vector_ranked = (
+        select(eligible_tools, vector_rank)
+        .select_from(
+            eligible_tools.join(
+                ToolEmbedding,
+                and_(
+                    ToolEmbedding.mcp_tool_version_id
+                    == eligible_tools.c.tool_version_id,
+                    ToolEmbedding.embedding_profile_id == profile_id,
+                    ToolEmbedding.status == ToolEmbeddingStatus.READY.value,
+                    ToolEmbedding.embedding.is_not(None),
+                ),
+            )
+        )
+    ).cte("vector_ranked")
+
+    vector_top = (
+        select(vector_ranked).where(vector_ranked.c.vector_rank <= vector_limit)
+    ).cte("vector_top")
+
+    lex = lexical_top
+    vec = vector_top
+    rrf_raw = (
+        func.coalesce(1.0 / (rrf_k + lex.c.lexical_rank), 0.0)
+        + func.coalesce(1.0 / (rrf_k + vec.c.vector_rank), 0.0)
+    ).label("rrf_raw")
+
+    merged = (
+        select(
+            func.coalesce(lex.c.mcp_tool_id, vec.c.mcp_tool_id).label("mcp_tool_id"),
+            func.coalesce(lex.c.tool_version_id, vec.c.tool_version_id).label(
+                "tool_version_id"
+            ),
+            func.coalesce(lex.c.remote_name, vec.c.remote_name).label("remote_name"),
+            func.coalesce(
+                lex.c.description_override, vec.c.description_override
+            ).label("description_override"),
+            func.coalesce(
+                lex.c.remote_description, vec.c.remote_description
+            ).label("remote_description"),
+            func.coalesce(lex.c.tags, vec.c.tags).label("tags"),
+            func.coalesce(lex.c.input_schema, vec.c.input_schema).label("input_schema"),
+            func.coalesce(lex.c.output_schema, vec.c.output_schema).label(
+                "output_schema"
+            ),
+            lex.c.lexical_rank,
+            vec.c.vector_rank,
+            rrf_raw,
+            func.coalesce(
+                lex.c.agent_requires_confirmation, vec.c.agent_requires_confirmation
+            ).label("agent_requires_confirmation"),
+            func.coalesce(
+                lex.c.parameter_constraints, vec.c.parameter_constraints
+            ).label("parameter_constraints"),
+            func.coalesce(lex.c.tool_policy_id, vec.c.tool_policy_id).label(
+                "tool_policy_id"
+            ),
+            func.coalesce(
+                lex.c.tool_policy_lock_version, vec.c.tool_policy_lock_version
+            ).label("tool_policy_lock_version"),
+            func.coalesce(lex.c.policy_risk_class, vec.c.policy_risk_class).label(
+                "policy_risk_class"
+            ),
+            func.coalesce(
+                lex.c.policy_requires_confirmation, vec.c.policy_requires_confirmation
+            ).label("policy_requires_confirmation"),
+            func.coalesce(
+                lex.c.policy_requires_approval, vec.c.policy_requires_approval
+            ).label("policy_requires_approval"),
+            func.coalesce(lex.c.approval_policy_id, vec.c.approval_policy_id).label(
+                "approval_policy_id"
+            ),
+            func.coalesce(lex.c.allow_auto_select, vec.c.allow_auto_select).label(
+                "allow_auto_select"
+            ),
+        )
+        .select_from(
+            lex.join(
+                vec,
+                lex.c.tool_version_id == vec.c.tool_version_id,
+                full=True,
+            )
+        )
+    ).cte("merged")
+
+    merge_rank = over(
+        func.row_number(),
+        order_by=(merged.c.rrf_raw.desc(), merged.c.tool_version_id.asc()),
+    ).label("merge_rank")
+
+    ranked = select(merged, merge_rank).cte("ranked")
+
+    return (
+        select(
+            profile_gate.c.profile_current,
+            ranked.c.mcp_tool_id,
+            ranked.c.tool_version_id,
+            ranked.c.remote_name,
+            ranked.c.description_override,
+            ranked.c.remote_description,
+            ranked.c.tags,
+            ranked.c.input_schema,
+            ranked.c.output_schema,
+            ranked.c.lexical_rank,
+            ranked.c.vector_rank,
+            ranked.c.rrf_raw,
+            ranked.c.agent_requires_confirmation,
+            ranked.c.parameter_constraints,
+            ranked.c.tool_policy_id,
+            ranked.c.tool_policy_lock_version,
+            ranked.c.policy_risk_class,
+            ranked.c.policy_requires_confirmation,
+            ranked.c.policy_requires_approval,
+            ranked.c.approval_policy_id,
+            ranked.c.allow_auto_select,
+        )
+        .select_from(
+            profile_gate.outerjoin(
+                ranked, ranked.c.merge_rank <= merged_limit
+            )
+        )
+        .order_by(
+            ranked.c.rrf_raw.desc().nulls_last(),
+            ranked.c.tool_version_id.asc().nulls_last(),
+        )
+    )
 
 
 class ToolRetrievalRepository:
@@ -295,6 +402,12 @@ class ToolRetrievalRepository:
         merged_limit: int = MERGED_CANDIDATE_LIMIT,
         rrf_k: int = RRF_K,
     ) -> ToolRetrievalSqlResult:
+        _validate_limits(
+            lexical_limit=lexical_limit,
+            vector_limit=vector_limit,
+            merged_limit=merged_limit,
+            rrf_k=rrf_k,
+        )
         if len(query_vector) != expected_dimension:
             raise ValueError(
                 f"query_vector dimension mismatch: expected {expected_dimension}, "
@@ -307,26 +420,19 @@ class ToolRetrievalRepository:
             if math.isnan(number) or math.isinf(number):
                 raise ValueError("query_vector contains NaN or Infinity")
 
-        params = {
-            "user_id": str(user_id),
-            "agent_version_id": str(agent_version_id),
-            "permission_code": TOOL_EXECUTE_PERMISSION,
-            "profile_id": str(profile_id),
-            "profile_lock_version": int(profile_lock_version),
-            "query_text": query_text,
-            "query_vector": str(query_vector),
-            "lexical_limit": int(lexical_limit),
-            "vector_limit": int(vector_limit),
-            "merged_limit": int(merged_limit),
-            "rrf_k": int(rrf_k),
-            "allow_effect": AgentToolGrantEffect.ALLOW.value,
-            "tool_active": MCPToolStatus.ACTIVE.value,
-            "server_active": MCPServerStatus.ACTIVE.value,
-            "version_valid": ToolVersionValidationStatus.VALID.value,
-            "resource_type_tool": ResourceGrantResourceType.MCP_TOOL.value,
-        }
-
-        result = await self._session.execute(text(_AUTHORIZED_RETRIEVAL_SQL), params)
+        stmt = _build_authorized_retrieval_statement(
+            user_id=user_id,
+            agent_version_id=agent_version_id,
+            query_text=query_text,
+            query_vector=query_vector,
+            profile_id=profile_id,
+            profile_lock_version=profile_lock_version,
+            lexical_limit=lexical_limit,
+            vector_limit=vector_limit,
+            merged_limit=merged_limit,
+            rrf_k=rrf_k,
+        )
+        result = await self._session.execute(stmt)
         rows = list(result.mappings().all())
         if not rows:
             return ToolRetrievalSqlResult(profile_current=False, hits=[])

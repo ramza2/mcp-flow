@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from app.core.errors import AppError
 from app.domain.enums import RiskClass
+from app.model_provider.errors import PROTOCOL, ModelProviderError
 from app.repositories.tool_retrieval import (
     RRF_K,
     ToolRetrievalHit,
@@ -252,3 +253,172 @@ async def test_profile_race_retries_once_then_conflict() -> None:
     assert exc.value.code == "RESOURCE_CONFLICT"
     assert service._retrieval.authorized_hybrid_search.await_count == 2
     assert provider.embed_texts.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_owned_provider_client_closed_on_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    session = MagicMock()
+    session.commit = AsyncMock()
+
+    owned = MagicMock()
+    owned.embed_texts = AsyncMock(return_value=[[0.1, 0.2, 0.3, 0.4]])
+    owned.aclose = AsyncMock()
+    monkeypatch.setattr(
+        "app.search.tool_retrieval.ModelProviderClient",
+        lambda: owned,
+    )
+
+    profile = MagicMock()
+    profile.id = uuid.uuid4()
+    profile.lock_version = 1
+    profile.provider = "OPENAI_COMPATIBLE"
+    profile.model = "emb"
+    profile.base_url = "https://llm.test/v1"
+    profile.dimension = 4
+    profile.credential_secret_id = None
+
+    service = ToolRetrievalService(session)
+    service._agent_versions.get = AsyncMock(return_value=MagicMock())
+    service._profiles.get_active_for_tools = AsyncMock(return_value=profile)
+    ok = MagicMock()
+    ok.profile_current = True
+    ok.hits = []
+    service._retrieval.authorized_hybrid_search = AsyncMock(return_value=ok)
+
+    result = await service.retrieve(
+        user_id=uuid.uuid4(),
+        agent_version_id=uuid.uuid4(),
+        query_text="weather",
+    )
+    assert result.candidates == ()
+    owned.embed_texts.assert_awaited_once()
+    owned.aclose.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_owned_provider_client_closed_on_provider_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = MagicMock()
+    session.commit = AsyncMock()
+
+    owned = MagicMock()
+    owned.embed_texts = AsyncMock(
+        side_effect=ModelProviderError(
+            error_code=PROTOCOL,
+            message="boom",
+            retryable=False,
+        )
+    )
+    owned.aclose = AsyncMock()
+    monkeypatch.setattr(
+        "app.search.tool_retrieval.ModelProviderClient",
+        lambda: owned,
+    )
+
+    profile = MagicMock()
+    profile.id = uuid.uuid4()
+    profile.lock_version = 1
+    profile.provider = "OPENAI_COMPATIBLE"
+    profile.model = "emb"
+    profile.base_url = "https://llm.test/v1"
+    profile.dimension = 4
+    profile.credential_secret_id = None
+
+    service = ToolRetrievalService(session)
+    service._agent_versions.get = AsyncMock(return_value=MagicMock())
+    service._profiles.get_active_for_tools = AsyncMock(return_value=profile)
+
+    with pytest.raises(ModelProviderError):
+        await service.retrieve(
+            user_id=uuid.uuid4(),
+            agent_version_id=uuid.uuid4(),
+            query_text="weather",
+        )
+    owned.aclose.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_injected_provider_client_not_closed() -> None:
+    session = MagicMock()
+    session.commit = AsyncMock()
+    provider = MagicMock()
+    provider.embed_texts = AsyncMock(return_value=[[0.1, 0.2, 0.3, 0.4]])
+    provider.aclose = AsyncMock()
+
+    profile = MagicMock()
+    profile.id = uuid.uuid4()
+    profile.lock_version = 1
+    profile.provider = "OPENAI_COMPATIBLE"
+    profile.model = "emb"
+    profile.base_url = "https://llm.test/v1"
+    profile.dimension = 4
+    profile.credential_secret_id = None
+
+    service = ToolRetrievalService(session, model_provider=provider)
+    service._agent_versions.get = AsyncMock(return_value=MagicMock())
+    service._profiles.get_active_for_tools = AsyncMock(return_value=profile)
+    ok = MagicMock()
+    ok.profile_current = True
+    ok.hits = []
+    service._retrieval.authorized_hybrid_search = AsyncMock(return_value=ok)
+
+    await service.retrieve(
+        user_id=uuid.uuid4(),
+        agent_version_id=uuid.uuid4(),
+        query_text="weather",
+    )
+    provider.aclose.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_profile_retry_closes_owned_client_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = MagicMock()
+    session.commit = AsyncMock()
+
+    owned = MagicMock()
+    owned.embed_texts = AsyncMock(return_value=[[0.1, 0.2, 0.3, 0.4]])
+    owned.aclose = AsyncMock()
+    monkeypatch.setattr(
+        "app.search.tool_retrieval.ModelProviderClient",
+        lambda: owned,
+    )
+
+    profile = MagicMock()
+    profile.id = uuid.uuid4()
+    profile.lock_version = 1
+    profile.provider = "OPENAI_COMPATIBLE"
+    profile.model = "emb"
+    profile.base_url = "https://llm.test/v1"
+    profile.dimension = 4
+    profile.credential_secret_id = None
+
+    service = ToolRetrievalService(session)
+    service._agent_versions.get = AsyncMock(return_value=MagicMock())
+    service._profiles.get_active_for_tools = AsyncMock(return_value=profile)
+
+    stale = MagicMock()
+    stale.profile_current = False
+    stale.hits = []
+    service._retrieval.authorized_hybrid_search = AsyncMock(return_value=stale)
+
+    with pytest.raises(AppError) as exc:
+        await service.retrieve(
+            user_id=uuid.uuid4(),
+            agent_version_id=uuid.uuid4(),
+            query_text="weather",
+        )
+    assert exc.value.code == "RESOURCE_CONFLICT"
+    assert owned.embed_texts.await_count == 2
+    owned.aclose.assert_awaited_once()
+
+
+def test_repository_rejects_non_positive_limits() -> None:
+    from app.repositories.tool_retrieval import _validate_limits
+
+    with pytest.raises(ValueError):
+        _validate_limits(lexical_limit=0, vector_limit=40, merged_limit=20, rrf_k=60)
+    with pytest.raises(ValueError):
+        _validate_limits(lexical_limit=40, vector_limit=40, merged_limit=20, rrf_k=0)

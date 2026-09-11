@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from fastapi import status
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import AppError
 from app.domain.enums import RiskClass
@@ -201,11 +201,9 @@ class ToolRetrievalService:
         self,
         session: AsyncSession,
         *,
-        session_factory: async_sessionmaker[AsyncSession] | None = None,
         model_provider: ModelProviderClient | None = None,
     ) -> None:
         self._session = session
-        self._session_factory = session_factory
         self._provider = model_provider
         self._profiles = EmbeddingProfileRepository(session)
         self._agent_versions = AgentVersionRepository(session)
@@ -233,9 +231,11 @@ class ToolRetrievalService:
         return self._snapshot_profile(profile)
 
     async def _embed_query(
-        self, snapshot: _ProfileSnapshot, query_text: str
+        self,
+        client: ModelProviderClient,
+        snapshot: _ProfileSnapshot,
+        query_text: str,
     ) -> list[float]:
-        client = self._provider or ModelProviderClient()
         vectors = await client.embed_texts(
             EmbeddingConnectionTarget(
                 provider=snapshot.provider,
@@ -307,26 +307,17 @@ class ToolRetrievalService:
                 status_code=status.HTTP_404_NOT_FOUND,
             )
 
-        snapshot = await self._load_active_profile_snapshot()
-        # Do not hold a DB transaction/lock across outbound embedding HTTP.
-        await self._session.commit()
-
-        profile_retried = False
-        query_vector = await self._embed_query(snapshot, normalized_query)
-        sql_result = await self._run_retrieval_sql(
-            user_id=user_id,
-            agent_version_id=agent_version_id,
-            query_text=normalized_query,
-            query_vector=query_vector,
-            snapshot=snapshot,
-        )
-
-        if not sql_result.profile_current:
-            # Active profile raced during embedding — retry once with a fresh snapshot.
-            profile_retried = True
+        client = self._provider or ModelProviderClient()
+        owns_client = self._provider is None
+        try:
             snapshot = await self._load_active_profile_snapshot()
+            # Do not hold a DB transaction/lock across outbound embedding HTTP.
             await self._session.commit()
-            query_vector = await self._embed_query(snapshot, normalized_query)
+
+            profile_retried = False
+            query_vector = await self._embed_query(
+                client, snapshot, normalized_query
+            )
             sql_result = await self._run_retrieval_sql(
                 user_id=user_id,
                 agent_version_id=agent_version_id,
@@ -334,28 +325,47 @@ class ToolRetrievalService:
                 query_vector=query_vector,
                 snapshot=snapshot,
             )
-            if not sql_result.profile_current:
-                raise AppError(
-                    code="RESOURCE_CONFLICT",
-                    message=(
-                        "Active embedding profile changed during retrieval; retry."
-                    ),
-                    status_code=status.HTTP_409_CONFLICT,
-                )
 
-        candidates = tuple(map_retrieval_hit(hit) for hit in sql_result.hits)
-        logger.info(
-            "tool_retrieval complete user=%s agent_version=%s query_len=%s "
-            "candidate_count=%s profile=%s retried=%s",
-            user_id,
-            agent_version_id,
-            len(normalized_query),
-            len(candidates),
-            snapshot.id,
-            profile_retried,
-        )
-        return ToolRetrievalResult(
-            candidates=candidates,
-            embedding_profile_id=snapshot.id,
-            profile_retried=profile_retried,
-        )
+            if not sql_result.profile_current:
+                # Active profile raced during embedding — retry once with a fresh snapshot.
+                profile_retried = True
+                snapshot = await self._load_active_profile_snapshot()
+                await self._session.commit()
+                query_vector = await self._embed_query(
+                    client, snapshot, normalized_query
+                )
+                sql_result = await self._run_retrieval_sql(
+                    user_id=user_id,
+                    agent_version_id=agent_version_id,
+                    query_text=normalized_query,
+                    query_vector=query_vector,
+                    snapshot=snapshot,
+                )
+                if not sql_result.profile_current:
+                    raise AppError(
+                        code="RESOURCE_CONFLICT",
+                        message=(
+                            "Active embedding profile changed during retrieval; retry."
+                        ),
+                        status_code=status.HTTP_409_CONFLICT,
+                    )
+
+            candidates = tuple(map_retrieval_hit(hit) for hit in sql_result.hits)
+            logger.info(
+                "tool_retrieval complete user=%s agent_version=%s query_len=%s "
+                "candidate_count=%s profile=%s retried=%s",
+                user_id,
+                agent_version_id,
+                len(normalized_query),
+                len(candidates),
+                snapshot.id,
+                profile_retried,
+            )
+            return ToolRetrievalResult(
+                candidates=candidates,
+                embedding_profile_id=snapshot.id,
+                profile_retried=profile_retried,
+            )
+        finally:
+            if owns_client:
+                await client.aclose()
