@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from dataclasses import dataclass
@@ -39,8 +40,23 @@ class ConnectionProbeResult:
     error_message: str | None = None
 
 
+# Profile `parameters` must never override these chat-completion system keys.
+_RESERVED_CHAT_PARAMETER_KEYS = frozenset(
+    {
+        "model",
+        "messages",
+        "stream",
+        "response_format",
+        "tools",
+        "tool_choice",
+        "functions",
+        "function_call",
+    }
+)
+
+
 class OpenAICompatibleAdapter:
-    """Minimal OpenAI-compatible HTTP adapter for connection tests only."""
+    """OpenAI-compatible HTTP adapter for probes, embeddings, and JSON chat."""
 
     def __init__(self, http: httpx.AsyncClient | None = None) -> None:
         self._http = http
@@ -422,3 +438,146 @@ class OpenAICompatibleAdapter:
             )
         latency_ms = int((time.perf_counter() - started) * 1000)
         return ConnectionProbeResult(success=True, latency_ms=latency_ms)
+
+    def _merge_chat_parameters(
+        self,
+        *,
+        model: str,
+        messages: list[dict[str, Any]],
+        parameters: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        if parameters:
+            reserved = sorted(set(parameters) & _RESERVED_CHAT_PARAMETER_KEYS)
+            if reserved:
+                raise ModelProviderError(
+                    error_code=PROTOCOL,
+                    message=(
+                        "LLM profile parameters must not override reserved "
+                        f"chat keys: {', '.join(reserved)}."
+                    ),
+                    retryable=False,
+                )
+        body: dict[str, Any] = {}
+        if parameters:
+            body.update(parameters)
+        body["model"] = model
+        body["messages"] = messages
+        body["stream"] = False
+        body["response_format"] = {"type": "json_object"}
+        return body
+
+    def _parse_chat_json_content(self, payload: Any) -> dict[str, Any]:
+        if not isinstance(payload, dict):
+            raise ModelProviderError(
+                error_code=PROTOCOL,
+                message="Chat completion response must be a JSON object.",
+                retryable=False,
+            )
+        choices = payload.get("choices")
+        if not isinstance(choices, list) or not choices:
+            raise ModelProviderError(
+                error_code=PROTOCOL,
+                message="Chat completion response missing choices.",
+                retryable=False,
+            )
+        first = choices[0]
+        if not isinstance(first, dict):
+            raise ModelProviderError(
+                error_code=PROTOCOL,
+                message="Chat completion choice must be an object.",
+                retryable=False,
+            )
+        message = first.get("message")
+        if not isinstance(message, dict):
+            raise ModelProviderError(
+                error_code=PROTOCOL,
+                message="Chat completion message must be an object.",
+                retryable=False,
+            )
+        content = message.get("content")
+        if not isinstance(content, str) or not content.strip():
+            raise ModelProviderError(
+                error_code=PROTOCOL,
+                message="Chat completion content must be a non-empty string.",
+                retryable=False,
+            )
+        # Strict JSON only — do not strip markdown fences or repair malformed content.
+        try:
+            parsed = json.loads(content)
+        except ValueError as exc:
+            raise ModelProviderError(
+                error_code=PROTOCOL,
+                message="Chat completion content is not valid JSON.",
+                retryable=False,
+            ) from exc
+        if not isinstance(parsed, dict):
+            raise ModelProviderError(
+                error_code=PROTOCOL,
+                message="Chat completion JSON must be an object.",
+                retryable=False,
+            )
+        return parsed
+
+    async def generate_json(
+        self,
+        *,
+        base_url: str,
+        model: str,
+        messages: list[dict[str, Any]],
+        parameters: dict[str, Any] | None = None,
+        bearer_token: str | None = None,
+        timeout_ms: int = _DEFAULT_TIMEOUT_MS,
+    ) -> dict[str, Any]:
+        """Production chat completion that returns a parsed JSON object.
+
+        Never logs message content, credentials, or Authorization headers.
+        """
+
+        if not messages:
+            raise ModelProviderError(
+                error_code=PROTOCOL,
+                message="messages must not be empty.",
+                retryable=False,
+            )
+        for item in messages:
+            if not isinstance(item, dict):
+                raise ModelProviderError(
+                    error_code=PROTOCOL,
+                    message="Each chat message must be an object.",
+                    retryable=False,
+                )
+            role = item.get("role")
+            content = item.get("content")
+            if not isinstance(role, str) or not role.strip():
+                raise ModelProviderError(
+                    error_code=PROTOCOL,
+                    message="Chat message role must be a non-empty string.",
+                    retryable=False,
+                )
+            if not isinstance(content, str):
+                raise ModelProviderError(
+                    error_code=PROTOCOL,
+                    message="Chat message content must be a string.",
+                    retryable=False,
+                )
+
+        api_root = normalize_openai_compatible_root(base_url)
+        url = join_api_path(api_root, "chat/completions")
+        headers = self._auth_headers(bearer_token)
+        body = self._merge_chat_parameters(
+            model=model, messages=messages, parameters=parameters
+        )
+        logger.info(
+            "model_provider chat_completions model=%s message_count=%s",
+            model,
+            len(messages),
+        )
+        response = await self._request(
+            method="POST",
+            url=url,
+            headers=headers,
+            timeout_ms=timeout_ms,
+            json_body=body,
+        )
+        payload = self._parse_json(response)
+        return self._parse_chat_json_content(payload)
