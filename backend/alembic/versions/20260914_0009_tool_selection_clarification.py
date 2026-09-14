@@ -99,6 +99,15 @@ def upgrade() -> None:
             name="ck_tool_selection_runs_decision",
         ),
         sa.CheckConstraint(
+            "("
+            "decision = 'NO_MATCH' AND selected_tool_version_id IS NULL"
+            ") OR ("
+            "decision IN ('AUTO_SELECT', 'CONFIRM', 'CLARIFY') "
+            "AND selected_tool_version_id IS NOT NULL"
+            ")",
+            name="ck_tool_selection_runs_selected_tool_consistency",
+        ),
+        sa.CheckConstraint(
             "confidence IS NULL OR (confidence >= 0 AND confidence <= 1)",
             name="ck_tool_selection_runs_confidence",
         ),
@@ -176,6 +185,13 @@ def upgrade() -> None:
         sa.CheckConstraint(
             "llm_fit_score IS NULL OR (llm_fit_score >= 0 AND llm_fit_score <= 1)",
             name="ck_tool_selection_candidates_llm_fit_score",
+        ),
+        sa.CheckConstraint(
+            "risk_class IN ("
+            "'READ_ONLY', 'IDEMPOTENT_WRITE', 'NON_IDEMPOTENT_WRITE', "
+            "'DESTRUCTIVE', 'UNKNOWN'"
+            ")",
+            name="ck_tool_selection_candidates_risk_class",
         ),
     )
     op.create_index(

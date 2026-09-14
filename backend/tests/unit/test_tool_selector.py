@@ -388,8 +388,16 @@ async def test_low_confidence_complete_inputs_rejected(
     )
     assert run is not None
     assert run.decision == "NO_MATCH"
-    assert run.selected_tool_version_id == candidates[0].descriptor.tool_version_id
+    assert run.selected_tool_version_id is None
+    assert outcome.selected_candidate is None
+    assert outcome.selection_result is None
+    assert outcome.confidence is not None
     assert run.confidence is not None and run.confidence < 0.60
+    assert run.required_input_coverage == 1.0
+    candidates_rows = await ToolSelectionRepository(db_session).list_candidates_for_run(
+        run.id
+    )
+    assert len(candidates_rows) >= 1
     clarification = await ClarificationRequestRepository(
         db_session
     ).get_open_for_agent_request(request_id)
@@ -788,6 +796,7 @@ async def test_missing_policy_forces_confirmation(db_session: AsyncSession) -> N
     assert clarification is not None
     assert clarification.request_type == ClarificationRequestType.TOOL_CONFIRMATION.value
     assert clarification.question_schema["required"] == ["confirmed"]
+    assert clarification.expires_at is None
 
 
 @pytest.mark.asyncio
@@ -891,6 +900,7 @@ async def test_clarify_persists_missing_parameter_clarification(
     assert "date" in clarification.question_schema["required"]
     assert clarification.question_schema["properties"]["date"] == {}
     assert "date" in clarification.prompt_text
+    assert clarification.expires_at is None
 
 
 @pytest.mark.asyncio

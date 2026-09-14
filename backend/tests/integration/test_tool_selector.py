@@ -754,6 +754,7 @@ async def test_pg_confirmation_when_auto_select_disabled(
             clarification.request_type
             == ClarificationRequestType.TOOL_CONFIRMATION.value
         )
+        assert clarification.expires_at is None
 
 
 @pytest.mark.integration
@@ -862,6 +863,7 @@ async def test_pg_waiting_input_missing_required(
             == ClarificationRequestType.MISSING_PARAMETER.value
         )
         assert "date" in clarification.question_schema["required"]
+        assert clarification.expires_at is None
 
 
 @pytest.mark.integration
@@ -1078,6 +1080,15 @@ async def test_pg_low_confidence_complete_inputs_rejected(
         )
         assert run is not None
         assert run.decision == "NO_MATCH"
+        assert run.selected_tool_version_id is None
+        assert run.confidence is not None
+        assert outcome.selected_candidate is None
+        assert outcome.selection_result is None
+        assert outcome.confidence is not None
+        candidates_rows = await ToolSelectionRepository(session).list_candidates_for_run(
+            run.id
+        )
+        assert len(candidates_rows) >= 1
         assert (
             await ClarificationRequestRepository(session).get_open_for_agent_request(
                 request_id
