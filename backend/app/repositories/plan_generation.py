@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import uuid
 from typing import Any
 
@@ -9,6 +10,15 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.plan_generation import PlanGenerationRun, PlanGenerationToolRef
+
+_PLAN_HASH_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
+def validate_plan_hash(plan_hash: str) -> str:
+    """Durable plan_hash contract: exactly 64 lowercase hex chars."""
+    if not isinstance(plan_hash, str) or _PLAN_HASH_RE.fullmatch(plan_hash) is None:
+        raise ValueError("plan_hash must be 64 lowercase hex characters")
+    return plan_hash
 
 
 class PlanGenerationRepository:
@@ -26,8 +36,7 @@ class PlanGenerationRepository:
         plan_hash: str,
         planning_settings_snapshot: dict[str, Any],
     ) -> PlanGenerationRun:
-        if len(plan_hash) != 64:
-            raise ValueError("plan_hash must be 64 hex characters")
+        validate_plan_hash(plan_hash)
         row = PlanGenerationRun(
             id=uuid.uuid4(),
             agent_request_id=agent_request_id,

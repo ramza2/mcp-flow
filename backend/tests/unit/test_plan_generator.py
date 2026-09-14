@@ -30,9 +30,13 @@ from app.repositories.mcp_server import MCPServerRepository
 from app.repositories.mcp_tool import MCPToolRepository
 from app.repositories.mcp_tool_policy import MCPToolPolicyRepository
 from app.repositories.parameter_build import ParameterBuildRepository
-from app.repositories.plan_generation import PlanGenerationRepository
+from app.repositories.plan_generation import (
+    PlanGenerationRepository,
+    validate_plan_hash,
+)
 from app.repositories.tool_selection import ToolSelectionRepository
 from app.repositories.user import UserRepository
+from app.models.agent import AgentVersion
 from app.schemas.execution_plan import (
     DETERMINISTIC_TOOL_STEP_ID,
     DETERMINISTIC_TOOL_STEP_NAME,
@@ -435,6 +439,88 @@ def test_plan_hash_determinism_and_difference() -> None:
     assert compute_plan_hash(plan_a) != compute_plan_hash(other_tool)
 
 
+def test_validate_plan_hash_accepts_compute_plan_hash_result() -> None:
+    plan = {
+        "schema_version": "1.0",
+        "goal": "x",
+        "source": {"type": "AGENT", "agent_version_id": str(uuid.uuid4())},
+        "inputs": {},
+        "limits": default_plan_limits().model_dump(mode="json"),
+        "steps": [
+            {
+                "id": DETERMINISTIC_TOOL_STEP_ID,
+                "name": DETERMINISTIC_TOOL_STEP_NAME,
+                "type": "TOOL",
+                "required": True,
+                "depends_on": [],
+                "when": None,
+                "timeout_seconds": 30,
+                "on_error": "FAIL_EXECUTION",
+                "config": {
+                    "tool_version_id": str(uuid.uuid4()),
+                    "bindings": {},
+                },
+            }
+        ],
+        "completion": {
+            "success_policy": "ALL_REQUIRED",
+            "response_step_ids": [DETERMINISTIC_TOOL_STEP_ID],
+        },
+    }
+    snapshot = ExecutionPlanV1.model_validate(plan).model_dump(mode="json")
+    digest = compute_plan_hash(snapshot)
+    assert validate_plan_hash(digest) == digest
+    assert digest == digest.lower()
+    assert len(digest) == 64
+
+
+@pytest.mark.parametrize(
+    "bad_hash",
+    [
+        "x" * 64,
+        "A" * 64,
+        "0" * 63,
+        "0" * 65,
+        "g" * 64,
+        "",
+        None,
+    ],
+    ids=[
+        "non_hex",
+        "uppercase_hex",
+        "len_63",
+        "len_65",
+        "invalid_hex_char",
+        "empty",
+        "none",
+    ],
+)
+def test_validate_plan_hash_rejects_invalid(bad_hash: object) -> None:
+    with pytest.raises(ValueError, match="64 lowercase hex"):
+        validate_plan_hash(bad_hash)  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_create_run_rejects_invalid_plan_hash(
+    db_session: AsyncSession,
+) -> None:
+    seeded = await _seed_planning(db_session)
+    build = await ParameterBuildRepository(
+        db_session
+    ).get_latest_complete_for_agent_request(seeded["request_id"])
+    assert build is not None
+    with pytest.raises(ValueError, match="64 lowercase hex"):
+        await PlanGenerationRepository(db_session).create_run(
+            agent_request_id=seeded["request_id"],
+            parameter_build_run_id=build.id,
+            agent_version_id=seeded["agent_version_id"],
+            plan_schema_version="1.0",
+            plan_snapshot={"schema_version": "1.0"},
+            plan_hash="A" * 64,
+            planning_settings_snapshot={},
+        )
+
+
 @pytest.mark.asyncio
 async def test_generate_single_tool_plan(db_session: AsyncSession) -> None:
     seeded = await _seed_planning(db_session)
@@ -477,6 +563,7 @@ async def test_generate_single_tool_plan(db_session: AsyncSession) -> None:
     assert run is not None
     assert run.plan_hash == outcome.plan_hash
     assert run.plan_hash == compute_plan_hash(run.plan_snapshot)
+    assert run.planning_settings_snapshot == {}
     validated = ExecutionPlanV1.model_validate(run.plan_snapshot)
     assert validated.model_dump(mode="json") == run.plan_snapshot
     refs = await PlanGenerationRepository(db_session).get_tool_refs_for_run(run.id)
@@ -564,6 +651,22 @@ async def test_wrong_status_resource_conflict(db_session: AsyncSession) -> None:
 
 
 @pytest.mark.asyncio
+async def test_planning_settings_empty_object_succeeds(
+    db_session: AsyncSession,
+) -> None:
+    seeded = await _seed_planning(db_session, planning_settings={})
+    outcome = await PlanGeneratorService(db_session).generate(
+        agent_request_id=seeded["request_id"]
+    )
+    assert outcome.agent_request_status == AgentRequestStatus.VALIDATING
+    run = await PlanGenerationRepository(db_session).get_latest_for_agent_request(
+        seeded["request_id"]
+    )
+    assert run is not None
+    assert run.planning_settings_snapshot == {}
+
+
+@pytest.mark.asyncio
 async def test_planning_settings_non_empty_failed(db_session: AsyncSession) -> None:
     seeded = await _seed_planning(
         db_session, planning_settings={"max_steps": 10}
@@ -577,6 +680,45 @@ async def test_planning_settings_non_empty_failed(db_session: AsyncSession) -> N
     assert row is not None
     assert row.status == AgentRequestStatus.FAILED.value
     assert row.completed_at is not None
+    assert (
+        await PlanGenerationRepository(db_session).get_latest_for_agent_request(
+            seeded["request_id"]
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize(
+    "corrupt_value",
+    [[], "", False, None, 0],
+    ids=["list", "empty_string", "false", "null", "zero"],
+)
+@pytest.mark.asyncio
+async def test_planning_settings_non_object_failed(
+    db_session: AsyncSession,
+    corrupt_value: object,
+) -> None:
+    seeded = await _seed_planning(db_session, planning_settings={})
+    await db_session.execute(
+        update(AgentVersion)
+        .where(AgentVersion.id == seeded["agent_version_id"])
+        .values(planning_settings=corrupt_value)
+    )
+    await db_session.commit()
+    with pytest.raises(AppError):
+        await PlanGeneratorService(db_session).generate(
+            agent_request_id=seeded["request_id"]
+        )
+    row = await AgentRequestRepository(db_session).get(seeded["request_id"])
+    assert row is not None
+    assert row.status == AgentRequestStatus.FAILED.value
+    assert row.completed_at is not None
+    assert (
+        await PlanGenerationRepository(db_session).get_latest_for_agent_request(
+            seeded["request_id"]
+        )
+        is None
+    )
 
 
 @pytest.mark.asyncio

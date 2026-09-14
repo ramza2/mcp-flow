@@ -121,9 +121,32 @@ async def test_plan_generation_schema_constraints(
         run_defs = " ".join(run_checks).lower()
         assert "plan_schema_version" in run_defs
         assert "'1.0'" in run_defs
-        assert "char_length((plan_hash)::text) = 64" in run_defs
+        # plan_hash must be lowercase SHA-256 hex (not length-only).
+        hash_checks = [c for c in run_checks if "plan_hash" in c.lower()]
+        assert hash_checks, "expected a CHECK involving plan_hash"
+        hash_defs_raw = " ".join(hash_checks)
+        hash_defs = hash_defs_raw.lower()
+        assert "~" in hash_defs or "similar to" in hash_defs
+        assert "0-9a-f" in hash_defs
+        assert "{64}" in hash_defs or "64" in hash_defs
+        assert "A-F" not in hash_defs_raw  # uppercase hex class must not be allowed
         assert "jsonb_typeof(plan_snapshot)" in run_defs
         assert "jsonb_typeof(planning_settings_snapshot)" in run_defs
+
+        hash_names = (
+            await session.execute(
+                text(
+                    """
+                    SELECT conname
+                    FROM pg_constraint
+                    WHERE conrelid = 'plan_generation_runs'::regclass
+                      AND contype = 'c'
+                      AND pg_get_constraintdef(oid) ILIKE '%plan_hash%'
+                    """
+                )
+            )
+        ).scalars().all()
+        assert any("plan_hash" in name for name in hash_names)
 
         ref_checks = (
             await session.execute(

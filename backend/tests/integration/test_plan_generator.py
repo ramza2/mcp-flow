@@ -22,6 +22,7 @@ from app.domain.enums import (
     ToolVersionValidationStatus,
 )
 from app.model_provider.openai_compatible import OPENAI_COMPATIBLE_PROVIDER
+from app.models.agent import AgentVersion
 from app.models.mcp import MCPToolVersion
 from app.models.parameter_build import ParameterBuildRun
 from app.repositories.agent import AgentRepository
@@ -45,6 +46,7 @@ from app.schemas.structured_request import StructuredRequestV1
 from app.services.agent_request import AgentRequestService
 from app.services.conversation import ConversationService
 from sqlalchemy import text, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
@@ -290,6 +292,7 @@ async def test_pg_generate_success_validating(
         assert validated.model_dump(mode="json") == run.plan_snapshot
         assert run.plan_hash == compute_plan_hash(run.plan_snapshot)
         assert run.plan_hash == outcome_plan_hash
+        assert run.planning_settings_snapshot == {}
 
         refs = await PlanGenerationRepository(session).get_tool_refs_for_run(run.id)
         assert len(refs) == 1
@@ -702,3 +705,115 @@ async def test_pg_double_generator(
         row = await AgentRequestRepository(session).get(seeded["request_id"])
         assert row is not None
         assert row.status == AgentRequestStatus.VALIDATING.value
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_pg_plan_hash_check_rejects_non_sha256_hex(
+    integration_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with integration_session_factory() as session:
+        seeded = await _seed_planning(session)
+        build = await ParameterBuildRepository(
+            session
+        ).get_latest_complete_for_agent_request(seeded["request_id"])
+        assert build is not None
+        base_params = {
+            "id": str(uuid.uuid4()),
+            "agent_request_id": str(seeded["request_id"]),
+            "parameter_build_run_id": str(build.id),
+            "agent_version_id": str(seeded["agent_version_id"]),
+            "plan_schema_version": "1.0",
+            "plan_snapshot": "{}",
+        }
+
+        async def _insert(plan_hash: str) -> None:
+            await session.execute(
+                text(
+                    """
+                    INSERT INTO plan_generation_runs (
+                      id, agent_request_id, parameter_build_run_id,
+                      agent_version_id, plan_schema_version,
+                      plan_snapshot, plan_hash, planning_settings_snapshot
+                    ) VALUES (
+                      CAST(:id AS uuid), CAST(:agent_request_id AS uuid),
+                      CAST(:parameter_build_run_id AS uuid),
+                      CAST(:agent_version_id AS uuid), :plan_schema_version,
+                      CAST(:plan_snapshot AS jsonb), :plan_hash, '{}'::jsonb
+                    )
+                    """
+                ),
+                {**base_params, "id": str(uuid.uuid4()), "plan_hash": plan_hash},
+            )
+
+        with pytest.raises(IntegrityError):
+            await _insert("x" * 64)
+            await session.flush()
+        await session.rollback()
+
+        with pytest.raises(IntegrityError):
+            await _insert("A" * 64)
+            await session.flush()
+        await session.rollback()
+
+        await _insert("0" * 64)
+        await session.commit()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_pg_corrupted_planning_settings_array_failed(
+    integration_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with integration_session_factory() as session:
+        seeded = await _seed_planning(session)
+
+    async with integration_session_factory() as session:
+        await session.execute(
+            text(
+                """
+                UPDATE agent_versions
+                SET planning_settings = '[]'::jsonb
+                WHERE id = CAST(:id AS uuid)
+                """
+            ),
+            {"id": str(seeded["agent_version_id"])},
+        )
+        await session.commit()
+
+    async with integration_session_factory() as session:
+        with pytest.raises(AppError):
+            await PlanGeneratorService(session).generate(
+                agent_request_id=seeded["request_id"]
+            )
+
+    async with integration_session_factory() as session:
+        row = await AgentRequestRepository(session).get(seeded["request_id"])
+        assert row is not None
+        assert row.status == AgentRequestStatus.FAILED.value
+        assert row.completed_at is not None
+        run_count = (
+            await session.execute(
+                text(
+                    "SELECT count(*) FROM plan_generation_runs "
+                    "WHERE agent_request_id = :id"
+                ),
+                {"id": seeded["request_id"]},
+            )
+        ).scalar_one()
+        assert int(run_count) == 0
+        ref_count = (
+            await session.execute(
+                text(
+                    """
+                    SELECT count(*)
+                    FROM plan_generation_tool_refs r
+                    JOIN plan_generation_runs g
+                      ON g.id = r.plan_generation_run_id
+                    WHERE g.agent_request_id = :id
+                    """
+                ),
+                {"id": seeded["request_id"]},
+            )
+        ).scalar_one()
+        assert int(ref_count) == 0

@@ -70,8 +70,8 @@ def upgrade() -> None:
             name="ck_plan_generation_runs_plan_schema_version",
         ),
         sa.CheckConstraint(
-            "char_length(plan_hash) = 64",
-            name="ck_plan_generation_runs_plan_hash_length",
+            "plan_hash ~ '^[0-9a-f]{64}$'",
+            name="ck_plan_generation_runs_plan_hash_sha256",
         ),
         # PostgreSQL-only JSONB checks (SQLite unit create_all omits these).
         sa.CheckConstraint(

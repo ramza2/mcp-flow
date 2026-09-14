@@ -192,15 +192,18 @@ class PlanGeneratorService:
                     f"{agent_version.plan_schema_version!r} 입니다."
                 ),
             )
-        planning_settings = agent_version.planning_settings or {}
-        if planning_settings != {}:
+        # Fail closed: only exact JSON object {} is allowed. Do not coerce
+        # null / [] / "" / false / 0 into {}.
+        planning_settings = agent_version.planning_settings
+        if not isinstance(planning_settings, dict) or planning_settings != {}:
             await self._fail_and_raise(
                 request.id,
                 message=(
                     "planning_settings semantics가 정의되기 전까지 "
-                    "non-empty planning_settings는 fail closed합니다."
+                    "exact empty object {}만 허용합니다."
                 ),
             )
+        planning_settings_snapshot: dict[str, Any] = {}
 
         grants = await self._grants.list_for_version(request.agent_version_id)
         grant = next(
@@ -288,7 +291,7 @@ class PlanGeneratorService:
                 plan_schema_version=EXECUTION_PLAN_SCHEMA_VERSION,
                 plan_snapshot=plan_snapshot,
                 plan_hash=plan_hash,
-                planning_settings_snapshot={},
+                planning_settings_snapshot=planning_settings_snapshot,
             )
             await self._plans.add_tool_refs(
                 plan_generation_run_id=run.id,
