@@ -72,7 +72,7 @@ async def test_tool_selection_clarification_schema_constraints(
             )
         ).scalars().all()
         assert any("decision" in name for name in checks)
-        assert "ck_tool_selection_runs_selected_tool_consistency" in checks
+        assert any("selected_tool" in name for name in checks)
         candidate_checks = (
             await session.execute(
                 text(
@@ -85,7 +85,34 @@ async def test_tool_selection_clarification_schema_constraints(
                 )
             )
         ).scalars().all()
-        assert "ck_tool_selection_candidates_risk_class" in candidate_checks
+        assert any("risk_class" in name for name in candidate_checks)
+        # Constraint SQL must encode the durable selection/risk invariants.
+        run_defs = (
+            await session.execute(
+                text(
+                    """
+                    SELECT pg_get_constraintdef(oid) FROM pg_constraint
+                    WHERE conrelid = 'tool_selection_runs'::regclass
+                      AND contype = 'c'
+                    """
+                )
+            )
+        ).scalars().all()
+        assert any(
+            "NO_MATCH" in d and "selected_tool_version_id" in d for d in run_defs
+        )
+        cand_defs = (
+            await session.execute(
+                text(
+                    """
+                    SELECT pg_get_constraintdef(oid) FROM pg_constraint
+                    WHERE conrelid = 'tool_selection_candidates'::regclass
+                      AND contype = 'c'
+                    """
+                )
+            )
+        ).scalars().all()
+        assert any("READ_ONLY" in d and "IDEMPOTENT_WRITE" in d for d in cand_defs)
         uniques = (
             await session.execute(
                 text(
@@ -365,21 +392,22 @@ async def test_pg_candidate_risk_class_check(
         )
         assert run is not None
 
+        candidates = await ToolSelectionRepository(session).list_candidates_for_run(
+            run.id
+        )
+        assert len(candidates) >= 1
+        candidate_id = candidates[0].id
+
         with pytest.raises(IntegrityError):
             await session.execute(
                 text(
                     """
-                    INSERT INTO tool_selection_candidates (
-                        id, tool_selection_run_id, tool_version_id,
-                        input_rank, retrieval_score, llm_fit_score,
-                        reason_summary, risk_class
-                    ) VALUES (
-                        :id, :run_id, :tool_version_id,
-                        99, 0.5, 0.5, 'bad risk', 'WRITE'
-                    )
+                    UPDATE tool_selection_candidates
+                    SET risk_class = 'WRITE'
+                    WHERE id = :id
                     """
                 ),
-                {"id": uuid.uuid4(), "run_id": run.id, "tool_version_id": ver},
+                {"id": candidate_id},
             )
             await session.flush()
         await session.rollback()
@@ -387,16 +415,11 @@ async def test_pg_candidate_risk_class_check(
         await session.execute(
             text(
                 """
-                INSERT INTO tool_selection_candidates (
-                    id, tool_selection_run_id, tool_version_id,
-                    input_rank, retrieval_score, llm_fit_score,
-                    reason_summary, risk_class
-                ) VALUES (
-                    :id, :run_id, :tool_version_id,
-                    99, 0.5, 0.5, 'ok risk', 'READ_ONLY'
-                )
+                UPDATE tool_selection_candidates
+                SET risk_class = 'READ_ONLY'
+                WHERE id = :id
                 """
             ),
-            {"id": uuid.uuid4(), "run_id": run.id, "tool_version_id": ver},
+            {"id": candidate_id},
         )
         await session.commit()
