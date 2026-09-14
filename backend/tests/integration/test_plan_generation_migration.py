@@ -121,7 +121,7 @@ async def test_plan_generation_schema_constraints(
         run_defs = " ".join(run_checks).lower()
         assert "plan_schema_version" in run_defs
         assert "'1.0'" in run_defs
-        assert "char_length(plan_hash) = 64" in run_defs
+        assert "char_length((plan_hash)::text) = 64" in run_defs
         assert "jsonb_typeof(plan_snapshot)" in run_defs
         assert "jsonb_typeof(planning_settings_snapshot)" in run_defs
 
@@ -138,7 +138,7 @@ async def test_plan_generation_schema_constraints(
             )
         ).scalars().all()
         ref_defs = " ".join(ref_checks).lower()
-        assert "btrim(step_key)" in ref_defs
+        assert "btrim((step_key)::text)" in ref_defs
 
         run_indexes = (
             await session.execute(
