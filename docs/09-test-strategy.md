@@ -288,6 +288,17 @@ Dataset은 평가 전 FROZEN하고 실행 중 정답을 변경하지 않는다.
 
 ---
 
+추가 (Execution Plan / Plan Generator foundation):
+
+- Execution Plan v1 schema contract (`schema_version`/`source`/`limits`/`on_error`/`completion`)
+- Plan hash determinism (canonical JSON + SHA-256)
+- Plan Generator durable handoff (`PLANNING`→`VALIDATING`)
+- ToolVersion projection FK (`plan_generation_tool_refs`)
+- secret-reference non-resolution (`SECRET_REF` only)
+- cancel/double-generator rollback
+- restart recovery (`plan_snapshot` re-validate + hash match)
+
+
 ## 9. Repository Integration Test
 
 실제 PostgreSQL에서:

@@ -23,6 +23,7 @@ from app.models.mcp import (
 )
 from app.models.model_profile import EmbeddingProfile, LLMProfile
 from app.models.parameter_build import ParameterBuildRun
+from app.models.plan_generation import PlanGenerationRun, PlanGenerationToolRef
 from app.models.session import Session
 from app.models.tool_selection import (
     ClarificationRequest,
@@ -50,6 +51,8 @@ __all__ = [
     "MCPToolVersion",
     "ParameterBuildRun",
     "Permission",
+    "PlanGenerationRun",
+    "PlanGenerationToolRef",
     "ResourceGrant",
     "Role",
     "RolePermission",
