@@ -21,6 +21,7 @@ from app.domain.enums import (
     ToolVersionValidationStatus,
 )
 from app.model_provider.openai_compatible import OPENAI_COMPATIBLE_PROVIDER
+from app.models.agent import AgentVersion
 from app.repositories.agent import AgentRepository
 from app.repositories.agent_request import AgentRequestRepository
 from app.repositories.agent_tool_grant import AgentToolGrantRepository
@@ -36,7 +37,6 @@ from app.repositories.plan_generation import (
 )
 from app.repositories.tool_selection import ToolSelectionRepository
 from app.repositories.user import UserRepository
-from app.models.agent import AgentVersion
 from app.schemas.execution_plan import (
     DETERMINISTIC_TOOL_STEP_ID,
     DETERMINISTIC_TOOL_STEP_NAME,

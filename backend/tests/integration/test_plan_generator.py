@@ -22,7 +22,6 @@ from app.domain.enums import (
     ToolVersionValidationStatus,
 )
 from app.model_provider.openai_compatible import OPENAI_COMPATIBLE_PROVIDER
-from app.models.agent import AgentVersion
 from app.models.mcp import MCPToolVersion
 from app.models.parameter_build import ParameterBuildRun
 from app.repositories.agent import AgentRepository
