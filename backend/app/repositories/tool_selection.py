@@ -77,6 +77,10 @@ class ToolSelectionRepository:
         await self._session.flush()
         return rows
 
+    async def get(self, run_id: uuid.UUID) -> ToolSelectionRun | None:
+        stmt = select(ToolSelectionRun).where(ToolSelectionRun.id == run_id)
+        return (await self._session.execute(stmt)).scalar_one_or_none()
+
     async def get_latest_for_agent_request(
         self, agent_request_id: uuid.UUID
     ) -> ToolSelectionRun | None:

@@ -763,6 +763,85 @@ Secret material / credential 원문은 어떤 snapshot에도 저장하지 않는
 `SECRET_REFERENCE` entity는 UUID secret reference만 `SECRET_REF` binding으로 보존한다.
 
 
+### 10.7 Plan Generation 근거
+
+```text
+plan_generation_runs
+plan_generation_tool_refs
+```
+
+Plan Generator는 AgentRequest가 `PLANNING`일 때 latest durable `ParameterBuildRun`과
+immutable selected ToolVersion을 복구한 뒤, deterministic Execution Plan v1 draft를 저장한다.
+Plan Validator는 프로세스 메모리 Outcome이 아니라 이 테이블의 latest run을 복구한다.
+
+#### `plan_generation_runs` (최소 field contract)
+
+```text
+id
+
+agent_request_id
+parameter_build_run_id
+agent_version_id
+
+plan_schema_version
+plan_snapshot jsonb
+plan_hash char(64)
+
+planning_settings_snapshot jsonb
+
+created_at
+```
+
+의미:
+
+```text
+agent_request_id
+→ 어떤 AgentRequest의 Plan Generation인지
+
+parameter_build_run_id
+→ 어떤 Parameter Build 결과를 사용했는지 (provenance evidence 추적)
+
+agent_version_id
+→ Plan source에 사용된 immutable AgentVersion
+
+plan_schema_version
+→ 현재 foundation은 "1.0"
+
+plan_snapshot
+→ ExecutionPlanV1.model_dump(mode="json") 결과
+
+plan_hash
+→ plan_snapshot만의 deterministic SHA-256 (64 hex)
+
+planning_settings_snapshot
+→ 현재 foundation은 {}
+```
+
+같은 AgentRequest에 대해 향후 repair/replanning이 가능하므로
+`UNIQUE(agent_request_id)`를 두지 않는다. 조회는 `created_at DESC, id DESC`.
+
+#### `plan_generation_tool_refs` (최소 field contract)
+
+Plan JSON 안 ToolVersion FK는 DB가 직접 보장하지 못하므로 Workflow의
+`workflow_version_tool_refs`와 같이 TOOL Step projection을 저장한다.
+
+```text
+plan_generation_run_id
+step_key
+mcp_tool_version_id
+created_at
+```
+
+PK:
+
+```text
+(plan_generation_run_id, step_key)
+```
+
+AgentRequest foundation은 `step_key = tool_1` 하나만 저장한다.
+
+
+
 ---
 
 ## 11. Workflow 모델

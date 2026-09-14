@@ -77,7 +77,7 @@ flowchart TD
 | Tool Retriever | 권한 적용 후보검색 | 최종 Tool 결정 |
 | Tool Selector | 후보평가·선택 | 미등록 Tool 생성 |
 | Parameter Builder | 입력값·출처·binding 구성 | secret 원문 생성 |
-| Plan Generator | Plan draft 생성 | 상태 변경, Tool 호출 |
+| Plan Generator | Plan draft 생성 및 AgentRequest foundation에서 durable handoff(`PLANNING`→`VALIDATING`) | Tool 호출, Plan 최종 검증, Execution 생성 |
 | Plan Validator | schema·DAG·binding·권한·정책 검증 | 위반을 추측으로 보정 |
 | Execution Engine | immutable Plan 실행, 상태전이 | 자연어 재해석 |
 | MCP Adapter | protocol 호출 정규화 | 사용자 권한 판단 |
@@ -442,6 +442,41 @@ LOOP
 ```
 
 `USER_INPUT`은 Plan v1의 authoring Step Type이 아니다. MCP Current의 MRTR로 실행 중 입력이 필요해지면 해당 Tool Step이 `WAITING_INPUT`으로 전환된다.
+
+### 9.1.1 AgentRequest Plan Generator foundation
+
+AgentRequest path의 Plan Generator foundation은 다음만 수행한다.
+
+```text
+selected immutable ToolVersion
++
+complete ParameterBuildRun bindings
+→ deterministic single TOOL step Plan
+→ durable plan_generation_runs / plan_generation_tool_refs
+→ PLANNING → VALIDATING
+```
+
+규칙:
+
+- LLM으로 추가 Tool/Step을 발명하지 않는다.
+- CONDITION / JOIN / APPROVAL / LOOP Step을 생성하지 않는다.
+- Canonical Step Type 집합(`TOOL`/`CONDITION`/`JOIN`/`APPROVAL`/`LOOP`)은 유지한다.
+- AgentRequest path의 `inputs`는 `{}`이다 (`PLAN_INPUT`을 새로 만들지 않는다).
+- TOOL Step `config`는 정확히 `tool_version_id` + `bindings`만 포함한다.
+- `bindings`는 executable `BindingValue`(`LITERAL` / `SECRET_REF`)만 포함하며
+  Parameter provenance는 `PlanGenerationRun → ParameterBuildRun.bindings_snapshot`으로 추적한다.
+- step id는 deterministic `tool_1`, name은 `Tool Step 1`이다.
+- Plan Validator / Execution / MCP Tool call / SecretResolver는 호출하지 않는다.
+
+### 9.1.2 TOOL Step timeout draft fallback
+
+Plan Generator는 `MCPToolPolicy.timeout_ms`가 있으면 draft `timeout_seconds`에 반영한다
+(`ceil(timeout_ms / 1000)`, 최소 1초).
+
+ToolPolicy가 없을 경우 initial draft fallback `30`초를 사용하나,
+이는 정책 검증 성공을 의미하지 않는다.
+
+Plan Validator가 ToolPolicy 존재와 timeout 정합성을 최종 판정한다.
 
 ### 9.2 오류정책
 
