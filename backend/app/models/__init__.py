@@ -23,12 +23,18 @@ from app.models.mcp import (
 )
 from app.models.model_profile import EmbeddingProfile, LLMProfile
 from app.models.session import Session
+from app.models.tool_selection import (
+    ClarificationRequest,
+    ToolSelectionCandidate,
+    ToolSelectionRun,
+)
 
 __all__ = [
     "Agent",
     "AgentRequest",
     "AgentToolGrant",
     "AgentVersion",
+    "ClarificationRequest",
     "Conversation",
     "ConversationMessage",
     "ApprovalPolicy",
@@ -47,6 +53,8 @@ __all__ = [
     "RolePermission",
     "Session",
     "ToolEmbedding",
+    "ToolSelectionCandidate",
+    "ToolSelectionRun",
     "User",
     "UserRole",
 ]

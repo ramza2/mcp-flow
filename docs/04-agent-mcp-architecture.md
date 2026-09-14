@@ -307,10 +307,15 @@ C = 0.25 * retrieval
 
 | 조건 | 처리 |
 |---|---|
-| `C >= 0.82`, margin `>= 0.10`, 필수입력 충족, 정책 허용 | 자동선택 가능 |
-| `0.60 <= C < 0.82` 또는 margin 부족 | 사용자 확인 |
-| `C < 0.60`, 후보 없음, 중요 입력 부족 | clarification 또는 미지원 |
-| 승인 필요/고위험 Tool | 점수와 무관하게 정책 Gate 적용 |
+| `C >= auto_select_threshold`, margin `>= 0.10`, 필수입력 충족, ToolPolicy 존재, `allow_auto_select=true`, confirmation 미요구, ambiguities 비어 있음 | 자동선택 가능 (`AUTO_SELECT`) |
+| `C >= confirmation_threshold` 이면서 자동선택 조건을 충족하지 못함 (margin 부족, ambiguities, policy/confirmation gate 등) | 사용자 확인 (`CONFIRM`) |
+| 필수입력 미충족 (`required_input_coverage < 1.0`) | clarification (`CLARIFY` / `WAITING_INPUT`) |
+| `C < confirmation_threshold` 이면서 필수입력은 충족 | 미지원 (`NO_MATCH` / `REJECTED`) — 구체 missing parameter가 없으면 WAITING_INPUT로 두지 않는다 |
+| 후보 없음 | 미지원 (`NO_MATCH` / `REJECTED`) |
+| `requires_approval` | Selection 단계 confirmation을 강제하지 않는다 (Execution Approval 영역) |
+| RiskClass만으로 confirmation mapping | 만들지 않는다 |
+
+기본 threshold 예시는 `auto_select_threshold=0.82`, `confirmation_threshold=0.60`, `auto_select_margin=0.10`이다. AgentVersion `selection_settings`가 있으면 그 값을 사용한다.
 
 수치는 `09-test-strategy.md`의 Evaluation Dataset으로 calibration한다.
 

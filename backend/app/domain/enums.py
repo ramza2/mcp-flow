@@ -375,6 +375,23 @@ class ToolEmbeddingStatus(StrEnum):
     FAILED = "FAILED"
 
 
+class ClarificationRequestType(StrEnum):
+    """docs/05 §10.4 clarification_requests.request_type."""
+
+    MISSING_PARAMETER = "MISSING_PARAMETER"
+    TOOL_CONFIRMATION = "TOOL_CONFIRMATION"
+    PLAN_CONFIRMATION = "PLAN_CONFIRMATION"
+
+
+class ClarificationRequestStatus(StrEnum):
+    """docs/05 §10.4 clarification_requests.status."""
+
+    OPEN = "OPEN"
+    ANSWERED = "ANSWERED"
+    EXPIRED = "EXPIRED"
+    CANCELLED = "CANCELLED"
+
+
 class ResourceGrantResourceType(StrEnum):
     """docs/05 resource_grants.resource_type — exact resource match only."""
 

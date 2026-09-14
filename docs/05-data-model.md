@@ -615,6 +615,78 @@ tool_selection_candidates
 
 Run에는 registry snapshot, model/profile, threshold, decision, selected ToolVersion, confidence, margin을 저장한다. 권한 filter에서 제외된 Tool identity는 사용자 요청별로 저장하지 않고 사유별 count만 기록한다.
 
+#### `tool_selection_runs` (최소 field contract)
+
+```text
+id
+agent_request_id
+agent_version_id
+
+embedding_profile_id
+llm_profile_id
+
+registry_snapshot jsonb
+model_snapshot jsonb
+threshold_snapshot jsonb
+
+decision
+selected_tool_version_id nullable
+
+confidence nullable
+candidate_margin nullable
+required_input_coverage nullable
+
+reason_summary nullable
+ambiguities jsonb
+
+created_at
+```
+
+`decision`은 Tool Selection 내부 결과이며 AgentRequest status가 아니다.
+
+```text
+AUTO_SELECT
+CONFIRM
+CLARIFY
+NO_MATCH
+```
+
+`registry_snapshot`에는 authorized candidate ToolVersion ID와 embedding profile 식별자만 저장한다. Hard Filter로 제외된 Tool/ToolVersion identity(name/description 포함)는 요청별로 저장하지 않는다.
+
+`model_snapshot`에는 LLM profile의 provider/model/parameters 등 재현용 메타만 저장한다. credential 원문·Authorization header·secret material은 저장하지 않는다.
+
+`threshold_snapshot`에는 실제 적용된 선택 임계값을 저장한다.
+
+```text
+auto_select_threshold
+confirmation_threshold
+max_candidates
+auto_select_margin
+```
+
+#### `tool_selection_candidates` (최소 field contract)
+
+```text
+tool_selection_run_id
+tool_version_id
+
+input_rank
+retrieval_score
+llm_fit_score nullable
+reason_summary nullable
+risk_class
+
+created_at
+```
+
+Unique:
+
+```text
+(tool_selection_run_id, tool_version_id)
+```
+
+LLM prompt에 전달된 authorized candidate만 저장한다. LLM이 생략한 후보는 `llm_fit_score`/`reason_summary`를 null로 둘 수 있다.
+
 ---
 
 ## 11. Workflow 모델
