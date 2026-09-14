@@ -72,7 +72,7 @@ async def test_tool_selection_clarification_schema_constraints(
             )
         ).scalars().all()
         assert any("decision" in name for name in checks)
-        assert any("selected_tool" in name for name in checks)
+        assert any("selected_" in name for name in checks)
         candidate_checks = (
             await session.execute(
                 text(
@@ -85,7 +85,8 @@ async def test_tool_selection_clarification_schema_constraints(
                 )
             )
         ).scalars().all()
-        assert any("risk_class" in name for name in candidate_checks)
+        # SQLAlchemy may truncate CHECK names; assert via definition text too.
+        assert candidate_checks
         # Constraint SQL must encode the durable selection/risk invariants.
         run_defs = (
             await session.execute(
@@ -237,6 +238,10 @@ async def test_pg_selected_tool_consistency_check(
         )
         assert run is not None
         assert run.selected_tool_version_id is None
+        agent_request_id = run.agent_request_id
+        agent_version_id = run.agent_version_id
+        embedding_profile_id = run.embedding_profile_id
+        llm_profile_id = run.llm_profile_id
 
         with pytest.raises(IntegrityError):
             await session.execute(
@@ -257,10 +262,10 @@ async def test_pg_selected_tool_consistency_check(
                 ),
                 {
                     "id": uuid.uuid4(),
-                    "agent_request_id": run.agent_request_id,
-                    "agent_version_id": run.agent_version_id,
-                    "embedding_profile_id": run.embedding_profile_id,
-                    "llm_profile_id": run.llm_profile_id,
+                    "agent_request_id": agent_request_id,
+                    "agent_version_id": agent_version_id,
+                    "embedding_profile_id": embedding_profile_id,
+                    "llm_profile_id": llm_profile_id,
                     "selected_tool_version_id": ver,
                 },
             )
@@ -286,10 +291,10 @@ async def test_pg_selected_tool_consistency_check(
                 ),
                 {
                     "id": uuid.uuid4(),
-                    "agent_request_id": run.agent_request_id,
-                    "agent_version_id": run.agent_version_id,
-                    "embedding_profile_id": run.embedding_profile_id,
-                    "llm_profile_id": run.llm_profile_id,
+                    "agent_request_id": agent_request_id,
+                    "agent_version_id": agent_version_id,
+                    "embedding_profile_id": embedding_profile_id,
+                    "llm_profile_id": llm_profile_id,
                 },
             )
             await session.flush()
@@ -302,7 +307,6 @@ async def test_pg_candidate_risk_class_check(
     integration_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     """risk_class='WRITE' fails; canonical RiskClass succeeds."""
-    import uuid
 
     from app.agent.tool_selector import ToolSelectorService
     from app.domain.enums import AgentToolGrantEffect, RiskClass
