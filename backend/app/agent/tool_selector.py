@@ -10,7 +10,7 @@ import json
 import logging
 import uuid
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from fastapi import status
@@ -27,13 +27,15 @@ from app.agent.selection_confidence import (
     sort_reranked_candidates,
 )
 from app.core.errors import AppError
-from app.domain.enums import AgentRequestStatus
+from app.domain.enums import AgentRequestStatus, ClarificationRequestType
 from app.model_provider.client import LLMConnectionTarget, ModelProviderClient
 from app.model_provider.errors import ModelProviderError
 from app.models.conversation import AgentRequest
 from app.repositories.agent_request import AgentRequestRepository
 from app.repositories.agent_version import AgentVersionRepository
+from app.repositories.clarification_request import ClarificationRequestRepository
 from app.repositories.llm_profile import LLMProfileRepository
+from app.repositories.tool_selection import ToolSelectionRepository
 from app.schemas.agent import SelectionSettings
 from app.schemas.structured_request import (
     STRUCTURED_REQUEST_SCHEMA_VERSION,
@@ -55,6 +57,8 @@ from app.search.tool_retrieval import (
 from app.services.agent_request import AgentRequestService
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_CLARIFICATION_TTL = timedelta(hours=24)
 
 _SECURITY_SYSTEM_CONTRACT = """\
 You are the MCPFlow Tool Selector / LLM Reranker.
@@ -97,6 +101,8 @@ class ToolSelectorService:
         self._versions = AgentVersionRepository(session)
         self._llm_profiles = LLMProfileRepository(session)
         self._agent_requests = AgentRequestService(session)
+        self._selections = ToolSelectionRepository(session)
+        self._clarifications = ClarificationRequestRepository(session)
         self._provider = model_provider
         self._owns_provider = model_provider is None
         self._tool_retrieval = tool_retrieval
@@ -104,6 +110,9 @@ class ToolSelectorService:
     async def select(self, *, agent_request_id: uuid.UUID) -> ToolSelectionOutcome:
         provider = self._provider or ModelProviderClient()
         owns_provider = self._owns_provider
+        phase: dict[str, AgentRequestStatus] = {
+            "status": AgentRequestStatus.RETRIEVING
+        }
         try:
             retrieval = self._tool_retrieval or ToolRetrievalService(
                 self._session, model_provider=provider
@@ -112,7 +121,15 @@ class ToolSelectorService:
                 agent_request_id=agent_request_id,
                 provider=provider,
                 retrieval=retrieval,
+                phase=phase,
             )
+        except (AppError, ModelProviderError):
+            raise
+        except Exception:
+            # Do not leave AgentRequest stuck in RETRIEVING/SELECTING.
+            # asyncio.CancelledError is BaseException on Py3.12+ and is not caught.
+            await self._fail_from(agent_request_id, expected=phase["status"])
+            raise
         finally:
             if owns_provider:
                 await provider.aclose()
@@ -123,6 +140,7 @@ class ToolSelectorService:
         agent_request_id: uuid.UUID,
         provider: ModelProviderClient,
         retrieval: ToolRetrievalService,
+        phase: dict[str, AgentRequestStatus],
     ) -> ToolSelectionOutcome:
         request = await self._requests.get(agent_request_id)
         if request is None:
@@ -201,6 +219,18 @@ class ToolSelectorService:
         )
         profile_parameters = dict(profile.parameters) if profile.parameters else None
         profile_id = profile.id
+        model_snapshot = {
+            "llm_profile_id": str(profile.id),
+            "provider": profile.provider,
+            "model": profile.model,
+            "parameters": dict(profile.parameters) if profile.parameters else {},
+        }
+        threshold_snapshot = {
+            "auto_select_threshold": selection_settings.auto_select_threshold,
+            "confirmation_threshold": selection_settings.confirmation_threshold,
+            "max_candidates": selection_settings.max_candidates,
+            "auto_select_margin": DEFAULT_AUTO_SELECT_MARGIN,
+        }
         await self._session.commit()
 
         logger.info(
@@ -248,21 +278,29 @@ class ToolSelectorService:
         )
 
         if not candidates:
-            await self._cas(
-                agent_request_id,
-                expected=[AgentRequestStatus.RETRIEVING],
+            return await self._commit_decision(
+                agent_request_id=agent_request_id,
+                expected=AgentRequestStatus.RETRIEVING,
                 new_status=AgentRequestStatus.REJECTED,
-                set_completed_at=True,
-                completed_at=datetime.now(UTC),
-            )
-            await self._session.commit()
-            return ToolSelectionOutcome(
                 decision="NO_MATCH",
+                agent_version_id=agent_version_id,
+                embedding_profile_id=retrieval_result.embedding_profile_id,
+                llm_profile_id=profile_id,
+                model_snapshot=model_snapshot,
+                threshold_snapshot=threshold_snapshot,
+                prompt_candidates=[],
+                llm_scores={},
+                selected_tool_version_id=None,
+                confidence=None,
+                candidate_margin=None,
+                required_input_coverage=None,
+                reason_summary=None,
+                ambiguities=[],
+                missing_fields=tuple(existing_missing),
                 selected_candidate=None,
                 selection_result=None,
-                confidence=None,
-                missing_fields=tuple(existing_missing),
-                agent_request_status=AgentRequestStatus.REJECTED.value,
+                confidence_breakdown=None,
+                clarification=None,
             )
 
         # Acquisition for evaluation phase — after retrieval completes.
@@ -280,6 +318,7 @@ class ToolSelectorService:
                 )
             raise
         await self._session.commit()
+        phase["status"] = AgentRequestStatus.SELECTING
 
         llm_limit = min(
             LLM_RERANK_INPUT_MAX,
@@ -352,54 +391,82 @@ class ToolSelectorService:
             existing_missing=existing_missing,
         )
 
-        extra_values: dict[str, Any] | None = None
-        set_completed_at = False
+        llm_scores = {
+            item.tool_version_id: (float(item.llm_fit_score), item.reason_summary)
+            for item in rerank.candidates
+        }
+        clarification: str | None
         if outcome.decision == "AUTO_SELECT":
             new_status = AgentRequestStatus.BUILDING_PARAMETERS
+            clarification = None
         elif outcome.decision == "CONFIRM":
             new_status = AgentRequestStatus.WAITING_CONFIRMATION
+            clarification = "TOOL_CONFIRMATION"
         elif outcome.decision == "CLARIFY":
-            new_status = AgentRequestStatus.WAITING_INPUT
-            extra_values = {"missing_fields": list(outcome.missing_fields)}
-        else:
-            new_status = AgentRequestStatus.FAILED
-            set_completed_at = True
-
-        try:
-            await self._cas(
-                agent_request_id,
-                expected=[AgentRequestStatus.SELECTING],
-                new_status=new_status,
-                set_completed_at=set_completed_at,
-                completed_at=datetime.now(UTC) if set_completed_at else None,
-                extra_values=extra_values,
-            )
-        except AppError as exc:
-            if exc.code == "RESOURCE_CONFLICT":
-                logger.info(
-                    "tool_selector final_cas_miss agent_request_id=%s "
-                    "intended_status=%s",
-                    agent_request_id,
-                    new_status.value,
+            if not outcome.missing_fields:
+                outcome = ToolSelectionOutcome(
+                    decision="NO_MATCH",
+                    selected_candidate=outcome.selected_candidate,
+                    selection_result=outcome.selection_result,
+                    confidence=outcome.confidence,
+                    missing_fields=(),
+                    agent_request_status="",
                 )
-            raise
+                new_status = AgentRequestStatus.REJECTED
+                clarification = None
+            else:
+                new_status = AgentRequestStatus.WAITING_INPUT
+                clarification = "MISSING_PARAMETER"
+        else:
+            new_status = AgentRequestStatus.REJECTED
+            clarification = None
 
-        await self._session.commit()
-        logger.info(
-            "tool_selector complete agent_request_id=%s decision=%s status=%s "
-            "confidence=%s",
-            agent_request_id,
-            outcome.decision,
-            new_status.value,
-            None if outcome.confidence is None else round(outcome.confidence.total, 4),
+        selected_id = (
+            None
+            if outcome.selected_candidate is None
+            else outcome.selected_candidate.descriptor.tool_version_id
         )
-        return ToolSelectionOutcome(
+        return await self._commit_decision(
+            agent_request_id=agent_request_id,
+            expected=AgentRequestStatus.SELECTING,
+            new_status=new_status,
             decision=outcome.decision,
+            agent_version_id=agent_version_id,
+            embedding_profile_id=retrieval_result.embedding_profile_id,
+            llm_profile_id=profile_id,
+            model_snapshot=model_snapshot,
+            threshold_snapshot=threshold_snapshot,
+            prompt_candidates=prompt_candidates,
+            llm_scores=llm_scores,
+            selected_tool_version_id=selected_id,
+            confidence=(
+                None if outcome.confidence is None else float(outcome.confidence.total)
+            ),
+            candidate_margin=(
+                None
+                if outcome.confidence is None
+                else float(outcome.confidence.candidate_margin)
+            ),
+            required_input_coverage=(
+                None
+                if outcome.confidence is None
+                else float(outcome.confidence.required_input_coverage)
+            ),
+            reason_summary=(
+                None
+                if outcome.selection_result is None
+                else outcome.selection_result.reason_summary
+            ),
+            ambiguities=(
+                []
+                if outcome.selection_result is None
+                else list(outcome.selection_result.ambiguities)
+            ),
+            missing_fields=outcome.missing_fields,
             selected_candidate=outcome.selected_candidate,
             selection_result=outcome.selection_result,
-            confidence=outcome.confidence,
-            missing_fields=outcome.missing_fields,
-            agent_request_status=new_status.value,
+            confidence_breakdown=outcome.confidence,
+            clarification=clarification,
         )
 
     def _load_structured_request(self, request: AgentRequest) -> StructuredRequestV1:
@@ -575,17 +642,19 @@ class ToolSelectorService:
         reason_summary = reason_by_id[top1_id]
         alternative_ids = [item_id for item_id, _score in ordered[1:]]
 
+        newly_missing = missing_required_inputs(
+            required_inputs=selected.descriptor.required_inputs,
+            structured=structured,
+        )
+        ambiguities = list(rerank.ambiguities)
         decision = self._system_decision(
             confidence_total=confidence.total,
             margin=margin,
             coverage=coverage,
             selection_settings=selection_settings,
             selected=selected,
-        )
-
-        newly_missing = missing_required_inputs(
-            required_inputs=selected.descriptor.required_inputs,
-            structured=structured,
+            ambiguities=ambiguities,
+            newly_missing=newly_missing,
         )
         missing_fields = (
             merge_missing_fields(existing_missing, newly_missing)
@@ -599,7 +668,7 @@ class ToolSelectorService:
             reason_summary=reason_summary,
             required_input_coverage=coverage,
             alternative_tool_ids=alternative_ids,
-            ambiguities=list(rerank.ambiguities),
+            ambiguities=ambiguities,
             proposed_action=decision,
         )
         return ToolSelectionOutcome(
@@ -619,29 +688,44 @@ class ToolSelectorService:
         coverage: float,
         selection_settings: SelectionSettings,
         selected: RetrievedToolCandidate,
+        ambiguities: list[str],
+        newly_missing: list[str],
     ) -> SelectionDecision:
         auto_threshold = selection_settings.auto_select_threshold
         confirm_threshold = selection_settings.confirmation_threshold
 
+        # Missing ToolPolicy or non-true allow_auto_select => fail-closed for AUTO_SELECT.
+        policy_allows_auto = (
+            selected.policy_present is True and selected.allow_auto_select is True
+        )
         confirmation_gated = (
-            selected.allow_auto_select is False
-            or selected.agent_requires_confirmation is True
+            selected.agent_requires_confirmation is True
             or selected.policy_requires_confirmation is True
         )
+        has_ambiguities = len(ambiguities) > 0
 
-        if coverage < 1.0 or confidence_total < confirm_threshold:
+        if coverage < 1.0 and newly_missing:
             return "CLARIFY"
+        if coverage < 1.0:
+            return "NO_MATCH"
+
+        # coverage == 1.0
+        if confidence_total < confirm_threshold:
+            # Complete inputs but low confidence => unsupported, not WAITING_INPUT.
+            return "NO_MATCH"
 
         auto_ok = (
             confidence_total >= auto_threshold
             and margin >= DEFAULT_AUTO_SELECT_MARGIN
-            and coverage == 1.0
+            and policy_allows_auto
             and not confirmation_gated
+            and not has_ambiguities
         )
         if auto_ok:
             return "AUTO_SELECT"
 
-        # Mid-band or policy-gated confirmation (requires_approval does not force CONFIRM).
+        # Mid-band / ambiguity / policy-confirmation gates.
+        # requires_approval does NOT force CONFIRM (Execution Approval domain).
         return "CONFIRM"
 
     async def _cas(
@@ -690,3 +774,206 @@ class ToolSelectorService:
                 await self._session.rollback()
                 return
             raise
+
+    async def _commit_decision(
+        self,
+        *,
+        agent_request_id: uuid.UUID,
+        expected: AgentRequestStatus,
+        new_status: AgentRequestStatus,
+        decision: SelectionDecision,
+        agent_version_id: uuid.UUID,
+        embedding_profile_id: uuid.UUID,
+        llm_profile_id: uuid.UUID,
+        model_snapshot: dict[str, Any],
+        threshold_snapshot: dict[str, Any],
+        prompt_candidates: list[RetrievedToolCandidate],
+        llm_scores: dict[uuid.UUID, tuple[float, str]],
+        selected_tool_version_id: uuid.UUID | None,
+        confidence: float | None,
+        candidate_margin: float | None,
+        required_input_coverage: float | None,
+        reason_summary: str | None,
+        ambiguities: list[str],
+        missing_fields: tuple[str, ...],
+        selected_candidate: RetrievedToolCandidate | None,
+        selection_result: ToolSelectionResult | None,
+        confidence_breakdown: ConfidenceBreakdown | None,
+        clarification: str | None,
+    ) -> ToolSelectionOutcome:
+        set_completed_at = new_status in {
+            AgentRequestStatus.REJECTED,
+            AgentRequestStatus.FAILED,
+        }
+        extra_values: dict[str, Any] | None = None
+        if new_status == AgentRequestStatus.WAITING_INPUT:
+            extra_values = {"missing_fields": list(missing_fields)}
+
+        try:
+            await self._persist_selection_evidence(
+                agent_request_id=agent_request_id,
+                agent_version_id=agent_version_id,
+                embedding_profile_id=embedding_profile_id,
+                llm_profile_id=llm_profile_id,
+                model_snapshot=model_snapshot,
+                threshold_snapshot=threshold_snapshot,
+                decision=decision,
+                selected_tool_version_id=selected_tool_version_id,
+                confidence=confidence,
+                candidate_margin=candidate_margin,
+                required_input_coverage=required_input_coverage,
+                reason_summary=reason_summary,
+                ambiguities=ambiguities,
+                prompt_candidates=prompt_candidates,
+                llm_scores=llm_scores,
+            )
+            if clarification == "MISSING_PARAMETER":
+                await self._create_missing_parameter_clarification(
+                    agent_request_id=agent_request_id,
+                    missing_fields=list(missing_fields),
+                )
+            elif clarification == "TOOL_CONFIRMATION":
+                await self._create_tool_confirmation_clarification(
+                    agent_request_id=agent_request_id,
+                )
+
+            await self._cas(
+                agent_request_id,
+                expected=[expected],
+                new_status=new_status,
+                set_completed_at=set_completed_at,
+                completed_at=datetime.now(UTC) if set_completed_at else None,
+                extra_values=extra_values,
+            )
+            await self._session.commit()
+        except AppError as exc:
+            await self._session.rollback()
+            if exc.code == "RESOURCE_CONFLICT":
+                logger.info(
+                    "tool_selector commit_cas_miss agent_request_id=%s "
+                    "expected=%s intended=%s",
+                    agent_request_id,
+                    expected.value,
+                    new_status.value,
+                )
+            raise
+        except Exception:
+            await self._session.rollback()
+            raise
+
+        logger.info(
+            "tool_selector complete agent_request_id=%s decision=%s status=%s "
+            "confidence=%s",
+            agent_request_id,
+            decision,
+            new_status.value,
+            None if confidence is None else round(confidence, 4),
+        )
+        return ToolSelectionOutcome(
+            decision=decision,
+            selected_candidate=selected_candidate,
+            selection_result=selection_result,
+            confidence=confidence_breakdown,
+            missing_fields=missing_fields,
+            agent_request_status=new_status.value,
+        )
+
+    async def _persist_selection_evidence(
+        self,
+        *,
+        agent_request_id: uuid.UUID,
+        agent_version_id: uuid.UUID,
+        embedding_profile_id: uuid.UUID,
+        llm_profile_id: uuid.UUID,
+        model_snapshot: dict[str, Any],
+        threshold_snapshot: dict[str, Any],
+        decision: SelectionDecision,
+        selected_tool_version_id: uuid.UUID | None,
+        confidence: float | None,
+        candidate_margin: float | None,
+        required_input_coverage: float | None,
+        reason_summary: str | None,
+        ambiguities: list[str],
+        prompt_candidates: list[RetrievedToolCandidate],
+        llm_scores: dict[uuid.UUID, tuple[float, str]],
+    ) -> None:
+        registry_snapshot = {
+            "embedding_profile_id": str(embedding_profile_id),
+            "authorized_candidate_tool_version_ids": [
+                str(item.descriptor.tool_version_id) for item in prompt_candidates
+            ],
+        }
+        run = await self._selections.create_run(
+            agent_request_id=agent_request_id,
+            agent_version_id=agent_version_id,
+            embedding_profile_id=embedding_profile_id,
+            llm_profile_id=llm_profile_id,
+            registry_snapshot=registry_snapshot,
+            model_snapshot=model_snapshot,
+            threshold_snapshot=threshold_snapshot,
+            decision=decision,
+            selected_tool_version_id=selected_tool_version_id,
+            confidence=confidence,
+            candidate_margin=candidate_margin,
+            required_input_coverage=required_input_coverage,
+            reason_summary=reason_summary,
+            ambiguities=list(ambiguities),
+        )
+        rows: list[dict[str, Any]] = []
+        for index, item in enumerate(prompt_candidates, start=1):
+            tool_version_id = item.descriptor.tool_version_id
+            scored = llm_scores.get(tool_version_id)
+            rows.append(
+                {
+                    "tool_version_id": tool_version_id,
+                    "input_rank": index,
+                    "retrieval_score": float(item.descriptor.retrieval_score),
+                    "llm_fit_score": None if scored is None else scored[0],
+                    "reason_summary": None if scored is None else scored[1],
+                    "risk_class": item.descriptor.risk_class,
+                }
+            )
+        if rows:
+            await self._selections.add_candidates(
+                tool_selection_run_id=run.id,
+                candidates=rows,
+            )
+
+    async def _create_missing_parameter_clarification(
+        self,
+        *,
+        agent_request_id: uuid.UUID,
+        missing_fields: list[str],
+    ) -> None:
+        question_schema = {
+            "type": "object",
+            "required": list(missing_fields),
+            "properties": {name: {} for name in missing_fields},
+            "additionalProperties": False,
+        }
+        await self._clarifications.create_open(
+            agent_request_id=agent_request_id,
+            request_type=ClarificationRequestType.MISSING_PARAMETER.value,
+            question_schema=question_schema,
+            prompt_text=f"추가 입력이 필요합니다: {', '.join(missing_fields)}",
+            expires_at=datetime.now(UTC) + DEFAULT_CLARIFICATION_TTL,
+        )
+
+    async def _create_tool_confirmation_clarification(
+        self,
+        *,
+        agent_request_id: uuid.UUID,
+    ) -> None:
+        question_schema = {
+            "type": "object",
+            "properties": {"confirmed": {"type": "boolean"}},
+            "required": ["confirmed"],
+            "additionalProperties": False,
+        }
+        await self._clarifications.create_open(
+            agent_request_id=agent_request_id,
+            request_type=ClarificationRequestType.TOOL_CONFIRMATION.value,
+            question_schema=question_schema,
+            prompt_text="선택된 도구의 사용을 확인해 주세요.",
+            expires_at=datetime.now(UTC) + DEFAULT_CLARIFICATION_TTL,
+        )

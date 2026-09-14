@@ -460,6 +460,23 @@ async def test_pg_auto_select_building_parameters(
         assert row is not None
         assert row.status == AgentRequestStatus.BUILDING_PARAMETERS.value
         assert row.completed_at is None
+        from app.repositories.tool_selection import ToolSelectionRepository
+
+        run = await ToolSelectionRepository(session).get_latest_for_agent_request(
+            request_id
+        )
+        assert run is not None
+        assert run.decision == "AUTO_SELECT"
+        assert run.selected_tool_version_id == ver_a
+        assert run.confidence is not None
+        assert "authorized_candidate_tool_version_ids" in run.registry_snapshot
+        assert "provider" in run.model_snapshot
+        assert run.threshold_snapshot["auto_select_margin"] == 0.10
+        candidates = await ToolSelectionRepository(session).list_candidates_for_run(
+            run.id
+        )
+        assert {row.tool_version_id for row in candidates} == {ver_a, ver_b}
+        assert all(row.input_rank >= 1 for row in candidates)
 
 
 @pytest.mark.integration
@@ -719,6 +736,24 @@ async def test_pg_confirmation_when_auto_select_disabled(
         row = await AgentRequestRepository(session).get(request_id)
         assert row is not None
         assert row.status == AgentRequestStatus.WAITING_CONFIRMATION.value
+        from app.domain.enums import ClarificationRequestType
+        from app.repositories.clarification_request import ClarificationRequestRepository
+        from app.repositories.tool_selection import ToolSelectionRepository
+
+        run = await ToolSelectionRepository(session).get_latest_for_agent_request(
+            request_id
+        )
+        assert run is not None
+        assert run.decision == "CONFIRM"
+        assert run.selected_tool_version_id == ver
+        clarification = await ClarificationRequestRepository(
+            session
+        ).get_open_for_agent_request(request_id)
+        assert clarification is not None
+        assert (
+            clarification.request_type
+            == ClarificationRequestType.TOOL_CONFIRMATION.value
+        )
 
 
 @pytest.mark.integration
@@ -809,6 +844,24 @@ async def test_pg_waiting_input_missing_required(
         assert row is not None
         assert row.status == AgentRequestStatus.WAITING_INPUT.value
         assert "date" in row.missing_fields
+        from app.domain.enums import ClarificationRequestType
+        from app.repositories.clarification_request import ClarificationRequestRepository
+        from app.repositories.tool_selection import ToolSelectionRepository
+
+        run = await ToolSelectionRepository(session).get_latest_for_agent_request(
+            request_id
+        )
+        assert run is not None
+        assert run.decision == "CLARIFY"
+        clarification = await ClarificationRequestRepository(
+            session
+        ).get_open_for_agent_request(request_id)
+        assert clarification is not None
+        assert (
+            clarification.request_type
+            == ClarificationRequestType.MISSING_PARAMETER.value
+        )
+        assert "date" in clarification.question_schema["required"]
 
 
 @pytest.mark.integration
@@ -923,3 +976,278 @@ async def test_pg_cancel_during_rerank(
         row = await AgentRequestRepository(session).get(request_id)
         assert row is not None
         assert row.status == AgentRequestStatus.CANCELLED.value
+        from app.repositories.clarification_request import ClarificationRequestRepository
+        from app.repositories.tool_selection import ToolSelectionRepository
+
+        assert (
+            await ToolSelectionRepository(session).get_latest_for_agent_request(
+                request_id
+            )
+            is None
+        )
+        assert (
+            await ClarificationRequestRepository(session).get_open_for_agent_request(
+                request_id
+            )
+            is None
+        )
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_pg_low_confidence_complete_inputs_rejected(
+    integration_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    query = "low confidence weather UNIQUE_LOW"
+    async with integration_session_factory() as session:
+        profile = await _create_active_profile(session)
+        _, tool, ver = await _seed_active_tool(
+            session, remote_name="low_weather", description=query
+        )
+        await MCPToolPolicyRepository(session).create(
+            mcp_tool_id=tool,
+            risk_class=RiskClass.READ_ONLY.value,
+            requires_confirmation=False,
+            requires_approval=False,
+            approval_policy_id=None,
+            timeout_ms=5000,
+            max_attempts=1,
+            backoff_policy=None,
+            max_result_bytes=1024,
+            allow_auto_select=True,
+            data_classification=None,
+            policy_metadata=None,
+        )
+        version_id, agent_id = await _seed_agent_version(
+            session,
+            grants=[
+                {
+                    "mcp_tool_id": tool,
+                    "effect": AgentToolGrantEffect.ALLOW.value,
+                }
+            ],
+        )
+        user_id = await _seed_authorized_user(session, tool_ids=[tool])
+        await _seed_embedding(
+            session,
+            tool_version_id=ver,
+            profile_id=profile.id,
+            search_text=query,
+            embedding=[1.0, 0.0, 0.0, 0.0],
+        )
+        agent = await AgentRepository(session).get(agent_id)
+        assert agent is not None
+        agent.owner_id = user_id
+        await session.flush()
+        request_id = await _seed_retrieving_request(
+            session,
+            user_id=user_id,
+            agent_id=agent_id,
+            agent_version_id=version_id,
+            request_text=query,
+        )
+
+    provider = _provider_client(
+        embed_vectors={query: [1.0, 0.0, 0.0, 0.0]},
+        chat_payload={
+            "candidates": [
+                {
+                    "tool_version_id": str(ver),
+                    "llm_fit_score": 0.3,
+                    "reason_summary": "weak",
+                }
+            ],
+            "ambiguities": [],
+        },
+    )
+    async with integration_session_factory() as session:
+        outcome = await ToolSelectorService(
+            session, model_provider=provider
+        ).select(agent_request_id=request_id)
+        assert outcome.decision == "NO_MATCH"
+    async with integration_session_factory() as session:
+        from app.repositories.clarification_request import ClarificationRequestRepository
+        from app.repositories.tool_selection import ToolSelectionRepository
+
+        row = await AgentRequestRepository(session).get(request_id)
+        assert row is not None
+        assert row.status == AgentRequestStatus.REJECTED.value
+        assert row.completed_at is not None
+        run = await ToolSelectionRepository(session).get_latest_for_agent_request(
+            request_id
+        )
+        assert run is not None
+        assert run.decision == "NO_MATCH"
+        assert (
+            await ClarificationRequestRepository(session).get_open_for_agent_request(
+                request_id
+            )
+            is None
+        )
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_pg_missing_policy_forces_confirmation(
+    integration_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    query = "missing policy weather UNIQUE_NOPOLICY"
+    async with integration_session_factory() as session:
+        profile = await _create_active_profile(session)
+        _, tool, ver = await _seed_active_tool(
+            session, remote_name="nopolicy_weather", description=query
+        )
+        version_id, agent_id = await _seed_agent_version(
+            session,
+            grants=[
+                {
+                    "mcp_tool_id": tool,
+                    "effect": AgentToolGrantEffect.ALLOW.value,
+                }
+            ],
+        )
+        user_id = await _seed_authorized_user(session, tool_ids=[tool])
+        await _seed_embedding(
+            session,
+            tool_version_id=ver,
+            profile_id=profile.id,
+            search_text=query,
+            embedding=[1.0, 0.0, 0.0, 0.0],
+        )
+        agent = await AgentRepository(session).get(agent_id)
+        assert agent is not None
+        agent.owner_id = user_id
+        await session.flush()
+        request_id = await _seed_retrieving_request(
+            session,
+            user_id=user_id,
+            agent_id=agent_id,
+            agent_version_id=version_id,
+            request_text=query,
+        )
+
+    provider = _provider_client(
+        embed_vectors={query: [1.0, 0.0, 0.0, 0.0]},
+        chat_payload={
+            "candidates": [
+                {
+                    "tool_version_id": str(ver),
+                    "llm_fit_score": 0.95,
+                    "reason_summary": "high score without policy",
+                }
+            ],
+            "ambiguities": [],
+        },
+    )
+    async with integration_session_factory() as session:
+        outcome = await ToolSelectorService(
+            session, model_provider=provider
+        ).select(agent_request_id=request_id)
+        assert outcome.decision == "CONFIRM"
+    async with integration_session_factory() as session:
+        from app.domain.enums import ClarificationRequestType
+        from app.repositories.clarification_request import ClarificationRequestRepository
+        from app.repositories.tool_selection import ToolSelectionRepository
+
+        row = await AgentRequestRepository(session).get(request_id)
+        assert row is not None
+        assert row.status == AgentRequestStatus.WAITING_CONFIRMATION.value
+        run = await ToolSelectionRepository(session).get_latest_for_agent_request(
+            request_id
+        )
+        assert run is not None
+        assert run.decision == "CONFIRM"
+        clarification = await ClarificationRequestRepository(
+            session
+        ).get_open_for_agent_request(request_id)
+        assert clarification is not None
+        assert (
+            clarification.request_type
+            == ClarificationRequestType.TOOL_CONFIRMATION.value
+        )
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_pg_ambiguities_force_confirmation(
+    integration_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    query = "ambiguous weather UNIQUE_AMBIG"
+    async with integration_session_factory() as session:
+        profile = await _create_active_profile(session)
+        _, tool, ver = await _seed_active_tool(
+            session, remote_name="ambig_weather", description=query
+        )
+        await MCPToolPolicyRepository(session).create(
+            mcp_tool_id=tool,
+            risk_class=RiskClass.READ_ONLY.value,
+            requires_confirmation=False,
+            requires_approval=False,
+            approval_policy_id=None,
+            timeout_ms=5000,
+            max_attempts=1,
+            backoff_policy=None,
+            max_result_bytes=1024,
+            allow_auto_select=True,
+            data_classification=None,
+            policy_metadata=None,
+        )
+        version_id, agent_id = await _seed_agent_version(
+            session,
+            grants=[
+                {
+                    "mcp_tool_id": tool,
+                    "effect": AgentToolGrantEffect.ALLOW.value,
+                }
+            ],
+        )
+        user_id = await _seed_authorized_user(session, tool_ids=[tool])
+        await _seed_embedding(
+            session,
+            tool_version_id=ver,
+            profile_id=profile.id,
+            search_text=query,
+            embedding=[1.0, 0.0, 0.0, 0.0],
+        )
+        agent = await AgentRepository(session).get(agent_id)
+        assert agent is not None
+        agent.owner_id = user_id
+        await session.flush()
+        request_id = await _seed_retrieving_request(
+            session,
+            user_id=user_id,
+            agent_id=agent_id,
+            agent_version_id=version_id,
+            request_text=query,
+        )
+
+    provider = _provider_client(
+        embed_vectors={query: [1.0, 0.0, 0.0, 0.0]},
+        chat_payload={
+            "candidates": [
+                {
+                    "tool_version_id": str(ver),
+                    "llm_fit_score": 0.95,
+                    "reason_summary": "high score",
+                }
+            ],
+            "ambiguities": ["두 도구의 업무 범위가 겹침"],
+        },
+    )
+    async with integration_session_factory() as session:
+        outcome = await ToolSelectorService(
+            session, model_provider=provider
+        ).select(agent_request_id=request_id)
+        assert outcome.decision == "CONFIRM"
+    async with integration_session_factory() as session:
+        from app.repositories.tool_selection import ToolSelectionRepository
+
+        row = await AgentRequestRepository(session).get(request_id)
+        assert row is not None
+        assert row.status == AgentRequestStatus.WAITING_CONFIRMATION.value
+        run = await ToolSelectionRepository(session).get_latest_for_agent_request(
+            request_id
+        )
+        assert run is not None
+        assert run.decision == "CONFIRM"
+        assert run.ambiguities == ["두 도구의 업무 범위가 겹침"]

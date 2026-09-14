@@ -62,6 +62,7 @@ def _candidate(
     agent_requires_confirmation: bool = False,
     policy_requires_confirmation: bool | None = False,
     policy_requires_approval: bool | None = False,
+    policy_present: bool = True,
 ) -> RetrievedToolCandidate:
     return RetrievedToolCandidate(
         mcp_tool_id=uuid.uuid4(),
@@ -71,9 +72,9 @@ def _candidate(
         rrf_raw=0.03,
         agent_requires_confirmation=agent_requires_confirmation,
         parameter_constraints=None,
-        policy_present=True,
-        tool_policy_id=uuid.uuid4(),
-        tool_policy_lock_version=1,
+        policy_present=policy_present,
+        tool_policy_id=uuid.uuid4() if policy_present else None,
+        tool_policy_lock_version=1 if policy_present else None,
         policy_requires_confirmation=policy_requires_confirmation,
         policy_requires_approval=policy_requires_approval,
         approval_policy_id=None,
@@ -352,7 +353,10 @@ async def test_mid_confidence_confirmation(db_session: AsyncSession) -> None:
 
 
 @pytest.mark.asyncio
-async def test_low_confidence_waiting_input(db_session: AsyncSession) -> None:
+async def test_low_confidence_complete_inputs_rejected(
+    db_session: AsyncSession,
+) -> None:
+    """coverage==1.0 and confidence < confirmation_threshold => NO_MATCH."""
     request_id, _, _ = await _seed_retrieving(db_session)
     candidates = [_candidate(_descriptor(retrieval_score=0.2))]
     payload = {
@@ -370,10 +374,26 @@ async def test_low_confidence_waiting_input(db_session: AsyncSession) -> None:
         model_provider=_MockLLM(payload),  # type: ignore[arg-type]
         tool_retrieval=_MockRetrieval(candidates),  # type: ignore[arg-type]
     ).select(agent_request_id=request_id)
-    assert outcome.decision == "CLARIFY"
+    assert outcome.decision == "NO_MATCH"
+    assert outcome.missing_fields == ()
     row = await AgentRequestRepository(db_session).get(request_id)
     assert row is not None
-    assert row.status == AgentRequestStatus.WAITING_INPUT.value
+    assert row.status == AgentRequestStatus.REJECTED.value
+    assert row.completed_at is not None
+    from app.repositories.clarification_request import ClarificationRequestRepository
+    from app.repositories.tool_selection import ToolSelectionRepository
+
+    run = await ToolSelectionRepository(db_session).get_latest_for_agent_request(
+        request_id
+    )
+    assert run is not None
+    assert run.decision == "NO_MATCH"
+    assert run.selected_tool_version_id == candidates[0].descriptor.tool_version_id
+    assert run.confidence is not None and run.confidence < 0.60
+    clarification = await ClarificationRequestRepository(
+        db_session
+    ).get_open_for_agent_request(request_id)
+    assert clarification is None
 
 
 @pytest.mark.asyncio
@@ -731,4 +751,255 @@ async def test_provider_ownership_internal(
         db_session,
         tool_retrieval=_MockRetrieval(candidates),  # type: ignore[arg-type]
     ).select(agent_request_id=request_id)
+    owned.aclose.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_missing_policy_forces_confirmation(db_session: AsyncSession) -> None:
+    request_id, _, _ = await _seed_retrieving(db_session)
+    candidates = [
+        _candidate(
+            _descriptor(retrieval_score=0.95),
+            allow_auto_select=True,
+            policy_present=False,
+        )
+    ]
+    outcome = await ToolSelectorService(
+        db_session,
+        model_provider=_MockLLM(_rerank_payload(candidates)),  # type: ignore[arg-type]
+        tool_retrieval=_MockRetrieval(candidates),  # type: ignore[arg-type]
+    ).select(agent_request_id=request_id)
+    assert outcome.decision == "CONFIRM"
+    row = await AgentRequestRepository(db_session).get(request_id)
+    assert row is not None
+    assert row.status == AgentRequestStatus.WAITING_CONFIRMATION.value
+    from app.domain.enums import ClarificationRequestType
+    from app.repositories.clarification_request import ClarificationRequestRepository
+    from app.repositories.tool_selection import ToolSelectionRepository
+
+    run = await ToolSelectionRepository(db_session).get_latest_for_agent_request(
+        request_id
+    )
+    assert run is not None
+    assert run.decision == "CONFIRM"
+    clarification = await ClarificationRequestRepository(
+        db_session
+    ).get_open_for_agent_request(request_id)
+    assert clarification is not None
+    assert clarification.request_type == ClarificationRequestType.TOOL_CONFIRMATION.value
+    assert clarification.question_schema["required"] == ["confirmed"]
+
+
+@pytest.mark.asyncio
+async def test_ambiguities_force_confirmation(db_session: AsyncSession) -> None:
+    request_id, _, _ = await _seed_retrieving(db_session)
+    candidates = [_candidate(_descriptor(retrieval_score=0.95))]
+    payload = _rerank_payload(candidates)
+    payload["ambiguities"] = ["두 도구의 업무 범위가 겹침"]
+    outcome = await ToolSelectorService(
+        db_session,
+        model_provider=_MockLLM(payload),  # type: ignore[arg-type]
+        tool_retrieval=_MockRetrieval(candidates),  # type: ignore[arg-type]
+    ).select(agent_request_id=request_id)
+    assert outcome.decision == "CONFIRM"
+    from app.repositories.tool_selection import ToolSelectionRepository
+
+    run = await ToolSelectionRepository(db_session).get_latest_for_agent_request(
+        request_id
+    )
+    assert run is not None
+    assert run.decision == "CONFIRM"
+    assert run.ambiguities == ["두 도구의 업무 범위가 겹침"]
+    row = await AgentRequestRepository(db_session).get(request_id)
+    assert row is not None
+    assert row.status == AgentRequestStatus.WAITING_CONFIRMATION.value
+
+
+@pytest.mark.asyncio
+async def test_auto_select_persists_run_and_candidates(
+    db_session: AsyncSession,
+) -> None:
+    request_id, _, _ = await _seed_retrieving(db_session)
+    candidates = [_candidate(_descriptor(retrieval_score=0.95))]
+    outcome = await ToolSelectorService(
+        db_session,
+        model_provider=_MockLLM(_rerank_payload(candidates)),  # type: ignore[arg-type]
+        tool_retrieval=_MockRetrieval(candidates),  # type: ignore[arg-type]
+    ).select(agent_request_id=request_id)
+    assert outcome.decision == "AUTO_SELECT"
+    from app.repositories.tool_selection import ToolSelectionRepository
+
+    repo = ToolSelectionRepository(db_session)
+    run = await repo.get_latest_for_agent_request(request_id)
+    assert run is not None
+    assert run.decision == "AUTO_SELECT"
+    assert run.selected_tool_version_id == candidates[0].descriptor.tool_version_id
+    assert run.registry_snapshot["authorized_candidate_tool_version_ids"] == [
+        str(candidates[0].descriptor.tool_version_id)
+    ]
+    assert "provider" in run.model_snapshot
+    assert "credential" not in str(run.model_snapshot).lower()
+    assert run.threshold_snapshot["auto_select_margin"] == 0.10
+    rows = await repo.list_candidates_for_run(run.id)
+    assert len(rows) == 1
+    assert rows[0].input_rank == 1
+    assert rows[0].llm_fit_score is not None
+
+
+@pytest.mark.asyncio
+async def test_clarify_persists_missing_parameter_clarification(
+    db_session: AsyncSession,
+) -> None:
+    request_id, _, _ = await _seed_retrieving(
+        db_session,
+        entities=[
+            {
+                "name": "location",
+                "value": "서울",
+                "source": ParameterProvenance.USER_EXPLICIT.value,
+            }
+        ],
+    )
+    candidates = [
+        _candidate(
+            _descriptor(
+                required_inputs=("location", "date"),
+                retrieval_score=0.95,
+            )
+        )
+    ]
+    outcome = await ToolSelectorService(
+        db_session,
+        model_provider=_MockLLM(_rerank_payload(candidates)),  # type: ignore[arg-type]
+        tool_retrieval=_MockRetrieval(candidates),  # type: ignore[arg-type]
+    ).select(agent_request_id=request_id)
+    assert outcome.decision == "CLARIFY"
+    from app.domain.enums import ClarificationRequestType
+    from app.repositories.clarification_request import ClarificationRequestRepository
+    from app.repositories.tool_selection import ToolSelectionRepository
+
+    run = await ToolSelectionRepository(db_session).get_latest_for_agent_request(
+        request_id
+    )
+    assert run is not None
+    assert run.decision == "CLARIFY"
+    clarification = await ClarificationRequestRepository(
+        db_session
+    ).get_open_for_agent_request(request_id)
+    assert clarification is not None
+    assert clarification.request_type == ClarificationRequestType.MISSING_PARAMETER.value
+    assert "date" in clarification.question_schema["required"]
+    assert clarification.question_schema["properties"]["date"] == {}
+    assert "date" in clarification.prompt_text
+
+
+@pytest.mark.asyncio
+async def test_cancel_during_rerank_leaves_no_selection_orphans(
+    db_session_factory,
+) -> None:
+    async with db_session_factory() as session:
+        request_id, _, _ = await _seed_retrieving(session)
+
+    started = asyncio.Event()
+    release = asyncio.Event()
+    candidates = [_candidate(_descriptor())]
+    llm = _MockLLM(_rerank_payload(candidates), delay=started, release=release)
+    retrieval = _MockRetrieval(candidates)
+
+    async def run() -> Exception | None:
+        async with db_session_factory() as session:
+            try:
+                await ToolSelectorService(
+                    session,
+                    model_provider=llm,  # type: ignore[arg-type]
+                    tool_retrieval=retrieval,  # type: ignore[arg-type]
+                ).select(agent_request_id=request_id)
+                return None
+            except Exception as exc:  # noqa: BLE001
+                return exc
+
+    task = asyncio.create_task(run())
+    await started.wait()
+    async with db_session_factory() as session:
+        await AgentRequestService(session).compare_and_set_status(
+            request_id,
+            expected_statuses=[AgentRequestStatus.SELECTING],
+            new_status=AgentRequestStatus.CANCELLED,
+            set_completed_at=True,
+        )
+        await session.commit()
+    release.set()
+    err = await task
+    assert isinstance(err, AppError)
+    assert err.code == "RESOURCE_CONFLICT"
+
+    async with db_session_factory() as session:
+        from app.repositories.clarification_request import ClarificationRequestRepository
+        from app.repositories.tool_selection import ToolSelectionRepository
+
+        row = await AgentRequestRepository(session).get(request_id)
+        assert row is not None
+        assert row.status == AgentRequestStatus.CANCELLED.value
+        assert (
+            await ToolSelectionRepository(session).get_latest_for_agent_request(
+                request_id
+            )
+            is None
+        )
+        assert (
+            await ClarificationRequestRepository(session).get_open_for_agent_request(
+                request_id
+            )
+            is None
+        )
+
+
+@pytest.mark.asyncio
+async def test_unexpected_exception_marks_failed(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    request_id, _, _ = await _seed_retrieving(db_session)
+    candidates = [_candidate(_descriptor(retrieval_score=0.95))]
+
+    async def boom(*_args, **_kwargs):  # noqa: ANN002
+        raise RuntimeError("unexpected db failure")
+
+    monkeypatch.setattr(
+        "app.repositories.tool_selection.ToolSelectionRepository.create_run",
+        boom,
+    )
+    with pytest.raises(RuntimeError, match="unexpected db failure"):
+        await ToolSelectorService(
+            db_session,
+            model_provider=_MockLLM(_rerank_payload(candidates)),  # type: ignore[arg-type]
+            tool_retrieval=_MockRetrieval(candidates),  # type: ignore[arg-type]
+        ).select(agent_request_id=request_id)
+    row = await AgentRequestRepository(db_session).get(request_id)
+    assert row is not None
+    assert row.status == AgentRequestStatus.FAILED.value
+    assert row.completed_at is not None
+
+
+@pytest.mark.asyncio
+async def test_provider_ownership_internal_error_path(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    request_id, _, _ = await _seed_retrieving(db_session)
+    candidates = [_candidate(_descriptor(retrieval_score=0.95))]
+    owned = MagicMock()
+    owned.generate_json = AsyncMock(
+        side_effect=ModelProviderError(
+            error_code=TIMEOUT, message="slow", retryable=True
+        )
+    )
+    owned.aclose = AsyncMock()
+    monkeypatch.setattr(
+        "app.agent.tool_selector.ModelProviderClient",
+        lambda *a, **k: owned,
+    )
+    with pytest.raises(ModelProviderError):
+        await ToolSelectorService(
+            db_session,
+            tool_retrieval=_MockRetrieval(candidates),  # type: ignore[arg-type]
+        ).select(agent_request_id=request_id)
     owned.aclose.assert_awaited_once()
