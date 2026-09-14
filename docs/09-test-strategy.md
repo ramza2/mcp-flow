@@ -273,6 +273,9 @@ Dataset은 평가 전 FROZEN하고 실행 중 정답을 변경하지 않는다.
 - Retry/timeout/risk policy
 - Predicate AST
 - Binding/Provenance
+- Parameter Builder durable handoff
+- secret reference non-resolution
+- missing parameter clarification (Parameter Builder)
 - Plan validation
 - Permission/ResourceGrant
 - ApprovalPolicy/Approval state

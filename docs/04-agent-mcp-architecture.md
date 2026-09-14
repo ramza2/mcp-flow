@@ -364,6 +364,31 @@ SECRET_REF
 
 Secret 원문은 LLM, Plan snapshot, 일반 로그에 포함하지 않는다.
 
+### 8.3 AgentRequest Parameter Builder path
+
+AgentRequest path의 Parameter Builder는 다음만 수행한다.
+
+```text
+materialized non-secret value → BindingKind.LITERAL
+secret reference (UUID) → BindingKind.SECRET_REF
+Provenance는 StructuredRequest entity.source를 그대로 보존
+```
+
+Parameter Builder는 SecretResolver를 호출하지 않으며 secret material을 조회·생성·저장하지 않는다.
+
+다음 BindingKind는 Workflow / Plan Generator 영역에서 context contract와 함께 구성한다.
+AgentRequest Parameter Builder는 이 kind의 field contract를 발명하지 않는다.
+
+```text
+PLAN_INPUT
+STEP_OUTPUT
+EXECUTION_CONTEXT
+LOOP_CONTEXT
+```
+
+결과 bindings는 `parameter_build_runs.bindings_snapshot`에 durable로 저장된다.
+
+
 ---
 
 ## 9. Execution Plan v1
