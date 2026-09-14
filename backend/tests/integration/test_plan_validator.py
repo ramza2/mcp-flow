@@ -17,14 +17,17 @@ from app.domain.enums import (
     RiskClass,
     ToolVersionValidationStatus,
 )
+from app.models.parameter_build import ParameterBuildRun
 from app.models.plan_generation import PlanGenerationRun, PlanGenerationToolRef
 from app.repositories.agent_request import AgentRequestRepository
 from app.repositories.approval_policy import ApprovalPolicyRepository
 from app.repositories.clarification_request import ClarificationRequestRepository
 from app.repositories.mcp_tool import MCPToolRepository
 from app.repositories.mcp_tool_policy import MCPToolPolicyRepository
+from app.repositories.parameter_build import ParameterBuildRepository
 from app.repositories.plan_generation import PlanGenerationRepository
 from app.repositories.plan_validation import PlanValidationRepository
+from app.schemas.execution_plan import compute_plan_hash
 from app.services.agent_request import AgentRequestService
 from sqlalchemy import text, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -482,3 +485,168 @@ async def test_pg_restart_recovery_ready(
         assert plan_run is not None
         assert run_v.plan_hash == plan_run.plan_hash
         assert run_v.policy_snapshot.get("tool_policy") is not None
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_pg_parameter_build_tool_version_tamper_failed(
+    integration_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with integration_session_factory() as session:
+        seeded = await _seed_validating(session)
+
+    async with integration_session_factory() as session:
+        plan_run = await PlanGenerationRepository(session).get_latest_for_agent_request(
+            seeded["request_id"]
+        )
+        assert plan_run is not None
+        other = await MCPToolRepository(session).create_version(
+            mcp_tool_id=seeded["tool_id"],
+            version_no=2,
+            content_hash=uuid.uuid4().hex,
+            validation_status=ToolVersionValidationStatus.VALID.value,
+            remote_description="v2",
+            input_schema={
+                "type": "object",
+                "properties": {"location": {"type": "string"}},
+                "required": ["location"],
+            },
+        )
+        await session.execute(
+            update(ParameterBuildRun)
+            .where(ParameterBuildRun.id == plan_run.parameter_build_run_id)
+            .values(tool_version_id=other.id)
+        )
+        await session.commit()
+
+    async with integration_session_factory() as session:
+        outcome = await PlanValidatorService(session).validate(
+            agent_request_id=seeded["request_id"]
+        )
+        assert outcome.decision == "FAILED"
+        row = await AgentRequestRepository(session).get(seeded["request_id"])
+        assert row is not None
+        assert row.status == AgentRequestStatus.FAILED.value
+        assert row.completed_at is not None
+        run_v = await PlanValidationRepository(session).get_latest_for_agent_request(
+            seeded["request_id"]
+        )
+        assert run_v is not None
+        assert run_v.decision == "FAILED"
+        assert any(e.get("code") == "PLAN_SCHEMA_INVALID" for e in run_v.errors)
+        assert (
+            await ClarificationRequestRepository(session).get_open_for_agent_request(
+                seeded["request_id"]
+            )
+            is None
+        )
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_pg_parameter_build_input_schema_snapshot_tamper_failed(
+    integration_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with integration_session_factory() as session:
+        seeded = await _seed_validating(session)
+
+    async with integration_session_factory() as session:
+        plan_run = await PlanGenerationRepository(session).get_latest_for_agent_request(
+            seeded["request_id"]
+        )
+        assert plan_run is not None
+        build = await ParameterBuildRepository(session).get_by_id(
+            plan_run.parameter_build_run_id
+        )
+        assert build is not None
+        tampered = copy.deepcopy(build.input_schema_snapshot)
+        tampered["properties"]["location"]["type"] = "integer"
+        await session.execute(
+            update(ParameterBuildRun)
+            .where(ParameterBuildRun.id == build.id)
+            .values(input_schema_snapshot=tampered)
+        )
+        await session.commit()
+
+    async with integration_session_factory() as session:
+        outcome = await PlanValidatorService(session).validate(
+            agent_request_id=seeded["request_id"]
+        )
+        assert outcome.decision == "FAILED"
+        row = await AgentRequestRepository(session).get(seeded["request_id"])
+        assert row is not None
+        assert row.status == AgentRequestStatus.FAILED.value
+        assert row.completed_at is not None
+        run_v = await PlanValidationRepository(session).get_latest_for_agent_request(
+            seeded["request_id"]
+        )
+        assert run_v is not None
+        assert any(e.get("code") == "PLAN_SCHEMA_INVALID" for e in run_v.errors)
+        assert (
+            await ClarificationRequestRepository(session).get_open_for_agent_request(
+                seeded["request_id"]
+            )
+            is None
+        )
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_pg_parameter_build_required_bypass_via_snapshot_failed(
+    integration_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with integration_session_factory() as session:
+        seeded = await _seed_validating(session)
+
+    async with integration_session_factory() as session:
+        plan_run = await PlanGenerationRepository(session).get_latest_for_agent_request(
+            seeded["request_id"]
+        )
+        assert plan_run is not None
+        build = await ParameterBuildRepository(session).get_by_id(
+            plan_run.parameter_build_run_id
+        )
+        assert build is not None
+        permissive = copy.deepcopy(build.input_schema_snapshot)
+        permissive["required"] = []
+        tampered_plan = copy.deepcopy(plan_run.plan_snapshot)
+        tampered_plan["steps"][0]["config"]["bindings"] = {}
+        await session.execute(
+            update(ParameterBuildRun)
+            .where(ParameterBuildRun.id == build.id)
+            .values(
+                input_schema_snapshot=permissive,
+                bindings_snapshot={},
+            )
+        )
+        await session.execute(
+            update(PlanGenerationRun)
+            .where(PlanGenerationRun.id == plan_run.id)
+            .values(
+                plan_snapshot=tampered_plan,
+                plan_hash=compute_plan_hash(tampered_plan),
+            )
+        )
+        await session.commit()
+
+    async with integration_session_factory() as session:
+        outcome = await PlanValidatorService(session).validate(
+            agent_request_id=seeded["request_id"]
+        )
+        assert outcome.decision == "FAILED"
+        row = await AgentRequestRepository(session).get(seeded["request_id"])
+        assert row is not None
+        assert row.status == AgentRequestStatus.FAILED.value
+        assert row.completed_at is not None
+        run_v = await PlanValidationRepository(session).get_latest_for_agent_request(
+            seeded["request_id"]
+        )
+        assert run_v is not None
+        codes = {e.get("code") for e in run_v.errors}
+        assert "PLAN_SCHEMA_INVALID" in codes or "PLAN_BINDING_INVALID" in codes
+        assert (
+            await ClarificationRequestRepository(session).get_open_for_agent_request(
+                seeded["request_id"]
+            )
+            is None
+        )

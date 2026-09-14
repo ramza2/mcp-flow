@@ -315,8 +315,6 @@ class PlanValidatorService:
 
         tool_refs = await self._plan_generations.get_tool_refs_for_run(plan_run.id)
         self._validate_plan_structure(plan, tool_refs, acc)
-        if param_snapshot is not None and build_run is not None and not acc.failed:
-            self._validate_binding_projection(plan, param_snapshot, build_run, acc)
 
         tool_version: MCPToolVersion | None = None
         logical_tool: MCPTool | None = None
@@ -324,27 +322,100 @@ class PlanValidatorService:
         grant: AgentToolGrant | None = None
         policy: MCPToolPolicy | None = None
 
-        if not acc.failed and plan.steps:
-            tool_version_id = plan.steps[0].config.get("tool_version_id")
-            if isinstance(tool_version_id, str):
-                tool_version_id = UUID(tool_version_id)
-            if isinstance(tool_version_id, UUID):
-                tool_version = await self._tools.get_version(tool_version_id)
-            if tool_version is None:
-                acc.rejected.append(
-                    _issue("PLAN_TOOL_UNAVAILABLE", "ToolVersion을 찾을 수 없습니다.")
-                )
-            else:
-                logical_tool = await self._tools.get(tool_version.mcp_tool_id)
-                if logical_tool is None:
-                    acc.rejected.append(
-                        _issue("PLAN_TOOL_UNAVAILABLE", "logical Tool을 찾을 수 없습니다.")
+        # Evidence-chain: Plan TOOL config ↔ ToolRef ↔ ParameterBuildRun.tool_version_id
+        # must agree on the same immutable ToolVersion before availability checks.
+        if not acc.failed and plan.steps and build_run is not None:
+            try:
+                cfg = ToolStepConfigV1.model_validate(plan.steps[0].config)
+            except Exception:
+                acc.failed.append(
+                    _issue(
+                        "PLAN_SCHEMA_INVALID",
+                        "ToolStepConfigV1 검증에 실패했습니다.",
+                        step_id=plan.steps[0].id,
                     )
-                else:
-                    server = await self._servers.get(logical_tool.mcp_server_id)
-                self._validate_tool_availability(
-                    tool_version, logical_tool, server, acc
                 )
+                cfg = None
+            if cfg is not None:
+                ref_by_step = {r.step_key: r for r in tool_refs}
+                ref = ref_by_step.get(plan.steps[0].id)
+                if ref is not None and ref.mcp_tool_version_id != cfg.tool_version_id:
+                    acc.failed.append(
+                        _issue(
+                            "PLAN_SCHEMA_INVALID",
+                            "ToolRef.mcp_tool_version_id가 step config와 불일치합니다.",
+                            step_id=plan.steps[0].id,
+                        )
+                    )
+                if build_run.tool_version_id != cfg.tool_version_id:
+                    acc.failed.append(
+                        _issue(
+                            "PLAN_SCHEMA_INVALID",
+                            "ParameterBuildRun.tool_version_id가 Plan TOOL "
+                            "config.tool_version_id와 불일치합니다.",
+                        )
+                    )
+                if (
+                    ref is not None
+                    and build_run.tool_version_id != ref.mcp_tool_version_id
+                ):
+                    acc.failed.append(
+                        _issue(
+                            "PLAN_SCHEMA_INVALID",
+                            "ParameterBuildRun.tool_version_id가 "
+                            "ToolRef.mcp_tool_version_id와 불일치합니다.",
+                        )
+                    )
+
+                if not acc.failed:
+                    tool_version = await self._tools.get_version(cfg.tool_version_id)
+                    if tool_version is None:
+                        # Missing row after durable plan evidence → treat as
+                        # availability failure (runtime), not schema repair.
+                        acc.rejected.append(
+                            _issue(
+                                "PLAN_TOOL_UNAVAILABLE",
+                                "ToolVersion을 찾을 수 없습니다.",
+                            )
+                        )
+                    else:
+                        if build_run.input_schema_snapshot != tool_version.input_schema:
+                            acc.failed.append(
+                                _issue(
+                                    "PLAN_SCHEMA_INVALID",
+                                    "ParameterBuildRun.input_schema_snapshot이 "
+                                    "immutable ToolVersion.input_schema와 불일치합니다.",
+                                )
+                            )
+                        if (
+                            param_snapshot is not None
+                            and not acc.failed
+                        ):
+                            self._validate_binding_projection(
+                                plan,
+                                param_snapshot,
+                                build_run,
+                                acc,
+                                input_schema=tool_version.input_schema,
+                            )
+                        if not acc.failed:
+                            logical_tool = await self._tools.get(
+                                tool_version.mcp_tool_id
+                            )
+                            if logical_tool is None:
+                                acc.rejected.append(
+                                    _issue(
+                                        "PLAN_TOOL_UNAVAILABLE",
+                                        "logical Tool을 찾을 수 없습니다.",
+                                    )
+                                )
+                            else:
+                                server = await self._servers.get(
+                                    logical_tool.mcp_server_id
+                                )
+                            self._validate_tool_availability(
+                                tool_version, logical_tool, server, acc
+                            )
 
         if logical_tool is not None and not acc.failed:
             grants = await self._grants.list_for_version(request.agent_version_id)
@@ -572,7 +643,15 @@ class PlanValidatorService:
         param_snapshot: ParameterBuildSnapshot,
         build_run: ParameterBuildRun,
         acc: _ValidationAccumulator,
+        *,
+        input_schema: Any,
     ) -> None:
+        """Validate executable bindings against immutable ToolVersion.input_schema.
+
+        `input_schema` must be ToolVersion.input_schema (Source of Truth).
+        ParameterBuildRun.input_schema_snapshot is checked for equality earlier
+        and must not be used as the authority for required/unknown/type checks.
+        """
         step = plan.steps[0]
         try:
             cfg = ToolStepConfigV1.model_validate(step.config)
@@ -596,7 +675,7 @@ class PlanValidatorService:
                 )
             )
 
-        schema = build_run.input_schema_snapshot
+        schema = input_schema
         if not isinstance(schema, dict):
             acc.failed.append(
                 _issue("PLAN_BINDING_INVALID", "input_schema가 object가 아닙니다.")
@@ -627,6 +706,16 @@ class PlanValidatorService:
                 )
             )
             return
+
+        for req_key in required:
+            if req_key not in properties:
+                acc.failed.append(
+                    _issue(
+                        "PLAN_BINDING_INVALID",
+                        f"required field={req_key!r}가 properties에 없습니다.",
+                        step_id=step.id,
+                    )
+                )
 
         for key in plan_bindings:
             if key not in properties:

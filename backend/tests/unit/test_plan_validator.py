@@ -20,6 +20,7 @@ from app.domain.enums import (
     ToolVersionValidationStatus,
 )
 from app.models.mcp import MCPToolVersion
+from app.models.parameter_build import ParameterBuildRun
 from app.models.plan_generation import PlanGenerationRun, PlanGenerationToolRef
 from app.repositories.agent_request import AgentRequestRepository
 from app.repositories.agent_tool_grant import AgentToolGrantRepository
@@ -28,6 +29,7 @@ from app.repositories.clarification_request import ClarificationRequestRepositor
 from app.repositories.mcp_server import MCPServerRepository
 from app.repositories.mcp_tool import MCPToolRepository
 from app.repositories.mcp_tool_policy import MCPToolPolicyRepository
+from app.repositories.parameter_build import ParameterBuildRepository
 from app.repositories.plan_generation import PlanGenerationRepository
 from app.repositories.plan_validation import PlanValidationRepository
 from app.repositories.role import PermissionRepository
@@ -718,6 +720,165 @@ async def test_confirmation_blocked_by_permission(db_session: AsyncSession) -> N
         agent_request_id=seeded["request_id"]
     )
     assert outcome.decision == "REJECTED"
+    assert (
+        await ClarificationRequestRepository(db_session).get_open_for_agent_request(
+            seeded["request_id"]
+        )
+        is None
+    )
+
+
+@pytest.mark.asyncio
+async def test_parameter_build_tool_version_tamper_failed(
+    db_session: AsyncSession,
+) -> None:
+    """ParameterBuildRun.tool_version_id mismatch is durable evidence corruption."""
+    seeded = await _seed_validating(db_session)
+    plan_run = await PlanGenerationRepository(db_session).get_latest_for_agent_request(
+        seeded["request_id"]
+    )
+    assert plan_run is not None
+    other = await MCPToolRepository(db_session).create_version(
+        mcp_tool_id=seeded["tool_id"],
+        version_no=2,
+        content_hash=uuid.uuid4().hex,
+        validation_status=ToolVersionValidationStatus.VALID.value,
+        remote_description="v2",
+        input_schema={
+            "type": "object",
+            "properties": {"location": {"type": "string"}},
+            "required": ["location"],
+        },
+    )
+    await db_session.execute(
+        update(ParameterBuildRun)
+        .where(ParameterBuildRun.id == plan_run.parameter_build_run_id)
+        .values(tool_version_id=other.id)
+    )
+    await db_session.commit()
+
+    outcome = await PlanValidatorService(db_session).validate(
+        agent_request_id=seeded["request_id"]
+    )
+    assert outcome.decision == "FAILED"
+    row = await AgentRequestRepository(db_session).get(seeded["request_id"])
+    assert row is not None
+    assert row.status == AgentRequestStatus.FAILED.value
+    assert row.completed_at is not None
+    run_v = await PlanValidationRepository(db_session).get_latest_for_agent_request(
+        seeded["request_id"]
+    )
+    assert run_v is not None
+    assert run_v.decision == "FAILED"
+    assert "PLAN_SCHEMA_INVALID" in _issue_codes(run_v.errors)
+    assert (
+        await ClarificationRequestRepository(db_session).get_open_for_agent_request(
+            seeded["request_id"]
+        )
+        is None
+    )
+
+
+@pytest.mark.asyncio
+async def test_parameter_build_input_schema_snapshot_tamper_failed(
+    db_session: AsyncSession,
+) -> None:
+    seeded = await _seed_validating(db_session)
+    plan_run = await PlanGenerationRepository(db_session).get_latest_for_agent_request(
+        seeded["request_id"]
+    )
+    assert plan_run is not None
+    build = await ParameterBuildRepository(db_session).get_by_id(
+        plan_run.parameter_build_run_id
+    )
+    assert build is not None
+    tampered_schema = copy.deepcopy(build.input_schema_snapshot)
+    tampered_schema["properties"]["location"]["type"] = "integer"
+    await db_session.execute(
+        update(ParameterBuildRun)
+        .where(ParameterBuildRun.id == build.id)
+        .values(input_schema_snapshot=tampered_schema)
+    )
+    await db_session.commit()
+
+    outcome = await PlanValidatorService(db_session).validate(
+        agent_request_id=seeded["request_id"]
+    )
+    assert outcome.decision == "FAILED"
+    row = await AgentRequestRepository(db_session).get(seeded["request_id"])
+    assert row is not None
+    assert row.status == AgentRequestStatus.FAILED.value
+    assert row.completed_at is not None
+    run_v = await PlanValidationRepository(db_session).get_latest_for_agent_request(
+        seeded["request_id"]
+    )
+    assert run_v is not None
+    assert run_v.decision == "FAILED"
+    assert "PLAN_SCHEMA_INVALID" in _issue_codes(run_v.errors)
+    assert (
+        await ClarificationRequestRepository(db_session).get_open_for_agent_request(
+            seeded["request_id"]
+        )
+        is None
+    )
+
+
+@pytest.mark.asyncio
+async def test_parameter_build_required_bypass_via_snapshot_failed(
+    db_session: AsyncSession,
+) -> None:
+    """Mutated snapshot required=[] must not override immutable ToolVersion schema."""
+    seeded = await _seed_validating(db_session)
+    plan_run = await PlanGenerationRepository(db_session).get_latest_for_agent_request(
+        seeded["request_id"]
+    )
+    assert plan_run is not None
+    build = await ParameterBuildRepository(db_session).get_by_id(
+        plan_run.parameter_build_run_id
+    )
+    assert build is not None
+
+    # Snapshot claims no required fields; strip bindings so a snapshot-SoT
+    # validator would incorrectly pass. Plan/ToolVersion remain requiring location.
+    permissive_schema = copy.deepcopy(build.input_schema_snapshot)
+    permissive_schema["required"] = []
+    empty_bindings: dict[str, Any] = {}
+    tampered_plan = copy.deepcopy(plan_run.plan_snapshot)
+    tampered_plan["steps"][0]["config"]["bindings"] = {}
+
+    await db_session.execute(
+        update(ParameterBuildRun)
+        .where(ParameterBuildRun.id == build.id)
+        .values(
+            input_schema_snapshot=permissive_schema,
+            bindings_snapshot=empty_bindings,
+        )
+    )
+    await db_session.execute(
+        update(PlanGenerationRun)
+        .where(PlanGenerationRun.id == plan_run.id)
+        .values(
+            plan_snapshot=tampered_plan,
+            plan_hash=compute_plan_hash(tampered_plan),
+        )
+    )
+    await db_session.commit()
+
+    outcome = await PlanValidatorService(db_session).validate(
+        agent_request_id=seeded["request_id"]
+    )
+    assert outcome.decision == "FAILED"
+    row = await AgentRequestRepository(db_session).get(seeded["request_id"])
+    assert row is not None
+    assert row.status == AgentRequestStatus.FAILED.value
+    assert row.completed_at is not None
+    run_v = await PlanValidationRepository(db_session).get_latest_for_agent_request(
+        seeded["request_id"]
+    )
+    assert run_v is not None
+    assert run_v.decision == "FAILED"
+    codes = _issue_codes(run_v.errors)
+    assert "PLAN_SCHEMA_INVALID" in codes or "PLAN_BINDING_INVALID" in codes
     assert (
         await ClarificationRequestRepository(db_session).get_open_for_agent_request(
             seeded["request_id"]
