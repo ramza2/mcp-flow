@@ -687,6 +687,82 @@ Unique:
 
 LLM prompt에 전달된 authorized candidate만 저장한다. LLM이 생략한 후보는 `llm_fit_score`/`reason_summary`를 null로 둘 수 있다.
 
+
+### 10.6 Parameter Build 근거
+
+```text
+parameter_build_runs
+```
+
+Parameter Builder는 AgentRequest가 `BUILDING_PARAMETERS`일 때 최신 durable `ToolSelectionRun`과
+immutable `selected_tool_version_id`를 복구한 뒤, StructuredRequest entities를 Tool input_schema
+property에 매핑한 결과를 저장한다. Plan Generator는 프로세스 메모리 Outcome이 아니라 이 테이블의
+latest complete run을 복구한다.
+
+#### `parameter_build_runs` (최소 field contract)
+
+```text
+id
+
+agent_request_id
+tool_selection_run_id
+tool_version_id
+
+input_schema_snapshot jsonb
+parameter_constraints_snapshot jsonb nullable
+
+bindings_snapshot jsonb
+missing_fields jsonb
+
+is_complete boolean
+
+created_at
+```
+
+의미:
+
+```text
+agent_request_id
+→ 어떤 AgentRequest의 Parameter Build인지
+
+tool_selection_run_id
+→ 어떤 Tool Selection 결과를 사용했는지
+
+tool_version_id
+→ selection 당시 immutable selected ToolVersion
+
+input_schema_snapshot
+→ Builder가 실제 사용한 ToolVersion.input_schema
+
+parameter_constraints_snapshot
+→ AgentToolGrant.parameter_constraints 당시 값 (semantics 미정)
+
+bindings_snapshot
+→ provenance + BindingValue 결과
+
+missing_fields
+→ 추가 사용자 입력이 필요한 Tool parameter names (항상 JSON array)
+
+is_complete
+→ Planning으로 진행 가능한 Parameter Build인지
+```
+
+Invariant:
+
+```text
+is_complete = true → missing_fields == []
+```
+
+같은 AgentRequest에 대해 clarification 응답 후 재수행이 가능하므로
+`UNIQUE(agent_request_id)`를 두지 않는다. 조회는 `created_at DESC, id DESC`.
+
+`parameter_constraints` semantics가 canonical로 정의되기 전까지 Parameter Builder는
+non-null constraint를 fail-closed(`FAILED`) 처리한다. 임의 DSL을 발명하지 않는다.
+
+Secret material / credential 원문은 어떤 snapshot에도 저장하지 않는다.
+`SECRET_REFERENCE` entity는 UUID secret reference만 `SECRET_REF` binding으로 보존한다.
+
+
 ---
 
 ## 11. Workflow 모델
