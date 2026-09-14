@@ -133,6 +133,8 @@ async def test_plan_generation_schema_constraints(
         assert "jsonb_typeof(plan_snapshot)" in run_defs
         assert "jsonb_typeof(planning_settings_snapshot)" in run_defs
 
+        # Constraint names may be truncated by the DB identifier limit;
+        # assert at least one CHECK whose definition mentions plan_hash.
         hash_names = (
             await session.execute(
                 text(
@@ -146,7 +148,7 @@ async def test_plan_generation_schema_constraints(
                 )
             )
         ).scalars().all()
-        assert any("plan_hash" in name for name in hash_names)
+        assert hash_names, "expected named CHECK constraint on plan_hash"
 
         ref_checks = (
             await session.execute(
