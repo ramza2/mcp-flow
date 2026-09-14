@@ -44,6 +44,10 @@ class ParameterBuildRepository:
         await self._session.flush()
         return row
 
+    async def get_by_id(self, run_id: uuid.UUID) -> ParameterBuildRun | None:
+        stmt = select(ParameterBuildRun).where(ParameterBuildRun.id == run_id)
+        return (await self._session.execute(stmt)).scalar_one_or_none()
+
     async def get_latest_for_agent_request(
         self, agent_request_id: uuid.UUID
     ) -> ParameterBuildRun | None:
