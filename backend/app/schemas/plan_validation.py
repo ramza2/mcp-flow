@@ -6,6 +6,11 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+# Re-export shared confirmation schema for callers that historically imported here.
+from app.schemas.clarification import (  # noqa: F401
+    CONFIRMATION_QUESTION_SCHEMA as PLAN_CONFIRMATION_QUESTION_SCHEMA,
+)
+
 VALIDATOR_VERSION: Literal["1.0"] = "1.0"
 
 # DB-local validation decision literals — same strings as AgentRequest terminal statuses.
@@ -15,19 +20,6 @@ PlanValidationDecision = Literal[
     "REJECTED",
     "FAILED",
 ]
-
-PLAN_CONFIRMATION_QUESTION_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "confirmed": {
-            "type": "boolean",
-        }
-    },
-    "required": ["confirmed"],
-    "additionalProperties": False,
-}
-
-PLAN_CONFIRMATION_PROMPT_TEXT = "생성된 실행 계획을 진행하시겠습니까?"
 
 
 class PlanValidationIssue(BaseModel):

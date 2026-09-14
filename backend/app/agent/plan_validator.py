@@ -24,6 +24,7 @@ from app.domain.enums import (
     ApprovalPolicyStatus,
     AuthorableStepType,
     BindingKind,
+    ClarificationRequestStatus,
     ClarificationRequestType,
     MCPProtocolEra,
     MCPServerStatus,
@@ -51,6 +52,10 @@ from app.repositories.parameter_build import ParameterBuildRepository
 from app.repositories.plan_generation import PlanGenerationRepository
 from app.repositories.plan_validation import PlanValidationRepository
 from app.schemas.agent import CANONICAL_PLAN_SCHEMA_VERSION
+from app.schemas.clarification import (
+    CONFIRMATION_QUESTION_SCHEMA,
+    PLAN_CONFIRMATION_PROMPT_TEXT,
+)
 from app.schemas.execution_plan import (
     DETERMINISTIC_TOOL_STEP_ID,
     EXECUTION_PLAN_SCHEMA_VERSION,
@@ -61,8 +66,6 @@ from app.schemas.execution_plan import (
 )
 from app.schemas.parameter_binding import ParameterBuildSnapshot
 from app.schemas.plan_validation import (
-    PLAN_CONFIRMATION_PROMPT_TEXT,
-    PLAN_CONFIRMATION_QUESTION_SCHEMA,
     VALIDATOR_VERSION,
     PlanValidationDecision,
     PlanValidationIssue,
@@ -452,9 +455,55 @@ class PlanValidatorService:
             and policy is not None
         ):
             if grant.requires_confirmation or policy.requires_confirmation:
-                acc.confirmation_required = True
+                if await self._has_satisfied_plan_confirmation(
+                    request=request,
+                    plan_run=plan_run,
+                    policy_snapshot=acc.policy_snapshot,
+                ):
+                    acc.confirmation_required = False
+                else:
+                    acc.confirmation_required = True
 
         return await self._finalize(request, plan_run, acc, plan_hash=plan_run.plan_hash)
+
+    async def _has_satisfied_plan_confirmation(
+        self,
+        *,
+        request: AgentRequest,
+        plan_run: PlanGenerationRun,
+        policy_snapshot: dict[str, Any],
+    ) -> bool:
+        """Reuse answered PLAN_CONFIRMATION for same plan + hash + policy snapshot."""
+        previous = await self._validations.get_latest_for_agent_request(request.id)
+        if previous is None:
+            return False
+        if previous.decision != "WAITING_CONFIRMATION":
+            return False
+        if previous.plan_generation_run_id != plan_run.id:
+            return False
+        if previous.plan_hash != plan_run.plan_hash:
+            return False
+        if not previous.confirmation_required:
+            return False
+        if previous.clarification_request_id is None:
+            return False
+        if previous.policy_snapshot != policy_snapshot:
+            return False
+
+        clarification = await self._clarifications.get(
+            previous.clarification_request_id
+        )
+        if clarification is None:
+            return False
+        if clarification.request_type != ClarificationRequestType.PLAN_CONFIRMATION.value:
+            return False
+        if clarification.status != ClarificationRequestStatus.ANSWERED.value:
+            return False
+        if clarification.response_payload != {"confirmed": True}:
+            return False
+        if clarification.answered_by != request.requester_id:
+            return False
+        return True
 
     def _validate_plan_structure(
         self,
@@ -1055,7 +1104,7 @@ class PlanValidatorService:
                 clarification = await self._clarifications.create_open(
                     agent_request_id=agent_request_id,
                     request_type=ClarificationRequestType.PLAN_CONFIRMATION.value,
-                    question_schema=PLAN_CONFIRMATION_QUESTION_SCHEMA,
+                    question_schema=CONFIRMATION_QUESTION_SCHEMA,
                     prompt_text=PLAN_CONFIRMATION_PROMPT_TEXT,
                     expires_at=None,
                 )

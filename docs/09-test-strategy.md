@@ -311,6 +311,20 @@ Dataset은 평가 전 FROZEN하고 실행 중 정답을 변경하지 않는다.
 - cancel race / double validator CAS
 - restart recovery (READY + WAITING_CONFIRMATION)
 
+추가 (Clarification / Confirmation resume foundation):
+
+- clarification response schema validation
+- owner-only response
+- structured request confirmed merge
+- secret-reference preservation
+- confirmation false cancel
+- plan-hash binding
+- policy-changed reconfirm
+- double response
+- cancel race
+- restart recovery
+- API Session/CSRF
+
 
 ## 9. Repository Integration Test
 

@@ -1012,16 +1012,15 @@ class ToolSelectorService:
         *,
         agent_request_id: uuid.UUID,
     ) -> None:
-        question_schema = {
-            "type": "object",
-            "properties": {"confirmed": {"type": "boolean"}},
-            "required": ["confirmed"],
-            "additionalProperties": False,
-        }
+        from app.schemas.clarification import (
+            CONFIRMATION_QUESTION_SCHEMA,
+            TOOL_CONFIRMATION_PROMPT_TEXT,
+        )
+
         await self._clarifications.create_open(
             agent_request_id=agent_request_id,
             request_type=ClarificationRequestType.TOOL_CONFIRMATION.value,
-            question_schema=question_schema,
-            prompt_text="선택된 도구의 사용을 확인해 주세요.",
+            question_schema=CONFIRMATION_QUESTION_SCHEMA,
+            prompt_text=TOOL_CONFIRMATION_PROMPT_TEXT,
             expires_at=None,
         )
