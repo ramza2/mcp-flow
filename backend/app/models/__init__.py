@@ -22,8 +22,8 @@ from app.models.mcp import (
     ToolEmbedding,
 )
 from app.models.model_profile import EmbeddingProfile, LLMProfile
-from app.models.session import Session
 from app.models.parameter_build import ParameterBuildRun
+from app.models.session import Session
 from app.models.tool_selection import (
     ClarificationRequest,
     ToolSelectionCandidate,

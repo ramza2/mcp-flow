@@ -269,9 +269,11 @@ def test_binding_schema_contract() -> None:
         "secret_id": str(secret_id),
     }
 
-    with pytest.raises(Exception):
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
         LiteralBindingValue.model_validate({"kind": "LITERAL", "value": "x", "extra": 1})
-    with pytest.raises(Exception):
+    with pytest.raises(ValidationError):
         SecretRefBindingValue.model_validate(
             {"kind": "SECRET_REF", "secret_id": "not-a-uuid"}
         )
