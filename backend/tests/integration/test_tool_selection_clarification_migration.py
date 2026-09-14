@@ -121,13 +121,13 @@ async def test_pg_selected_tool_consistency_check(
     """NO_MATCH + selected OR AUTO_SELECT + null selected must fail DB CHECK."""
     import uuid
 
-    from sqlalchemy.exc import IntegrityError
-
     from app.agent.tool_selector import ToolSelectorService
     from app.domain.enums import AgentToolGrantEffect, RiskClass
     from app.repositories.agent import AgentRepository
     from app.repositories.mcp_tool_policy import MCPToolPolicyRepository
     from app.repositories.tool_selection import ToolSelectionRepository
+    from sqlalchemy.exc import IntegrityError
+
     from tests.integration.test_tool_selector import (
         _create_active_profile,
         _provider_client,
@@ -277,13 +277,13 @@ async def test_pg_candidate_risk_class_check(
     """risk_class='WRITE' fails; canonical RiskClass succeeds."""
     import uuid
 
-    from sqlalchemy.exc import IntegrityError
-
     from app.agent.tool_selector import ToolSelectorService
     from app.domain.enums import AgentToolGrantEffect, RiskClass
     from app.repositories.agent import AgentRepository
     from app.repositories.mcp_tool_policy import MCPToolPolicyRepository
     from app.repositories.tool_selection import ToolSelectionRepository
+    from sqlalchemy.exc import IntegrityError
+
     from tests.integration.test_tool_selector import (
         _create_active_profile,
         _provider_client,
