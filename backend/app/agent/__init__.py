@@ -6,6 +6,7 @@ It must NOT invoke MCP Tools directly — Execution Engine owns tool calls.
 
 from app.agent.parameter_builder import ParameterBuilderService, ParameterBuildOutcome
 from app.agent.plan_generator import PlanGenerationOutcome, PlanGeneratorService
+from app.agent.plan_validator import PlanValidationOutcome, PlanValidatorService
 from app.agent.request_analyzer import RequestAnalyzerService
 from app.agent.tool_selector import ToolSelectionOutcome, ToolSelectorService
 
@@ -14,6 +15,8 @@ __all__ = [
     "ParameterBuilderService",
     "PlanGenerationOutcome",
     "PlanGeneratorService",
+    "PlanValidationOutcome",
+    "PlanValidatorService",
     "RequestAnalyzerService",
     "ToolSelectorService",
     "ToolSelectionOutcome",

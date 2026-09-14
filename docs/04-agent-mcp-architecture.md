@@ -565,6 +565,50 @@ PLAN_APPROVAL_REQUIRED
 
 schema 구조 오류는 제한적으로 LLM repair를 허용할 수 있으나 권한·정책 위반은 repair로 우회하지 않는다.
 
+대표 오류 (foundation 추가):
+
+```text
+PLAN_POLICY_INVALID
+```
+
+### 11.1 AgentRequest Plan Validator foundation
+
+AgentRequest가 `VALIDATING`일 때 Plan Validator는 **latest durable `PlanGenerationRun`**만 복구한다.
+과거 valid run fallback, Plan repair, LLM repair, Tool 재선택, Parameter 재구성, Approval Step 자동 삽입,
+Execution/ApprovalRequest 생성은 하지 않는다.
+
+검증 순서 (foundation):
+
+```text
+PlanGenerationRun / plan_hash / ExecutionPlanV1 재검증
+→ ParameterBuildRun / binding projection 정합성
+→ ToolRef projection
+→ single-TOOL AgentRequest foundation shape
+→ DAG / dependency / limits
+→ ToolVersion / Tool / Server current availability
+→ requester Permission + MCP_TOOL ResourceGrant
+→ AgentToolGrant ALLOW
+→ MCPToolPolicy (필수) + timeout 정합성
+→ ApprovalPolicy (requires_approval=true일 때)
+```
+
+decision precedence:
+
+```text
+structural corruption → FAILED
+permission / policy / current availability → REJECTED
+confirmation gate (grant 또는 ToolPolicy flag) → WAITING_CONFIRMATION + OPEN PLAN_CONFIRMATION
+all pass → READY
+```
+
+규칙:
+
+- `requires_approval=true`는 `WAITING_CONFIRMATION`과 별개다. 유효한 ApprovalPolicy가 있으면 validation은 통과할 수 있다.
+- ApprovalRequest / Step `WAITING_APPROVAL`은 Execution 단계에서 처리한다.
+- Plan Validator `READY`는 **execution authorization token이 아니다**. Execution 생성 시 Permission/Grant/Tool state/policy를 다시 검증한다.
+- `ToolPolicy.requires_confirmation` / `AgentToolGrant.requires_confirmation`만 confirmation source of truth다. `risk_class`만으로 confirmation을 강제하지 않는다.
+- Generator의 ToolPolicy timeout fallback(30s)은 draft 생성 편의일 뿐 validation 성공을 의미하지 않는다. Validator 시점에 MCPToolPolicy가 반드시 존재해야 한다.
+
 ---
 
 ## 12. MCP Protocol 지원기준

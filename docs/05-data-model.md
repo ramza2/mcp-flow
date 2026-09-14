@@ -841,6 +841,82 @@ PK:
 AgentRequest foundation은 `step_key = tool_1` 하나만 저장한다.
 
 
+### 10.8 Plan Validation 근거
+
+```text
+plan_validation_runs
+```
+
+Plan Validator는 AgentRequest가 `VALIDATING`일 때 latest durable `PlanGenerationRun`을 복구한 뒤
+deterministic validation evidence를 저장한다. 프로세스 메모리 outcome만 두지 않는다.
+
+#### `plan_validation_runs` (최소 field contract)
+
+```text
+id
+
+agent_request_id
+plan_generation_run_id
+
+plan_hash
+validator_version
+
+decision
+
+errors jsonb
+warnings jsonb
+checks_snapshot jsonb
+policy_snapshot jsonb
+
+confirmation_required boolean
+clarification_request_id nullable
+
+created_at
+```
+
+`validator_version` foundation: `"1.0"`
+
+`decision` (DB-local/internal literal — AgentRequest terminal status와 동일 문자열):
+
+```text
+READY
+WAITING_CONFIRMATION
+REJECTED
+FAILED
+```
+
+confirmation consistency:
+
+```text
+decision = WAITING_CONFIRMATION
+→ confirmation_required = true
+→ clarification_request_id IS NOT NULL
+→ ClarificationRequest.type = PLAN_CONFIRMATION
+
+decision ∈ {READY, REJECTED, FAILED}
+→ confirmation_required = false
+→ clarification_request_id IS NULL
+```
+
+같은 AgentRequest에 대해 confirmation 후 재검증/replan이 가능하므로
+`UNIQUE(agent_request_id)`를 두지 않는다. latest ordering: `created_at DESC, id DESC`.
+
+restart recovery:
+
+```text
+READY
+→ AgentRequest READY + latest PlanValidationRun decision READY + plan_hash 일치
+
+WAITING_CONFIRMATION
+→ AgentRequest WAITING_CONFIRMATION + OPEN PLAN_CONFIRMATION
+  + PlanValidationRun.clarification_request_id 일치
+```
+
+`policy_snapshot`에는 secret/credential 없이 ToolPolicy/ApprovalPolicy safe field만 저장한다.
+`checks_snapshot`에는 authorization/tool availability boolean 수준만 저장한다.
+
+Plan Validator `READY`는 Execution authorization token이 아니다.
+
 
 ---
 
