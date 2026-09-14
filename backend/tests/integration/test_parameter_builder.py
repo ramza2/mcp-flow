@@ -33,6 +33,7 @@ from app.repositories.mcp_tool import MCPToolRepository
 from app.repositories.parameter_build import ParameterBuildRepository
 from app.repositories.tool_selection import ToolSelectionRepository
 from app.repositories.user import UserRepository
+from app.schemas.parameter_binding import ParameterBuildSnapshot
 from app.schemas.structured_request import StructuredRequestV1
 from app.services.agent_request import AgentRequestService
 from app.services.conversation import ConversationService
@@ -579,6 +580,47 @@ async def test_pg_grant_removed_fail_closed(
 
 @pytest.mark.integration
 @pytest.mark.asyncio
+async def test_pg_property_collision_failed(
+    integration_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with integration_session_factory() as session:
+        seeded = await _seed_building(
+            session,
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "Location": {"type": "string"},
+                    "location": {"type": "string"},
+                },
+                "required": ["location"],
+                "additionalProperties": False,
+            },
+            required=["location"],
+        )
+
+    async with integration_session_factory() as session:
+        with pytest.raises(AppError):
+            await ParameterBuilderService(session).build(
+                agent_request_id=seeded["request_id"]
+            )
+
+    async with integration_session_factory() as session:
+        row = await AgentRequestRepository(session).get(seeded["request_id"])
+        assert row is not None
+        assert row.status == AgentRequestStatus.FAILED.value
+        assert row.completed_at is not None
+        run = await ParameterBuildRepository(session).get_latest_for_agent_request(
+            seeded["request_id"]
+        )
+        assert run is None
+        clarification = await ClarificationRequestRepository(
+            session
+        ).get_open_for_agent_request(seeded["request_id"])
+        assert clarification is None
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
 async def test_pg_restart_recovery(
     integration_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -603,3 +645,9 @@ async def test_pg_restart_recovery(
         assert run.bindings_snapshot["location"]["binding"]["value"] == "서울"
         assert run.bindings_snapshot["location"]["provenance"] == "USER_EXPLICIT"
         assert run.bindings_snapshot["location"]["binding"]["kind"] == "LITERAL"
+
+        validated = ParameterBuildSnapshot.model_validate(run.bindings_snapshot)
+        assert set(validated.root) == {"location"}
+        assert validated.root["location"].binding.value == "서울"
+        assert validated.model_dump(mode="json") == run.bindings_snapshot
+        assert "root" not in validated.model_dump(mode="json")

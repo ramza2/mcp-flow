@@ -412,6 +412,25 @@ def _validate_input_schema(input_schema: Any) -> tuple[dict[str, Any], list[str]
     else:
         raise ValueError("input_schema.properties must be object when present")
 
+    # Fail closed on normalized property-name collisions before entity matching.
+    # Normalize is lookup-only; exact Tool property names are preserved as keys.
+    normalized_properties: dict[str, str] = {}
+    for prop_name in properties:
+        if not isinstance(prop_name, str):
+            raise ValueError("input_schema property names must be strings")
+        normalized = _normalize_name(prop_name)
+        if not normalized:
+            raise ValueError(
+                f"input_schema property name {prop_name!r} is empty after normalize"
+            )
+        previous = normalized_properties.get(normalized)
+        if previous is not None and previous != prop_name:
+            raise ValueError(
+                "input_schema properties collide after normalize: "
+                f"{previous!r} and {prop_name!r}"
+            )
+        normalized_properties[normalized] = prop_name
+
     required_raw = input_schema.get("required")
     if required_raw is None:
         required: list[str] = []
@@ -445,6 +464,7 @@ def _map_entities_to_bindings(
     properties: dict[str, Any],
     required: list[str],
 ) -> tuple[dict[str, ParameterBinding], list[str]]:
+    # Safe: uniqueness already enforced in _validate_input_schema.
     property_by_norm: dict[str, str] = {
         _normalize_name(prop_name): prop_name for prop_name in properties
     }

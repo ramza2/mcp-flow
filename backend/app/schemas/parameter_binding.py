@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
+from pydantic import BaseModel, ConfigDict, Field, RootModel, TypeAdapter
 
 from app.domain.enums import BindingKind, ParameterProvenance
 
@@ -43,14 +43,12 @@ class ParameterBinding(BaseModel):
     binding: BindingValue
 
 
-class ParameterBuildSnapshot(BaseModel):
-    """Validated bindings map stored on ParameterBuildRun.bindings_snapshot."""
+class ParameterBuildSnapshot(RootModel[dict[str, ParameterBinding]]):
+    """Tool property name → ParameterBinding.
 
-    model_config = ConfigDict(extra="forbid")
-
-    # Tool schema property name → binding. Kept as a plain dict in DB;
-    # this model validates each entry when needed.
-    root: dict[str, ParameterBinding]
+    Durable ``ParameterBuildRun.bindings_snapshot`` is a plain map
+    (no wrapper key). Validate DB JSONB with ``model_validate(snapshot)``.
+    """
 
 
 _BINDING_ADAPTER: TypeAdapter[BindingValue] = TypeAdapter(BindingValue)

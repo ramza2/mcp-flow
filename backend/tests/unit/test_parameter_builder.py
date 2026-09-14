@@ -7,7 +7,7 @@ from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
-from app.agent.parameter_builder import ParameterBuilderService
+from app.agent.parameter_builder import ParameterBuilderService, _validate_input_schema
 from app.core.errors import AppError
 from app.domain.enums import (
     AgentRequestStatus,
@@ -34,6 +34,7 @@ from app.repositories.user import UserRepository
 from app.schemas.parameter_binding import (
     LiteralBindingValue,
     ParameterBinding,
+    ParameterBuildSnapshot,
     SecretRefBindingValue,
 )
 from app.schemas.structured_request import StructuredRequestV1
@@ -286,6 +287,72 @@ def test_binding_schema_contract() -> None:
     assert binding.binding.kind == BindingKind.LITERAL
 
 
+def test_parameter_build_snapshot_literal_round_trip() -> None:
+    payload = {
+        "location": {
+            "provenance": "USER_EXPLICIT",
+            "binding": {
+                "kind": "LITERAL",
+                "value": "서울",
+            },
+        }
+    }
+    snapshot = ParameterBuildSnapshot.model_validate(payload)
+    assert "location" in snapshot.root
+    assert snapshot.root["location"].provenance == ParameterProvenance.USER_EXPLICIT
+    assert snapshot.root["location"].binding.kind == BindingKind.LITERAL
+    dumped = snapshot.model_dump(mode="json")
+    assert dumped == payload
+    assert "root" not in dumped
+
+
+def test_parameter_build_snapshot_secret_ref_round_trip() -> None:
+    secret_id = uuid.uuid4()
+    payload = {
+        "credential": {
+            "provenance": "SECRET_REFERENCE",
+            "binding": {
+                "kind": "SECRET_REF",
+                "secret_id": str(secret_id),
+            },
+        }
+    }
+    snapshot = ParameterBuildSnapshot.model_validate(payload)
+    assert snapshot.root["credential"].provenance == ParameterProvenance.SECRET_REFERENCE
+    assert snapshot.root["credential"].binding.kind == BindingKind.SECRET_REF
+    assert snapshot.root["credential"].binding.secret_id == secret_id
+    dumped = snapshot.model_dump(mode="json")
+    assert dumped == payload
+    assert "root" not in dumped
+
+
+def test_validate_input_schema_property_collision_location() -> None:
+    with pytest.raises(ValueError, match="collide"):
+        _validate_input_schema(
+            {
+                "type": "object",
+                "properties": {
+                    "Location": {"type": "string"},
+                    "location": {"type": "string"},
+                },
+                "required": ["location"],
+            }
+        )
+
+
+def test_validate_input_schema_property_collision_whitespace() -> None:
+    with pytest.raises(ValueError, match="collide"):
+        _validate_input_schema(
+            {
+                "type": "object",
+                "properties": {
+                    " location ": {"type": "string"},
+                    "LOCATION": {"type": "string"},
+                },
+            }
+        )
+
+
 @pytest.mark.asyncio
 async def test_complete_literal_bindings(db_session: AsyncSession) -> None:
     seeded = await _seed_building_parameters(db_session)
@@ -465,7 +532,75 @@ async def test_casefold_unique_match(db_session: AsyncSession) -> None:
         agent_request_id=seeded["request_id"]
     )
     assert outcome.is_complete is True
+    assert set(outcome.bindings) == {"location"}
     assert "location" in outcome.bindings
+    assert "Location" not in outcome.bindings
+
+
+@pytest.mark.asyncio
+async def test_property_collision_failed_no_run(db_session: AsyncSession) -> None:
+    seeded = await _seed_building_parameters(
+        db_session,
+        input_schema={
+            "type": "object",
+            "properties": {
+                "Location": {"type": "string"},
+                "location": {"type": "string"},
+            },
+            "required": ["location"],
+            "additionalProperties": False,
+        },
+        required=["location"],
+    )
+    with pytest.raises(AppError):
+        await ParameterBuilderService(db_session).build(
+            agent_request_id=seeded["request_id"]
+        )
+    row = await AgentRequestRepository(db_session).get(seeded["request_id"])
+    assert row is not None
+    assert row.status == AgentRequestStatus.FAILED.value
+    assert row.completed_at is not None
+    run = await ParameterBuildRepository(db_session).get_latest_for_agent_request(
+        seeded["request_id"]
+    )
+    assert run is None
+    clarification = await ClarificationRequestRepository(
+        db_session
+    ).get_open_for_agent_request(seeded["request_id"])
+    assert clarification is None
+
+
+@pytest.mark.asyncio
+async def test_exact_property_key_preserved(db_session: AsyncSession) -> None:
+    """Entity casefold-matches; durable key keeps exact Tool property name."""
+    seeded = await _seed_building_parameters(
+        db_session,
+        input_schema={
+            "type": "object",
+            "properties": {"Location": {"type": "string"}},
+            "required": ["Location"],
+            "additionalProperties": False,
+        },
+        required=["Location"],
+        entities=[
+            {
+                "name": "location",
+                "value": "서울",
+                "source": ParameterProvenance.USER_EXPLICIT.value,
+            }
+        ],
+    )
+    outcome = await ParameterBuilderService(db_session).build(
+        agent_request_id=seeded["request_id"]
+    )
+    assert outcome.is_complete is True
+    assert set(outcome.bindings) == {"Location"}
+    run = await ParameterBuildRepository(db_session).get_latest_complete_for_agent_request(
+        seeded["request_id"]
+    )
+    assert run is not None
+    assert "Location" in run.bindings_snapshot
+    assert "location" not in run.bindings_snapshot
 
 
 @pytest.mark.asyncio
@@ -663,3 +798,10 @@ async def test_restart_recovery_from_durable_run(db_session: AsyncSession) -> No
     assert recovered.tool_version_id == seeded["tool_version_id"]
     assert recovered.bindings_snapshot["location"]["binding"]["value"] == "서울"
     assert recovered.bindings_snapshot["location"]["provenance"] == "USER_EXPLICIT"
+
+    validated = ParameterBuildSnapshot.model_validate(recovered.bindings_snapshot)
+    assert set(validated.root) == {"location"}
+    assert validated.root["location"].binding.kind == BindingKind.LITERAL
+    assert validated.root["location"].binding.value == "서울"
+    assert validated.model_dump(mode="json") == recovered.bindings_snapshot
+    assert "root" not in validated.model_dump(mode="json")
