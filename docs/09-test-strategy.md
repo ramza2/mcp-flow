@@ -298,6 +298,19 @@ Dataset은 평가 전 FROZEN하고 실행 중 정답을 변경하지 않는다.
 - cancel/double-generator rollback
 - restart recovery (`plan_snapshot` re-validate + hash match)
 
+추가 (Plan Validator foundation):
+
+- Plan Validator durable handoff (`VALIDATING`→`READY`|`WAITING_CONFIRMATION`|`REJECTED`|`FAILED`)
+- plan_hash tamper / ToolRef projection mismatch
+- DAG (dependency missing, self dependency, cycle helper)
+- binding projection equality / LITERAL basic type / SECRET_REF structure
+- ToolVersion current availability / stale `current_version_id`
+- authorization snapshot (`mcp.tool.execute` + exact `MCP_TOOL` ResourceGrant)
+- ToolPolicy required + timeout consistency / ApprovalPolicy validation
+- PLAN_CONFIRMATION atomicity (`expires_at = null`)
+- cancel race / double validator CAS
+- restart recovery (READY + WAITING_CONFIRMATION)
+
 
 ## 9. Repository Integration Test
 
