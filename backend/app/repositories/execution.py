@@ -55,7 +55,8 @@ class ExecutionRepository:
             plan_hash=plan_hash,
             input_snapshot=dict(input_snapshot),
             policy_snapshot=dict(policy_snapshot),
-            result_summary=None,
+            # Leave nullable JSONB unset so PostgreSQL stores SQL NULL
+            # (explicit None becomes JSON null and fails jsonb_typeof CHECKs).
             error_code=None,
             error_message=None,
             trace_id=trace_id,
@@ -95,8 +96,7 @@ class ExecutionRepository:
             sequence_hint=sequence_hint,
             status=status,
             step_snapshot=dict(step_snapshot),
-            resolved_input=None,
-            result_inline=None,
+            # Omit resolved_input / result_inline — SQL NULL, not JSON null.
             result_blob_id=None,
             condition_result=None,
             iteration_no=None,
