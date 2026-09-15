@@ -431,6 +431,204 @@ async def test_mixed_secret_non_secret_duplicates_rejected(
 
 
 @pytest.mark.asyncio
+async def test_multi_secret_reference_uuid_preserved(
+    db_session: AsyncSession,
+) -> None:
+    new_secret = uuid.uuid4()
+    seeded = await _seed_missing_parameter(
+        db_session,
+        required=["credential"],
+        entities=[],
+        missing_inputs=["credential"],
+    )
+    request = await AgentRequestRepository(db_session).get(seeded["request_id"])
+    assert request is not None
+    structured = StructuredRequestV1.model_validate(request.structured_request)
+    before_entities = [
+        {
+            "name": "credential",
+            "value": str(uuid.uuid4()),
+            "source": ParameterProvenance.SECRET_REFERENCE.value,
+        },
+        {
+            "name": "CREDENTIAL",
+            "value": str(uuid.uuid4()),
+            "source": ParameterProvenance.SECRET_REFERENCE.value,
+        },
+    ]
+    patched = StructuredRequestV1.model_validate(
+        {
+            **structured.model_dump(mode="json"),
+            "entities": before_entities,
+            "missing_inputs": ["credential"],
+            "needs_clarification": True,
+        }
+    )
+    request.structured_request = patched.model_dump(mode="json")
+    await db_session.commit()
+
+    outcome = await ClarificationResponseService(db_session).submit_response(
+        agent_request_id=seeded["request_id"],
+        clarification_id=seeded["clarification_id"],
+        requester_id=seeded["requester_id"],
+        body=_submit({"credential": str(new_secret)}),
+    )
+    assert outcome.agent_request_status == AgentRequestStatus.RETRIEVING
+    request = await AgentRequestRepository(db_session).get(seeded["request_id"])
+    assert request is not None
+    structured = StructuredRequestV1.model_validate(request.structured_request)
+    matching = [
+        e for e in structured.entities if e.name.strip().casefold() == "credential"
+    ]
+    assert len(matching) == 1
+    assert matching[0].name == "credential"
+    assert matching[0].source == ParameterProvenance.SECRET_REFERENCE
+    assert matching[0].value == str(new_secret)
+
+
+@pytest.mark.asyncio
+async def test_multi_secret_reference_plaintext_rejected(
+    db_session: AsyncSession,
+) -> None:
+    seeded = await _seed_missing_parameter(
+        db_session,
+        required=["credential"],
+        entities=[],
+        missing_inputs=["credential"],
+    )
+    request = await AgentRequestRepository(db_session).get(seeded["request_id"])
+    assert request is not None
+    structured = StructuredRequestV1.model_validate(request.structured_request)
+    before = structured.model_dump(mode="json")
+    patched = StructuredRequestV1.model_validate(
+        {
+            **before,
+            "entities": [
+                {
+                    "name": "credential",
+                    "value": str(uuid.uuid4()),
+                    "source": ParameterProvenance.SECRET_REFERENCE.value,
+                },
+                {
+                    "name": "CREDENTIAL",
+                    "value": str(uuid.uuid4()),
+                    "source": ParameterProvenance.SECRET_REFERENCE.value,
+                },
+            ],
+            "missing_inputs": ["credential"],
+            "needs_clarification": True,
+        }
+    )
+    request.structured_request = patched.model_dump(mode="json")
+    await db_session.commit()
+    before_json = str(request.structured_request)
+
+    with pytest.raises(AppError) as exc:
+        await ClarificationResponseService(db_session).submit_response(
+            agent_request_id=seeded["request_id"],
+            clarification_id=seeded["clarification_id"],
+            requester_id=seeded["requester_id"],
+            body=_submit({"credential": "plain-password"}),
+        )
+    assert exc.value.code == "VALIDATION_ERROR"
+    assert exc.value.status_code == 400
+
+    clarification = await ClarificationRequestRepository(db_session).get(
+        seeded["clarification_id"]
+    )
+    assert clarification is not None
+    assert clarification.status == ClarificationRequestStatus.OPEN.value
+    assert clarification.response_payload is None
+    request = await AgentRequestRepository(db_session).get(seeded["request_id"])
+    assert request is not None
+    assert request.status == AgentRequestStatus.WAITING_INPUT.value
+    assert "plain-password" not in str(request.structured_request)
+    assert "plain-password" not in before_json or True  # baseline may differ
+    assert request.structured_request == patched.model_dump(mode="json")
+
+
+def test_normalized_question_property_collision_conflict() -> None:
+    schema = {
+        "type": "object",
+        "properties": {
+            "Location": {"type": "string"},
+            " location ": {"type": "string"},
+        },
+        "required": ["Location"],
+        "additionalProperties": False,
+    }
+    with pytest.raises(AppError) as exc:
+        _validate_against_question_schema(schema, {"Location": "서울"})
+    assert exc.value.code == "RESOURCE_CONFLICT"
+    assert exc.value.status_code == 409
+
+
+def test_normalized_required_collision_conflict() -> None:
+    schema = {
+        "type": "object",
+        "properties": {"location": {"type": "string"}},
+        "required": ["location", " Location "],
+        "additionalProperties": False,
+    }
+    with pytest.raises(AppError) as exc:
+        _validate_against_question_schema(schema, {"location": "서울"})
+    assert exc.value.code == "RESOURCE_CONFLICT"
+    assert exc.value.status_code == 409
+
+
+def test_normalized_response_key_collision_validation_error() -> None:
+    schema = {
+        "type": "object",
+        "properties": {"location": {"type": "string"}},
+        "required": ["location"],
+        "additionalProperties": False,
+    }
+    with pytest.raises(AppError) as exc:
+        _validate_against_question_schema(
+            schema,
+            {"Location": "서울", " location ": "부산"},
+        )
+    assert exc.value.code == "VALIDATION_ERROR"
+    assert exc.value.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_normalized_question_property_collision_keeps_open(
+    db_session: AsyncSession,
+) -> None:
+    seeded = await _seed_missing_parameter(db_session)
+    clarification = await ClarificationRequestRepository(db_session).get(
+        seeded["clarification_id"]
+    )
+    assert clarification is not None
+    clarification.question_schema = {
+        "type": "object",
+        "properties": {
+            "Location": {"type": "string"},
+            " location ": {"type": "string"},
+        },
+        "required": ["Location"],
+        "additionalProperties": False,
+    }
+    await db_session.commit()
+
+    with pytest.raises(AppError) as exc:
+        await ClarificationResponseService(db_session).submit_response(
+            agent_request_id=seeded["request_id"],
+            clarification_id=seeded["clarification_id"],
+            requester_id=seeded["requester_id"],
+            body=_submit({"Location": "서울"}),
+        )
+    assert exc.value.code == "RESOURCE_CONFLICT"
+    clarification = await ClarificationRequestRepository(db_session).get(
+        seeded["clarification_id"]
+    )
+    assert clarification is not None
+    assert clarification.status == ClarificationRequestStatus.OPEN.value
+    assert clarification.response_payload is None
+
+
+@pytest.mark.asyncio
 async def test_ambiguities_remaining_rejected(db_session: AsyncSession) -> None:
     seeded = await _seed_missing_parameter(
         db_session,

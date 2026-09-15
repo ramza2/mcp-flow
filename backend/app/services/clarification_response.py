@@ -243,8 +243,8 @@ class ClarificationResponseService:
                 status_code=409,
             )
 
-        # Exact field names from properties keys (lookup by normalized name).
-        exact_by_norm = {_norm(k): k for k in properties}
+        # Reuse fail-closed property index (validated already ran the same check).
+        exact_by_norm = _property_name_index(properties)
         for key in validated:
             if _norm(key) not in exact_by_norm:
                 # validated keys already constrained by schema; keep defensive
@@ -260,11 +260,13 @@ class ClarificationResponseService:
             matching = [
                 e for e in entities if _norm(e.name) == _norm(exact_name)
             ]
-            sources = {e.source for e in matching}
-            if (
-                ParameterProvenance.SECRET_REFERENCE in sources
-                and len(sources) > 1
-            ):
+            secret_count = sum(
+                1
+                for e in matching
+                if e.source == ParameterProvenance.SECRET_REFERENCE
+            )
+            # Mixed secret/non-secret on the same normalized field is fail-closed.
+            if 0 < secret_count < len(matching):
                 raise AppError(
                     code="VALIDATION_ERROR",
                     message=(
@@ -273,10 +275,8 @@ class ClarificationResponseService:
                     ),
                     status_code=400,
                 )
-            if (
-                len(matching) == 1
-                and matching[0].source == ParameterProvenance.SECRET_REFERENCE
-            ):
+            # One or many SECRET_REFERENCE-only matches keep secret semantics.
+            if secret_count >= 1 and secret_count == len(matching):
                 secret_id = _parse_secret_uuid(response_value, field=exact_name)
                 replacement = StructuredRequestEntity(
                     name=exact_name,
@@ -582,6 +582,83 @@ def _validate_confirmation_payload(
     return confirmed
 
 
+def _property_name_index(properties: dict[str, Any]) -> dict[str, str]:
+    """Map normalized property name → exact property key. Collisions are schema corruption."""
+    prop_by_norm: dict[str, str] = {}
+    for key in properties:
+        if not isinstance(key, str):
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message="question_schema.properties key는 non-empty string이어야 합니다.",
+                status_code=409,
+            )
+        normalized = _norm(key)
+        if not normalized:
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message="question_schema.properties key는 정규화 후 non-empty여야 합니다.",
+                status_code=409,
+            )
+        if normalized in prop_by_norm:
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message=(
+                    "question_schema.properties에 normalized name collision이 있습니다."
+                ),
+                status_code=409,
+            )
+        prop_by_norm[normalized] = key
+    return prop_by_norm
+
+
+def _required_exact_names(
+    required: Any, *, prop_by_norm: dict[str, str]
+) -> list[str]:
+    """Validate required contract; return exact property names. Corruption → 409."""
+    if not isinstance(required, list):
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message="question_schema.required는 string[]이어야 합니다.",
+            status_code=409,
+        )
+    exact_names: list[str] = []
+    seen_exact: set[str] = set()
+    seen_norm: set[str] = set()
+    for item in required:
+        if not isinstance(item, str):
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message="question_schema.required item은 non-empty string이어야 합니다.",
+                status_code=409,
+            )
+        normalized = _norm(item)
+        if not normalized:
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message="question_schema.required item은 정규화 후 non-empty여야 합니다.",
+                status_code=409,
+            )
+        if item in seen_exact or normalized in seen_norm:
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message="question_schema.required에 duplicate/normalized collision이 있습니다.",
+                status_code=409,
+            )
+        exact = prop_by_norm.get(normalized)
+        if exact is None:
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message=(
+                    f"question_schema.required item={item!r}가 properties에 연결되지 않습니다."
+                ),
+                status_code=409,
+            )
+        seen_exact.add(item)
+        seen_norm.add(normalized)
+        exact_names.append(exact)
+    return exact_names
+
+
 def _validate_against_question_schema(
     schema: dict[str, Any], payload: dict[str, Any]
 ) -> dict[str, Any]:
@@ -598,34 +675,38 @@ def _validate_against_question_schema(
             message="question_schema.properties가 object가 아닙니다.",
             status_code=409,
         )
-    required = schema.get("required", [])
-    if not isinstance(required, list) or not all(isinstance(r, str) for r in required):
-        raise AppError(
-            code="RESOURCE_CONFLICT",
-            message="question_schema.required는 string[]이어야 합니다.",
-            status_code=409,
-        )
+    prop_by_norm = _property_name_index(properties)
+    required_exact = _required_exact_names(
+        schema.get("required", []), prop_by_norm=prop_by_norm
+    )
 
-    # Map payload keys to property keys via normalized lookup, then re-key to exact names.
-    prop_by_norm = {_norm(k): k for k in properties}
+    # Map payload keys to exact property names; reject normalized key collisions.
     exact_payload: dict[str, Any] = {}
     for key, value in payload.items():
+        if not isinstance(key, str) or not _norm(key):
+            raise AppError(
+                code="VALIDATION_ERROR",
+                message=f"invalid field key={key!r}",
+                status_code=400,
+            )
         exact = prop_by_norm.get(_norm(key))
         if exact is None:
-            if schema.get("additionalProperties") is False:
-                raise AppError(
-                    code="VALIDATION_ERROR",
-                    message=f"unknown field={key!r}",
-                    status_code=400,
-                )
             raise AppError(
                 code="VALIDATION_ERROR",
                 message=f"unknown field={key!r}",
                 status_code=400,
             )
+        if exact in exact_payload:
+            raise AppError(
+                code="VALIDATION_ERROR",
+                message=(
+                    f"response payload에 normalized duplicate field={exact!r}가 있습니다."
+                ),
+                status_code=400,
+            )
         exact_payload[exact] = value
 
-    for req in required:
+    for req in required_exact:
         if req not in exact_payload:
             raise AppError(
                 code="VALIDATION_ERROR",

@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import uuid
 from datetime import UTC, datetime
 from typing import Any
+from uuid import UUID
 
 import pytest
 from app.agent.parameter_builder import ParameterBuilderService
@@ -564,3 +566,162 @@ async def test_pg_restart_recovery(
             agent_request_id=plan_seed["request_id"]
         )
         assert outcome.decision == "READY"
+
+
+async def _seed_missing_credential(
+    session: AsyncSession,
+) -> dict[str, Any]:
+    seeded = await _seed_building(
+        session,
+        required=["credential"],
+        entities=[],
+    )
+    request = await AgentRequestRepository(session).get(seeded["request_id"])
+    assert request is not None
+    structured = StructuredRequestV1.model_validate(request.structured_request)
+    patched = StructuredRequestV1.model_validate(
+        {
+            **structured.model_dump(mode="json"),
+            "missing_inputs": ["credential"],
+            "ambiguities": [],
+            "needs_clarification": True,
+        }
+    )
+    await AgentRequestService(session).compare_and_set_status(
+        request.id,
+        expected_statuses=[AgentRequestStatus.BUILDING_PARAMETERS],
+        new_status=AgentRequestStatus.BUILDING_PARAMETERS,
+        extra_values={
+            "structured_request": patched.model_dump(mode="json"),
+            "structured_request_version": "1.0",
+        },
+    )
+    await session.commit()
+    outcome = await ParameterBuilderService(session).build(
+        agent_request_id=seeded["request_id"]
+    )
+    assert outcome.agent_request_status == AgentRequestStatus.WAITING_INPUT
+    clarification = await ClarificationRequestRepository(
+        session
+    ).get_open_for_agent_request(seeded["request_id"])
+    assert clarification is not None
+    request = await AgentRequestRepository(session).get(seeded["request_id"])
+    assert request is not None
+    return {
+        **seeded,
+        "clarification_id": clarification.id,
+        "requester_id": request.requester_id,
+    }
+
+
+async def _inject_duplicate_secrets(
+    session: AsyncSession, *, request_id: UUID
+) -> dict[str, Any]:
+    request = await AgentRequestRepository(session).get(request_id)
+    assert request is not None
+    structured = StructuredRequestV1.model_validate(request.structured_request)
+    uuid_a = str(uuid.uuid4())
+    uuid_b = str(uuid.uuid4())
+    patched = StructuredRequestV1.model_validate(
+        {
+            **structured.model_dump(mode="json"),
+            "entities": [
+                {
+                    "name": "credential",
+                    "value": uuid_a,
+                    "source": ParameterProvenance.SECRET_REFERENCE.value,
+                },
+                {
+                    "name": "CREDENTIAL",
+                    "value": uuid_b,
+                    "source": ParameterProvenance.SECRET_REFERENCE.value,
+                },
+            ],
+            "missing_inputs": ["credential"],
+            "needs_clarification": True,
+        }
+    )
+    request.structured_request = patched.model_dump(mode="json")
+    await session.commit()
+    return {
+        "uuid_a": uuid_a,
+        "uuid_b": uuid_b,
+        "structured": patched.model_dump(mode="json"),
+    }
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_pg_duplicate_secret_valid_uuid(
+    integration_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    new_secret = uuid.uuid4()
+    async with integration_session_factory() as session:
+        seeded = await _seed_missing_credential(session)
+        await _inject_duplicate_secrets(session, request_id=seeded["request_id"])
+
+    async with integration_session_factory() as session:
+        outcome = await ClarificationResponseService(session).submit_response(
+            agent_request_id=seeded["request_id"],
+            clarification_id=seeded["clarification_id"],
+            requester_id=seeded["requester_id"],
+            body=_submit({"credential": str(new_secret)}),
+        )
+        assert outcome.agent_request_status == AgentRequestStatus.RETRIEVING
+
+    async with integration_session_factory() as session:
+        clarification = await ClarificationRequestRepository(session).get(
+            seeded["clarification_id"]
+        )
+        assert clarification is not None
+        assert clarification.status == ClarificationRequestStatus.ANSWERED.value
+        request = await AgentRequestRepository(session).get(seeded["request_id"])
+        assert request is not None
+        assert request.status == AgentRequestStatus.RETRIEVING.value
+        structured = StructuredRequestV1.model_validate(request.structured_request)
+        matching = [
+            e
+            for e in structured.entities
+            if e.name.strip().casefold() == "credential"
+        ]
+        assert len(matching) == 1
+        assert matching[0].name == "credential"
+        assert matching[0].source == ParameterProvenance.SECRET_REFERENCE
+        assert matching[0].value == str(new_secret)
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_pg_duplicate_secret_plaintext_not_persisted(
+    integration_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with integration_session_factory() as session:
+        seeded = await _seed_missing_credential(session)
+        injected = await _inject_duplicate_secrets(
+            session, request_id=seeded["request_id"]
+        )
+
+    async with integration_session_factory() as session:
+        with pytest.raises(AppError) as exc:
+            await ClarificationResponseService(session).submit_response(
+                agent_request_id=seeded["request_id"],
+                clarification_id=seeded["clarification_id"],
+                requester_id=seeded["requester_id"],
+                body=_submit({"credential": "plain-password"}),
+            )
+        assert exc.value.code == "VALIDATION_ERROR"
+        assert exc.value.status_code == 400
+
+    async with integration_session_factory() as session:
+        clarification = await ClarificationRequestRepository(session).get(
+            seeded["clarification_id"]
+        )
+        assert clarification is not None
+        assert clarification.status == ClarificationRequestStatus.OPEN.value
+        assert clarification.response_payload is None
+        request = await AgentRequestRepository(session).get(seeded["request_id"])
+        assert request is not None
+        assert request.status == AgentRequestStatus.WAITING_INPUT.value
+        assert request.structured_request == injected["structured"]
+        assert "plain-password" not in str(request.structured_request)
+        assert "plain-password" not in str(clarification.response_payload)
