@@ -360,6 +360,8 @@ async def test_confirmation_required_flag_on_ready_validation_reject(
 async def test_plan_run_mismatch_409(
     db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    from datetime import timedelta
+
     _install_no_side_effects(monkeypatch)
     seeded = await _seed_ready(db_session)
     validation = await PlanValidationRepository(db_session).get_latest_for_agent_request(
@@ -371,6 +373,7 @@ async def test_plan_run_mismatch_409(
     )
     assert plan is not None
     # Insert a newer plan run so latest != validated plan.
+    # SQLite created_at is second-precision; bump explicitly so ordering wins.
     newer = PlanGenerationRun(
         id=uuid.uuid4(),
         agent_request_id=seeded["request_id"],
@@ -380,6 +383,7 @@ async def test_plan_run_mismatch_409(
         plan_snapshot=dict(plan.plan_snapshot),
         plan_hash=plan.plan_hash,
         planning_settings_snapshot=dict(plan.planning_settings_snapshot),
+        created_at=plan.created_at + timedelta(seconds=5),
     )
     db_session.add(newer)
     await db_session.commit()
