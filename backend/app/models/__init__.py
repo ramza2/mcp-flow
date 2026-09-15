@@ -11,6 +11,8 @@ from app.models.auth import (
     UserRole,
 )
 from app.models.conversation import AgentRequest, Conversation, ConversationMessage
+from app.models.execution import Execution, ExecutionStep
+from app.models.idempotency import ApiIdempotencyRecord
 from app.models.mcp import (
     MCPServer,
     MCPServerCheck,
@@ -38,9 +40,12 @@ __all__ = [
     "AgentToolGrant",
     "AgentVersion",
     "ClarificationRequest",
+    "ApiIdempotencyRecord",
     "Conversation",
     "ConversationMessage",
     "ApprovalPolicy",
+    "Execution",
+    "ExecutionStep",
     "EmbeddingProfile",
     "LLMProfile",
     "MCPServer",
