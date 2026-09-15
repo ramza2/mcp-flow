@@ -57,7 +57,7 @@ from app.services.clarification_response import ClarificationResponseService
 from app.services.execution_creation import ExecutionCreationService
 from app.services.policy_snapshot import build_safe_tool_policy_snapshot
 from app.services.user import UserService
-from sqlalchemy import select, text, update
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from tests.unit.test_plan_validator import _seed_validating

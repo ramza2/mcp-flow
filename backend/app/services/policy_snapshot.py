@@ -1,4 +1,7 @@
-"""Safe ToolPolicy / ApprovalPolicy snapshot builder (shared by PlanValidator + Execution create)."""
+"""Safe ToolPolicy / ApprovalPolicy snapshot builder.
+
+Shared by PlanValidator and Execution create.
+"""
 
 from __future__ import annotations
 
