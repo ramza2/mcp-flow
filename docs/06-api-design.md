@@ -665,6 +665,56 @@ Confirmation 예:
 
 `POST /agent-requests/{request_id}/confirmations` convenience endpoint는 별도 범위다. 이번 foundation의 canonical path는 clarifications responses다.
 
+### 11.4 Execution 생성 (AgentRequest foundation)
+
+```http
+POST /api/v1/agent-requests/{request_id}/executions
+```
+
+Session 인증이 필요하며 unsafe POST이므로 CSRF가 필요하다.
+
+Required headers:
+
+```http
+Idempotency-Key: <client-generated-key>
+X-CSRF-Token: <csrf-token>
+```
+
+Request body는 없다. Client는 Plan JSON을 다시 제출하지 않는다. 서버가 READY AgentRequest의 latest READY `PlanValidationRun` → exact `PlanGenerationRun` → current preflight로 immutable `plan_snapshot`을 materialize한다.
+
+성공 응답 `201 Created` 예:
+
+```json
+{
+  "id": "...",
+  "status": "CREATED",
+  "source_type": "AGENT_REQUEST",
+  "trigger_type": "USER",
+  "agent_request_id": "...",
+  "agent_version_id": "...",
+  "plan_hash": "...",
+  "requested_at": "2026-09-15T00:00:00Z",
+  "step_count": 1
+}
+```
+
+Idempotency (`operation_scope = AGENT_REQUEST_EXECUTION_CREATE_V1`):
+
+```text
+동일 Idempotency-Key + 동일 request hash
+→ 기존 Execution 반환 (201, replay)
+
+동일 Idempotency-Key + 다른 request hash
+→ 409 IDEMPOTENCY_KEY_REUSED
+
+preflight 실패
+→ Idempotency-Key를 소비하지 않음
+```
+
+`request_hash`는 `{agent_request_id, source_type=AGENT_REQUEST, trigger_type=USER}`의 canonical JSON SHA-256이다.
+
+AgentRequest `requester_id`와 동일한 authenticated principal만 생성할 수 있다. AgentRequest가 `READY`가 아니거나 preflight가 실패하면 Execution을 만들지 않는다.
+
 ---
 
 ## 12. Workflow API
