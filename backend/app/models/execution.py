@@ -162,7 +162,7 @@ class ExecutionStep(Base):
     status: Mapped[str] = mapped_column(String(32), nullable=False)
     step_snapshot: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     resolved_input: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
-    result_inline: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    result_inline: Mapped[Any | None] = mapped_column(JSONB, nullable=True)
     result_blob_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), nullable=True
     )

@@ -1206,3 +1206,98 @@ async def test_empty_idempotency_key_400(
         )
     assert exc.value.status_code == 400
     assert exc.value.code == "VALIDATION_ERROR"
+
+
+@pytest.mark.asyncio
+async def test_idempotency_key_128_chars_accepted(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _install_no_side_effects(monkeypatch)
+    seeded = await _seed_ready(db_session)
+    key = "k" * 128
+    outcome = await _create(db_session, seeded, idempotency_key=key)
+    assert outcome.replayed is False
+    assert outcome.result.status == ExecutionStatus.CREATED.value
+
+
+@pytest.mark.asyncio
+async def test_idempotency_key_129_chars_rejected(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _install_no_side_effects(monkeypatch)
+    seeded = await _seed_ready(db_session)
+    with pytest.raises(AppError) as exc:
+        await _create(db_session, seeded, idempotency_key="k" * 129)
+    assert exc.value.status_code == 400
+    assert exc.value.code == "VALIDATION_ERROR"
+    assert (
+        await ExecutionRepository(db_session).count_for_agent_request(
+            seeded["request_id"]
+        )
+        == 0
+    )
+    rows = (
+        await db_session.execute(select(ApiIdempotencyRecord))
+    ).scalars().all()
+    assert rows == []
+
+
+@pytest.mark.asyncio
+async def test_replay_returns_stored_snapshot_after_status_mutation(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from datetime import UTC, datetime
+
+    _install_no_side_effects(monkeypatch)
+    seeded = await _seed_ready(db_session)
+    key = _idem_key()
+    first = await _create(db_session, seeded, idempotency_key=key)
+    assert first.result.status == ExecutionStatus.CREATED.value
+    assert first.replayed is False
+
+    execution = await ExecutionRepository(db_session).get(first.result.id)
+    assert execution is not None
+    execution.status = ExecutionStatus.QUEUED.value
+    execution.queued_at = datetime.now(UTC)
+    await db_session.commit()
+
+    replay = await _create(db_session, seeded, idempotency_key=key)
+    assert replay.replayed is True
+    assert replay.http_status == 201
+    assert replay.result.id == first.result.id
+    assert replay.result.status == ExecutionStatus.CREATED.value
+
+    current = await ExecutionRepository(db_session).get(first.result.id)
+    assert current is not None
+    assert current.status == ExecutionStatus.QUEUED.value
+    assert current.queued_at is not None
+
+
+@pytest.mark.asyncio
+async def test_corrupt_idempotency_response_body_conflict(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _install_no_side_effects(monkeypatch)
+    seeded = await _seed_ready(db_session)
+    key = _idem_key()
+    first = await _create(db_session, seeded, idempotency_key=key)
+    row = (
+        await db_session.execute(
+            select(ApiIdempotencyRecord).where(
+                ApiIdempotencyRecord.resource_id == first.result.id
+            )
+        )
+    ).scalar_one()
+    row.response_body = {"status": "CREATED"}  # missing required fields
+    await db_session.commit()
+
+    with pytest.raises(AppError) as exc:
+        await _create(db_session, seeded, idempotency_key=key)
+    assert exc.value.status_code == 409
+    assert exc.value.code == "RESOURCE_CONFLICT"
+    assert (
+        await ExecutionRepository(db_session).count_for_agent_request(
+            seeded["request_id"]
+        )
+        == 1
+    )

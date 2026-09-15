@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
+from pydantic import ValidationError
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -71,7 +72,8 @@ _MCP_TOOL_RESOURCE = ResourceGrantResourceType.MCP_TOOL.value
 _OPERATION_SCOPE = "AGENT_REQUEST_EXECUTION_CREATE_V1"
 _TRIGGER_USER = "USER"
 _RESOURCE_EXECUTION = "EXECUTION"
-_PG_UNIQUE = "23505"
+_IDEMPOTENCY_KEY_MAX_LEN = 128
+_IDEMPOTENCY_PK_NAME = "pk_api_idempotency_records"
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,13 +101,41 @@ def _semantic_equal(left: Any, right: Any) -> bool:
     )
 
 
-def _is_unique_violation(exc: IntegrityError) -> bool:
+def _constraint_name(exc: IntegrityError) -> str | None:
     orig = getattr(exc, "orig", None)
-    code = getattr(orig, "pgcode", None) or getattr(orig, "sqlstate", None)
-    if code == _PG_UNIQUE:
+    if orig is None:
+        return None
+    diag = getattr(orig, "diag", None)
+    name = getattr(diag, "constraint_name", None) if diag is not None else None
+    if name:
+        return str(name)
+    name = getattr(orig, "constraint_name", None)
+    return str(name) if name else None
+
+
+def _is_idempotency_pk_violation(exc: IntegrityError) -> bool:
+    """True only for api_idempotency_records composite PK collisions.
+
+    Other UNIQUE violations must propagate unchanged.
+    """
+    name = _constraint_name(exc)
+    if name == _IDEMPOTENCY_PK_NAME:
         return True
-    msg = str(getattr(orig, "args", [exc])[0]).lower()
-    return "unique" in msg
+
+    orig = getattr(exc, "orig", None)
+    msg = str(orig if orig is not None else exc)
+    if _IDEMPOTENCY_PK_NAME in msg:
+        return True
+
+    # SQLite create_all fallback (no named PK constraint): table+PK columns.
+    lower = msg.lower()
+    if (
+        "unique constraint failed" in lower
+        and "api_idempotency_records" in lower
+        and "idempotency_key" in lower
+    ):
+        return True
+    return False
 
 
 class ExecutionCreationService:
@@ -138,6 +168,15 @@ class ExecutionCreationService:
             raise AppError(
                 code="VALIDATION_ERROR",
                 message="Idempotency-Key must be a non-empty string.",
+                status_code=400,
+            )
+        if len(key) > _IDEMPOTENCY_KEY_MAX_LEN:
+            raise AppError(
+                code="VALIDATION_ERROR",
+                message=(
+                    f"Idempotency-Key must be at most "
+                    f"{_IDEMPOTENCY_KEY_MAX_LEN} characters."
+                ),
                 status_code=400,
             )
 
@@ -187,7 +226,7 @@ class ExecutionCreationService:
             return outcome
         except IntegrityError as exc:
             await self._session.rollback()
-            if not _is_unique_violation(exc):
+            if not _is_idempotency_pk_violation(exc):
                 raise
             raced = await self._idempotency.get(
                 principal_key=principal_key,
@@ -230,20 +269,31 @@ class ExecutionCreationService:
                 message="Idempotency가 가리키는 Execution이 없습니다.",
                 status_code=409,
             )
-        steps = await self._executions.list_steps(execution.id)
+        if record.response_status != 201 or record.response_body is None:
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message="Idempotency response snapshot이 손상되었습니다.",
+                status_code=409,
+            )
+        try:
+            result = AgentRequestExecutionCreateResult.model_validate(
+                record.response_body
+            )
+        except ValidationError as exc:
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message="Idempotency response snapshot이 유효하지 않습니다.",
+                status_code=409,
+            ) from exc
+        if result.id != record.resource_id:
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message="Idempotency response snapshot id가 resource_id와 불일치합니다.",
+                status_code=409,
+            )
         return ExecutionCreationOutcome(
-            result=AgentRequestExecutionCreateResult(
-                id=execution.id,
-                status=execution.status,
-                source_type=execution.source_type,
-                trigger_type=execution.trigger_type,
-                agent_request_id=execution.agent_request_id,
-                agent_version_id=execution.agent_version_id,
-                plan_hash=execution.plan_hash,
-                requested_at=execution.requested_at,
-                step_count=len(steps),
-            ),
-            http_status=201,
+            result=result,
+            http_status=int(record.response_status),
             replayed=True,
         )
 

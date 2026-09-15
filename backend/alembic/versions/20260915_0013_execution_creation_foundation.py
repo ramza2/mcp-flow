@@ -299,10 +299,6 @@ def upgrade() -> None:
             name="ck_execution_steps_resolved_input_object",
         ),
         sa.CheckConstraint(
-            "result_inline IS NULL OR jsonb_typeof(result_inline) = 'object'",
-            name="ck_execution_steps_result_inline_object",
-        ),
-        sa.CheckConstraint(
             "sequence_hint >= 0",
             name="ck_execution_steps_sequence_hint",
         ),

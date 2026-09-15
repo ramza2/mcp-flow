@@ -60,10 +60,17 @@ async def create_agent_request_execution(
             message="Idempotency-Key header is required.",
             status_code=400,
         )
+    key = idempotency_key.strip()
+    if len(key) > 128:
+        raise AppError(
+            code="VALIDATION_ERROR",
+            message="Idempotency-Key must be at most 128 characters.",
+            status_code=400,
+        )
     outcome = await ExecutionCreationService(session).create_from_agent_request(
         agent_request_id=request_id,
         requester_id=principal.user_id,
-        idempotency_key=idempotency_key,
+        idempotency_key=key,
     )
     response.status_code = outcome.http_status
     return outcome.result

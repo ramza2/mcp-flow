@@ -459,7 +459,7 @@ async def test_pg_concurrent_same_key_one_execution(
     successes = [r for r in results if not isinstance(r, AppError)]
     errors = [r for r in results if isinstance(r, AppError)]
     assert len(successes) >= 1
-    # Loser may replay successfully or hit a transient conflict; never two rows.
+    # Same-key race must never 500. Prefer dual success/replay; allow 409 only.
     async with integration_session_factory() as session:
         assert (
             await ExecutionRepository(session).count_for_agent_request(
@@ -467,13 +467,24 @@ async def test_pg_concurrent_same_key_one_execution(
             )
             == 1
         )
+        steps = await ExecutionRepository(session).list_steps(successes[0].result.id)
+        assert len(steps) == 1
+        idem_count = (
+            await session.execute(
+                text(
+                    "SELECT count(*) FROM api_idempotency_records "
+                    "WHERE idempotency_key = :k"
+                ),
+                {"k": key},
+            )
+        ).scalar_one()
+        assert int(idem_count) == 1
         ids = {s.result.id for s in successes}
         assert len(ids) == 1
         for err in errors:
-            assert err.status_code in (409, 500) or err.code in {
-                "RESOURCE_CONFLICT",
-                "IDEMPOTENCY_KEY_REUSED",
-            }
+            assert err.status_code == 409
+            assert err.code in {"RESOURCE_CONFLICT", "IDEMPOTENCY_KEY_REUSED"}
+            assert err.status_code != 500
 
 
 @pytest.mark.integration
@@ -579,3 +590,98 @@ async def test_pg_plan_snapshot_tamper_via_hash_update_409(
                 )
             )
         ).scalars().first() is not None
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_pg_replay_uses_stored_response_after_queued_mutation(
+    integration_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from datetime import UTC, datetime
+
+    async with integration_session_factory() as session:
+        seeded = await _seed_ready(session)
+        key = _idem_key()
+        first = await _create(session, seeded, idempotency_key=key)
+        assert first.result.status == ExecutionStatus.CREATED.value
+        assert first.replayed is False
+        execution_id = first.result.id
+
+    async with integration_session_factory() as session:
+        execution = await ExecutionRepository(session).get(execution_id)
+        assert execution is not None
+        execution.status = ExecutionStatus.QUEUED.value
+        execution.queued_at = datetime.now(UTC)
+        await session.commit()
+
+    async with integration_session_factory() as session:
+        replay = await _create(session, seeded, idempotency_key=key)
+        assert replay.replayed is True
+        assert replay.http_status == 201
+        assert replay.result.id == execution_id
+        assert replay.result.status == ExecutionStatus.CREATED.value
+        current = await ExecutionRepository(session).get(execution_id)
+        assert current is not None
+        assert current.status == ExecutionStatus.QUEUED.value
+        assert current.queued_at is not None
+        assert (
+            await ExecutionRepository(session).count_for_agent_request(
+                seeded["request_id"]
+            )
+            == 1
+        )
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_pg_result_inline_allows_non_object_json(
+    integration_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """result_inline must not be constrained to JSON object (docs/05 §13.4)."""
+    async with integration_session_factory() as session:
+        seeded = await _seed_ready(session)
+        outcome = await _create(session, seeded)
+        steps = await ExecutionRepository(session).list_steps(outcome.result.id)
+        assert len(steps) == 1
+        step_id = steps[0].id
+
+    async with integration_session_factory() as session:
+        await session.execute(
+            text(
+                "UPDATE execution_steps "
+                "SET result_inline = CAST(:val AS jsonb) "
+                "WHERE id = CAST(:id AS uuid)"
+            ),
+            {"val": '["a", "b"]', "id": str(step_id)},
+        )
+        await session.commit()
+        row = (
+            await session.execute(
+                text(
+                    "SELECT result_inline FROM execution_steps "
+                    "WHERE id = CAST(:id AS uuid)"
+                ),
+                {"id": str(step_id)},
+            )
+        ).scalar_one()
+        assert row == ["a", "b"]
+
+        await session.execute(
+            text(
+                "UPDATE execution_steps "
+                "SET result_inline = CAST(:val AS jsonb) "
+                "WHERE id = CAST(:id AS uuid)"
+            ),
+            {"val": '"ok"', "id": str(step_id)},
+        )
+        await session.commit()
+        row = (
+            await session.execute(
+                text(
+                    "SELECT result_inline FROM execution_steps "
+                    "WHERE id = CAST(:id AS uuid)"
+                ),
+                {"id": str(step_id)},
+            )
+        ).scalar_one()
+        assert row == "ok"

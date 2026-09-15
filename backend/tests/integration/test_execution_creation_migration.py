@@ -187,6 +187,8 @@ async def test_execution_creation_schema_constraints(
         assert "'tool'" in step_defs
         assert "attempt_count" in step_defs
         assert "jsonb_typeof(step_snapshot)" in step_defs
+        assert "ck_execution_steps_result_inline_object" not in " ".join(step_checks)
+        assert "result_inline is null or jsonb_typeof(result_inline)" not in step_defs
 
         uniques = (
             await session.execute(
