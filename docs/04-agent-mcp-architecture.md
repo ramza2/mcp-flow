@@ -79,7 +79,7 @@ flowchart TD
 | Parameter Builder | 입력값·출처·binding 구성 | secret 원문 생성 |
 | Plan Generator | Plan draft 생성 및 AgentRequest foundation에서 durable handoff(`PLANNING`→`VALIDATING`) | Tool 호출, Plan 최종 검증, Execution 생성 |
 | Plan Validator | schema·DAG·binding·권한·정책 검증 | 위반을 추측으로 보정 |
-| Execution Engine | immutable Plan 실행, 상태전이 | 자연어 재해석 |
+| Execution Engine | immutable Plan 실행, 상태전이. Execution 생성 시 validated Plan을 immutable `plan_snapshot`으로 고정한다. `CREATED`는 Tool call 인가 토큰이 아니며, Tool 호출 직전 authorization/policy를 다시 검사한다. | 자연어 재해석 |
 | MCP Adapter | protocol 호출 정규화 | 사용자 권한 판단 |
 | Result Validator | output schema 및 결과 검증 | 실패를 성공으로 변경 |
 | Response Composer | 검증된 결과를 사용자 응답으로 구성 | 실행되지 않은 결과 생성 |

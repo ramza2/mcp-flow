@@ -72,6 +72,7 @@ from app.schemas.plan_validation import (
     PlanValidationResult,
 )
 from app.services.agent_request import AgentRequestService
+from app.services.policy_snapshot import build_safe_tool_policy_snapshot
 
 logger = logging.getLogger(__name__)
 
@@ -1048,40 +1049,7 @@ class PlanValidatorService:
         policy: MCPToolPolicy,
         approval_policy: ApprovalPolicy | None,
     ) -> None:
-        acc.policy_snapshot = {
-            "tool_policy": {
-                "id": str(policy.id),
-                "mcp_tool_id": str(policy.mcp_tool_id),
-                "risk_class": policy.risk_class,
-                "requires_confirmation": policy.requires_confirmation,
-                "requires_approval": policy.requires_approval,
-                "approval_policy_id": (
-                    str(policy.approval_policy_id)
-                    if policy.approval_policy_id
-                    else None
-                ),
-                "timeout_ms": policy.timeout_ms,
-                "max_attempts": policy.max_attempts,
-                "backoff_policy": policy.backoff_policy,
-                "max_result_bytes": policy.max_result_bytes,
-                "allow_auto_select": policy.allow_auto_select,
-                "data_classification": policy.data_classification,
-            },
-            "approval_policy": (
-                {
-                    "id": str(approval_policy.id),
-                    "status": approval_policy.status,
-                    "decision_mode": approval_policy.decision_mode,
-                    "required_approvals": approval_policy.required_approvals,
-                    "approver_scope": approval_policy.approver_scope,
-                    "default_expiry_seconds": approval_policy.default_expiry_seconds,
-                    "allow_self_approval": approval_policy.allow_self_approval,
-                    "reject_comment_required": approval_policy.reject_comment_required,
-                }
-                if approval_policy is not None
-                else None
-            ),
-        }
+        acc.policy_snapshot = build_safe_tool_policy_snapshot(policy, approval_policy)
 
     async def _finalize(
         self,

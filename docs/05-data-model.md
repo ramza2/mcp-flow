@@ -1070,6 +1070,7 @@ decided_at
 | `workflow_version_id` | Workflow 실행 참조 |
 | `schedule_occurrence_id` | 예약 발생 참조 |
 | `parent_execution_id` | 재실행/연결 실행 원본 |
+| `plan_validation_run_id` | AgentRequest 출처일 때 exact READY `PlanValidationRun` 증거 FK (nullable; Workflow/Schedule 등 비-Agent 출처는 null) |
 | `status` | Canonical Execution status |
 | `plan_schema_version`, `plan_snapshot`, `plan_hash` | immutable plan |
 | `input_snapshot` | secret ref만 포함 |
@@ -1080,7 +1081,65 @@ decided_at
 | lifecycle | requested/queued/started/finished/cancel_requested |
 | `lock_version`, `retention_until` | 동시성/보존 |
 
-### 13.2 Execution 상태전이
+`source_type = AGENT_REQUEST` foundation은 `plan_validation_run_id`로 해당 Execution이 고정한 exact READY validation evidence를 pin한다. creation 이후 Plan/validation lineage를 재해석하지 않는다.
+
+### 13.2 AgentRequest Execution Creation Foundation
+
+READY AgentRequest에서 Execution `CREATED`까지의 foundation 경로:
+
+```text
+AgentRequest READY
+→ latest PlanValidationRun (decision = READY)
+→ exact PlanGenerationRun (validation.plan_generation_run_id)
+→ current auth/policy/tool availability preflight
+→ Execution CREATED + ExecutionStep PENDING
+```
+
+이 단계는 queue / Celery / Outbox / ApprovalRequest 생성 / SecretResolver / MCP Tool call을 수행하지 않는다. `CREATED`는 Tool 호출 인가 토큰이 아니다.
+
+Snapshot semantics (AgentRequest foundation):
+
+```text
+plan_snapshot
+→ PlanGenerationRun의 immutable validated plan (생성 후 불변)
+
+input_snapshot
+→ {}  (AgentRequest foundation; secret 원문 없음)
+
+policy_snapshot
+→ creation-time current safe ToolPolicy/ApprovalPolicy snapshot
+  (secret/credential 없이)
+```
+
+Policy equality rule:
+
+```text
+current creation policy snapshot
+== READY PlanValidationRun.policy_snapshot
+```
+
+불일치면 Execution을 만들지 않고 reject한다. validation 시점 정책과 생성 시점 정책이 달라진 경우 prior READY만으로 통과하지 않는다.
+
+Confirmation rule:
+
+```text
+current confirmation required
+(grant.requires_confirmation OR tool_policy.requires_confirmation)
+→ 동일 plan_generation_run_id + plan_hash + policy_snapshot에 대한
+  ANSWERED PLAN_CONFIRMATION (confirmed=true, answered_by=requester)
+```
+
+증거가 없거나 confirmed≠true이면 reject한다.
+
+Materialization:
+
+```text
+executions.status = CREATED
+executions.plan_validation_run_id = READY PlanValidationRun.id
+execution_steps.status = PENDING  (foundation: single TOOL step)
+```
+
+### 13.3 Execution 상태전이
 
 ```mermaid
 stateDiagram-v2
@@ -1115,7 +1174,7 @@ TIMED_OUT
 
 `PLANNING`, `WAITING_CONFIRMATION`, `REJECTED`, `EXPIRED`, `PARTIAL`은 Execution canonical 상태가 아니다.
 
-### 13.3 `execution_steps`
+### 13.4 `execution_steps`
 
 ```text
 id, execution_id
@@ -1136,7 +1195,7 @@ error_code, error_message
 lock_version
 ```
 
-### 13.4 Step 상태전이
+### 13.5 Step 상태전이
 
 ```text
 PENDING → READY | SKIPPED | CANCELLED
@@ -1148,7 +1207,7 @@ WAITING_APPROVAL → READY | FAILED | SKIPPED | CANCELLED
 
 `UNKNOWN_OUTCOME`은 terminal이며 자동 retry하지 않는다.
 
-### 13.5 Attempt 및 Tool Call
+### 13.6 Attempt 및 Tool Call
 
 `step_attempts`:
 
@@ -1176,7 +1235,7 @@ request_bytes, response_bytes
 started_at, first_byte_at, finished_at
 ```
 
-### 13.6 MCP MRTR
+### 13.7 MCP MRTR
 
 `mcp_input_requests`:
 
@@ -1193,7 +1252,7 @@ requested_at, expires_at, answered_at, answered_by
 
 Current MCP의 `input_required`와 Legacy elicitation을 공통 내부 엔터티로 normalize한다.
 
-### 13.7 Execution Event
+### 13.8 Execution Event
 
 `execution_events`는 SSE 재연결 원본이다.
 
@@ -1282,7 +1341,30 @@ resource_type, resource_id
 created_at, completed_at, expires_at
 ```
 
-동일 key에 다른 request hash가 오면 `IDEMPOTENCY_KEY_REUSED`로 거절한다.
+복합 PK:
+
+```text
+(principal_key, operation_scope, idempotency_key)
+```
+
+동일 key에 다른 `request_hash`가 오면 `IDEMPOTENCY_KEY_REUSED`로 거절한다.
+
+#### AgentRequest Execution Creation foundation
+
+```text
+operation_scope = AGENT_REQUEST_EXECUTION_CREATE_V1
+principal_key   = str(requester_id)
+request_hash    = SHA-256(canonical JSON of
+                  {agent_request_id, source_type=AGENT_REQUEST, trigger_type=USER})
+resource_type   = EXECUTION
+resource_id     = created Execution.id
+status          = COMPLETED  (성공 생성/replay만 record)
+expires_at      = null       (foundation: TTL 미적용)
+```
+
+성공 시에만 COMPLETED record를 남긴다. preflight 실패는 key를 소비하지 않는다.
+동일 key + 동일 `request_hash` replay는 기존 Execution을 반환한다.
+동시 생성 race는 unique 충돌 후 existing COMPLETED record로 reconcile한다.
 
 ---
 

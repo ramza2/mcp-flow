@@ -325,6 +325,20 @@ Dataset은 평가 전 FROZEN하고 실행 중 정답을 변경하지 않는다.
 - restart recovery
 - API Session/CSRF
 
+추가 (Execution Creation foundation):
+
+- READY AgentRequest → Execution `CREATED` 분리 (Tool call 없음)
+- immutable `plan_snapshot` materialization
+- plan validation lineage (latest READY PlanValidationRun → exact PlanGenerationRun)
+- current auth/policy/tool availability preflight
+- policy snapshot equality (current == READY PlanValidationRun.policy_snapshot)
+- PLAN_CONFIRMATION evidence (ANSWERED confirmed=true, same plan/hash/policy)
+- secret non-resolution (SECRET_REF만, 원문 미해석)
+- ExecutionStep `PENDING` materialization
+- idempotency replay / key reuse (`IDEMPOTENCY_KEY_REUSED`) / concurrency reconcile
+- failed preflight does not consume Idempotency-Key
+- restart recovery (CREATED + plan_validation_run_id + plan_hash 일치)
+
 
 ## 9. Repository Integration Test
 

@@ -67,3 +67,35 @@ class PlanValidationRepository:
             .limit(1)
         )
         return (await self._session.execute(stmt)).scalar_one_or_none()
+
+    async def get_latest_waiting_confirmation_for_plan(
+        self,
+        *,
+        agent_request_id: uuid.UUID,
+        plan_generation_run_id: uuid.UUID,
+        plan_hash: str,
+        policy_snapshot: dict[str, Any],
+    ) -> PlanValidationRun | None:
+        """Latest WAITING_CONFIRMATION evidence for exact plan + policy snapshot."""
+        stmt = (
+            select(PlanValidationRun)
+            .where(
+                PlanValidationRun.agent_request_id == agent_request_id,
+                PlanValidationRun.decision == "WAITING_CONFIRMATION",
+                PlanValidationRun.confirmation_required.is_(True),
+                PlanValidationRun.plan_generation_run_id == plan_generation_run_id,
+                PlanValidationRun.plan_hash == plan_hash,
+                PlanValidationRun.clarification_request_id.is_not(None),
+            )
+            .order_by(
+                PlanValidationRun.created_at.desc(),
+                PlanValidationRun.id.desc(),
+            )
+            .limit(1)
+        )
+        row = (await self._session.execute(stmt)).scalar_one_or_none()
+        if row is None:
+            return None
+        if row.policy_snapshot != policy_snapshot:
+            return None
+        return row
