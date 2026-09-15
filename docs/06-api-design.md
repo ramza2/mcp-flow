@@ -622,6 +622,49 @@ AUTO_EXECUTE_SAFE
 
 Client가 수정한 Plan JSON을 실행 입력으로 다시 보내지 않는다. 서버에 저장된 validated plan snapshot을 사용한다.
 
+### 11.3 Clarification Response
+
+```http
+POST /api/v1/agent-requests/{request_id}/clarifications/{clarification_id}/responses
+```
+
+Session 인증이 필요하며 unsafe POST이므로 CSRF가 필요하다.
+
+AgentRequest `requester_id`와 동일한 authenticated principal만 응답할 수 있다. 다르면 `403 FORBIDDEN`이며 Clarification 존재 여부를 불필요하게 노출하지 않는다.
+
+Missing parameter 예:
+
+```json
+{
+  "response_payload": {
+    "location": "서울"
+  }
+}
+```
+
+Confirmation 예:
+
+```json
+{
+  "response_payload": {
+    "confirmed": true
+  }
+}
+```
+
+응답 예:
+
+```json
+{
+  "agent_request_id": "...",
+  "clarification_id": "...",
+  "clarification_status": "ANSWERED",
+  "agent_request_status": "RETRIEVING"
+}
+```
+
+`POST /agent-requests/{request_id}/confirmations` convenience endpoint는 별도 범위다. 이번 foundation의 canonical path는 clarifications responses다.
+
 ---
 
 ## 12. Workflow API

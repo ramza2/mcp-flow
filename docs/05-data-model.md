@@ -606,6 +606,32 @@ requested_at, expires_at, answered_at, answered_by
 
 Agent planning 단계의 `WAITING_INPUT`/`WAITING_CONFIRMATION`은 이 엔터티와 연결한다.
 
+Answer semantics:
+
+```text
+OPEN → ANSWERED
+
+response_payload
+answered_at
+answered_by
+```
+
+응답은 `status == OPEN`인 row에만 허용한다. 이미 `ANSWERED` / `EXPIRED` / `CANCELLED`이면 overwrite하지 않고 `RESOURCE_CONFLICT`다.
+
+Atomic relation:
+
+```text
+Clarification OPEN → ANSWERED CAS
++
+StructuredRequest update (MISSING_PARAMETER인 경우)
++
+AgentRequest WAITING_* → resume status CAS
+```
+
+는 동일 transaction이다. AgentRequest CAS miss면 Clarification answer도 rollback하여 orphan ANSWERED를 만들지 않는다.
+
+`expires_at != null && expires_at <= now`인 row에 대한 response는 `RESOURCE_CONFLICT`로 거부한다. AgentRequest `EXPIRED` 상태는 만들지 않는다.
+
 ### 10.5 Tool Selection 근거
 
 ```text
@@ -916,6 +942,18 @@ WAITING_CONFIRMATION
 `checks_snapshot`에는 authorization/tool availability boolean 수준만 저장한다.
 
 Plan Validator `READY`는 Execution authorization token이 아니다.
+
+`PLAN_CONFIRMATION` response는 다음으로 confirmation 대상 Plan을 고정한다.
+
+```text
+clarification_request_id
++ plan_generation_run_id
++ plan_hash
+```
+
+재검증 시 같은 PlanGenerationRun + 동일 `plan_hash` + 동일 `policy_snapshot` +
+`ANSWERED` confirmation(`confirmed=true`, `answered_by=requester`)만 satisfied로 재사용한다.
+policy snapshot이 바뀌면 prior confirmation을 재사용하지 않고 새 `PLAN_CONFIRMATION`을 만든다.
 
 
 ---

@@ -137,6 +137,37 @@ CANCELLED
 
 `PLANNING`과 `WAITING_CONFIRMATION`은 Execution 상태가 아니다. 실제 Execution 상태는 `05-data-model.md`의 Canonical enum을 사용한다.
 
+### Clarification / Confirmation Resume
+
+OPEN ClarificationRequest에 requester가 응답하면 동일 transaction에서 ANSWERED로 CAS하고 AgentRequest를 resume한다.
+
+Canonical resume:
+
+```text
+MISSING_PARAMETER + valid response
+→ WAITING_INPUT → RETRIEVING
+
+TOOL_CONFIRMATION + confirmed=true
+→ WAITING_CONFIRMATION → BUILDING_PARAMETERS
+
+PLAN_CONFIRMATION + confirmed=true
+→ WAITING_CONFIRMATION → VALIDATING
+→ PlanValidator 재실행
+→ 동일 Plan + 동일 policy_snapshot의 answered confirmation evidence가 유효하면 READY 가능
+
+TOOL_CONFIRMATION / PLAN_CONFIRMATION + confirmed=false
+→ CANCELLED
+```
+
+규칙:
+
+- `PLAN_CONFIRMATION` true를 직접 `READY`로 보내지 않는다. 항상 `VALIDATING`으로 재개한 뒤 Validator를 다시 실행한다.
+- `PLAN_CONFIRMATION`은 `clarification_request_id` + `plan_generation_run_id` + `plan_hash`로 confirmation 대상 Plan을 고정한다.
+- confirmation false는 사용자 중단이므로 `CANCELLED`다. `REJECTED`는 정책/지원범위 거절이다.
+- `MISSING_PARAMETER` 응답 후 Tool 선택에 영향을 줄 수 있으므로 `BUILDING_PARAMETERS`로 바로 가지 않고 `RETRIEVING`으로 재개한다.
+- Response API는 Selector / ParameterBuilder / PlanValidator / LLM / MCP / SecretResolver를 자동 호출하지 않는다.
+- Analyzer ambiguity-only ClarificationRequest 생성 redesign은 이번 foundation 범위 밖이다. 현재 resume은 기존 OPEN ClarificationRequest에 집중한다.
+
 ---
 
 ## 5. StructuredRequest v1
@@ -600,6 +631,9 @@ permission / policy / current availability → REJECTED
 confirmation gate (grant 또는 ToolPolicy flag) → WAITING_CONFIRMATION + OPEN PLAN_CONFIRMATION
 all pass → READY
 ```
+
+confirmation already satisfied (same plan_generation_run_id + plan_hash + policy_snapshot +
+ANSWERED PLAN_CONFIRMATION confirmed=true by requester)이면 새 Clarification을 만들지 않고 READY로 진행한다.
 
 규칙:
 
