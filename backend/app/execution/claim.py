@@ -10,7 +10,12 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import AppError
-from app.domain.enums import AuthorableStepType, ExecutionStatus, StepStatus
+from app.domain.enums import (
+    AuthorableStepType,
+    ExecutionSourceType,
+    ExecutionStatus,
+    StepStatus,
+)
 from app.models.execution import Execution, ExecutionStep
 from app.schemas.execution_plan import (
     DETERMINISTIC_TOOL_STEP_ID,
@@ -85,6 +90,12 @@ class ExecutionClaimService:
                 lease_token=None,
                 lease_expires_at=execution.lease_expires_at,
                 reason="STALE_DELIVERY",
+            )
+        if execution.source_type != ExecutionSourceType.AGENT_REQUEST.value:
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message="Queue/Claim foundation supports AgentRequest Executions only.",
+                status_code=409,
             )
         if execution.queued_at is None or execution.started_at is not None:
             raise AppError(
