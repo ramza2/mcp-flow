@@ -49,7 +49,8 @@ def _validate_limit(limit: int) -> int:
     return limit
 
 
-def _validate_dispatch_row(row: object) -> uuid.UUID:
+def validate_execution_dispatch_event(row: object) -> uuid.UUID:
+    """Validate that an Outbox row is exactly one ID-only Execution dispatch."""
     payload = getattr(row, "payload", None)
     if not isinstance(payload, dict) or set(payload) != {"execution_id"}:
         raise AppError(
@@ -152,7 +153,7 @@ class OutboxRelayService:
         published = 0
         failed = 0
         for row in rows:
-            execution_id = _validate_dispatch_row(row)
+            execution_id = validate_execution_dispatch_event(row)
             ts = now or datetime.now(UTC)
             try:
                 publisher.publish_execution(
