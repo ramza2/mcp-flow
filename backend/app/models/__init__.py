@@ -24,6 +24,7 @@ from app.models.mcp import (
     ToolEmbedding,
 )
 from app.models.model_profile import EmbeddingProfile, LLMProfile
+from app.models.outbox import OutboxEvent
 from app.models.parameter_build import ParameterBuildRun
 from app.models.plan_generation import PlanGenerationRun, PlanGenerationToolRef
 from app.models.plan_validation import PlanValidationRun
@@ -55,6 +56,7 @@ __all__ = [
     "MCPToolPolicy",
     "MCPToolVerification",
     "MCPToolVersion",
+    "OutboxEvent",
     "ParameterBuildRun",
     "Permission",
     "PlanGenerationRun",
