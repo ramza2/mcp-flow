@@ -11,7 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import AppError
-from app.domain.enums import ExecutionStatus
+from app.domain.enums import ExecutionSourceType, ExecutionStatus
 from app.models.execution import Execution
 from app.repositories.outbox import OutboxRepository
 
@@ -80,7 +80,7 @@ def validate_execution_dispatch_event(row: object) -> uuid.UUID:
 
 
 class ExecutionQueueService:
-    """Stage CREATED rows into QUEUED + durable Outbox in one DB transaction."""
+    """Stage AgentRequest CREATED rows into QUEUED + Outbox atomically."""
 
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
@@ -96,7 +96,10 @@ class ExecutionQueueService:
         ts = now or datetime.now(UTC)
         stmt = (
             select(Execution)
-            .where(Execution.status == ExecutionStatus.CREATED.value)
+            .where(
+                Execution.status == ExecutionStatus.CREATED.value,
+                Execution.source_type == ExecutionSourceType.AGENT_REQUEST.value,
+            )
             .order_by(Execution.requested_at.asc(), Execution.id.asc())
             .limit(bounded)
             .with_for_update(skip_locked=True)
