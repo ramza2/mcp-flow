@@ -61,18 +61,19 @@ async def _run() -> None:
 
     try:
         while not stop.is_set():
-            try:
-                result = await run_iteration(settings=settings)
-                if result.staged or result.selected:
-                    logger.info(
-                        "outbox iteration staged=%s selected=%s published=%s failed=%s",
-                        result.staged,
-                        result.selected,
-                        result.published,
-                        result.failed,
-                    )
-            except Exception:
-                logger.exception("outbox iteration failed")
+            # Broker/network delivery failures are converted into durable unpublished
+            # Outbox evidence by OutboxRelayService.  Unexpected DB/schema/corruption
+            # failures intentionally escape so the supervised process restarts instead
+            # of retrying corrupted durable state forever.
+            result = await run_iteration(settings=settings)
+            if result.staged or result.selected:
+                logger.info(
+                    "outbox iteration staged=%s selected=%s published=%s failed=%s",
+                    result.staged,
+                    result.selected,
+                    result.published,
+                    result.failed,
+                )
             try:
                 await asyncio.wait_for(
                     stop.wait(),
