@@ -35,13 +35,47 @@ class PublishBatchResult:
 
 
 def _validate_limit(limit: int) -> int:
-    if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1 or limit > _MAX_BATCH_SIZE:
+    if (
+        not isinstance(limit, int)
+        or isinstance(limit, bool)
+        or limit < 1
+        or limit > _MAX_BATCH_SIZE
+    ):
         raise AppError(
             code="VALIDATION_ERROR",
             message=f"batch limit must be between 1 and {_MAX_BATCH_SIZE}.",
             status_code=400,
         )
     return limit
+
+
+def _validate_dispatch_row(row: object) -> uuid.UUID:
+    payload = getattr(row, "payload", None)
+    if not isinstance(payload, dict) or set(payload) != {"execution_id"}:
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message="Execution dispatch Outbox payload is corrupted.",
+            status_code=409,
+        )
+    try:
+        execution_id = uuid.UUID(str(payload["execution_id"]))
+    except (TypeError, ValueError) as exc:
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message="Execution dispatch Outbox payload is corrupted.",
+            status_code=409,
+        ) from exc
+    if (
+        getattr(row, "event_type", None) != "EXECUTION_DISPATCH"
+        or getattr(row, "aggregate_type", None) != "EXECUTION"
+        or execution_id != getattr(row, "aggregate_id", None)
+    ):
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message="Execution dispatch Outbox lineage is corrupted.",
+            status_code=409,
+        )
+    return execution_id
 
 
 class ExecutionQueueService:
@@ -118,21 +152,16 @@ class OutboxRelayService:
         published = 0
         failed = 0
         for row in rows:
+            execution_id = _validate_dispatch_row(row)
             ts = now or datetime.now(UTC)
             try:
-                execution_id = uuid.UUID(str(row.payload.get("execution_id")))
-                if (
-                    row.event_type != "EXECUTION_DISPATCH"
-                    or row.aggregate_type != "EXECUTION"
-                    or execution_id != row.aggregate_id
-                    or set(row.payload) != {"execution_id"}
-                ):
-                    raise ValueError("corrupt execution dispatch outbox payload")
                 publisher.publish_execution(
                     execution_id=execution_id,
                     outbox_event_id=row.id,
                 )
             except Exception:
+                # Broker/network failures are retryable delivery failures.  Do not
+                # persist exception strings because broker URLs may contain secrets.
                 await self._outbox.record_publish_failure(row, now=ts)
                 failed += 1
             else:
