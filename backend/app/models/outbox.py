@@ -6,7 +6,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import DateTime, Index, Integer, String, UniqueConstraint, func
+from sqlalchemy import DateTime, Index, Integer, String, UniqueConstraint, func, text
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -26,6 +26,11 @@ class OutboxEvent(Base):
         ),
         Index("ix_outbox_events_aggregate", "aggregate_type", "aggregate_id"),
         Index("ix_outbox_events_created_at", "created_at"),
+        Index(
+            "ix_outbox_events_unpublished_created_at",
+            "created_at",
+            postgresql_where=text("published_at IS NULL"),
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
