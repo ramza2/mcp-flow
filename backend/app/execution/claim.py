@@ -12,7 +12,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.errors import AppError
 from app.domain.enums import AuthorableStepType, ExecutionStatus, StepStatus
 from app.models.execution import Execution, ExecutionStep
-from app.schemas.execution_plan import DETERMINISTIC_TOOL_STEP_ID, ExecutionPlanStep
+from app.schemas.execution_plan import (
+    DETERMINISTIC_TOOL_STEP_ID,
+    ExecutionPlanStep,
+    ExecutionPlanV1,
+)
 
 _WORKER_ID_MAX_LEN = 128
 
@@ -42,7 +46,11 @@ def _normalize_worker_id(worker_id: str) -> str:
 
 class ExecutionClaimService:
     def __init__(self, session: AsyncSession, *, lease_seconds: int) -> None:
-        if not isinstance(lease_seconds, int) or isinstance(lease_seconds, bool) or lease_seconds <= 0:
+        if (
+            not isinstance(lease_seconds, int)
+            or isinstance(lease_seconds, bool)
+            or lease_seconds <= 0
+        ):
             raise ValueError("lease_seconds must be a positive integer")
         self._session = session
         self._lease_seconds = lease_seconds
@@ -129,16 +137,32 @@ class ExecutionClaimService:
                 message="ExecutionStep is inconsistent with initial PENDING foundation state.",
                 status_code=409,
             )
+
         try:
+            plan = ExecutionPlanV1.model_validate(execution.plan_snapshot)
             plan_step = ExecutionPlanStep.model_validate(step.step_snapshot)
         except Exception as exc:
             raise AppError(
                 code="RESOURCE_CONFLICT",
-                message="ExecutionStep snapshot is invalid.",
+                message="Execution plan/step snapshot is invalid.",
                 status_code=409,
             ) from exc
+        if len(plan.steps) != 1:
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message="AgentRequest foundation Execution plan must contain one Step.",
+                status_code=409,
+            )
+        expected_step = plan.steps[0]
+        if expected_step.model_dump(mode="json") != step.step_snapshot:
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message="Execution plan/step snapshot lineage is inconsistent.",
+                status_code=409,
+            )
         if (
             plan_step.id != step.step_key
+            or plan_step.id != expected_step.id
             or plan_step.type != AuthorableStepType.TOOL
             or plan_step.depends_on != []
             or plan_step.when is not None
