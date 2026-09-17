@@ -1,0 +1,59 @@
+# Server deployment override — reuse the host's existing Traefik Docker provider.
+# Usage:
+#   docker compose --env-file .env.server \
+#     -f compose.yaml -f compose.server.yaml up -d --build
+#
+# The base Traefik service is disabled in this overlay. `edge` is remapped to the
+# host's external Traefik network so only frontend/api are reachable from ingress.
+
+services:
+  traefik:
+    profiles:
+      - standalone-edge
+
+  frontend:
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=${MCPFLOW_TRAEFIK_NETWORK:-traefik_proxy}"
+      - "traefik.http.routers.mcpflow-web-http.rule=Host(`${MCPFLOW_HOST:?MCPFLOW_HOST is required}`)"
+      - "traefik.http.routers.mcpflow-web-http.entrypoints=${MCPFLOW_TRAEFIK_HTTP_ENTRYPOINT:-web}"
+      - "traefik.http.routers.mcpflow-web-http.middlewares=mcpflow-https-redirect"
+      - "traefik.http.middlewares.mcpflow-https-redirect.redirectscheme.scheme=https"
+      - "traefik.http.middlewares.mcpflow-https-redirect.redirectscheme.permanent=true"
+      - "traefik.http.routers.mcpflow-web.rule=Host(`${MCPFLOW_HOST:?MCPFLOW_HOST is required}`)"
+      - "traefik.http.routers.mcpflow-web.entrypoints=${MCPFLOW_TRAEFIK_HTTPS_ENTRYPOINT:-websecure}"
+      - "traefik.http.routers.mcpflow-web.tls=true"
+      - "traefik.http.routers.mcpflow-web.tls.certresolver=${MCPFLOW_TRAEFIK_CERTRESOLVER:-letsencrypt}"
+      - "traefik.http.routers.mcpflow-web.service=mcpflow-web"
+      - "traefik.http.services.mcpflow-web.loadbalancer.server.port=8080"
+
+  api:
+    environment:
+      MCPFLOW_SESSION_COOKIE_SECURE: ${MCPFLOW_SESSION_COOKIE_SECURE:-true}
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=${MCPFLOW_TRAEFIK_NETWORK:-traefik_proxy}"
+      - "traefik.http.routers.mcpflow-api.rule=Host(`${MCPFLOW_HOST:?MCPFLOW_HOST is required}`) && (Path(`/api`) || PathPrefix(`/api/`) || Path(`/health`) || PathPrefix(`/health/`) || PathPrefix(`/docs`) || PathPrefix(`/redoc`) || Path(`/openapi.json`))"
+      - "traefik.http.routers.mcpflow-api.priority=100"
+      - "traefik.http.routers.mcpflow-api.entrypoints=${MCPFLOW_TRAEFIK_HTTPS_ENTRYPOINT:-websecure}"
+      - "traefik.http.routers.mcpflow-api.tls=true"
+      - "traefik.http.routers.mcpflow-api.tls.certresolver=${MCPFLOW_TRAEFIK_CERTRESOLVER:-letsencrypt}"
+      - "traefik.http.routers.mcpflow-api.service=mcpflow-api"
+      - "traefik.http.services.mcpflow-api.loadbalancer.server.port=8000"
+
+networks:
+  edge:
+    name: ${MCPFLOW_TRAEFIK_NETWORK:-traefik_proxy}
+    external: true
+
+secrets:
+  postgres_admin_password:
+    file: ./infra/secrets/server/postgres_admin_password
+  postgres_migration_password:
+    file: ./infra/secrets/server/postgres_migration_password
+  postgres_app_password:
+    file: ./infra/secrets/server/postgres_app_password
+  minio_root_user:
+    file: ./infra/secrets/server/minio_root_user
+  minio_root_password:
+    file: ./infra/secrets/server/minio_root_password
