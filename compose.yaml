@@ -146,6 +146,7 @@ services:
     networks:
       - app
       - data
+      - mcp
     depends_on:
       postgres:
         condition: service_healthy
