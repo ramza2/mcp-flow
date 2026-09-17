@@ -66,10 +66,12 @@ def validate_execution_dispatch_event(row: object) -> uuid.UUID:
             message="Execution dispatch Outbox payload is corrupted.",
             status_code=409,
         ) from exc
+    expected_dedupe = f"execution:{execution_id}:initial"
     if (
         getattr(row, "event_type", None) != "EXECUTION_DISPATCH"
         or getattr(row, "aggregate_type", None) != "EXECUTION"
         or execution_id != getattr(row, "aggregate_id", None)
+        or getattr(row, "dedupe_key", None) != expected_dedupe
     ):
         raise AppError(
             code="RESOURCE_CONFLICT",
