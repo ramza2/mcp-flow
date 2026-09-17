@@ -6,7 +6,7 @@ on:
       - cursor/backend-execution-queue-claim-ba97
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   backend:
@@ -162,23 +162,18 @@ jobs:
           test "${{ steps.playwright.outcome }}" = success
 
   docs:
-    if: github.event.head_commit.message != 'docs: document execution queue and claim foundation'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
       - name: Patch canonical docs
         run: python .github/pr27_patch_docs.py
-      - name: Commit docs
-        shell: bash
-        run: |
-          if git diff --quiet -- docs; then
-            echo 'No documentation changes needed.'
-            exit 0
-          fi
-          git config user.name 'ramza2'
-          git config user.email 'chjeon@openlink.kr'
-          git add docs/02-functional-specification.md docs/03-system-architecture.md docs/05-data-model.md docs/08-deployment-architecture.md docs/09-test-strategy.md
-          git commit -m 'docs: document execution queue and claim foundation'
-          git push origin HEAD:cursor/backend-execution-queue-claim-ba97
+      - name: Upload patched canonical docs
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr27-patched-docs
+          path: |
+            docs/02-functional-specification.md
+            docs/03-system-architecture.md
+            docs/05-data-model.md
+            docs/08-deployment-architecture.md
+            docs/09-test-strategy.md
