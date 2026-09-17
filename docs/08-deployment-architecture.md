@@ -15,7 +15,7 @@
 | 상태 원본 | PostgreSQL |
 | 비동기 전달 | Redis + Celery |
 | 공식 과제명 | MCP 연계 업무 자동화 AI 에이전트 개발 |
-| 최종 수정일 | 2026-09-02 |
+| 최종 수정일 | 2026-09-17 |
 
 ---
 
@@ -124,11 +124,11 @@ migration
 | `traefik` | TLS, routing, edge policy | config/cert |
 | `frontend` | React 정적 UI | 없음 |
 | `api` | REST/SSE, 인증, 동기 use case | 없음 |
-| `worker` | Agent planning, Execution, Remote MCP/LLM | 없음 |
+| `worker` | Execution queue consumer/DB lease claim; 향후 Agent planning·Tool runner 확장 | 없음 |
 | `mcp-worker` | 승인된 local stdio MCP 실행 | 없음 |
 | `factory-worker` | untrusted Factory build/test | 임시 workspace |
 | `scheduler` | occurrence claim/Execution 생성 | 없음 |
-| `outbox` | DB outbox → Queue/notification publish | 없음 |
+| `outbox` | CREATED staging + DB Outbox → Celery execution queue at-least-once publish | 없음 |
 | `postgres` | 업무/실행/감사 원본 | 필수 |
 | `redis` | Celery broker/단기 coordination | 재생성 가능 |
 | `object-storage` | result/export/artifact/evidence | 필수 |
@@ -148,11 +148,11 @@ mcpflow-backend:<version-or-commit>
 
 ```text
 api            -> python -m mcpflow.entrypoints.api
-worker         -> celery -A mcpflow.infrastructure.celery worker -Q agent,execution,maintenance
+worker         -> celery -A app.infrastructure.celery_app:celery_app worker -Q execution --loglevel=INFO
 mcp-worker     -> celery -A mcpflow.infrastructure.celery worker -Q mcp_stdio
 factory-worker -> celery -A mcpflow.infrastructure.celery worker -Q factory
 scheduler      -> python -m mcpflow.entrypoints.scheduler
-outbox         -> python -m mcpflow.entrypoints.outbox
+outbox         -> python -m app.entrypoints.outbox
 migration      -> alembic upgrade head
 ```
 
@@ -323,6 +323,10 @@ maintenance
 ```
 
 Task payload에는 업무 object 전체나 credential 대신 ID를 전달한다.
+
+Queue/Claim foundation의 `execution` queue payload는 `execution_id`와 `outbox_event_id`만 포함한다. Celery는 `task_acks_late=true`, `task_reject_on_worker_lost=true`, `worker_prefetch_multiplier=1`을 사용하고 result backend를 업무상태 원본으로 사용하지 않는다.
+
+`outbox` process는 PostgreSQL에서 `CREATED` AgentRequest Execution을 `QUEUED + Outbox`로 원자 staging한 뒤 unpublished event를 broker에 publish한다. Redis가 일시적으로 unavailable이어도 Execution은 `QUEUED`, Outbox는 unpublished 상태로 남아 복구 후 재전달된다.
 
 ---
 
