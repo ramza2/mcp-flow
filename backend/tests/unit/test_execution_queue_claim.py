@@ -138,6 +138,7 @@ async def test_outbox_corrupt_payload_fails_closed_not_publish_retry(
             select(OutboxEvent).where(OutboxEvent.aggregate_id == execution_id)
         )
     ).scalar_one()
+    row_id = row.id
     row.payload = {"execution_id": str(execution_id), "plan": "forbidden"}
     await db_session.commit()
 
@@ -147,7 +148,7 @@ async def test_outbox_corrupt_payload_fails_closed_not_publish_retry(
         )
     assert exc_info.value.code == "RESOURCE_CONFLICT"
     await db_session.rollback()
-    row = await db_session.get(OutboxEvent, row.id)
+    row = await db_session.get(OutboxEvent, row_id)
     assert row is not None
     assert row.publish_attempt_count == 0
     assert row.published_at is None
