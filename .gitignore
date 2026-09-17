@@ -149,11 +149,13 @@ activemq-data/
 
 # Environments
 .env
+.env.server
 .envrc
 .venv
 
-# Local Docker Compose secrets (never commit)
+# Docker Compose secrets (never commit)
 infra/secrets/local/
+infra/secrets/server/
 env/
 venv/
 ENV/
