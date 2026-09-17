@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import pytest
 from sqlalchemy import select
@@ -14,6 +15,7 @@ from app.core.config import get_settings
 from app.domain.enums import ExecutionStatus
 from app.execution.queue import ExecutionQueueService, OutboxRelayService
 from app.infrastructure.celery_app import celery_app
+from app.infrastructure.queue import CeleryExecutionQueuePublisher
 from app.models.outbox import OutboxEvent
 
 from tests.unit.test_execution_creation import _create, _idem_key, _seed_ready
@@ -39,6 +41,35 @@ def test_celery_publish_is_bounded_by_transport_and_retry_settings() -> None:
     assert retry_policy["interval_start"] == 0
     assert retry_policy["interval_step"] == 0.2
     assert retry_policy["interval_max"] == 1.0
+
+
+def test_execution_publisher_applies_bounded_retry_policy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_send_task(name: str, **kwargs: Any) -> None:
+        captured["name"] = name
+        captured.update(kwargs)
+
+    monkeypatch.setattr(celery_app, "send_task", fake_send_task)
+    execution_id = uuid.uuid4()
+    outbox_event_id = uuid.uuid4()
+
+    CeleryExecutionQueuePublisher().publish_execution(
+        execution_id=execution_id,
+        outbox_event_id=outbox_event_id,
+    )
+
+    assert captured["name"] == "mcpflow.execution.claim"
+    assert captured["queue"] == "execution"
+    assert captured["task_id"] == str(outbox_event_id)
+    assert captured["kwargs"] == {
+        "execution_id": str(execution_id),
+        "outbox_event_id": str(outbox_event_id),
+    }
+    assert captured["retry"] is True
+    assert captured["retry_policy"] == celery_app.conf.task_publish_retry_policy
 
 
 @pytest.mark.asyncio
