@@ -28,6 +28,13 @@ from app.schemas.execution_plan import (
 _WORKER_ID_MAX_LEN = 128
 
 
+def _as_utc(value: datetime) -> datetime:
+    """Normalize DB datetimes for comparisons across PostgreSQL and SQLite tests."""
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
+
+
 @dataclass(frozen=True, slots=True)
 class ExecutionClaimOutcome:
     execution_id: uuid.UUID
@@ -247,12 +254,17 @@ class ExecutionClaimService:
                 message="Execution lease no longer exists.",
                 status_code=409,
             )
+        lease_expires_at = (
+            _as_utc(execution.lease_expires_at)
+            if execution.lease_expires_at is not None
+            else None
+        )
         if (
             execution.status != ExecutionStatus.RUNNING.value
             or execution.worker_id != worker
             or execution.lease_token != lease_token
-            or execution.lease_expires_at is None
-            or execution.lease_expires_at <= ts
+            or lease_expires_at is None
+            or lease_expires_at <= ts
         ):
             raise AppError(
                 code="RESOURCE_CONFLICT",
