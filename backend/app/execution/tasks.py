@@ -6,6 +6,8 @@ import asyncio
 import logging
 import uuid
 
+from sqlalchemy.exc import DBAPIError, InterfaceError, OperationalError
+
 from app.core.config import get_settings
 from app.core.errors import AppError
 from app.db.session import dispose_db, init_db, session_scope
@@ -15,6 +17,17 @@ from app.infrastructure.celery_app import celery_app
 from app.repositories.outbox import OutboxRepository
 
 logger = logging.getLogger(__name__)
+
+_CLAIM_DB_MAX_RETRIES = 3
+_CLAIM_DB_RETRY_BASE_SECONDS = 2
+_CLAIM_DB_RETRY_MAX_SECONDS = 30
+
+
+def _is_retryable_database_error(exc: DBAPIError) -> bool:
+    """Retry connection-level DB failures, never arbitrary application failures."""
+    return isinstance(exc, (OperationalError, InterfaceError)) or bool(
+        getattr(exc, "connection_invalidated", False)
+    )
 
 
 async def _claim_once(
@@ -96,10 +109,41 @@ def claim_execution_task(
         )
         return
 
-    asyncio.run(
-        _claim_once(
-            execution_id=execution_uuid,
-            outbox_event_id=event_uuid,
-            worker_id=worker_id,
+    try:
+        asyncio.run(
+            _claim_once(
+                execution_id=execution_uuid,
+                outbox_event_id=event_uuid,
+                worker_id=worker_id,
+            )
         )
-    )
+    except AppError as exc:
+        # Durable state/schema conflicts are not transient queue failures.  Do not
+        # poison-loop them through Celery retry; an operator must repair evidence.
+        logger.error(
+            "discarding execution claim due durable conflict execution_id=%s outbox_event_id=%s code=%s",
+            execution_uuid,
+            event_uuid,
+            exc.code,
+        )
+        return
+    except DBAPIError as exc:
+        if not _is_retryable_database_error(exc):
+            raise
+        retry_count = int(getattr(request, "retries", 0) or 0)
+        countdown = min(
+            _CLAIM_DB_RETRY_BASE_SECONDS * (2**retry_count),
+            _CLAIM_DB_RETRY_MAX_SECONDS,
+        )
+        logger.warning(
+            "retrying execution claim after transient database failure execution_id=%s outbox_event_id=%s retry=%s",
+            execution_uuid,
+            event_uuid,
+            retry_count + 1,
+        )
+        retry = getattr(self, "retry")
+        raise retry(
+            exc=RuntimeError("transient database failure during execution claim"),
+            countdown=countdown,
+            max_retries=_CLAIM_DB_MAX_RETRIES,
+        ) from exc
