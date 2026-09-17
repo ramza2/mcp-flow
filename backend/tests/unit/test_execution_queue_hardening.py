@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
+import pytest
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
-
-import pytest
 
 from app.core.errors import AppError
 from app.domain.enums import ExecutionSourceType, ExecutionStatus
