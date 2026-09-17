@@ -28,6 +28,12 @@ async def _created_execution(session: AsyncSession) -> uuid.UUID:
     return outcome.result.id
 
 
+def _as_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
+
+
 def test_celery_publish_retry_policy_is_bounded() -> None:
     settings = get_settings()
     retry_policy = celery_app.conf.task_publish_retry_policy
@@ -135,7 +141,9 @@ async def test_outbox_published_at_is_captured_after_publish_returns(
             select(OutboxEvent).where(OutboxEvent.aggregate_id == execution_id)
         )
     ).scalar_one()
-    assert row.published_at == after
-    assert row.last_attempt_at == after
+    assert row.published_at is not None
+    assert row.last_attempt_at is not None
+    assert _as_utc(row.published_at) == after
+    assert _as_utc(row.last_attempt_at) == after
     assert row.publish_attempt_count == 1
     assert row.last_error_code is None
