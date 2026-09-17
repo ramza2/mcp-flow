@@ -21,6 +21,8 @@ from app.schemas.execution_plan import (
     DETERMINISTIC_TOOL_STEP_ID,
     ExecutionPlanStep,
     ExecutionPlanV1,
+    ToolStepConfigV1,
+    compute_plan_hash,
 )
 
 _WORKER_ID_MAX_LEN = 128
@@ -158,6 +160,15 @@ class ExecutionClaimService:
                 message="Execution plan/step snapshot is invalid.",
                 status_code=409,
             ) from exc
+        if (
+            execution.plan_schema_version != plan.schema_version
+            or compute_plan_hash(execution.plan_snapshot) != execution.plan_hash
+        ):
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message="Execution plan snapshot/hash lineage is inconsistent.",
+                status_code=409,
+            )
         if len(plan.steps) != 1:
             raise AppError(
                 code="RESOURCE_CONFLICT",
@@ -171,12 +182,21 @@ class ExecutionClaimService:
                 message="Execution plan/step snapshot lineage is inconsistent.",
                 status_code=409,
             )
+        try:
+            tool_config = ToolStepConfigV1.model_validate(expected_step.config)
+        except Exception as exc:
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message="Execution TOOL Step config is invalid.",
+                status_code=409,
+            ) from exc
         if (
             plan_step.id != step.step_key
             or plan_step.id != expected_step.id
             or plan_step.type != AuthorableStepType.TOOL
             or plan_step.depends_on != []
             or plan_step.when is not None
+            or step.mcp_tool_version_id != tool_config.tool_version_id
         ):
             raise AppError(
                 code="RESOURCE_CONFLICT",
