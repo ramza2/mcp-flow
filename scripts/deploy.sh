@@ -11,7 +11,7 @@ usage() {
 Usage: ./scripts/deploy.sh [command]
 
 Commands:
-  deploy        Configure if needed, validate, migrate, deploy, and smoke-test (default)
+  deploy         Configure if needed, validate, migrate, deploy, and smoke-test (default)
   --reconfigure  Re-run interactive configuration, then deploy
   --status       Show container status
   --logs         Follow key service logs
@@ -134,15 +134,16 @@ preflight() {
   compose config >/dev/null
 }
 
-wait_runtime_health() {
+wait_services() {
+  local label="$1"
+  shift
   local deadline=$((SECONDS + 180))
-  local required=(api worker outbox frontend postgres redis object-storage)
-  local svc cid status unhealthy=0 all_ready=1
+  local svc cid status all_ready
 
-  log "Waiting for runtime containers"
+  log "Waiting for $label"
   while (( SECONDS < deadline )); do
     all_ready=1
-    for svc in "${required[@]}"; do
+    for svc in "$@"; do
       cid="$(compose ps -q "$svc" 2>/dev/null || true)"
       if [[ -z "$cid" ]]; then
         all_ready=0
@@ -152,21 +153,45 @@ wait_runtime_health() {
       case "$status" in
         healthy|running) ;;
         unhealthy|exited|dead)
-          unhealthy=1
-          echo "Service $svc is $status"
-          break
+          compose logs --tail=120 "$svc" || true
+          fail "Service $svc entered state: $status"
           ;;
         *) all_ready=0 ;;
       esac
     done
-    (( unhealthy == 1 )) && break
     (( all_ready == 1 )) && return 0
     sleep 3
   done
 
   compose ps || true
-  compose logs --tail=120 migration api worker outbox postgres redis object-storage || true
-  fail "Runtime services did not become healthy"
+  fail "$label did not become ready within 180 seconds"
+}
+
+wait_migration() {
+  local deadline=$((SECONDS + 180))
+  local cid state exit_code
+
+  log "Waiting for Alembic migration"
+  while (( SECONDS < deadline )); do
+    cid="$(compose ps -a -q migration 2>/dev/null || true)"
+    if [[ -n "$cid" ]]; then
+      state="$(docker inspect -f '{{.State.Status}}' "$cid")"
+      if [[ "$state" == "exited" ]]; then
+        exit_code="$(docker inspect -f '{{.State.ExitCode}}' "$cid")"
+        if [[ "$exit_code" == "0" ]]; then
+          echo "Migration completed successfully"
+          return 0
+        fi
+        compose logs --tail=200 migration || true
+        fail "Migration failed with exit code $exit_code"
+      fi
+      [[ "$state" == "dead" ]] && fail "Migration container entered dead state"
+    fi
+    sleep 2
+  done
+
+  compose logs --tail=200 migration || true
+  fail "Migration did not complete within 180 seconds"
 }
 
 smoke_test() {
@@ -190,8 +215,7 @@ smoke_test() {
   fail "HTTPS readiness check failed: $url"
 }
 
-deploy() {
-  ensure_config
+deploy_core() {
   ensure_secrets
   preflight
 
@@ -200,23 +224,29 @@ deploy() {
 
   log "Starting stateful dependencies"
   compose up -d postgres redis object-storage
+  wait_services "stateful dependencies" postgres redis object-storage
 
   log "Running Alembic migration (fail-fast)"
-  compose up --abort-on-container-exit --exit-code-from migration migration
+  compose up -d migration
+  wait_migration
 
   log "Starting MCPFlow runtime"
   compose up -d api worker outbox frontend
-
-  wait_runtime_health
+  wait_services "runtime services" api worker outbox frontend postgres redis object-storage
   smoke_test
 
   log "Deployment complete"
   compose ps
 }
 
+deploy() {
+  ensure_config
+  deploy_core
+}
+
 status() {
   [[ -f "$ENV_FILE" ]] || fail "$ENV_FILE does not exist"
-  compose ps
+  compose ps -a
 }
 
 logs() {
@@ -228,7 +258,8 @@ restart_runtime() {
   [[ -f "$ENV_FILE" ]] || fail "$ENV_FILE does not exist"
   preflight
   compose restart api worker outbox frontend
-  wait_runtime_health
+  wait_services "runtime services" api worker outbox frontend postgres redis object-storage
+  smoke_test
 }
 
 down() {
@@ -240,7 +271,7 @@ down() {
 cd "$ROOT_DIR"
 case "${1:-deploy}" in
   deploy) deploy ;;
-  --reconfigure) write_env; deploy ;;
+  --reconfigure) write_env; deploy_core ;;
   --status) status ;;
   --logs) logs ;;
   --restart) restart_runtime ;;
