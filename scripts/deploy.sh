@@ -38,6 +38,30 @@ read_default() {
   printf '%s' "${value:-$default}"
 }
 
+current_git_tag() {
+  git -C "$ROOT_DIR" rev-parse --short HEAD 2>/dev/null || printf 'server'
+}
+
+refresh_managed_image_tag() {
+  local current existing
+  current="$(current_git_tag)"
+  existing="$(grep -E '^MCPFLOW_IMAGE_TAG=' "$ENV_FILE" 2>/dev/null | tail -n 1 | cut -d= -f2- || true)"
+
+  # SHA-shaped tags are deploy.sh-managed revision tags. Refresh them after git pull
+  # so image names remain traceable to the source revision. Explicit custom tags
+  # such as "pilot-1" are preserved.
+  if [[ -z "$existing" || "$existing" =~ ^[0-9a-fA-F]{7,40}$ ]]; then
+    if grep -q '^MCPFLOW_IMAGE_TAG=' "$ENV_FILE"; then
+      sed -i "s/^MCPFLOW_IMAGE_TAG=.*/MCPFLOW_IMAGE_TAG=$current/" "$ENV_FILE"
+    else
+      printf 'MCPFLOW_IMAGE_TAG=%s\n' "$current" >> "$ENV_FILE"
+    fi
+    if [[ "$existing" != "$current" ]]; then
+      echo "Image tag updated: ${existing:-unset} -> $current"
+    fi
+  fi
+}
+
 write_env() {
   local host network entrypoint resolver environment log_level docs_enabled image_tag lease_seconds
 
@@ -54,7 +78,7 @@ write_env() {
   environment="$(read_default "Deployment environment" "pilot")"
   log_level="$(read_default "Log level" "INFO")"
   docs_enabled="$(read_default "API docs enabled (true/false)" "false")"
-  image_tag="$(read_default "Image tag" "$(git -C "$ROOT_DIR" rev-parse --short HEAD 2>/dev/null || echo server)")"
+  image_tag="$(read_default "Image tag" "$(current_git_tag)")"
   lease_seconds="$(read_default "Execution lease seconds" "60")"
 
   cat > "$ENV_FILE" <<EOF
@@ -206,16 +230,23 @@ smoke_test() {
   local i
   log "HTTPS smoke test: $url"
   for i in {1..30}; do
-    if curl --fail --silent --show-error --max-time 5 "$url" >/dev/null; then
+    # Traefik may briefly serve its default/self-signed certificate while ACME
+    # issuance or certificate reload completes. Suppress transient retry noise;
+    # a successful verified request is still required before deployment passes.
+    if curl --fail --silent --max-time 5 "$url" >/dev/null 2>&1; then
       echo "Health check passed"
       return 0
     fi
     sleep 2
   done
+
+  echo "Final HTTPS diagnostic:" >&2
+  curl --fail --silent --show-error --max-time 5 "$url" >/dev/null || true
   fail "HTTPS readiness check failed: $url"
 }
 
 deploy_core() {
+  refresh_managed_image_tag
   ensure_secrets
   preflight
 
