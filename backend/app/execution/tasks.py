@@ -18,7 +18,6 @@ from app.repositories.outbox import OutboxRepository
 
 logger = logging.getLogger(__name__)
 
-_CLAIM_DB_MAX_RETRIES = 3
 _CLAIM_DB_RETRY_BASE_SECONDS = 2
 _CLAIM_DB_RETRY_MAX_SECONDS = 30
 
@@ -84,7 +83,11 @@ async def _claim_once(
         await dispose_db()
 
 
-@celery_app.task(bind=True, name="mcpflow.execution.claim")
+@celery_app.task(
+    bind=True,
+    name="mcpflow.execution.claim",
+    max_retries=None,
+)
 def claim_execution_task(
     self: object,
     *,
@@ -138,12 +141,11 @@ def claim_execution_task(
         logger.warning(
             "retrying execution claim after transient database failure execution_id=%s outbox_event_id=%s retry=%s",
             execution_uuid,
-            event_uuid,
+            outbox_event_id,
             retry_count + 1,
         )
         retry = getattr(self, "retry")
         raise retry(
             exc=RuntimeError("transient database failure during execution claim"),
             countdown=countdown,
-            max_retries=_CLAIM_DB_MAX_RETRIES,
         ) from exc
