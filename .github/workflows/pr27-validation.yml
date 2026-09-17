@@ -52,42 +52,111 @@ jobs:
         working-directory: backend
         run: python -c "import celery; import redis; print(celery.__version__, redis.__version__)"
       - name: Ruff
+        id: ruff
+        continue-on-error: true
         working-directory: backend
-        run: ruff check .
+        shell: bash
+        run: |
+          set -o pipefail
+          ruff check . 2>&1 | tee ../ruff.log
       - name: Non-integration tests
+        id: nonint
+        continue-on-error: true
         working-directory: backend
-        run: pytest -m "not integration" -q
+        shell: bash
+        run: |
+          set -o pipefail
+          pytest -m "not integration" -q 2>&1 | tee ../pytest-non-integration.log
       - name: Integration tests
+        id: integration
+        continue-on-error: true
         working-directory: backend
-        run: pytest -m integration -q
+        shell: bash
+        run: |
+          set -o pipefail
+          pytest -m integration -q 2>&1 | tee ../pytest-integration.log
       - name: Full tests
+        id: full
+        continue-on-error: true
         working-directory: backend
-        run: pytest -m "" -q
+        shell: bash
+        run: |
+          set -o pipefail
+          pytest -m "" -q 2>&1 | tee ../pytest-full.log
       - name: Compose config
-        run: docker compose -f compose.yaml -f compose.local.yaml config >/dev/null
+        id: compose
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          docker compose -f compose.yaml -f compose.local.yaml config 2>&1 | tee compose-config.log >/dev/null
+      - name: Upload backend validation logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr27-backend-validation
+          path: |
+            ruff.log
+            pytest-non-integration.log
+            pytest-integration.log
+            pytest-full.log
+            compose-config.log
+      - name: Enforce backend validation
+        if: always()
+        shell: bash
+        run: |
+          test "${{ steps.ruff.outcome }}" = success
+          test "${{ steps.nonint.outcome }}" = success
+          test "${{ steps.integration.outcome }}" = success
+          test "${{ steps.full.outcome }}" = success
+          test "${{ steps.compose.outcome }}" = success
 
   frontend:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.25.0
+          run_install: false
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
           cache: pnpm
           cache-dependency-path: frontend/pnpm-lock.yaml
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 11.25.0
-          run_install: false
       - name: Install frontend dependencies
         working-directory: frontend
         run: pnpm install --frozen-lockfile
       - name: Typecheck / Vitest / build
+        id: check
+        continue-on-error: true
         working-directory: frontend
-        run: pnpm check
+        shell: bash
+        run: |
+          set -o pipefail
+          pnpm check 2>&1 | tee ../frontend-check.log
       - name: Install Playwright Chromium
         working-directory: frontend
         run: pnpm exec playwright install --with-deps chromium
       - name: Playwright
+        id: playwright
+        continue-on-error: true
         working-directory: frontend
-        run: pnpm exec playwright test
+        shell: bash
+        run: |
+          set -o pipefail
+          pnpm exec playwright test 2>&1 | tee ../playwright.log
+      - name: Upload frontend validation logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr27-frontend-validation
+          path: |
+            frontend-check.log
+            playwright.log
+      - name: Enforce frontend validation
+        if: always()
+        shell: bash
+        run: |
+          test "${{ steps.check.outcome }}" = success
+          test "${{ steps.playwright.outcome }}" = success
