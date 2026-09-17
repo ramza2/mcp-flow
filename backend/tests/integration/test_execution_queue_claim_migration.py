@@ -22,6 +22,30 @@ def _cfg(url: str) -> Config:
     return cfg
 
 
+def _check_constraint_definition(
+    check_map: dict[str, str],
+    logical_name: str,
+) -> str:
+    """Resolve a logical CHECK name through the SQLAlchemy naming convention.
+
+    The project convention is ``ck_%(table_name)s_%(constraint_name)s``.  Alembic
+    therefore persists an explicitly supplied logical name such as
+    ``ck_executions_running_lease`` with an additional table prefix on PostgreSQL.
+    Keep this regression focused on the intended logical constraint and definition
+    rather than coupling it to that rendered prefix.
+    """
+    matches = [
+        definition
+        for name, definition in check_map.items()
+        if name == logical_name or name.endswith(f"_{logical_name}")
+    ]
+    assert len(matches) == 1, (
+        f"expected exactly one CHECK matching {logical_name!r}; "
+        f"found names={sorted(check_map)}"
+    )
+    return matches[0]
+
+
 @pytest.mark.integration
 def test_alembic_execution_queue_claim_downgrade_upgrade(
     integration_database_url: str,
@@ -72,10 +96,12 @@ async def test_execution_queue_claim_schema_constraints(
             )
         ).all()
         check_map = {row.conname: row.pg_get_constraintdef for row in exec_checks}
-        assert "ck_executions_running_lease" in check_map
-        assert "ck_executions_queued_without_lease" in check_map
-        assert "running" in check_map["ck_executions_running_lease"].lower()
-        assert "lease_token" in check_map["ck_executions_running_lease"].lower()
+        running_lease = _check_constraint_definition(
+            check_map, "ck_executions_running_lease"
+        )
+        _check_constraint_definition(check_map, "ck_executions_queued_without_lease")
+        assert "running" in running_lease.lower()
+        assert "lease_token" in running_lease.lower()
 
         tables = (
             await session.execute(
