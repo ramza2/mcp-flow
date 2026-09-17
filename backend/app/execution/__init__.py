@@ -1,5 +1,6 @@
 """Execution Engine package boundary (docs/03/04).
 
-Owns Execution / Step lifecycle, approvals waits, MRTR waits, cancel, timeout.
-No engine implementation in this skeleton.
+PR #27 foundation owns CREATED→QUEUED staging, durable Outbox delivery,
+QUEUED→RUNNING orchestration claim/lease, and initial PENDING→READY.
+Tool execution, StepAttempt, approval/MRTR, retry, cancel, and completion remain deferred.
 """

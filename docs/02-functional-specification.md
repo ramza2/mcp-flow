@@ -11,7 +11,7 @@
 | 상세 계약 | `04-agent-mcp-architecture.md` v0.2, `05-data-model.md` v0.2 |
 | 공식 과제명 | MCP 연계 업무 자동화 AI 에이전트 개발 |
 | 개발 프로젝트명 | MCPFlow |
-| 최종 수정일 | 2026-09-02 |
+| 최종 수정일 | 2026-09-17 |
 
 ---
 
@@ -493,7 +493,21 @@ SUCCEEDED FAILED SKIPPED TIMED_OUT CANCELLED UNKNOWN_OUTCOME
 
 ## FNC-EXE-003. Queue/Claim
 
-Celery/Redis는 전달과 coordination에 사용하고 DB가 상태 원본이다. Worker는 lease/idempotent claim을 사용한다.
+PostgreSQL이 Execution/Step 상태 원본이고 Celery/Redis는 전달과 coordination에만 사용한다.
+
+AgentRequest Execution foundation의 초기 dispatch는 다음과 같다.
+
+```text
+Execution CREATED
+→ DB stager: QUEUED + EXECUTION_DISPATCH Outbox를 동일 transaction에서 생성
+→ outbox process: unpublished Outbox를 execution queue에 ID-only payload로 at-least-once publish
+→ worker: DB lease/idempotent claim 성공 시 QUEUED → RUNNING
+→ foundation single TOOL Step: PENDING → READY
+```
+
+중복 broker delivery는 정상 조건이며 이미 `RUNNING` 또는 terminal인 Execution은 DB claim에서 no-op 처리한다. Redis 장애 시 `QUEUED + unpublished Outbox`를 PostgreSQL에 유지하고 복구 후 재전달한다.
+
+이번 foundation의 lease는 Execution orchestration ownership이며 Tool side-effect idempotency나 StepAttempt retry token이 아니다. expired `RUNNING` lease takeover/recovery는 `FNC-EXE-011` 후속 범위로 남긴다.
 
 ## FNC-EXE-004. 실행 직전 재검증
 
@@ -537,6 +551,8 @@ Approval Step 또는 ToolPolicy가 요구하면 `WAITING_APPROVAL`로 전환한�
 ## FNC-EXE-011. 복구
 
 Worker lease, MCP task handle, persisted state를 사용해 재시작 후 복구한다. 동일 non-idempotent Tool을 무조건 재호출하지 않는다.
+
+Queue/Claim foundation에서는 unpublished Outbox 재전달과 duplicate claim no-op까지만 구현한다. `RUNNING` Execution의 lease가 만료된 뒤 새 worker가 takeover하여 Tool을 재실행할지 판단하는 로직은 StepAttempt/Tool side-effect 증적이 필요한 후속 복구 범위다.
 
 ## FNC-EXE-012. 부분성공
 

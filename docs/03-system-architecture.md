@@ -11,7 +11,7 @@
 | 상세 계약 | `04-agent-mcp-architecture.md` v0.2, `05-data-model.md` v0.2 |
 | 공식 과제명 | MCP 연계 업무 자동화 AI 에이전트 개발 |
 | 개발 프로젝트명 | MCPFlow |
-| 최종 수정일 | 2026-09-02 |
+| 최종 수정일 | 2026-09-17 |
 
 ---
 
@@ -298,7 +298,9 @@ Execution Engine 책임:
 - Plan materialization
 - dependency/ready 계산
 - concurrency limit
-- lease/claim
+- durable `CREATED → QUEUED + Outbox` staging
+- DB lease/idempotent claim (`QUEUED → RUNNING`)
+- initial dependency-free Step readiness (`PENDING → READY`)
 - 정책·Permission 재검증
 - Tool call
 - MRTR input wait/resume
@@ -324,6 +326,8 @@ Queue:
 | `maintenance` | health, embedding, export, retention |
 
 Celery payload에는 전체 업무데이터/secret 대신 ID를 전달한다.
+
+Initial Execution dispatch는 PostgreSQL durable Outbox를 거친다. `outbox` process가 `CREATED` AgentRequest Execution을 `QUEUED`로 바꾸는 transaction에서 `EXECUTION_DISPATCH` Outbox를 함께 생성하고, broker에는 `execution_id`/`outbox_event_id`만 전달한다. Broker 전달은 at-least-once이며 최종 중복 방지는 worker의 DB claim이다.
 
 ---
 
@@ -441,8 +445,12 @@ Execution 최종상태를 Redis에만 저장하지 않는다.
 - Mutable Resource: optimistic lock
 - Approval decision: row lock + context hash
 - Schedule occurrence: unique constraint
-- Worker Step claim: lease + idempotency
-- Outbox: same transaction + at-least-once consumer dedup
+- Initial AgentRequest dispatch: `CREATED → QUEUED + Outbox` same transaction
+- Outbox relay: `FOR UPDATE SKIP LOCKED` + at-least-once publish
+- Worker Execution claim: DB row lock + opaque lease token + expiry/heartbeat
+- Duplicate broker delivery: already `RUNNING`/terminal이면 no-op
+- Initial Step readiness: Execution claim과 같은 transaction에서 `PENDING → READY`
+- Outbox/worker payload: Execution/Outbox ID만 전달
 - Execution Plan/Version: immutable snapshot
 
 `RUNNING → QUEUED` 식으로 업무상태를 되돌려 Worker 재전달을 표현하지 않는다.
@@ -484,8 +492,8 @@ Metric:
 | 장애 | 기본 처리 |
 |---|---|
 | API 재시작 | Worker 실행은 DB 상태 기준 지속 |
-| Worker 종료 | lease 만료 후 복구, non-idempotent 재호출 제한 |
-| Redis 장애 | 업무상태 유지, Outbox로 복구 후 재전달 |
+| Worker 종료 | foundation은 lease 만료를 증거로 남기며 자동 takeover는 후속 복구 범위; non-idempotent 재호출 제한 |
+| Redis 장애 | `QUEUED + unpublished Outbox` 업무상태 유지, broker 복구 후 재전달 |
 | MCP 장애 | 관련 Step 오류정책 적용 |
 | LLM 장애 | 신규 planning 실패, 관리/과거이력 유지 |
 | Object Storage 장애 | artifact 기능 영향, DB 정합성 유지 |

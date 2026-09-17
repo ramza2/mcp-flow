@@ -27,9 +27,16 @@ class Settings(BaseSettings):
         description="Async SQLAlchemy PostgreSQL URL",
     )
 
-    # Placeholders for future canonical services (docs/08) — not connected in this skeleton.
     redis_url: str = "redis://localhost:6379/0"
     object_storage_endpoint: str = "http://localhost:9000"
+
+    execution_lease_seconds: int = Field(default=60, gt=0)
+    outbox_poll_interval_seconds: float = Field(default=1.0, gt=0)
+    outbox_batch_size: int = Field(default=50, ge=1, le=500)
+    celery_broker_connection_timeout: float = Field(default=5.0, gt=0)
+    celery_publish_connect_timeout: float = Field(default=5.0, gt=0)
+    celery_publish_socket_timeout: float = Field(default=5.0, gt=0)
+    celery_publish_max_retries: int = Field(default=3, ge=0, le=10)
 
     request_id_header: str = "X-Request-ID"
     request_id_max_length: int = 128

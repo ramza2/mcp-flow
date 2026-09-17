@@ -14,7 +14,7 @@
 | API 시험 | FastAPI/httpx + OpenAPI contract |
 | 성능 시험 | k6 또는 동등 도구 |
 | 공식 과제명 | MCP 연계 업무 자동화 AI 에이전트 개발 |
-| 최종 수정일 | 2026-09-02 |
+| 최종 수정일 | 2026-09-17 |
 
 ---
 
@@ -338,6 +338,27 @@ Dataset은 평가 전 FROZEN하고 실행 중 정답을 변경하지 않는다.
 - idempotency replay / key reuse (`IDEMPOTENCY_KEY_REUSED`) / concurrency reconcile
 - failed preflight does not consume Idempotency-Key
 - restart recovery (CREATED + plan_validation_run_id + plan_hash 일치)
+
+추가 (Execution Queue / Claim foundation):
+
+- `CREATED → QUEUED + EXECUTION_DISPATCH Outbox` 동일 transaction
+- stager `FOR UPDATE SKIP LOCKED` concurrency / single Outbox dedupe
+- ID-only Outbox/Celery payload (`execution_id`, `outbox_event_id`)
+- broker publish success / failure evidence / same-row retry
+- broker success 후 mark-published 유실을 가정한 duplicate delivery 안전성
+- unpublished Outbox restart recovery
+- DB idempotent claim `QUEUED → RUNNING`
+- initial single TOOL Step `PENDING → READY` same transaction
+- double claim winner 1 / loser no-op
+- already RUNNING/terminal duplicate task no-op
+- worker_id/lease_token/lease expiry/heartbeat contract
+- wrong worker/token 및 expired heartbeat 거절
+- claim 중 Step transition 실패 시 Execution update rollback
+- QUEUED lifecycle/Step count/status/snapshot corruption fail-closed
+- Redis unavailable 시 `QUEUED + unpublished Outbox` 유지
+- Queue/Claim 중 SecretResolver/MCP/LLM/ApprovalRequest/StepAttempt/ToolCall 호출 0
+- Queue/Claim 후 create Idempotency-Key replay가 최초 `CREATED` response snapshot 유지
+- expired RUNNING lease takeover는 미구현 범위임을 회귀로 고정
 
 
 ## 9. Repository Integration Test

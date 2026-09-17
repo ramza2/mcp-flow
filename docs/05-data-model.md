@@ -11,7 +11,7 @@
 | Database | PostgreSQL + pgvector |
 | 공식 과제명 | MCP 연계 업무 자동화 AI 에이전트 개발 |
 | 개발 프로젝트명 | MCPFlow |
-| 최종 수정일 | 2026-09-02 |
+| 최종 수정일 | 2026-09-17 |
 
 ---
 
@@ -1079,6 +1079,9 @@ decided_at
 | `error_code`, `error_message` | 최종 오류 |
 | `trace_id`, `priority` | 추적/우선순위 |
 | lifecycle | requested/queued/started/finished/cancel_requested |
+| `worker_id` | 현재 Execution orchestration lease holder (nullable) |
+| `lease_token` | stale worker update를 차단하는 opaque UUID claim token (nullable) |
+| `lease_expires_at`, `heartbeat_at` | orchestration lease 만료/heartbeat (nullable) |
 | `lock_version`, `retention_until` | 동시성/보존 |
 
 `source_type = AGENT_REQUEST` foundation은 `plan_validation_run_id`로 해당 Execution이 고정한 exact READY validation evidence를 pin한다. creation 이후 Plan/validation lineage를 재해석하지 않는다.
@@ -1138,6 +1141,34 @@ executions.status = CREATED
 executions.plan_validation_run_id = READY PlanValidationRun.id
 execution_steps.status = PENDING  (foundation: single TOOL step)
 ```
+
+#### Queue / Claim Foundation
+
+AgentRequest source의 initial dispatch만 지원한다.
+
+```text
+CREATED
+→ stager가 Execution row를 lock
+→ QUEUED + queued_at + lock_version 증가
+→ 같은 transaction에서 EXECUTION_DISPATCH Outbox 생성
+→ outbox relay가 execution queue에 execution_id/outbox_event_id만 publish
+→ worker가 QUEUED row를 DB lock으로 claim
+→ RUNNING + worker_id + lease_token + lease_expires_at + heartbeat_at + started_at
+→ 같은 transaction에서 single TOOL Step PENDING → READY + ready_at
+```
+
+Invariant:
+
+```text
+RUNNING → worker_id, lease_token, lease_expires_at 필수
+QUEUED  → worker/lease/heartbeat 모두 null
+```
+
+중복 broker delivery는 `RUNNING`/terminal 상태를 되돌리지 않고 no-op 처리한다. `queued_at`, `started_at`, `ready_at`은 최초 transition에서만 설정한다.
+
+Lease heartbeat는 `RUNNING` + 동일 worker_id + 동일 lease_token + 미만료 lease에서만 연장한다. 만료된 lease를 heartbeat로 되살리지 않는다. expired `RUNNING` lease takeover는 후속 복구 범위다.
+
+Queue/claim은 coordination 책임만 가지며 User/ResourceGrant/ToolPolicy 재검증, Secret resolve, MCP call, StepAttempt 생성은 수행하지 않는다.
 
 ### 13.3 Execution 상태전이
 
@@ -1327,6 +1358,37 @@ lock_version
 ### 15.2 `outbox_events`
 
 업무 row와 같은 transaction에서 생성하며 at-least-once 전달을 전제로 consumer가 idempotent해야 한다.
+
+Queue/Claim foundation 최소 field contract:
+
+```text
+id uuid PK
+event_type
+aggregate_type
+aggregate_id uuid
+dedupe_key unique
+payload jsonb
+created_at
+last_attempt_at nullable
+published_at nullable
+publish_attempt_count
+last_error_code nullable
+lock_version
+```
+
+Initial AgentRequest dispatch:
+
+```text
+event_type     = EXECUTION_DISPATCH
+aggregate_type = EXECUTION
+aggregate_id   = execution.id
+dedupe_key     = execution:{execution_id}:initial
+payload        = {"execution_id": "..."}
+```
+
+`published_at IS NULL`이면 미발행/재시도 대상이며 별도 Outbox status enum을 만들지 않는다. broker publish 성공 후 DB mark 전에 process가 종료될 수 있으므로 같은 event가 재전달될 수 있다. Consumer는 `outbox_event_id` lineage를 확인하고 DB Execution claim으로 중복을 제거한다.
+
+Broker/network 실패 시 exception 원문이나 Redis credential을 저장하지 않고 `last_error_code=PUBLISH_FAILED` 수준만 남긴다. published row는 즉시 삭제하지 않으며 retention은 별도 maintenance 정책으로 처리한다.
 
 ### 15.3 `api_idempotency_records`
 

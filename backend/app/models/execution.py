@@ -28,7 +28,7 @@ class Execution(Base):
 
     __tablename__ = "executions"
     __table_args__ = (
-        # PostgreSQL CHECK constraints live in Alembic migration 0013 so SQLite
+        # PostgreSQL CHECK constraints live in Alembic migrations so SQLite
         # unit create_all remains compatible.
         Index(
             "ix_executions_agent_request_id_requested_at",
@@ -48,6 +48,11 @@ class Execution(Base):
         Index("ix_executions_agent_version_id", "agent_version_id"),
         Index("ix_executions_plan_validation_run_id", "plan_validation_run_id"),
         Index("ix_executions_parent_execution_id", "parent_execution_id"),
+        Index(
+            "ix_executions_status_lease_expires_at",
+            "status",
+            "lease_expires_at",
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -113,6 +118,14 @@ class Execution(Base):
     cancel_requested_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    worker_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    lease_token: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    heartbeat_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     lock_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     retention_until: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
@@ -120,7 +133,7 @@ class Execution(Base):
 
 
 class ExecutionStep(Base):
-    """Per-step immutable plan projection for an Execution (docs/05 §13.3)."""
+    """Per-step immutable plan projection for an Execution (docs/05 §13.4)."""
 
     __tablename__ = "execution_steps"
     __table_args__ = (
