@@ -24,4 +24,6 @@ class CeleryExecutionQueuePublisher:
             },
             queue="execution",
             task_id=str(outbox_event_id),
+            retry=True,
+            retry_policy=celery_app.conf.task_publish_retry_policy,
         )
