@@ -9,8 +9,7 @@ permissions:
   contents: write
 
 jobs:
-  patch-docs:
-    if: github.event.head_commit.message != 'docs: document execution queue and claim foundation'
+  docs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -18,7 +17,7 @@ jobs:
           fetch-depth: 0
       - name: Patch canonical docs
         run: python .github/pr27_patch_docs.py
-      - name: Commit docs
+      - name: Commit patched docs when needed
         shell: bash
         run: |
           if git diff --quiet -- docs; then
