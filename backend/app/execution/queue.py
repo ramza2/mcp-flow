@@ -159,19 +159,22 @@ class OutboxRelayService:
         failed = 0
         for row in rows:
             execution_id = validate_execution_dispatch_event(row)
-            ts = now or datetime.now(UTC)
             try:
                 publisher.publish_execution(
                     execution_id=execution_id,
                     outbox_event_id=row.id,
                 )
             except Exception:
-                # Broker/network failures are retryable delivery failures.  Do not
+                # Broker/network failures are retryable delivery failures. Do not
                 # persist exception strings because broker URLs may contain secrets.
-                await self._outbox.record_publish_failure(row, now=ts)
+                attempt_at = now or datetime.now(UTC)
+                await self._outbox.record_publish_failure(row, now=attempt_at)
                 failed += 1
             else:
-                await self._outbox.mark_published(row, now=ts)
+                # Capture the timestamp after publish returns so a slow or retried
+                # broker connection cannot backdate published_at to the attempt start.
+                attempt_at = now or datetime.now(UTC)
+                await self._outbox.mark_published(row, now=attempt_at)
                 published += 1
         return PublishBatchResult(
             selected=len(rows),

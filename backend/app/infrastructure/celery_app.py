@@ -29,4 +29,11 @@ celery_app.conf.update(
     task_reject_on_worker_lost=True,
     worker_prefetch_multiplier=1,
     broker_connection_timeout=settings.celery_broker_connection_timeout,
+    task_publish_retry=True,
+    task_publish_retry_policy={
+        "max_retries": settings.celery_publish_max_retries,
+        "interval_start": 0,
+        "interval_step": 0.2,
+        "interval_max": 1.0,
+    },
 )
