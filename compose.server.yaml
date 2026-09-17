@@ -1,0 +1,58 @@
+# Server/pilot deployment override.
+# Uses an existing Traefik instance with Docker provider + labels.
+# Usage is normally through ./scripts/deploy.sh.
+
+services:
+  # Keep the embedded/file-provider Traefik available for local development only.
+  # Adding a profile here excludes it from normal server deployment.
+  traefik:
+    profiles: ["embedded-proxy"]
+
+  frontend:
+    restart: unless-stopped
+    networks:
+      - edge
+      - traefik_external
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=${MCPFLOW_TRAEFIK_NETWORK}"
+      - "traefik.http.routers.mcpflow.rule=Host(`${MCPFLOW_HOST}`) && PathPrefix(`/`)"
+      - "traefik.http.routers.mcpflow.entrypoints=${MCPFLOW_TRAEFIK_ENTRYPOINT:-websecure}"
+      - "traefik.http.routers.mcpflow.tls=true"
+      - "traefik.http.routers.mcpflow.tls.certresolver=${MCPFLOW_TRAEFIK_CERTRESOLVER:-letsencrypt}"
+      - "traefik.http.routers.mcpflow.priority=1"
+      - "traefik.http.services.mcpflow.loadbalancer.server.port=8080"
+
+  api:
+    restart: unless-stopped
+    networks:
+      - edge
+      - app
+      - data
+      - traefik_external
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=${MCPFLOW_TRAEFIK_NETWORK}"
+      - "traefik.http.routers.mcpflow-api.rule=Host(`${MCPFLOW_HOST}`) && (Path(`/api/v1`) || PathPrefix(`/api/v1/`) || Path(`/health`) || PathPrefix(`/health/`))"
+      - "traefik.http.routers.mcpflow-api.entrypoints=${MCPFLOW_TRAEFIK_ENTRYPOINT:-websecure}"
+      - "traefik.http.routers.mcpflow-api.tls=true"
+      - "traefik.http.routers.mcpflow-api.tls.certresolver=${MCPFLOW_TRAEFIK_CERTRESOLVER:-letsencrypt}"
+      - "traefik.http.routers.mcpflow-api.priority=100"
+      - "traefik.http.services.mcpflow-api.loadbalancer.server.port=8000"
+
+networks:
+  traefik_external:
+    external: true
+    name: ${MCPFLOW_TRAEFIK_NETWORK}
+
+secrets:
+  postgres_admin_password:
+    file: ./infra/secrets/server/postgres_admin_password
+  postgres_migration_password:
+    file: ./infra/secrets/server/postgres_migration_password
+  postgres_app_password:
+    file: ./infra/secrets/server/postgres_app_password
+  minio_root_user:
+    file: ./infra/secrets/server/minio_root_user
+  minio_root_password:
+    file: ./infra/secrets/server/minio_root_password
