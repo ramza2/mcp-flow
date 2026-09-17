@@ -28,14 +28,10 @@ async def _created_execution(session: AsyncSession) -> uuid.UUID:
     return outcome.result.id
 
 
-def test_celery_publish_is_bounded_by_transport_and_retry_settings() -> None:
+def test_celery_publish_retry_policy_is_bounded() -> None:
     settings = get_settings()
-    transport = celery_app.conf.broker_transport_options
     retry_policy = celery_app.conf.task_publish_retry_policy
 
-    assert transport["socket_connect_timeout"] == settings.celery_broker_connection_timeout
-    assert transport["socket_timeout"] == settings.celery_broker_socket_timeout
-    assert transport["max_retries"] == settings.celery_publish_max_retries
     assert celery_app.conf.task_publish_retry is True
     assert retry_policy["max_retries"] == settings.celery_publish_max_retries
     assert retry_policy["interval_start"] == 0
@@ -43,15 +39,30 @@ def test_celery_publish_is_bounded_by_transport_and_retry_settings() -> None:
     assert retry_policy["interval_max"] == 1.0
 
 
-def test_execution_publisher_applies_bounded_retry_policy(
+def test_execution_publisher_uses_producer_scoped_timeouts_and_retry_policy(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    settings = get_settings()
     captured: dict[str, Any] = {}
+
+    class FakeConnection:
+        def __enter__(self) -> "FakeConnection":
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            del args
+
+    connection = FakeConnection()
+
+    def fake_connection_for_write(**kwargs: Any) -> FakeConnection:
+        captured["connection_kwargs"] = kwargs
+        return connection
 
     def fake_send_task(name: str, **kwargs: Any) -> None:
         captured["name"] = name
         captured.update(kwargs)
 
+    monkeypatch.setattr(celery_app, "connection_for_write", fake_connection_for_write)
     monkeypatch.setattr(celery_app, "send_task", fake_send_task)
     execution_id = uuid.uuid4()
     outbox_event_id = uuid.uuid4()
@@ -61,9 +72,18 @@ def test_execution_publisher_applies_bounded_retry_policy(
         outbox_event_id=outbox_event_id,
     )
 
+    assert captured["connection_kwargs"] == {
+        "connect_timeout": settings.celery_publish_connect_timeout,
+        "transport_options": {
+            "socket_connect_timeout": settings.celery_publish_connect_timeout,
+            "socket_timeout": settings.celery_publish_socket_timeout,
+            "max_retries": settings.celery_publish_max_retries,
+        },
+    }
     assert captured["name"] == "mcpflow.execution.claim"
     assert captured["queue"] == "execution"
     assert captured["task_id"] == str(outbox_event_id)
+    assert captured["connection"] is connection
     assert captured["kwargs"] == {
         "execution_id": str(execution_id),
         "outbox_event_id": str(outbox_event_id),
