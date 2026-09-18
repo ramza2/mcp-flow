@@ -34,9 +34,23 @@ secret_master_key
 
 `secret_master_key` is a 32-byte AES-256-GCM key encoded as standard base64.
 Compose mounts it into `worker` only as `/run/secrets/secret_master_key`
-(`MCPFLOW_SECRET_MASTER_KEY_FILE`). Never commit the file; rotate with
-`--force` and restart `worker` (no Postgres volume reset required for this
-key alone).
+(`MCPFLOW_SECRET_MASTER_KEY_FILE`). Never commit the file.
+
+### Master key lifecycle (not a simple rotate)
+
+- **Initial generation** is supported (local generator / `deploy.sh` ensure).
+- **Back up** the master key separately and securely. Losing it makes
+  `secret_records` ciphertext permanently unreadable.
+- **Do not** replace, delete, or `--force` overwrite `secret_master_key` while
+  encrypted `secret_records` still depend on it.
+- Existing ciphertext was sealed with the current key; swapping the file and
+  restarting `worker` does **not** re-encrypt rows and will fail closed on
+  resolve.
+- A future rotation must decrypt with the old key and re-encrypt with the new
+  key under a controlled migration. **Automated key rotation is not
+  implemented in PR #30.**
+- Resetting the Postgres data volume is **not** a master-key rotation
+  mechanism (and would destroy data).
 
 Values are URL-safe / hex-based / base64 and are **not** printed to stdout.
 
