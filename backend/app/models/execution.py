@@ -241,3 +241,57 @@ class StepAttempt(Base):
     finished_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+
+
+class ToolCall(Base):
+    """MCP tools/call evidence — docs/05 §13.6."""
+
+    __tablename__ = "tool_calls"
+    __table_args__ = (
+        UniqueConstraint(
+            "step_attempt_id",
+            "remote_request_id",
+            name="uq_tool_calls_step_attempt_id_remote_request_id",
+        ),
+        Index("ix_tool_calls_step_attempt_id", "step_attempt_id"),
+        Index("ix_tool_calls_mcp_server_id", "mcp_server_id"),
+        Index("ix_tool_calls_mcp_tool_version_id", "mcp_tool_version_id"),
+        Index("ix_tool_calls_remote_request_id", "remote_request_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    step_attempt_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("step_attempts.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    mcp_server_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("mcp_servers.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    mcp_tool_version_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("mcp_tool_versions.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    protocol_era: Mapped[str] = mapped_column(String(32), nullable=False)
+    protocol_version: Mapped[str] = mapped_column(String(32), nullable=False)
+    transport_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    remote_request_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    request_meta: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    response_meta: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    normalized_status: Mapped[str] = mapped_column(String(32), nullable=False)
+    request_bytes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    response_bytes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    first_byte_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
