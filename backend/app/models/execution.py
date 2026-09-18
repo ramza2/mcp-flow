@@ -98,7 +98,13 @@ class Execution(Base):
     plan_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     input_snapshot: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     policy_snapshot: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
-    result_summary: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    # none_as_null=True: the Tool Runner terminal transition assigns Python
+    # None to this column on an already-persisted row (UPDATE, not INSERT) —
+    # without it, SQLAlchemy binds a JSONB 'null' literal instead of SQL NULL
+    # and violates the ``result_summary IS NULL OR jsonb_typeof(...)`` CHECK.
+    result_summary: Mapped[dict[str, Any] | None] = mapped_column(
+        JSONB(none_as_null=True), nullable=True
+    )
     error_code: Mapped[str | None] = mapped_column(String(128), nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     trace_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
@@ -174,7 +180,11 @@ class ExecutionStep(Base):
     sequence_hint: Mapped[int] = mapped_column(Integer, nullable=False)
     status: Mapped[str] = mapped_column(String(32), nullable=False)
     step_snapshot: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
-    resolved_input: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    # none_as_null=True: resolved_input is assigned None on already-persisted
+    # rows in some pre-send failure paths — see result_summary above.
+    resolved_input: Mapped[dict[str, Any] | None] = mapped_column(
+        JSONB(none_as_null=True), nullable=True
+    )
     result_inline: Mapped[Any | None] = mapped_column(JSONB, nullable=True)
     result_blob_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), nullable=True
@@ -226,7 +236,11 @@ class StepAttempt(Base):
         DateTime(timezone=True), nullable=True
     )
     idempotency_key: Mapped[str] = mapped_column(String(256), nullable=False)
-    request_snapshot: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    # none_as_null=True: see result_summary above (same object-typed CHECK
+    # pattern applies to request_snapshot).
+    request_snapshot: Mapped[dict[str, Any] | None] = mapped_column(
+        JSONB(none_as_null=True), nullable=True
+    )
     result_inline: Mapped[Any | None] = mapped_column(JSONB, nullable=True)
     result_blob_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), nullable=True
@@ -237,6 +251,67 @@ class StepAttempt(Base):
     is_retryable: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     started_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+
+class ToolCall(Base):
+    """MCP tools/call evidence — docs/05 §13.6."""
+
+    __tablename__ = "tool_calls"
+    __table_args__ = (
+        UniqueConstraint(
+            "step_attempt_id",
+            "remote_request_id",
+            name="uq_tool_calls_step_attempt_id_remote_request_id",
+        ),
+        Index("ix_tool_calls_step_attempt_id", "step_attempt_id"),
+        Index("ix_tool_calls_mcp_server_id", "mcp_server_id"),
+        Index("ix_tool_calls_mcp_tool_version_id", "mcp_tool_version_id"),
+        Index("ix_tool_calls_remote_request_id", "remote_request_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    step_attempt_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("step_attempts.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    mcp_server_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("mcp_servers.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    mcp_tool_version_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("mcp_tool_versions.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    protocol_era: Mapped[str] = mapped_column(String(32), nullable=False)
+    protocol_version: Mapped[str] = mapped_column(String(32), nullable=False)
+    transport_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    remote_request_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    # none_as_null=True: the Tool Runner terminal transition assigns Python
+    # None to response_meta (and sometimes request_meta) on an
+    # already-persisted row — see result_summary above.
+    request_meta: Mapped[dict[str, Any] | None] = mapped_column(
+        JSONB(none_as_null=True), nullable=True
+    )
+    response_meta: Mapped[dict[str, Any] | None] = mapped_column(
+        JSONB(none_as_null=True), nullable=True
+    )
+    normalized_status: Mapped[str] = mapped_column(String(32), nullable=False)
+    request_bytes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    response_bytes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    first_byte_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
     )
     finished_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True

@@ -521,6 +521,8 @@ Attempt 생성 → Secret 주입 → MCP Adapter → progress/MRTR/cancel 처리
 
 Attempt foundation 범위에서는 Step `READY → RUNNING`과 `StepAttempt STARTED` persistence까지만 구현한다. Secret resolve, MCP `tools/call`, ToolCall row, terminal Step/Execution 전이는 후속 MCP Tool runner 범위다.
 
+MCP Tool Runner vertical slice(`McpToolRunner`)는 `requires_approval` fail-closed 재검증, `SECRET_REF` argument 해석(`app/execution/secret_materialize.py`), `CurrentMCPClient.call_tool`를 통한 실제 `tools/call` 실행, output schema 검증(`app/execution/result_validator.py`), ToolCall/StepAttempt/Step/Execution terminal 전이까지를 구현한다. MRTR(`input_required`)은 이 범위에서 detect-only로만 처리되며 — 즉 감지 시 Step은 재개 가능한 `WAITING_INPUT`이 아니라 명시적으로 실패 처리된다 — 실제 runtime 입력 round-trip 재개(§15)는 후속 범위다.
+
 ## FNC-EXE-006. Timeout/Retry
 
 - read/idempotent 일시오류만 제한 retry

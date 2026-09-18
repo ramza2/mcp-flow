@@ -56,3 +56,5 @@ secrets:
     file: ./infra/secrets/server/minio_root_user
   minio_root_password:
     file: ./infra/secrets/server/minio_root_password
+  secret_master_key:
+    file: ./infra/secrets/server/secret_master_key

@@ -248,6 +248,22 @@ AND expires_at > now()
 
 Secret API는 암호문·nonce·원문을 반환하지 않는다.
 
+#### Secret decrypted payload (vertical slice)
+
+Master key는 DB 밖(file injection)에 두고 AES-256-GCM으로 암호문을 관리한다.
+복호화된 JSON payload shape는 `secret_kind`별로 다음과 같다.
+
+```text
+API_KEY          → { "value": "<string>" }
+BASIC_AUTH       → { "username": "<string>", "password": "<string>" }
+OAUTH_TOKEN_SET  → { "access_token": "<string>" }
+CUSTOM           → { "<string>": "<string>", ... }  # string values only
+```
+
+BEARER MCP auth는 `API_KEY.value` 또는 `OAUTH_TOKEN_SET.access_token`만 사용한다.
+Tool argument로 SECRET_REF를 materialize할 때 `API_KEY.value`만 string argument로 projection한다.
+BASIC_AUTH / OAUTH_TOKEN_SET / CUSTOM을 Tool argument로 임의 projection하지 않는다(fail-closed).
+
 ---
 
 ## 6. Provider Profile
@@ -1266,10 +1282,14 @@ mcp_server_id, mcp_tool_version_id
 protocol_era, protocol_version, transport_type
 remote_request_id
 request_meta, response_meta
-normalized_status
+normalized_status(STARTED/SUCCEEDED/FAILED/TIMED_OUT/CANCELLED/UNKNOWN_OUTCOME)
 request_bytes, response_bytes
 started_at, first_byte_at, finished_at
 ```
+
+`normalized_status`는 StepAttempt terminal 의미와 정렬한다. ToolCall STARTED evidence는
+외부 `tools/call` 전에 durable commit한다. `request_meta`/`response_meta`에는 credential
+header·raw secret·MRTR `requestState`를 저장하지 않는다.
 
 ### 13.7 MCP MRTR
 

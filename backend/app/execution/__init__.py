@@ -2,8 +2,13 @@
 
 Owns CREATED→QUEUED staging, durable Outbox delivery,
 QUEUED→RUNNING orchestration claim/lease, initial PENDING→READY,
-and TOOL Step Attempt starter foundation (READY→RUNNING + StepAttempt STARTED).
+TOOL Step Attempt starter foundation (READY→RUNNING + StepAttempt STARTED),
+and the MCP Tool Runner (StepAttempt STARTED → MCP ``tools/call`` →
+ToolCall/StepAttempt/ExecutionStep/Execution terminal transition).
 
-Does NOT yet call MCP, resolve secrets, create ToolCall rows, or wire Attempt
-start into the Celery claim task (deferred to the MCP Tool runner PR).
+The Agent Runtime does not invoke MCP Tools directly — only this package,
+via ``McpToolRunner``, performs the outbound ``tools/call``. MCP stdio
+execution stays isolated in ``mcp-worker`` and is out of scope here
+(``app.mcp.current.CurrentMCPClient`` handles STREAMABLE_HTTP + CURRENT era
+only).
 """

@@ -758,6 +758,19 @@ Invocation Identity = immutable tool_version_id
 
 Tool 업무 오류(`isError`)와 transport/protocol 오류를 분리한다. outputSchema가 있으면 `structured_content`를 검증하고 불일치 결과를 `SUCCEEDED`로 처리하지 않는다.
 
+### 14.3 구현 위치 (MCP Tool Runner vertical slice)
+
+Current MCP `tools/call` 요청/응답 매핑과 `NormalizedToolResult` 계약은 `backend/app/mcp/` 아래에 존재한다.
+
+```text
+app/mcp/current.py    — CurrentMCPClient.call_tool (tools/call 요청·응답 정규화)
+app/mcp/contracts.py  — NormalizedToolResult
+app/mcp/errors.py     — MCPClientError, MCPResultTooLargeError 등 protocol/network/timeout 오류 분류
+app/mcp/auth_headers.py — 인증 헤더 구성/redaction (Authorization 등 secret 로그 금지)
+```
+
+MCP Tool Runner vertical slice(현재 범위)는 `tools/call` happy path, `isError` 업무오류, timeout(connect/read) 분류, 결과과대(`MCPResultTooLargeError`) 처리를 구현한다. §15 MRTR은 `input_required` 응답을 감지해 명시적으로 `MCP_INPUT_REQUIRED_UNSUPPORTED`로 실패 처리(detect-only)하며, 실제 WAITING_INPUT round-trip 재개는 이후 범위다.
+
 ---
 
 ## 15. MRTR 기반 실행 중 사용자 입력

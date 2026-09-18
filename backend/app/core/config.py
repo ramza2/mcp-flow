@@ -37,6 +37,15 @@ class Settings(BaseSettings):
     celery_publish_connect_timeout: float = Field(default=5.0, gt=0)
     celery_publish_socket_timeout: float = Field(default=5.0, gt=0)
     celery_publish_max_retries: int = Field(default=3, ge=0, le=10)
+    secret_master_key_file: str | None = Field(
+        default=None,
+        description="External AES-256-GCM master key file path (never commit).",
+    )
+    result_inline_max_bytes: int = Field(
+        default=256_000,
+        gt=0,
+        description="Max JSONB inline result size before fail-closed (no object storage yet).",
+    )
 
     request_id_header: str = "X-Request-ID"
     request_id_max_length: int = 128

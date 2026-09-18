@@ -9,7 +9,7 @@ from typing import Any
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.execution import Execution, ExecutionStep, StepAttempt
+from app.models.execution import Execution, ExecutionStep, StepAttempt, ToolCall
 
 
 class ExecutionRepository:
@@ -199,3 +199,85 @@ class ExecutionRepository:
             .limit(1)
         )
         return (await self._session.execute(stmt)).scalar_one_or_none()
+
+    async def get_attempt(self, attempt_id: uuid.UUID) -> StepAttempt | None:
+        stmt = select(StepAttempt).where(StepAttempt.id == attempt_id)
+        return (await self._session.execute(stmt)).scalar_one_or_none()
+
+    async def get_attempt_with_lock(self, attempt_id: uuid.UUID) -> StepAttempt | None:
+        stmt = select(StepAttempt).where(StepAttempt.id == attempt_id).with_for_update()
+        return (await self._session.execute(stmt)).scalar_one_or_none()
+
+    async def lock_execution(self, execution_id: uuid.UUID) -> Execution | None:
+        stmt = select(Execution).where(Execution.id == execution_id).with_for_update()
+        return (await self._session.execute(stmt)).scalar_one_or_none()
+
+    async def lock_step(self, step_id: uuid.UUID) -> ExecutionStep | None:
+        stmt = select(ExecutionStep).where(ExecutionStep.id == step_id).with_for_update()
+        return (await self._session.execute(stmt)).scalar_one_or_none()
+
+    async def create_tool_call(
+        self,
+        *,
+        step_attempt_id: uuid.UUID,
+        mcp_server_id: uuid.UUID,
+        mcp_tool_version_id: uuid.UUID,
+        protocol_era: str,
+        protocol_version: str,
+        transport_type: str,
+        remote_request_id: str,
+        request_meta: dict[str, Any] | None,
+        normalized_status: str,
+        started_at: datetime,
+    ) -> ToolCall:
+        # Omit request_meta/response_meta when unset — SQL NULL, not JSON null
+        # (an explicit None binds a JSONB 'null' literal and fails the
+        # ck_tool_calls_*_object jsonb_typeof CHECK constraints on Postgres).
+        row = ToolCall(
+            id=uuid.uuid4(),
+            step_attempt_id=step_attempt_id,
+            mcp_server_id=mcp_server_id,
+            mcp_tool_version_id=mcp_tool_version_id,
+            protocol_era=protocol_era,
+            protocol_version=protocol_version,
+            transport_type=transport_type,
+            remote_request_id=remote_request_id,
+            normalized_status=normalized_status,
+            request_bytes=None,
+            response_bytes=None,
+            started_at=started_at,
+            first_byte_at=None,
+            finished_at=None,
+        )
+        if request_meta is not None:
+            row.request_meta = dict(request_meta)
+        self._session.add(row)
+        await self._session.flush()
+        return row
+
+    async def get_tool_call(self, tool_call_id: uuid.UUID) -> ToolCall | None:
+        stmt = select(ToolCall).where(ToolCall.id == tool_call_id)
+        return (await self._session.execute(stmt)).scalar_one_or_none()
+
+    async def get_tool_call_with_lock(self, tool_call_id: uuid.UUID) -> ToolCall | None:
+        stmt = select(ToolCall).where(ToolCall.id == tool_call_id).with_for_update()
+        return (await self._session.execute(stmt)).scalar_one_or_none()
+
+    async def get_tool_call_for_attempt(
+        self, step_attempt_id: uuid.UUID
+    ) -> ToolCall | None:
+        stmt = (
+            select(ToolCall)
+            .where(ToolCall.step_attempt_id == step_attempt_id)
+            .order_by(ToolCall.started_at.desc())
+            .limit(1)
+        )
+        return (await self._session.execute(stmt)).scalar_one_or_none()
+
+    async def list_tool_calls(self, step_attempt_id: uuid.UUID) -> list[ToolCall]:
+        stmt = (
+            select(ToolCall)
+            .where(ToolCall.step_attempt_id == step_attempt_id)
+            .order_by(ToolCall.started_at.asc())
+        )
+        return list((await self._session.execute(stmt)).scalars().all())

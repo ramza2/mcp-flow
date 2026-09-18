@@ -10,7 +10,7 @@
 
 - Docker Engine
 - Docker Compose v2 (`docker compose`)
-- Python 3 (최초 server secret 자동 생성 시 사용)
+- Python 3 (server secret ensure — 누락 secret 추가 생성 시 사용)
 - 기존 Traefik 컨테이너
 - Traefik Docker provider 활성화
 - Traefik이 연결된 external Docker network
@@ -76,7 +76,15 @@ Execution lease seconds [60]:
 
 ## 4. Secret
 
-최초 배포 시 `infra/secrets/server/`가 비어 있으면 `infra/scripts/generate_local_secrets.py`를 사용해 다음 파일을 자동 생성한다.
+`./scripts/deploy.sh`는 매 배포마다 `infra/scripts/generate_local_secrets.py`
+를 `--dir infra/secrets/server`로 호출한다. 생성기는 **`--force` 없이**
+동작하므로:
+
+- 이미 있는 secret 파일 값은 덮어쓰지 않는다
+- 디렉터리가 비어 있지 않은 기존 설치에서도, 누락된 파일만 추가 생성한다
+  (예: 이전 5개 secret만 있는 서버에 `secret_master_key` 추가)
+
+필수 server secret 목록:
 
 ```text
 postgres_admin_password
@@ -84,9 +92,23 @@ postgres_migration_password
 postgres_app_password
 minio_root_user
 minio_root_password
+secret_master_key
 ```
 
-기존 파일이 있으면 덮어쓰지 않는다. Secret 값은 배포 로그에 출력하지 않는다.
+`secret_master_key`는 AES-256-GCM master key(standard base64, 32 bytes)이며
+`worker`만 `/run/secrets/secret_master_key`로 mount한다. Secret 값은 배포
+로그에 출력하지 않는다.
+
+### Master key 주의
+
+- 최초 생성·백업은 지원한다. 키를 안전한 별도 위치에 보관한다.
+- `secret_records`가 해당 키로 암호화된 동안 키를 교체/삭제하지 않는다.
+- 키 파일만 바꾸고 `worker`를 재시작하는 것으로는 회전되지 않는다
+  (기존 ciphertext가 읽히지 않는다).
+- local `--force`는 postgres/minio 자격증명만 재생성하며 **기존
+  `secret_master_key`는 덮어쓰지 않는다**.
+- 향후 회전은 old key decrypt → new key re-encrypt가 필요하며, PR #30에는
+  자동 회전이 없다. DB volume reset은 회전 수단이 아니다.
 
 `.env.server`와 `infra/secrets/server/`는 Git 대상이 아니다.
 
