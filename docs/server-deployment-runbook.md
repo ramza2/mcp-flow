@@ -105,6 +105,8 @@ secret_master_key
 - `secret_records`가 해당 키로 암호화된 동안 키를 교체/삭제하지 않는다.
 - 키 파일만 바꾸고 `worker`를 재시작하는 것으로는 회전되지 않는다
   (기존 ciphertext가 읽히지 않는다).
+- local `--force`는 postgres/minio 자격증명만 재생성하며 **기존
+  `secret_master_key`는 덮어쓰지 않는다**.
 - 향후 회전은 old key decrypt → new key re-encrypt가 필요하며, PR #30에는
   자동 회전이 없다. DB volume reset은 회전 수단이 아니다.
 

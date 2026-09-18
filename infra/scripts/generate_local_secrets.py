@@ -2,7 +2,18 @@
 """Generate local non-Git secrets for MCPFlow Docker Compose.
 
 Passwords are URL-safe so MCPFLOW_DATABASE_URL assembly needs no escaping.
-Existing files are preserved unless --force is passed.
+
+Default behavior preserves every existing file and only creates missing ones.
+
+``--force`` regenerates ordinary local credentials/passwords only. It never
+overwrites an existing ``secret_master_key`` (encrypted ``secret_records``
+depend on that key).
+
+``--force-master-key`` is a separate, explicitly dangerous option that
+overwrites ``secret_master_key`` after printing a warning (never the key
+value). Prefer controlled decrypt/re-encrypt rotation instead; automated
+rotation is not implemented in PR #30.
+
 Secret values are never printed.
 """
 
@@ -27,6 +38,8 @@ SECRET_FILES = (
     "minio_root_password",
     "secret_master_key",
 )
+
+_MASTER_KEY_NAME = "secret_master_key"
 
 
 def _generate_password() -> str:
@@ -60,12 +73,30 @@ def _write_secret(path: Path, value: str, *, force: bool) -> str:
     return "written"
 
 
+def _should_force_write(name: str, *, force: bool, force_master_key: bool) -> bool:
+    if name == _MASTER_KEY_NAME:
+        return force_master_key
+    return force
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Generate MCPFlow local secrets")
     parser.add_argument(
         "--force",
         action="store_true",
-        help="Overwrite existing secret files",
+        help=(
+            "Overwrite existing ordinary credentials/passwords. "
+            "Never overwrites an existing secret_master_key."
+        ),
+    )
+    parser.add_argument(
+        "--force-master-key",
+        action="store_true",
+        help=(
+            "DANGEROUS: overwrite an existing secret_master_key. "
+            "Makes prior secret_records ciphertext unreadable without "
+            "decrypt/re-encrypt migration. Not a supported rotation path."
+        ),
     )
     parser.add_argument(
         "--dir",
@@ -78,16 +109,29 @@ def main(argv: list[str] | None = None) -> int:
     out_dir: Path = args.dir
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    master_path = out_dir / _MASTER_KEY_NAME
+    if args.force_master_key and master_path.exists():
+        print(
+            "WARNING: --force-master-key will replace an existing secret_master_key. "
+            "Encrypted secret_records sealed with the previous key become "
+            "unreadable. Automated key rotation is not implemented. "
+            "Key material is not printed.",
+            file=sys.stderr,
+        )
+
     results: dict[str, str] = {}
     for name in SECRET_FILES:
         path = out_dir / name
+        force_write = _should_force_write(
+            name, force=args.force, force_master_key=args.force_master_key
+        )
         if name == "minio_root_user":
             value = _generate_minio_user()
-        elif name == "secret_master_key":
+        elif name == _MASTER_KEY_NAME:
             value = _generate_master_key()
         else:
             value = _generate_password()
-        results[name] = _write_secret(path, value, force=args.force)
+        results[name] = _write_secret(path, value, force=force_write)
 
     written = sum(1 for status in results.values() if status == "written")
     skipped = sum(1 for status in results.values() if status == "skipped")
