@@ -80,26 +80,33 @@ class CurrentMCPClient:
             "params": params,
         }
 
-    def _map_http_error(self, status_code: int) -> MCPClientError:
+    def _map_http_error(
+        self, status_code: int, *, outcome_unknown: bool = False
+    ) -> MCPClientError:
         if status_code in {401, 403}:
             return MCPClientError(
                 error_layer="AUTH",
                 error_code="MCP_AUTH_FAILED",
                 message="MCP server rejected authentication.",
                 retryable=False,
+                outcome_unknown=False,
             )
         if 400 <= status_code < 500:
+            # Explicit client rejection — request was not accepted as a successful
+            # tool invocation; keep non-ambiguous unless a caller overrides.
             return MCPClientError(
                 error_layer="PROTOCOL",
                 error_code="MCP_HTTP_CLIENT_ERROR",
                 message=f"MCP server returned HTTP {status_code}.",
                 retryable=False,
+                outcome_unknown=False,
             )
         return MCPClientError(
             error_layer="NETWORK",
             error_code="MCP_HTTP_SERVER_ERROR",
             message=f"MCP server returned HTTP {status_code}.",
             retryable=True,
+            outcome_unknown=outcome_unknown,
         )
 
     def _map_transport_error(
@@ -499,7 +506,11 @@ class CurrentMCPClient:
         }
 
         if status_code is not None and status_code >= 400:
-            raise self._map_http_error(status_code)
+            # tools/call already dispatched. 4xx stays non-ambiguous (explicit
+            # rejection). 5xx is conservative post-send ambiguity.
+            raise self._map_http_error(
+                status_code, outcome_unknown=status_code >= 500
+            )
 
         # tools/call was sent and a body arrived — malformed JSON / JSON-RPC is
         # post-send ambiguity (external side effect may already have occurred).
@@ -539,6 +550,7 @@ class CurrentMCPClient:
                 error_code="MCP_INVALID_TOOL_RESULT",
                 message="tools/call result must be an object.",
                 retryable=False,
+                outcome_unknown=True,
             )
 
         result_type = result.get("resultType")
@@ -563,6 +575,7 @@ class CurrentMCPClient:
                 error_code="MCP_INVALID_TOOL_RESULT",
                 message="tools/call result.content must be an array.",
                 retryable=False,
+                outcome_unknown=True,
             )
 
         structured_content = result.get("structuredContent")
@@ -572,6 +585,7 @@ class CurrentMCPClient:
                 error_code="MCP_INVALID_TOOL_RESULT",
                 message="tools/call result.structuredContent must be an object or array.",
                 retryable=False,
+                outcome_unknown=True,
             )
 
         metadata = result.get("_meta")

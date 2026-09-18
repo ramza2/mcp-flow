@@ -395,6 +395,9 @@ Dataset은 평가 전 FROZEN하고 실행 중 정답을 변경하지 않는다.
     `WriteTimeout` → `outcome_unknown=true` (전송 후 모호성; headers 단계도 pre-send로
     오분류하지 않음)
   - 전송 후 invalid JSON / malformed JSON-RPC → `outcome_unknown=true`
+  - 전송 후 invalid tool result object / invalid `content` /
+    invalid `structuredContent` → `outcome_unknown=true`
+  - HTTP 4xx → `outcome_unknown=false`; HTTP 5xx(전송 후) → `outcome_unknown=true`
   - `Authorization` 헤더는 실제 요청에는 포함되나 오류 메시지/로그에는 노출되지 않음
 - `McpToolRunner` (TX1/network/TX2, §17 참조):
   - `requires_approval` fail-closed 재검증 — MCP 호출 0
@@ -410,12 +413,19 @@ Dataset은 평가 전 FROZEN하고 실행 중 정답을 변경하지 않는다.
   - output schema 일치 → `SUCCEEDED`
   - `NON_IDEMPOTENT_WRITE` + timeout `outcome_unknown=true` → 호출 1회만,
     Step `UNKNOWN_OUTCOME`, Execution은 canonical 상태가 없으므로 `FAILED`로 fail-closed
+  - `DESTRUCTIVE` + HTTP 5xx `outcome_unknown=true` → Step/Attempt/ToolCall
+    `UNKNOWN_OUTCOME`, Execution `FAILED` (자동 재시도 없음)
+  - `READ_ONLY` + invalid tool result `outcome_unknown=true` → safe failure
+    정책으로 Step `FAILED` (UNKNOWN_OUTCOME 아님)
   - lease mismatch → MCP 호출 0
   - remote 성공 직후 lease 만료 → finalizer fencing reject, stale worker가 terminal
     상태를 덮어쓰지 않음
   - 기존 `ToolCall STARTED`(Step `RUNNING` + Attempt `STARTED`) 재진입 → MCP 호출 0,
     동일 ToolCall 유지, 새 ToolCall/status 발명 없음 (FNC-EXE-011 복구 범위)
   - 이미 terminal(`SUCCEEDED`)인 Step에 대한 중복/동시 runner 실행 → MCP 호출 0
+- Compose: `worker`에만 `secret_master_key` Docker secret mount
+  (`MCPFLOW_SECRET_MASTER_KEY_FILE=/run/secrets/secret_master_key`); 키 파일은
+  gitignored local/server 경로, Secret CRUD API 없음
 - 마이그레이션(`0016`): `secret_records`(평문 컬럼 부재, kind/status CHECK, unique
   name, fingerprint/status index)와 `tool_calls`(FK RESTRICT/CASCADE,
   `normalized_status` CHECK, `request_meta`/`response_meta` object-type CHECK,

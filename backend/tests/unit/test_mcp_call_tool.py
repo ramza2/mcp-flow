@@ -283,6 +283,90 @@ async def test_input_required_remains_outcome_unknown_false() -> None:
 
 
 @pytest.mark.asyncio
+async def test_invalid_tool_result_object_after_send_outcome_unknown_true() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content.decode("utf-8"))
+        return httpx.Response(
+            200,
+            json={"jsonrpc": "2.0", "id": body["id"], "result": ["not-an-object"]},
+        )
+
+    with pytest.raises(MCPClientError) as exc:
+        await _call(handler)
+
+    assert exc.value.error_code == "MCP_INVALID_TOOL_RESULT"
+    assert exc.value.outcome_unknown is True
+
+
+@pytest.mark.asyncio
+async def test_invalid_content_after_send_outcome_unknown_true() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content.decode("utf-8"))
+        return httpx.Response(
+            200,
+            json={
+                "jsonrpc": "2.0",
+                "id": body["id"],
+                "result": {"content": "not-an-array"},
+            },
+        )
+
+    with pytest.raises(MCPClientError) as exc:
+        await _call(handler)
+
+    assert exc.value.error_code == "MCP_INVALID_TOOL_RESULT"
+    assert "content" in exc.value.message
+    assert exc.value.outcome_unknown is True
+
+
+@pytest.mark.asyncio
+async def test_invalid_structured_content_after_send_outcome_unknown_true() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content.decode("utf-8"))
+        return httpx.Response(
+            200,
+            json={
+                "jsonrpc": "2.0",
+                "id": body["id"],
+                "result": {"content": [], "structuredContent": "not-object-or-array"},
+            },
+        )
+
+    with pytest.raises(MCPClientError) as exc:
+        await _call(handler)
+
+    assert exc.value.error_code == "MCP_INVALID_TOOL_RESULT"
+    assert "structuredContent" in exc.value.message
+    assert exc.value.outcome_unknown is True
+
+
+@pytest.mark.asyncio
+async def test_http_500_after_send_outcome_unknown_true() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, json={"error": "internal"})
+
+    with pytest.raises(MCPClientError) as exc:
+        await _call(handler)
+
+    assert exc.value.error_layer == "NETWORK"
+    assert exc.value.error_code == "MCP_HTTP_SERVER_ERROR"
+    assert exc.value.retryable is True
+    assert exc.value.outcome_unknown is True
+
+
+@pytest.mark.asyncio
+async def test_http_400_after_send_outcome_unknown_false() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(400, json={"error": "bad request"})
+
+    with pytest.raises(MCPClientError) as exc:
+        await _call(handler)
+
+    assert exc.value.error_code == "MCP_HTTP_CLIENT_ERROR"
+    assert exc.value.outcome_unknown is False
+
+
+@pytest.mark.asyncio
 async def test_authorization_header_present_on_request_but_never_in_errors() -> None:
     captured: dict[str, Any] = {}
 

@@ -579,6 +579,98 @@ async def test_non_idempotent_write_timeout_unknown_outcome_calls_once(
         assert tool_calls[0].normalized_status == ToolCallNormalizedStatus.UNKNOWN_OUTCOME.value
 
 
+@pytest.mark.asyncio
+async def test_destructive_http_500_maps_to_unknown_outcome(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Post-send HTTP 5xx + unsafe risk → UNKNOWN_OUTCOME (Execution FAILED)."""
+    _install_no_side_effects(monkeypatch)
+    execution_id, worker_id, lease_token = await _claim_ready_execution(
+        db_session_factory, risk_class=RiskClass.DESTRUCTIVE.value
+    )
+
+    client = _StubCurrentMCPClient(
+        error=MCPClientError(
+            error_layer="NETWORK",
+            error_code="MCP_HTTP_SERVER_ERROR",
+            message="MCP server returned HTTP 500.",
+            retryable=True,
+            outcome_unknown=True,
+        )
+    )
+    runner = McpToolRunner(
+        session_factory=db_session_factory,
+        mcp_client=client,
+        secret_resolver_factory=_unimplemented_resolver_factory,
+        lease_seconds=60,
+        result_inline_max_bytes=256_000,
+    )
+    outcome = await runner.run_claimed_execution(
+        execution_id=execution_id, worker_id=worker_id, lease_token=lease_token
+    )
+    assert outcome.mcp_called is True
+    assert outcome.terminal_status == StepStatus.UNKNOWN_OUTCOME.value
+    assert len(client.calls) == 1
+
+    async with db_session_factory() as session:
+        execution = await ExecutionRepository(session).get(execution_id)
+        assert execution is not None
+        assert execution.status == ExecutionStatus.FAILED.value
+        step = (await ExecutionRepository(session).list_steps(execution_id))[0]
+        assert step.status == StepStatus.UNKNOWN_OUTCOME.value
+        attempts = await ExecutionRepository(session).list_attempts(step.id)
+        assert attempts[0].status == StepAttemptStatus.UNKNOWN_OUTCOME.value
+        tool_calls = await ExecutionRepository(session).list_tool_calls(attempts[0].id)
+        assert tool_calls[0].normalized_status == ToolCallNormalizedStatus.UNKNOWN_OUTCOME.value
+
+
+@pytest.mark.asyncio
+async def test_read_only_invalid_tool_result_stays_failed_not_unknown(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """READ_ONLY keeps safe failure policy even when outcome_unknown=true."""
+    _install_no_side_effects(monkeypatch)
+    execution_id, worker_id, lease_token = await _claim_ready_execution(
+        db_session_factory, risk_class=RiskClass.READ_ONLY.value
+    )
+
+    client = _StubCurrentMCPClient(
+        error=MCPClientError(
+            error_layer="PROTOCOL",
+            error_code="MCP_INVALID_TOOL_RESULT",
+            message="tools/call result must be an object.",
+            retryable=False,
+            outcome_unknown=True,
+        )
+    )
+    runner = McpToolRunner(
+        session_factory=db_session_factory,
+        mcp_client=client,
+        secret_resolver_factory=_unimplemented_resolver_factory,
+        lease_seconds=60,
+        result_inline_max_bytes=256_000,
+    )
+    outcome = await runner.run_claimed_execution(
+        execution_id=execution_id, worker_id=worker_id, lease_token=lease_token
+    )
+    assert outcome.mcp_called is True
+    assert outcome.terminal_status == StepStatus.FAILED.value
+    assert len(client.calls) == 1
+
+    async with db_session_factory() as session:
+        execution = await ExecutionRepository(session).get(execution_id)
+        assert execution is not None
+        assert execution.status == ExecutionStatus.FAILED.value
+        step = (await ExecutionRepository(session).list_steps(execution_id))[0]
+        assert step.status == StepStatus.FAILED.value
+        attempts = await ExecutionRepository(session).list_attempts(step.id)
+        assert attempts[0].status == StepAttemptStatus.FAILED.value
+        tool_calls = await ExecutionRepository(session).list_tool_calls(attempts[0].id)
+        assert tool_calls[0].normalized_status == ToolCallNormalizedStatus.FAILED.value
+
+
 # ---------------------------------------------------------------------------
 # Wrong lease -> never calls MCP
 # ---------------------------------------------------------------------------

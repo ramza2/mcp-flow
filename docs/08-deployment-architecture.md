@@ -368,6 +368,13 @@ SESSION_SIGNING_KEY_FILE=
 - Docker secret/file mount 또는 외부 Secret Store
 - DB의 `secret_records` 암호화 master key는 DB와 분리
 - Runtime Process별 필요한 Secret만 mount
+- Compose baseline: `worker`만 `secret_master_key`를
+  `/run/secrets/secret_master_key`로 mount하고
+  `MCPFLOW_SECRET_MASTER_KEY_FILE`로 참조한다
+  - local: `infra/secrets/local/secret_master_key` (gitignored;
+    `python infra/scripts/generate_local_secrets.py`로 생성)
+  - server: `infra/secrets/server/secret_master_key` (gitignored; 운영에서
+    별도 배포, Git에 커밋하지 않음)
 
 Git에 실제 credential을 commit하지 않는다.
 

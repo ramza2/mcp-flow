@@ -29,9 +29,16 @@ postgres_migration_password
 postgres_app_password
 minio_root_user
 minio_root_password
+secret_master_key
 ```
 
-Values are URL-safe / hex-based and are **not** printed to stdout.
+`secret_master_key` is a 32-byte AES-256-GCM key encoded as standard base64.
+Compose mounts it into `worker` only as `/run/secrets/secret_master_key`
+(`MCPFLOW_SECRET_MASTER_KEY_FILE`). Never commit the file; rotate with
+`--force` and restart `worker` (no Postgres volume reset required for this
+key alone).
+
+Values are URL-safe / hex-based / base64 and are **not** printed to stdout.
 
 On Unix-like systems files are created with mode `0644` so non-root
 container users can read Compose bind-mounted secrets. These files are
