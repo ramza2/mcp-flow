@@ -230,6 +230,9 @@ class ExecutionRepository:
         normalized_status: str,
         started_at: datetime,
     ) -> ToolCall:
+        # Omit request_meta/response_meta when unset — SQL NULL, not JSON null
+        # (an explicit None binds a JSONB 'null' literal and fails the
+        # ck_tool_calls_*_object jsonb_typeof CHECK constraints on Postgres).
         row = ToolCall(
             id=uuid.uuid4(),
             step_attempt_id=step_attempt_id,
@@ -239,8 +242,6 @@ class ExecutionRepository:
             protocol_version=protocol_version,
             transport_type=transport_type,
             remote_request_id=remote_request_id,
-            request_meta=dict(request_meta) if request_meta is not None else None,
-            response_meta=None,
             normalized_status=normalized_status,
             request_bytes=None,
             response_bytes=None,
@@ -248,6 +249,8 @@ class ExecutionRepository:
             first_byte_at=None,
             finished_at=None,
         )
+        if request_meta is not None:
+            row.request_meta = dict(request_meta)
         self._session.add(row)
         await self._session.flush()
         return row
