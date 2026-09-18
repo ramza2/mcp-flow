@@ -11,7 +11,7 @@ from app.models.auth import (
     UserRole,
 )
 from app.models.conversation import AgentRequest, Conversation, ConversationMessage
-from app.models.execution import Execution, ExecutionStep
+from app.models.execution import Execution, ExecutionStep, StepAttempt
 from app.models.idempotency import ApiIdempotencyRecord
 from app.models.mcp import (
     MCPServer,
@@ -47,6 +47,7 @@ __all__ = [
     "ApprovalPolicy",
     "Execution",
     "ExecutionStep",
+    "StepAttempt",
     "EmbeddingProfile",
     "LLMProfile",
     "MCPServer",

@@ -9,7 +9,7 @@ from typing import Any
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.execution import Execution, ExecutionStep
+from app.models.execution import Execution, ExecutionStep, StepAttempt
 
 
 class ExecutionRepository:
@@ -129,3 +129,73 @@ class ExecutionRepository:
             Execution.agent_request_id == agent_request_id
         )
         return int((await self._session.execute(stmt)).scalar_one())
+
+    async def get_step(self, step_id: uuid.UUID) -> ExecutionStep | None:
+        stmt = select(ExecutionStep).where(ExecutionStep.id == step_id)
+        return (await self._session.execute(stmt)).scalar_one_or_none()
+
+    async def create_attempt(
+        self,
+        *,
+        step_execution_id: uuid.UUID,
+        attempt_no: int,
+        status: str,
+        worker_id: str | None,
+        lease_expires_at: datetime | None,
+        idempotency_key: str,
+        request_snapshot: dict[str, Any] | None,
+        started_at: datetime,
+    ) -> StepAttempt:
+        row = StepAttempt(
+            id=uuid.uuid4(),
+            step_execution_id=step_execution_id,
+            attempt_no=attempt_no,
+            status=status,
+            worker_id=worker_id,
+            lease_expires_at=lease_expires_at,
+            idempotency_key=idempotency_key,
+            request_snapshot=(
+                dict(request_snapshot) if request_snapshot is not None else None
+            ),
+            result_blob_id=None,
+            error_layer=None,
+            error_code=None,
+            error_message=None,
+            is_retryable=None,
+            started_at=started_at,
+            finished_at=None,
+        )
+        self._session.add(row)
+        await self._session.flush()
+        return row
+
+    async def list_attempts(self, step_execution_id: uuid.UUID) -> list[StepAttempt]:
+        stmt = (
+            select(StepAttempt)
+            .where(StepAttempt.step_execution_id == step_execution_id)
+            .order_by(StepAttempt.attempt_no.asc())
+        )
+        return list((await self._session.execute(stmt)).scalars().all())
+
+    async def get_attempt_by_no(
+        self, *, step_execution_id: uuid.UUID, attempt_no: int
+    ) -> StepAttempt | None:
+        stmt = select(StepAttempt).where(
+            StepAttempt.step_execution_id == step_execution_id,
+            StepAttempt.attempt_no == attempt_no,
+        )
+        return (await self._session.execute(stmt)).scalar_one_or_none()
+
+    async def get_started_attempt(
+        self, step_execution_id: uuid.UUID
+    ) -> StepAttempt | None:
+        stmt = (
+            select(StepAttempt)
+            .where(
+                StepAttempt.step_execution_id == step_execution_id,
+                StepAttempt.status == "STARTED",
+            )
+            .order_by(StepAttempt.attempt_no.desc())
+            .limit(1)
+        )
+        return (await self._session.execute(stmt)).scalar_one_or_none()

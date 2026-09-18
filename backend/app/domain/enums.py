@@ -171,6 +171,17 @@ class StepStatus(StrEnum):
     UNKNOWN_OUTCOME = "UNKNOWN_OUTCOME"
 
 
+class StepAttemptStatus(StrEnum):
+    """docs/05 §13.6 step_attempts.status."""
+
+    STARTED = "STARTED"
+    SUCCEEDED = "SUCCEEDED"
+    FAILED = "FAILED"
+    TIMED_OUT = "TIMED_OUT"
+    CANCELLED = "CANCELLED"
+    UNKNOWN_OUTCOME = "UNKNOWN_OUTCOME"
+
+
 class ApprovalStatus(StrEnum):
     PENDING = "PENDING"
     APPROVED = "APPROVED"

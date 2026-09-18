@@ -1253,6 +1253,11 @@ is_retryable
 started_at, finished_at
 ```
 
+Attempt foundation에서는 `STARTED` row 생성과 Step `RUNNING` 전이만 수행한다.
+`idempotency_key`는 StepAttempt lineage/deduplication 용도이며 remote MCP side-effect
+idempotency와 동일하지 않다. `request_snapshot`/`resolved_input`은 SECRET_REF를
+reference-only로 보존하고 raw secret을 기록하지 않는다.
+
 `tool_calls`:
 
 ```text
