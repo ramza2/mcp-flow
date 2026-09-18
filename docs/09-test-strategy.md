@@ -377,6 +377,37 @@ Dataset은 평가 전 FROZEN하고 실행 중 정답을 변경하지 않는다.
 - Celery claim task는 Attempt를 자동 시작하지 않음
 - MCP tools/call / ToolCall / SecretResolver / terminal Step·Execution 미구현
 
+추가 (MCP Tool Runner vertical slice):
+
+- Secret crypto: AES-256-GCM encrypt/decrypt round-trip(API_KEY 등), invalid
+  payload/key_version/nonce fail-closed, decrypt 실패 시 ciphertext/평문이
+  `AppError.message`에 노출되지 않음
+- `DatabaseSecretResolver`: ACTIVE는 해석 성공, REVOKED/EXPIRED/만료/missing/
+  master key 부재는 모두 `None` (fail-closed, 500 아님)
+- `CurrentMCPClient.call_tool` (httpx.MockTransport 기반):
+  - happy path `tools/call` → `structuredContent` 정규화
+  - `isError=true` → `protocol_success=true`, `tool_error=true`
+  - 결과 과대 → `MCPResultTooLargeError`, 원문 body 미보존
+  - `input_required` → `MCP_INPUT_REQUIRED_UNSUPPORTED` (detect-only, `requestState` 미노출)
+  - connect timeout → `outcome_unknown=false`, read timeout(전송 후) → `outcome_unknown=true`
+  - `Authorization` 헤더는 실제 요청에는 포함되나 오류 메시지/로그에는 노출되지 않음
+- `McpToolRunner` (TX1/network/TX2, §17 참조):
+  - `requires_approval` fail-closed 재검증 — MCP 호출 0
+  - BEARER 인증: secret은 `call_tool`에는 전달되나 Execution/Step/Attempt/ToolCall의
+    어떤 JSON 필드·`error_message`·로그에도 원문이 남지 않음
+  - `SECRET_REF` 인자: 성공 후에도 `resolved_input`은 참조(`secret_id`)만 보존
+  - `SECRET_REF` 대상 secret 없음 → remote 호출 0, Step/Execution `FAILED`
+  - output schema 불일치 → `FAILED`, 원문 `structured_content`가 오류 메시지에 노출되지 않음
+  - output schema 일치 → `SUCCEEDED`
+  - `NON_IDEMPOTENT_WRITE` + timeout `outcome_unknown=true` → 호출 1회만,
+    Step `UNKNOWN_OUTCOME`, Execution은 canonical 상태가 없으므로 `FAILED`로 fail-closed
+  - lease mismatch → MCP 호출 0
+  - 이미 terminal(`SUCCEEDED`)인 Step에 대한 중복/동시 runner 실행 → MCP 호출 0
+- 마이그레이션(`0016`): `secret_records`(평문 컬럼 부재, kind/status CHECK, unique
+  name, fingerprint/status index)와 `tool_calls`(FK RESTRICT/CASCADE,
+  `normalized_status` CHECK, `request_meta`/`response_meta` object-type CHECK,
+  `(step_attempt_id, remote_request_id)` unique) round-trip(upgrade→downgrade→upgrade)
+
 
 ## 9. Repository Integration Test
 
