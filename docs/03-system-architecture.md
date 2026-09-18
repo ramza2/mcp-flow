@@ -452,6 +452,9 @@ Execution 최종상태를 Redis에만 저장하지 않는다.
 - Initial Step readiness: Execution claim과 같은 transaction에서 `PENDING → READY`
 - Outbox/worker payload: Execution/Outbox ID만 전달
 - Execution Plan/Version: immutable snapshot
+- TOOL Step Attempt foundation: worker/lease 검증 + FNC-EXE-004 preflight 후
+  동일 transaction에서 Step `READY → RUNNING` + `StepAttempt STARTED`
+- Attempt starter는 claim task에 자동 연결하지 않음 (MCP call/terminal 처리 전)
 
 `RUNNING → QUEUED` 식으로 업무상태를 되돌려 Worker 재전달을 표현하지 않는다.
 

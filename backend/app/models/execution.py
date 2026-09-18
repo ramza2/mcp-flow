@@ -194,3 +194,50 @@ class ExecutionStep(Base):
     error_code: Mapped[str | None] = mapped_column(String(128), nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     lock_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+
+
+class StepAttempt(Base):
+    """Per-step attempt lineage — docs/05 §13.6 (MCP call deferred to later PR)."""
+
+    __tablename__ = "step_attempts"
+    __table_args__ = (
+        UniqueConstraint(
+            "step_execution_id",
+            "attempt_no",
+            name="uq_step_attempts_step_execution_id_attempt_no",
+        ),
+        Index("ix_step_attempts_step_execution_id", "step_execution_id"),
+        Index("ix_step_attempts_status_step_execution_id", "status", "step_execution_id"),
+        Index("ix_step_attempts_idempotency_key", "idempotency_key"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    step_execution_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("execution_steps.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    attempt_no: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    worker_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    idempotency_key: Mapped[str] = mapped_column(String(256), nullable=False)
+    request_snapshot: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    result_inline: Mapped[Any | None] = mapped_column(JSONB, nullable=True)
+    result_blob_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), nullable=True
+    )
+    error_layer: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    error_code: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    is_retryable: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )

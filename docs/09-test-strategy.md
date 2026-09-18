@@ -360,6 +360,20 @@ Dataset은 평가 전 FROZEN하고 실행 중 정답을 변경하지 않는다.
 - Queue/Claim 후 create Idempotency-Key replay가 최초 `CREATED` response snapshot 유지
 - expired RUNNING lease takeover는 미구현 범위임을 회귀로 고정
 
+추가 (TOOL Step Attempt foundation):
+
+- StepAttempt persistence (`step_attempts` + canonical statuses)
+- TOOL Step `READY → RUNNING` + `StepAttempt STARTED` atomic transition
+- FNC-EXE-004 runtime preflight reuse (User/Grant/Server/Tool/ToolVersion/Policy)
+- Binding materialization foundation: LITERAL + SECRET_REF only (fail-closed otherwise)
+- secret-safe `resolved_input` / `request_snapshot` (raw secret 미기록)
+- duplicate start idempotent replay (same worker/lease)
+- wrong worker / lease token / expired lease fail-closed
+- invalid Step state / non-TOOL / corrupted lineage fail-closed
+- concurrent READY start → exactly one Attempt
+- Celery claim task는 Attempt를 자동 시작하지 않음
+- MCP tools/call / ToolCall / SecretResolver / terminal Step·Execution 미구현
+
 
 ## 9. Repository Integration Test
 
