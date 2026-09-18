@@ -608,7 +608,6 @@ async def test_bearer_bad_master_key_fails_pre_send_not_stranded_running(
     )
     assert outcome.mcp_called is False
     assert outcome.terminal_status == StepStatus.FAILED.value
-    assert outcome.reason == "SECRET_MASTER_KEY_INVALID"
 
     async with db_session_factory() as session:
         execution = await ExecutionRepository(session).get(execution_id)
@@ -619,6 +618,7 @@ async def test_bearer_bad_master_key_fails_pre_send_not_stranded_running(
         assert step.status == StepStatus.FAILED.value
         attempts = await ExecutionRepository(session).list_attempts(step.id)
         assert attempts[0].status == StepAttemptStatus.FAILED.value
+        assert attempts[0].error_code == "SECRET_MASTER_KEY_INVALID"
         tool_calls = await ExecutionRepository(session).list_tool_calls(attempts[0].id)
         assert len(tool_calls) == 1
         assert tool_calls[0].normalized_status == ToolCallNormalizedStatus.FAILED.value
