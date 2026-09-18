@@ -9,6 +9,7 @@ Secret values are never printed.
 from __future__ import annotations
 
 import argparse
+import base64
 import os
 import secrets
 import stat
@@ -40,8 +41,6 @@ def _generate_minio_user() -> str:
 
 def _generate_master_key() -> str:
     """32-byte AES-256 key as standard base64 (loadable by secret_crypto)."""
-    import base64
-
     return base64.b64encode(secrets.token_bytes(32)).decode("ascii")
 
 
