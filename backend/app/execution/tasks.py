@@ -114,6 +114,11 @@ async def _run_mcp_tool_step(
 
     MCP failures are never wrapped in a Celery retry — the claim phase above
     is the only part of this task that retries on transient DB errors.
+
+    Master-key loading is lazy: auth NONE with no SECRET_REF arguments never
+    touches the key file. When a secret is required and the configured key is
+    missing/invalid, the runner fails closed pre-send instead of stranding the
+    claimed Execution in RUNNING after an eager load exception.
     """
     session_factory: async_sessionmaker[AsyncSession] | None = get_session_factory()
     if session_factory is None:
@@ -123,10 +128,13 @@ async def _run_mcp_tool_step(
         )
         return
 
-    master_key = load_master_key_from_settings(file_path=settings.secret_master_key_file)
-
     def _resolver_factory(session: AsyncSession) -> DatabaseSecretResolver:
-        return DatabaseSecretResolver(session, master_key=master_key)
+        return DatabaseSecretResolver(
+            session,
+            master_key_loader=lambda: load_master_key_from_settings(
+                file_path=settings.secret_master_key_file
+            ),
+        )
 
     mcp_client = CurrentMCPClient()
     try:

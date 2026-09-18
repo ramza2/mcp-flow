@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import types
 import uuid
 from datetime import UTC, datetime
@@ -375,3 +376,261 @@ def test_apply_terminal_transition_unknown_outcome_never_reaches_execution() -> 
     assert execution.status == ExecutionStatus.FAILED.value
     assert execution.worker_id is None
     assert execution.lease_token is None
+
+
+@pytest.mark.asyncio
+async def test_existing_started_tool_call_never_reissued(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Step RUNNING + Attempt STARTED + ToolCall STARTED → no second tools/call."""
+    from app.domain.enums import (
+        CURRENT_MCP_PROTOCOL_VERSION,
+        MCPProtocolEra,
+        MCPTransportType,
+    )
+    from app.execution.tool_step_attempt import ToolStepAttemptService
+    from app.repositories.mcp_tool import MCPToolRepository
+
+    _install_no_side_effects(monkeypatch)
+    execution_id, worker_id, lease_token = await _claim_ready_execution(db_session_factory)
+
+    async with db_session_factory() as session:
+        steps = await ExecutionRepository(session).list_steps(execution_id)
+        step = steps[0]
+        started = await ToolStepAttemptService(session).start(
+            execution_id=execution_id,
+            step_execution_id=step.id,
+            worker_id=worker_id,
+            lease_token=lease_token,
+        )
+        tool_version = await MCPToolRepository(session).get_version(step.mcp_tool_version_id)
+        assert tool_version is not None
+        logical_tool = await MCPToolRepository(session).get(tool_version.mcp_tool_id)
+        assert logical_tool is not None
+        server = await MCPServerRepository(session).get(logical_tool.mcp_server_id)
+        assert server is not None
+        tool_call = await ExecutionRepository(session).create_tool_call(
+            step_attempt_id=started.attempt_id,
+            mcp_server_id=server.id,
+            mcp_tool_version_id=tool_version.id,
+            protocol_era=MCPProtocolEra.CURRENT.value,
+            protocol_version=CURRENT_MCP_PROTOCOL_VERSION,
+            transport_type=MCPTransportType.STREAMABLE_HTTP.value,
+            remote_request_id=str(uuid.uuid4()),
+            request_meta={"method": "tools/call"},
+            normalized_status=ToolCallNormalizedStatus.STARTED.value,
+            started_at=datetime.now(UTC),
+        )
+        await session.commit()
+        existing_tool_call_id = tool_call.id
+
+    runner = McpToolRunner(
+        session_factory=db_session_factory,
+        mcp_client=_NeverCalledMCPClient(),
+        secret_resolver_factory=_resolver_factory,
+        lease_seconds=60,
+        result_inline_max_bytes=256_000,
+    )
+    outcome = await runner.run_claimed_execution(
+        execution_id=execution_id, worker_id=worker_id, lease_token=lease_token
+    )
+    assert outcome.mcp_called is False
+    assert outcome.reason == "TOOL_CALL_ALREADY_STARTED"
+    assert outcome.tool_call_id == existing_tool_call_id
+    assert outcome.terminal_status is None
+
+    async with db_session_factory() as session:
+        execution = await ExecutionRepository(session).get(execution_id)
+        assert execution is not None
+        assert execution.status == ExecutionStatus.RUNNING.value
+        step = (await ExecutionRepository(session).list_steps(execution_id))[0]
+        assert step.status == StepStatus.RUNNING.value
+        attempts = await ExecutionRepository(session).list_attempts(step.id)
+        assert len(attempts) == 1
+        assert attempts[0].status == StepAttemptStatus.STARTED.value
+        tool_calls = await ExecutionRepository(session).list_tool_calls(attempts[0].id)
+        assert len(tool_calls) == 1
+        assert tool_calls[0].id == existing_tool_call_id
+        assert tool_calls[0].normalized_status == ToolCallNormalizedStatus.STARTED.value
+
+
+@pytest.mark.asyncio
+async def test_finalize_rejects_expired_lease_after_remote_success(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Remote success must not overwrite terminal state when the lease expired."""
+    from datetime import timedelta
+
+    from app.core.errors import AppError
+
+    _install_no_side_effects(monkeypatch)
+    execution_id, worker_id, lease_token = await _claim_ready_execution(db_session_factory)
+
+    class _ExpireLeaseThenSucceed:
+        def __init__(self) -> None:
+            self.calls: list[dict] = []
+
+        async def call_tool(self, endpoint, **kwargs):
+            self.calls.append({"endpoint": endpoint, **kwargs})
+            async with db_session_factory() as session:
+                execution = await ExecutionRepository(session).get(execution_id)
+                assert execution is not None
+                execution.lease_expires_at = datetime.now(UTC) - timedelta(seconds=1)
+                await session.commit()
+            return (
+                NormalizedToolResult(
+                    protocol_success=True,
+                    tool_error=False,
+                    content=[{"type": "text", "text": "late"}],
+                    raw_size_bytes=8,
+                    duration_ms=1,
+                ),
+                {"http_status": 200},
+                datetime.now(UTC),
+            )
+
+    client = _ExpireLeaseThenSucceed()
+    runner = McpToolRunner(
+        session_factory=db_session_factory,
+        mcp_client=client,
+        secret_resolver_factory=_resolver_factory,
+        lease_seconds=60,
+        result_inline_max_bytes=256_000,
+    )
+    with pytest.raises(AppError) as exc:
+        await runner.run_claimed_execution(
+            execution_id=execution_id, worker_id=worker_id, lease_token=lease_token
+        )
+    assert exc.value.code == "RESOURCE_CONFLICT"
+    assert len(client.calls) == 1
+
+    async with db_session_factory() as session:
+        execution = await ExecutionRepository(session).get(execution_id)
+        assert execution is not None
+        assert execution.status == ExecutionStatus.RUNNING.value
+        step = (await ExecutionRepository(session).list_steps(execution_id))[0]
+        assert step.status == StepStatus.RUNNING.value
+        attempts = await ExecutionRepository(session).list_attempts(step.id)
+        assert attempts[0].status == StepAttemptStatus.STARTED.value
+        tool_calls = await ExecutionRepository(session).list_tool_calls(attempts[0].id)
+        assert len(tool_calls) == 1
+        assert tool_calls[0].normalized_status == ToolCallNormalizedStatus.STARTED.value
+
+
+@pytest.mark.asyncio
+async def test_none_auth_succeeds_without_master_key_loader(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """auth NONE + no SECRET_REF must not require master-key loading."""
+    from app.core.errors import AppError
+    from app.core.secrets import DatabaseSecretResolver
+
+    _install_no_side_effects(monkeypatch)
+    execution_id, worker_id, lease_token = await _claim_ready_execution(db_session_factory)
+    loader_calls = {"count": 0}
+
+    def _raising_loader() -> bytes | None:
+        loader_calls["count"] += 1
+        raise AppError(
+            code="SECRET_MASTER_KEY_UNAVAILABLE",
+            message="Secret master key file is unavailable.",
+            status_code=503,
+        )
+
+    def _factory(session: AsyncSession) -> DatabaseSecretResolver:
+        return DatabaseSecretResolver(session, master_key_loader=_raising_loader)
+
+    client = _StubCurrentMCPClient(
+        result=NormalizedToolResult(
+            protocol_success=True,
+            tool_error=False,
+            content=[],
+            raw_size_bytes=4,
+            duration_ms=1,
+        )
+    )
+    runner = McpToolRunner(
+        session_factory=db_session_factory,
+        mcp_client=client,
+        secret_resolver_factory=_factory,
+        lease_seconds=60,
+        result_inline_max_bytes=256_000,
+    )
+    outcome = await runner.run_claimed_execution(
+        execution_id=execution_id, worker_id=worker_id, lease_token=lease_token
+    )
+    assert outcome.terminal_status == StepStatus.SUCCEEDED.value
+    assert loader_calls["count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_bearer_bad_master_key_fails_pre_send_not_stranded_running(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Missing/invalid master key for BEARER fails closed pre-send (not RUNNING)."""
+    from app.core.errors import AppError
+    from app.core.secrets import DatabaseSecretResolver
+    from app.domain.enums import MCPAuthType
+
+    _install_no_side_effects(monkeypatch)
+
+    def _set_bearer(server) -> None:
+        server.auth_type = MCPAuthType.BEARER.value
+        server.auth_secret_id = uuid.uuid4()
+
+    execution_id, worker_id, lease_token = await _claim_ready_execution(
+        db_session_factory, mutate_server=_set_bearer
+    )
+
+    def _bad_loader() -> bytes | None:
+        raise AppError(
+            code="SECRET_MASTER_KEY_INVALID",
+            message="Secret master key must be 32 bytes.",
+            status_code=503,
+        )
+
+    def _factory(session: AsyncSession) -> DatabaseSecretResolver:
+        return DatabaseSecretResolver(session, master_key_loader=_bad_loader)
+
+    runner = McpToolRunner(
+        session_factory=db_session_factory,
+        mcp_client=_NeverCalledMCPClient(),
+        secret_resolver_factory=_factory,
+        lease_seconds=60,
+        result_inline_max_bytes=256_000,
+    )
+    outcome = await runner.run_claimed_execution(
+        execution_id=execution_id, worker_id=worker_id, lease_token=lease_token
+    )
+    assert outcome.mcp_called is False
+    assert outcome.terminal_status == StepStatus.FAILED.value
+    assert outcome.reason == "SECRET_MASTER_KEY_INVALID"
+
+    async with db_session_factory() as session:
+        execution = await ExecutionRepository(session).get(execution_id)
+        assert execution is not None
+        assert execution.status == ExecutionStatus.FAILED.value
+        assert execution.error_code == "SECRET_MASTER_KEY_INVALID"
+        step = (await ExecutionRepository(session).list_steps(execution_id))[0]
+        assert step.status == StepStatus.FAILED.value
+        attempts = await ExecutionRepository(session).list_attempts(step.id)
+        assert attempts[0].status == StepAttemptStatus.FAILED.value
+        tool_calls = await ExecutionRepository(session).list_tool_calls(attempts[0].id)
+        assert len(tool_calls) == 1
+        assert tool_calls[0].normalized_status == ToolCallNormalizedStatus.FAILED.value
+        blob = json.dumps(
+            {
+                "execution": execution.error_message,
+                "step": step.error_message,
+                "attempt": attempts[0].error_message,
+                "tool_call_meta": tool_calls[0].request_meta,
+            },
+            default=str,
+        )
+        assert "sk-" not in blob
+        assert "Bearer" not in blob
+

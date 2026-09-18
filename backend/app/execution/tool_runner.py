@@ -39,6 +39,7 @@ from app.core.errors import AppError
 from app.core.secrets import SecretResolver
 from app.domain.enums import (
     CURRENT_MCP_PROTOCOL_VERSION,
+    BindingKind,
     ExecutionStatus,
     MCPAuthType,
     MCPProtocolEra,
@@ -98,6 +99,17 @@ class _PreSendFailClosed(MCPClientError):
         )
 
 
+class _NoSecretResolver:
+    """Literal-only path — never touches the secret store or master key."""
+
+    async def resolve(self, secret_id: uuid.UUID) -> None:
+        raise AppError(
+            code="SECRET_UNAVAILABLE",
+            message="Secret material is unavailable; remote call is fail-closed.",
+            status_code=409,
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class ToolRunOutcome:
     execution_id: uuid.UUID
@@ -116,6 +128,8 @@ class _PreparedCall:
     attempt_id: uuid.UUID
     tool_call_id: uuid.UUID
     remote_request_id: str
+    mcp_server_id: uuid.UUID
+    mcp_tool_version_id: uuid.UUID
     endpoint: str
     tool_name: str
     timeout_ms: int
@@ -166,6 +180,13 @@ def _plan_timeout_seconds(step: ExecutionStep) -> int | None:
             status_code=409,
         )
     return timeout
+
+
+def _resolved_input_needs_secret(resolved_input: dict[str, Any]) -> bool:
+    return any(
+        isinstance(value, dict) and value.get("kind") == BindingKind.SECRET_REF.value
+        for value in resolved_input.values()
+    )
 
 
 async def _assert_confirmation_evidence(
@@ -321,12 +342,26 @@ class McpToolRunner:
                     )
 
                 existing_tool_call = await executions.get_tool_call_for_attempt(attempt.id)
-                existing_started = (
-                    existing_tool_call is not None
-                    and existing_tool_call.normalized_status
-                    == ToolCallNormalizedStatus.STARTED.value
-                )
-                if existing_tool_call is not None and not existing_started:
+                if existing_tool_call is not None:
+                    if (
+                        existing_tool_call.normalized_status
+                        == ToolCallNormalizedStatus.STARTED.value
+                    ):
+                        # ToolCall STARTED is durable invocation evidence only.
+                        # PR #30 does not recover interrupted attempts (FNC-EXE-011);
+                        # never reissue tools/call — especially not NON_IDEMPOTENT /
+                        # DESTRUCTIVE — and do not invent a new status.
+                        return _PrepareResult(
+                            outcome=ToolRunOutcome(
+                                execution_id=execution.id,
+                                step_execution_id=step.id,
+                                attempt_id=attempt.id,
+                                tool_call_id=existing_tool_call.id,
+                                mcp_called=False,
+                                terminal_status=None,
+                                reason="TOOL_CALL_ALREADY_STARTED",
+                            )
+                        )
                     raise AppError(
                         code="RESOURCE_CONFLICT",
                         message="ToolCall already terminal while Step remains RUNNING.",
@@ -421,29 +456,26 @@ class McpToolRunner:
                         ),
                     )
 
-                if existing_tool_call is not None:
-                    tool_call = existing_tool_call
-                else:
-                    remote_request_id = str(uuid.uuid4())
-                    request_meta = {
-                        "method": "tools/call",
-                        "tool_name": logical_tool.remote_name,
-                        "timeout_ms": tool_policy.timeout_ms,
-                        "auth_type": server.auth_type,
-                        "content_type": "application/json",
-                    }
-                    tool_call = await executions.create_tool_call(
-                        step_attempt_id=attempt.id,
-                        mcp_server_id=server.id,
-                        mcp_tool_version_id=tool_version.id,
-                        protocol_era=server.protocol_era,
-                        protocol_version=CURRENT_MCP_PROTOCOL_VERSION,
-                        transport_type=server.transport_type,
-                        remote_request_id=remote_request_id,
-                        request_meta=request_meta,
-                        normalized_status=ToolCallNormalizedStatus.STARTED.value,
-                        started_at=now,
-                    )
+                remote_request_id = str(uuid.uuid4())
+                request_meta = {
+                    "method": "tools/call",
+                    "tool_name": logical_tool.remote_name,
+                    "timeout_ms": tool_policy.timeout_ms,
+                    "auth_type": server.auth_type,
+                    "content_type": "application/json",
+                }
+                tool_call = await executions.create_tool_call(
+                    step_attempt_id=attempt.id,
+                    mcp_server_id=server.id,
+                    mcp_tool_version_id=tool_version.id,
+                    protocol_era=server.protocol_era,
+                    protocol_version=CURRENT_MCP_PROTOCOL_VERSION,
+                    transport_type=server.transport_type,
+                    remote_request_id=remote_request_id,
+                    request_meta=request_meta,
+                    normalized_status=ToolCallNormalizedStatus.STARTED.value,
+                    started_at=now,
+                )
 
                 if pre_send_failure is not None:
                     terminal = _apply_terminal_transition(
@@ -478,6 +510,8 @@ class McpToolRunner:
                     attempt_id=attempt.id,
                     tool_call_id=tool_call.id,
                     remote_request_id=tool_call.remote_request_id,
+                    mcp_server_id=server.id,
+                    mcp_tool_version_id=tool_version.id,
                     endpoint=str(server.endpoint_url),
                     tool_name=logical_tool.remote_name,
                     timeout_ms=tool_policy.timeout_ms,
@@ -515,8 +549,17 @@ class McpToolRunner:
     async def _resolve_secrets(
         self, prepared: _PreparedCall
     ) -> tuple[dict[str, str], dict[str, Any]]:
+        needs_secret = (
+            prepared.auth_type != MCPAuthType.NONE.value
+            or _resolved_input_needs_secret(prepared.resolved_input)
+        )
         async with self._session_factory() as session:
-            resolver = self._secret_resolver_factory(session)
+            # NONE + no SECRET_REF must not force master-key loading. Resolvers
+            # that lazy-load on first resolve() stay idle on this path.
+            if needs_secret:
+                resolver = self._secret_resolver_factory(session)
+            else:
+                resolver = _NoSecretResolver()
             auth_headers: dict[str, str] = {}
             if prepared.auth_type != MCPAuthType.NONE.value:
                 resolved = (
@@ -606,23 +649,31 @@ class McpToolRunner:
                 attempt = await executions.get_attempt_with_lock(prepared.attempt_id)
                 tool_call = await executions.get_tool_call_with_lock(prepared.tool_call_id)
 
+                now = datetime.now(UTC)
                 if (
                     execution is None
                     or step is None
                     or attempt is None
                     or tool_call is None
+                    or execution.status != ExecutionStatus.RUNNING.value
                     or execution.worker_id != prepared.worker_id
                     or execution.lease_token != prepared.lease_token
-                    or tool_call.remote_request_id != prepared.remote_request_id
+                    or execution.lease_expires_at is None
+                    or _as_utc(execution.lease_expires_at) <= _as_utc(now)
+                    or step.execution_id != execution.id
                     or attempt.step_execution_id != step.id
+                    or tool_call.step_attempt_id != attempt.id
+                    or tool_call.remote_request_id != prepared.remote_request_id
+                    or tool_call.mcp_server_id != prepared.mcp_server_id
+                    or tool_call.mcp_tool_version_id != prepared.mcp_tool_version_id
                 ):
+                    # Stale/expired owner must not write terminal state.
                     raise AppError(
                         code="RESOURCE_CONFLICT",
                         message="Tool Runner finalize fencing failed.",
                         status_code=409,
                     )
 
-                now = datetime.now(UTC)
                 terminal = _apply_terminal_transition(
                     execution=execution,
                     step=step,

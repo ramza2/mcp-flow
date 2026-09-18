@@ -105,13 +105,58 @@ class CurrentMCPClient:
     def _map_transport_error(
         self, exc: Exception, *, request_sent: bool = False
     ) -> MCPClientError:
-        """Map a transport-level exception. ``request_sent`` marks post-send ambiguity.
+        """Map a transport-level exception with conservative outcome certainty.
 
-        When the request was already sent over the wire and the failure occurs
-        afterwards (timeout/connection drop), the external side effect may
-        already have happened — ``outcome_unknown`` communicates that fact so
-        callers never auto-retry a non-idempotent operation.
+        Classification for ``tools/call`` (and shared transport mapping):
+
+        - ``ConnectTimeout`` / ``ConnectError`` / ``PoolTimeout``: request was
+          never transmitted → ``outcome_unknown=false``
+        - ``ReadTimeout`` / ``ReadError``: response-phase failure after dispatch
+          (including waiting for response headers) → ``outcome_unknown=true``
+        - ``WriteTimeout`` / ``WriteError``: transmission may have begun →
+          ``outcome_unknown=true``
+        - Remaining timeout/network types fall back to ``request_sent`` so
+          pre-send failures stay non-ambiguous and post-send stay conservative.
+
+        Do not blindly mark every NETWORK error unknown — connect/pool failures
+        remain ``outcome_unknown=false``.
         """
+        # Pre-send / pre-dispatch: connection never established, or pool wait.
+        if isinstance(exc, (httpx.ConnectTimeout, httpx.PoolTimeout)):
+            return MCPClientError(
+                error_layer="TIMEOUT",
+                error_code="MCP_CONNECTION_TIMEOUT",
+                message="MCP server connection timed out.",
+                retryable=True,
+                outcome_unknown=False,
+            )
+        if isinstance(exc, httpx.ConnectError):
+            return MCPClientError(
+                error_layer="NETWORK",
+                error_code="MCP_NETWORK_ERROR",
+                message="Failed to connect to MCP server.",
+                retryable=True,
+                outcome_unknown=False,
+            )
+
+        # Post-dispatch / possible partial transmission.
+        if isinstance(exc, (httpx.ReadTimeout, httpx.WriteTimeout)):
+            return MCPClientError(
+                error_layer="TIMEOUT",
+                error_code="MCP_CONNECTION_TIMEOUT",
+                message="MCP server connection timed out.",
+                retryable=True,
+                outcome_unknown=True,
+            )
+        if isinstance(exc, (httpx.ReadError, httpx.WriteError)):
+            return MCPClientError(
+                error_layer="NETWORK",
+                error_code="MCP_NETWORK_ERROR",
+                message="Failed to complete MCP request/response.",
+                retryable=True,
+                outcome_unknown=True,
+            )
+
         if isinstance(exc, httpx.TimeoutException):
             return MCPClientError(
                 error_layer="TIMEOUT",
@@ -120,7 +165,7 @@ class CurrentMCPClient:
                 retryable=True,
                 outcome_unknown=request_sent,
             )
-        if isinstance(exc, (httpx.ConnectError, httpx.NetworkError)):
+        if isinstance(exc, httpx.NetworkError):
             return MCPClientError(
                 error_layer="NETWORK",
                 error_code="MCP_NETWORK_ERROR",
@@ -136,13 +181,20 @@ class CurrentMCPClient:
             outcome_unknown=False,
         )
 
-    def _validate_jsonrpc_envelope(self, payload: Any, *, request_id: str) -> dict[str, Any]:
+    def _validate_jsonrpc_envelope(
+        self,
+        payload: Any,
+        *,
+        request_id: str,
+        outcome_unknown: bool = False,
+    ) -> dict[str, Any]:
         if not isinstance(payload, dict):
             raise MCPClientError(
                 error_layer="PROTOCOL",
                 error_code="MCP_INVALID_JSONRPC",
                 message="MCP server returned a non-object JSON-RPC payload.",
                 retryable=False,
+                outcome_unknown=outcome_unknown,
             )
         if payload.get("jsonrpc") != "2.0":
             raise MCPClientError(
@@ -150,6 +202,7 @@ class CurrentMCPClient:
                 error_code="MCP_INVALID_JSONRPC",
                 message="MCP JSON-RPC version must be '2.0'.",
                 retryable=False,
+                outcome_unknown=outcome_unknown,
             )
         if payload.get("id") != request_id:
             raise MCPClientError(
@@ -157,6 +210,7 @@ class CurrentMCPClient:
                 error_code="MCP_INVALID_JSONRPC",
                 message="MCP JSON-RPC response id does not match request id.",
                 retryable=False,
+                outcome_unknown=outcome_unknown,
             )
         has_result = "result" in payload
         has_error = "error" in payload
@@ -167,6 +221,7 @@ class CurrentMCPClient:
                 error_code="MCP_INVALID_JSONRPC",
                 message="MCP JSON-RPC response must contain exactly one of result or error.",
                 retryable=False,
+                outcome_unknown=outcome_unknown,
             )
         if has_error and not isinstance(payload.get("error"), dict):
             raise MCPClientError(
@@ -174,6 +229,7 @@ class CurrentMCPClient:
                 error_code="MCP_INVALID_JSONRPC",
                 message="MCP JSON-RPC error must be an object.",
                 retryable=False,
+                outcome_unknown=outcome_unknown,
             )
         return payload
 
@@ -401,6 +457,10 @@ class CurrentMCPClient:
             tool_name,
         )
 
+        # ``request_sent`` tracks whether we observed response headers (definite
+        # post-dispatch). Transport mapping also classifies Read*/Write* as
+        # post-send even when headers never arrived — a ReadTimeout while
+        # waiting for headers must not be treated as pre-send.
         request_sent = False
         first_byte_at: datetime | None = None
         raw_chunks = bytearray()
@@ -441,6 +501,8 @@ class CurrentMCPClient:
         if status_code is not None and status_code >= 400:
             raise self._map_http_error(status_code)
 
+        # tools/call was sent and a body arrived — malformed JSON / JSON-RPC is
+        # post-send ambiguity (external side effect may already have occurred).
         try:
             payload = json.loads(bytes(raw_chunks).decode("utf-8"))
         except (ValueError, UnicodeDecodeError) as exc:
@@ -449,9 +511,12 @@ class CurrentMCPClient:
                 error_code="MCP_INVALID_JSON",
                 message="MCP server returned non-JSON response.",
                 retryable=False,
+                outcome_unknown=True,
             ) from exc
 
-        envelope = self._validate_jsonrpc_envelope(payload, request_id=remote_request_id)
+        envelope = self._validate_jsonrpc_envelope(
+            payload, request_id=remote_request_id, outcome_unknown=True
+        )
 
         error = envelope.get("error")
         if error is not None:

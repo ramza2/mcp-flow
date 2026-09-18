@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Protocol
@@ -19,6 +20,8 @@ from app.domain.enums import SecretStatus
 from app.repositories.secret import SecretRecordRepository
 
 logger = logging.getLogger(__name__)
+
+MasterKeyLoader = Callable[[], bytes | None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,20 +46,40 @@ class UnimplementedSecretResolver:
 
 
 class DatabaseSecretResolver:
-    """Decrypt ACTIVE secret_records with an external AES-256-GCM master key."""
+    """Decrypt ACTIVE secret_records with an external AES-256-GCM master key.
+
+    Prefer ``master_key_loader`` for lazy loading so claim→runner paths that
+    never need secrets (auth NONE, no SECRET_REF) do not touch the key file.
+    When a secret is required, loader failures propagate as ``AppError`` and
+    become safe pre-send failures rather than stranding a claimed Execution.
+    """
 
     def __init__(
         self,
         session: AsyncSession,
         *,
-        master_key: bytes | None,
+        master_key: bytes | None = None,
+        master_key_loader: MasterKeyLoader | None = None,
     ) -> None:
+        if master_key is not None and master_key_loader is not None:
+            raise ValueError("Provide master_key or master_key_loader, not both.")
         self._session = session
         self._master_key = master_key
+        self._master_key_loader = master_key_loader
+        self._master_key_resolved = master_key_loader is None
         self._records = SecretRecordRepository(session)
 
+    def _ensure_master_key(self) -> bytes | None:
+        if not self._master_key_resolved:
+            assert self._master_key_loader is not None
+            # May raise AppError (missing/invalid configured key).
+            self._master_key = self._master_key_loader()
+            self._master_key_resolved = True
+        return self._master_key
+
     async def resolve(self, secret_id: uuid.UUID) -> ResolvedSecret | None:
-        if self._master_key is None:
+        master_key = self._ensure_master_key()
+        if master_key is None:
             logger.info("secret resolve skipped: master key unavailable")
             return None
         row = await self._records.get(secret_id)
@@ -72,7 +95,7 @@ class DatabaseSecretResolver:
                 return None
         try:
             material = decrypt_secret_payload(
-                self._master_key,
+                master_key,
                 kind=row.secret_kind,
                 ciphertext=bytes(row.ciphertext),
                 nonce=bytes(row.nonce),

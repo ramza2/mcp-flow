@@ -377,3 +377,79 @@ async def test_pg_duplicate_runner_after_succeeded_zero_mcp_calls(
         assert len(attempts) == 1
         tool_calls = await ExecutionRepository(session).list_tool_calls(attempts[0].id)
         assert len(tool_calls) == 1
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_pg_started_tool_call_never_reissued(
+    integration_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """RUNNING + STARTED Attempt + STARTED ToolCall → MCP call count 0, same ToolCall."""
+    from app.domain.enums import (
+        CURRENT_MCP_PROTOCOL_VERSION,
+        MCPProtocolEra,
+        MCPTransportType,
+    )
+    from app.execution.tool_step_attempt import ToolStepAttemptService
+
+    execution_id, worker_id, lease_token = await _claim_ready_execution(
+        integration_session_factory
+    )
+
+    async with integration_session_factory() as session:
+        steps = await ExecutionRepository(session).list_steps(execution_id)
+        step = steps[0]
+        started = await ToolStepAttemptService(session).start(
+            execution_id=execution_id,
+            step_execution_id=step.id,
+            worker_id=worker_id,
+            lease_token=lease_token,
+        )
+        tool_version = await MCPToolRepository(session).get_version(step.mcp_tool_version_id)
+        assert tool_version is not None
+        logical_tool = await MCPToolRepository(session).get(tool_version.mcp_tool_id)
+        assert logical_tool is not None
+        server = await MCPServerRepository(session).get(logical_tool.mcp_server_id)
+        assert server is not None
+        tool_call = await ExecutionRepository(session).create_tool_call(
+            step_attempt_id=started.attempt_id,
+            mcp_server_id=server.id,
+            mcp_tool_version_id=tool_version.id,
+            protocol_era=MCPProtocolEra.CURRENT.value,
+            protocol_version=CURRENT_MCP_PROTOCOL_VERSION,
+            transport_type=MCPTransportType.STREAMABLE_HTTP.value,
+            remote_request_id=str(uuid.uuid4()),
+            request_meta={"method": "tools/call"},
+            normalized_status=ToolCallNormalizedStatus.STARTED.value,
+            started_at=datetime.now(UTC),
+        )
+        await session.commit()
+        existing_tool_call_id = tool_call.id
+
+    runner = McpToolRunner(
+        session_factory=integration_session_factory,
+        mcp_client=_NeverCalledMCPClient(),
+        secret_resolver_factory=_unimplemented_resolver_factory,
+        lease_seconds=60,
+        result_inline_max_bytes=256_000,
+    )
+    outcome = await runner.run_claimed_execution(
+        execution_id=execution_id, worker_id=worker_id, lease_token=lease_token
+    )
+    assert outcome.mcp_called is False
+    assert outcome.reason == "TOOL_CALL_ALREADY_STARTED"
+    assert outcome.tool_call_id == existing_tool_call_id
+
+    async with integration_session_factory() as session:
+        execution = await ExecutionRepository(session).get(execution_id)
+        assert execution is not None
+        assert execution.status == ExecutionStatus.RUNNING.value
+        step = (await ExecutionRepository(session).list_steps(execution_id))[0]
+        assert step.status == StepStatus.RUNNING.value
+        attempts = await ExecutionRepository(session).list_attempts(step.id)
+        assert len(attempts) == 1
+        assert attempts[0].status == StepAttemptStatus.STARTED.value
+        tool_calls = await ExecutionRepository(session).list_tool_calls(attempts[0].id)
+        assert len(tool_calls) == 1
+        assert tool_calls[0].id == existing_tool_call_id
+        assert tool_calls[0].normalized_status == ToolCallNormalizedStatus.STARTED.value

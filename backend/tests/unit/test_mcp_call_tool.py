@@ -167,6 +167,37 @@ async def test_connect_timeout_outcome_unknown_false() -> None:
 
 
 @pytest.mark.asyncio
+async def test_pool_timeout_outcome_unknown_false() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.PoolTimeout("pool acquire timed out", request=request)
+
+    with pytest.raises(MCPClientError) as exc:
+        await _call(handler)
+
+    assert exc.value.error_layer == "TIMEOUT"
+    assert exc.value.outcome_unknown is False
+
+
+@pytest.mark.asyncio
+async def test_read_timeout_waiting_for_response_headers_outcome_unknown_true() -> None:
+    """ReadTimeout before stream context sets request_sent must still be post-send.
+
+    Waiting for response headers means the request was already dispatched; a
+    headers-phase ReadTimeout must not be misclassified as pre-send.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("headers timed out", request=request)
+
+    with pytest.raises(MCPClientError) as exc:
+        await _call(handler)
+
+    assert exc.value.error_layer == "TIMEOUT"
+    assert exc.value.error_code == "MCP_CONNECTION_TIMEOUT"
+    assert exc.value.outcome_unknown is True
+
+
+@pytest.mark.asyncio
 async def test_read_timeout_after_send_outcome_unknown_true() -> None:
     class _StreamThatTimesOutMidBody(httpx.AsyncByteStream):
         async def __aiter__(self):
@@ -184,6 +215,71 @@ async def test_read_timeout_after_send_outcome_unknown_true() -> None:
     # The request was already sent and partially streamed — the external tool
     # call may already have taken effect, so outcome is ambiguous.
     assert exc.value.outcome_unknown is True
+
+
+@pytest.mark.asyncio
+async def test_write_timeout_outcome_unknown_true() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.WriteTimeout("write timed out", request=request)
+
+    with pytest.raises(MCPClientError) as exc:
+        await _call(handler)
+
+    assert exc.value.error_layer == "TIMEOUT"
+    assert exc.value.outcome_unknown is True
+
+
+@pytest.mark.asyncio
+async def test_invalid_json_after_send_outcome_unknown_true() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"not-json{")
+
+    with pytest.raises(MCPClientError) as exc:
+        await _call(handler)
+
+    assert exc.value.error_code == "MCP_INVALID_JSON"
+    assert exc.value.retryable is False
+    assert exc.value.outcome_unknown is True
+
+
+@pytest.mark.asyncio
+async def test_malformed_jsonrpc_after_send_outcome_unknown_true() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"jsonrpc": "1.0", "id": "ignored", "result": {}},
+        )
+
+    with pytest.raises(MCPClientError) as exc:
+        await _call(handler)
+
+    assert exc.value.error_code == "MCP_INVALID_JSONRPC"
+    assert exc.value.retryable is False
+    assert exc.value.outcome_unknown is True
+
+
+@pytest.mark.asyncio
+async def test_input_required_remains_outcome_unknown_false() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content.decode("utf-8"))
+        return httpx.Response(
+            200,
+            json={
+                "jsonrpc": "2.0",
+                "id": body["id"],
+                "result": {
+                    "resultType": "input_required",
+                    "inputRequests": [{"name": "otp"}],
+                    "requestState": "opaque",
+                },
+            },
+        )
+
+    with pytest.raises(MCPClientError) as exc:
+        await _call(handler)
+
+    assert exc.value.error_code == "MCP_INPUT_REQUIRED_UNSUPPORTED"
+    assert exc.value.outcome_unknown is False
 
 
 @pytest.mark.asyncio
