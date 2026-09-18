@@ -7,13 +7,18 @@ import logging
 import uuid
 
 from sqlalchemy.exc import DBAPIError, InterfaceError, OperationalError
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.core.config import get_settings
+from app.core.config import Settings, get_settings
 from app.core.errors import AppError
-from app.db.session import dispose_db, init_db, session_scope
+from app.core.secret_crypto import load_master_key_from_settings
+from app.core.secrets import DatabaseSecretResolver
+from app.db.session import dispose_db, get_session_factory, init_db, session_scope
 from app.execution.claim import ExecutionClaimService
 from app.execution.queue import validate_execution_dispatch_event
+from app.execution.tool_runner import McpToolRunner
 from app.infrastructure.celery_app import celery_app
+from app.mcp.current import CurrentMCPClient
 from app.repositories.outbox import OutboxRepository
 
 logger = logging.getLogger(__name__)
@@ -38,6 +43,8 @@ async def _claim_once(
     settings = get_settings()
     init_db(settings)
     try:
+        claimed = False
+        lease_token: uuid.UUID | None = None
         async with session_scope() as session:
             event = await OutboxRepository(session).get(outbox_event_id)
             if event is None:
@@ -79,8 +86,81 @@ async def _claim_once(
                 outcome.claimed,
                 outcome.reason,
             )
+            claimed = outcome.claimed
+            lease_token = outcome.lease_token
+
+        # The claim transaction above is already committed and its session
+        # closed. Duplicate broker delivery on an unclaimed/stale Execution
+        # must never call MCP — the runner only runs for a fresh claim.
+        if claimed and lease_token is not None:
+            await _run_mcp_tool_step(
+                execution_id=execution_id,
+                worker_id=worker_id,
+                lease_token=lease_token,
+                settings=settings,
+            )
     finally:
         await dispose_db()
+
+
+async def _run_mcp_tool_step(
+    *,
+    execution_id: uuid.UUID,
+    worker_id: str,
+    lease_token: uuid.UUID,
+    settings: Settings,
+) -> None:
+    """Run the MCP Tool Runner for a freshly claimed Execution.
+
+    MCP failures are never wrapped in a Celery retry — the claim phase above
+    is the only part of this task that retries on transient DB errors.
+    """
+    session_factory: async_sessionmaker[AsyncSession] | None = get_session_factory()
+    if session_factory is None:
+        logger.error(
+            "MCP Tool Runner skipped: database session factory unavailable execution_id=%s",
+            execution_id,
+        )
+        return
+
+    master_key = load_master_key_from_settings(file_path=settings.secret_master_key_file)
+
+    def _resolver_factory(session: AsyncSession) -> DatabaseSecretResolver:
+        return DatabaseSecretResolver(session, master_key=master_key)
+
+    mcp_client = CurrentMCPClient()
+    try:
+        runner = McpToolRunner(
+            session_factory=session_factory,
+            mcp_client=mcp_client,
+            secret_resolver_factory=_resolver_factory,
+            lease_seconds=settings.execution_lease_seconds,
+            result_inline_max_bytes=settings.result_inline_max_bytes,
+        )
+        try:
+            result = await runner.run_claimed_execution(
+                execution_id=execution_id,
+                worker_id=worker_id,
+                lease_token=lease_token,
+            )
+            logger.info(
+                "MCP Tool Runner finished execution_id=%s mcp_called=%s terminal_status=%s reason=%s",
+                execution_id,
+                result.mcp_called,
+                result.terminal_status,
+                result.reason,
+            )
+        except AppError as exc:
+            # Durable state/lineage conflicts (e.g. lost lease fencing) are not
+            # transient queue failures — never Celery-retry MCP Tool Runner
+            # failures; an operator must repair evidence if this recurs.
+            logger.error(
+                "MCP Tool Runner discarded due to durable conflict execution_id=%s code=%s",
+                execution_id,
+                exc.code,
+            )
+    finally:
+        await mcp_client.aclose()
 
 
 @celery_app.task(
@@ -144,7 +224,7 @@ def claim_execution_task(
             outbox_event_id,
             retry_count + 1,
         )
-        retry = getattr(self, "retry")
+        retry = self.retry
         raise retry(
             exc=RuntimeError("transient database failure during execution claim"),
             countdown=countdown,
