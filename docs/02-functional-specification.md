@@ -513,7 +513,7 @@ Execution CREATED
 
 User 활성/Permission, Agent grant, Server/Tool state, input, ToolPolicy, Approval snapshot, concurrency를 다시 확인한다.
 
-TOOL Step Attempt foundation에서는 Attempt 생성 직전에 현재 DB 상태로 동일 재검증을 수행한다. Creation-time planning preflight와 코드를 공유하되, Celery claim task는 Attempt를 자동 시작하지 않는다.
+TOOL Step Attempt foundation에서는 Attempt 생성 직전에 현재 DB 상태로 동일 재검증을 수행한다. Creation-time planning preflight와 코드를 공유하되, Celery claim task는 Attempt를 자동 시작하지 않는다. `ToolPolicy.requires_approval=true`이면 Attempt foundation은 ApprovalRequest/`WAITING_APPROVAL`을 만들지 않고 fail-closed한다(FNC-EXE-009는 후속 Approval PR).
 
 ## FNC-EXE-005. MCP Tool 호출
 

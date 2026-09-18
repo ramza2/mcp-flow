@@ -20,13 +20,17 @@ from app.domain.enums import (
 )
 from app.execution.claim import ExecutionClaimService, _as_utc
 from app.execution.queue import ExecutionQueueService
+from app.execution.runtime_preflight import assert_current_tool_executable
 from app.execution.tool_step_attempt import (
     ToolStepAttemptService,
     materialize_secret_safe_resolved_input,
 )
+from app.repositories.agent_tool_grant import AgentToolGrantRepository
+from app.repositories.approval_policy import ApprovalPolicyRepository
 from app.repositories.execution import ExecutionRepository
 from app.repositories.mcp_tool import MCPToolRepository
 from app.repositories.mcp_tool_policy import MCPToolPolicyRepository
+from app.repositories.user import UserRepository
 from app.schemas.parameter_binding import LiteralBindingValue, SecretRefBindingValue
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -34,6 +38,7 @@ from tests.unit.test_execution_creation import (
     _create,
     _idem_key,
     _install_no_side_effects,
+    _seed_confirmed_ready,
     _seed_ready,
 )
 from tests.unit.test_execution_queue_claim import _created_execution
@@ -417,3 +422,204 @@ async def test_agent_version_missing_rejected(db_session: AsyncSession) -> None:
     assert (await ExecutionRepository(db_session).list_attempts(claimed["step_id"])) == []
     step = (await ExecutionRepository(db_session).list_steps(claimed["execution_id"]))[0]
     assert step.status == StepStatus.READY.value
+
+
+@pytest.mark.asyncio
+async def test_requires_approval_fail_closed(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _install_no_side_effects(monkeypatch)
+    approval = await ApprovalPolicyRepository(db_session).create(
+        code=f"ap-{uuid.uuid4().hex[:8]}",
+        name="Attempt Approval Gate",
+    )
+    await db_session.flush()
+    seeded = await _seed_ready(
+        db_session,
+        policy_requires_approval=True,
+        approval_policy_id=approval.id,
+    )
+    created = await _create(db_session, seeded, idempotency_key=_idem_key())
+    await ExecutionQueueService(db_session).stage_created_batch(limit=10)
+    claim = await ExecutionClaimService(db_session, lease_seconds=60).claim(
+        execution_id=created.result.id, worker_id="worker-approval"
+    )
+    await db_session.commit()
+    assert claim.claimed and claim.lease_token is not None
+
+    with pytest.raises(AppError) as exc:
+        await ToolStepAttemptService(db_session).start(
+            execution_id=created.result.id,
+            step_execution_id=claim.ready_step_ids[0],
+            worker_id="worker-approval",
+            lease_token=claim.lease_token,
+        )
+    assert exc.value.status_code == 409
+    assert "requires_approval" in exc.value.message.lower()
+    step = (await ExecutionRepository(db_session).list_steps(created.result.id))[0]
+    assert step.status == StepStatus.READY.value
+    assert step.attempt_count == 0
+    assert (await ExecutionRepository(db_session).list_attempts(step.id)) == []
+    execution = await ExecutionRepository(db_session).get(created.result.id)
+    assert execution is not None
+    assert execution.status == ExecutionStatus.RUNNING.value
+
+
+@pytest.mark.asyncio
+async def test_grant_confirmation_drift_without_evidence_rejected(
+    db_session: AsyncSession,
+) -> None:
+    claimed = await _claim_ready(db_session)
+    execution = await ExecutionRepository(db_session).get(claimed["execution_id"])
+    assert execution is not None and execution.agent_version_id is not None
+    step = (await ExecutionRepository(db_session).list_steps(claimed["execution_id"]))[0]
+    assert step.mcp_tool_version_id is not None
+    version = await MCPToolRepository(db_session).get_version(step.mcp_tool_version_id)
+    assert version is not None
+    grants = await AgentToolGrantRepository(db_session).list_for_version(
+        execution.agent_version_id
+    )
+    grant = next(g for g in grants if g.mcp_tool_id == version.mcp_tool_id)
+    assert grant.requires_confirmation is False
+    grant.requires_confirmation = True
+    await db_session.commit()
+
+    with pytest.raises(AppError) as exc:
+        await ToolStepAttemptService(db_session).start(
+            execution_id=claimed["execution_id"],
+            step_execution_id=claimed["step_id"],
+            worker_id=claimed["worker_id"],
+            lease_token=claimed["lease_token"],
+        )
+    assert exc.value.status_code == 409
+    assert "confirmation" in exc.value.message.lower()
+    step = (await ExecutionRepository(db_session).list_steps(claimed["execution_id"]))[0]
+    assert step.status == StepStatus.READY.value
+    assert step.attempt_count == 0
+    assert (await ExecutionRepository(db_session).list_attempts(step.id)) == []
+
+
+@pytest.mark.asyncio
+async def test_confirmation_evidence_allows_attempt_start(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _install_no_side_effects(monkeypatch)
+    seeded = await _seed_confirmed_ready(db_session)
+    created = await _create(db_session, seeded, idempotency_key=_idem_key())
+    await ExecutionQueueService(db_session).stage_created_batch(limit=10)
+    claim = await ExecutionClaimService(db_session, lease_seconds=60).claim(
+        execution_id=created.result.id, worker_id="worker-confirm"
+    )
+    await db_session.commit()
+    assert claim.claimed and claim.lease_token is not None
+
+    outcome = await ToolStepAttemptService(db_session).start(
+        execution_id=created.result.id,
+        step_execution_id=claim.ready_step_ids[0],
+        worker_id="worker-confirm",
+        lease_token=claim.lease_token,
+    )
+    await db_session.commit()
+    assert outcome.replayed is False
+    assert outcome.attempt_no == 1
+    step = (await ExecutionRepository(db_session).list_steps(created.result.id))[0]
+    assert step.status == StepStatus.RUNNING.value
+
+
+@pytest.mark.asyncio
+async def test_tool_policy_confirmation_drift_still_fail_closed(
+    db_session: AsyncSession,
+) -> None:
+    claimed = await _claim_ready(db_session)
+    step = (await ExecutionRepository(db_session).list_steps(claimed["execution_id"]))[0]
+    assert step.mcp_tool_version_id is not None
+    version = await MCPToolRepository(db_session).get_version(step.mcp_tool_version_id)
+    assert version is not None
+    policy = await MCPToolPolicyRepository(db_session).get_by_tool_id(version.mcp_tool_id)
+    assert policy is not None
+    assert policy.requires_confirmation is False
+    policy.requires_confirmation = True
+    await db_session.commit()
+
+    with pytest.raises(AppError) as exc:
+        await ToolStepAttemptService(db_session).start(
+            execution_id=claimed["execution_id"],
+            step_execution_id=claimed["step_id"],
+            worker_id=claimed["worker_id"],
+            lease_token=claimed["lease_token"],
+        )
+    assert exc.value.status_code == 409
+    assert "policy snapshot" in exc.value.message.lower()
+    step = (await ExecutionRepository(db_session).list_steps(claimed["execution_id"]))[0]
+    assert step.status == StepStatus.READY.value
+    assert (await ExecutionRepository(db_session).list_attempts(step.id)) == []
+
+
+@pytest.mark.asyncio
+async def test_creation_and_attempt_share_current_tool_preflight(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _install_no_side_effects(monkeypatch)
+    calls: list[str] = []
+    real = assert_current_tool_executable
+
+    async def _spy(*args: Any, **kwargs: Any) -> Any:
+        calls.append("preflight")
+        return await real(*args, **kwargs)
+
+    monkeypatch.setattr(
+        "app.services.execution_creation.assert_current_tool_executable", _spy
+    )
+    monkeypatch.setattr(
+        "app.execution.tool_step_attempt.assert_current_tool_executable", _spy
+    )
+
+    seeded = await _seed_ready(db_session)
+    created = await _create(db_session, seeded, idempotency_key=_idem_key())
+    assert calls == ["preflight"]
+
+    await ExecutionQueueService(db_session).stage_created_batch(limit=10)
+    claim = await ExecutionClaimService(db_session, lease_seconds=60).claim(
+        execution_id=created.result.id, worker_id="worker-shared"
+    )
+    await db_session.commit()
+    assert claim.claimed and claim.lease_token is not None
+
+    await ToolStepAttemptService(db_session).start(
+        execution_id=created.result.id,
+        step_execution_id=claim.ready_step_ids[0],
+        worker_id="worker-shared",
+        lease_token=claim.lease_token,
+    )
+    assert calls == ["preflight", "preflight"]
+
+
+@pytest.mark.asyncio
+async def test_start_does_not_rollback_caller_transaction(
+    db_session: AsyncSession,
+) -> None:
+    claimed = await _claim_ready(db_session)
+    execution = await ExecutionRepository(db_session).get(claimed["execution_id"])
+    assert execution is not None
+    user = await UserRepository(db_session).get(execution.requester_id)
+    assert user is not None
+    probe = f"tx-probe-{uuid.uuid4().hex[:8]}"
+    user.display_name = probe
+
+    outcome = await ToolStepAttemptService(db_session).start(
+        execution_id=claimed["execution_id"],
+        step_execution_id=claimed["step_id"],
+        worker_id=claimed["worker_id"],
+        lease_token=claimed["lease_token"],
+    )
+    # session.rollback() inside start would revert the probe before commit.
+    assert user.display_name == probe
+    await db_session.commit()
+
+    assert outcome.replayed is False
+    reloaded = await UserRepository(db_session).get(execution.requester_id)
+    assert reloaded is not None
+    assert reloaded.display_name == probe
+    step = (await ExecutionRepository(db_session).list_steps(claimed["execution_id"]))[0]
+    assert step.status == StepStatus.RUNNING.value
+    assert step.attempt_count == 1

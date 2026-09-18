@@ -1,9 +1,12 @@
-"""Shared FNC-EXE-004 runtime Tool authorization / policy preflight.
+"""Shared current-Tool executable preflight (FNC-EXE-004).
 
-Used by TOOL Step Attempt starter. Creation-time planning preflight remains
-in ExecutionCreationService for AgentRequest lineage checks; this helper covers
-current User / Grant / Tool / Server / ToolPolicy state against an immutable
-ToolVersion id and an expected safe policy snapshot.
+Used by:
+- ExecutionCreationService (creation-time Tool/Server/Grant/Policy checks)
+- ToolStepAttemptService (Attempt-start revalidation)
+
+AgentRequest PlanValidationRun / confirmation *lineage selection* stays in
+ExecutionCreationService. PLAN_CONFIRMATION *evidence* checking is shared via
+``assert_answered_plan_confirmation``.
 """
 
 from __future__ import annotations
@@ -21,6 +24,8 @@ from app.domain.enums import (
     AgentVersionStatus,
     ApprovalDecisionMode,
     ApprovalPolicyStatus,
+    ClarificationRequestStatus,
+    ClarificationRequestType,
     MCPProtocolEra,
     MCPServerStatus,
     MCPToolStatus,
@@ -36,9 +41,11 @@ from app.repositories.agent_tool_grant import AgentToolGrantRepository
 from app.repositories.agent_version import AgentVersionRepository
 from app.repositories.approval_policy import ApprovalPolicyRepository
 from app.repositories.authorization import AuthorizationRepository
+from app.repositories.clarification_request import ClarificationRequestRepository
 from app.repositories.mcp_server import MCPServerRepository
 from app.repositories.mcp_tool import MCPToolRepository
 from app.repositories.mcp_tool_policy import MCPToolPolicyRepository
+from app.repositories.plan_validation import PlanValidationRepository
 from app.services.policy_snapshot import build_safe_tool_policy_snapshot
 
 _EXECUTE_PERMISSION = "mcp.tool.execute"
@@ -67,8 +74,9 @@ async def assert_current_tool_executable(
 ) -> RuntimeToolAuthorization:
     """Fail-closed current-state checks for Tool execution (FNC-EXE-004).
 
-    ``expected_policy_snapshot`` is the immutable Execution.policy_snapshot (or
-    READY validation snapshot at creation). Current safe policy must equal it.
+    ``expected_policy_snapshot`` is the immutable snapshot pinned at creation
+    (READY PlanValidationRun.policy_snapshot / Execution.policy_snapshot).
+    Current safe policy must equal it.
     """
     tools = MCPToolRepository(session)
     servers = MCPServerRepository(session)
@@ -252,7 +260,7 @@ async def assert_current_tool_executable(
     if current_policy != expected_policy_snapshot:
         raise AppError(
             code="EXECUTION_PRECONDITION_FAILED",
-            message="current policy snapshot != Execution.policy_snapshot.",
+            message="current policy snapshot != expected policy snapshot.",
             status_code=409,
         )
 
@@ -265,3 +273,47 @@ async def assert_current_tool_executable(
         grant=grant,
         policy_snapshot=current_policy,
     )
+
+
+async def assert_answered_plan_confirmation(
+    session: AsyncSession,
+    *,
+    agent_request_id: uuid.UUID,
+    requester_id: uuid.UUID,
+    plan_generation_run_id: uuid.UUID,
+    plan_hash: str,
+    policy_snapshot: dict[str, Any],
+) -> None:
+    """Require ANSWERED PLAN_CONFIRMATION confirmed=true for exact plan lineage.
+
+    Does not create new confirmation requests — evidence must already exist.
+    """
+    validations = PlanValidationRepository(session)
+    clarifications = ClarificationRequestRepository(session)
+
+    waiting = await validations.get_latest_waiting_confirmation_for_plan(
+        agent_request_id=agent_request_id,
+        plan_generation_run_id=plan_generation_run_id,
+        plan_hash=plan_hash,
+        policy_snapshot=policy_snapshot,
+    )
+    if waiting is None or waiting.clarification_request_id is None:
+        raise AppError(
+            code="EXECUTION_PRECONDITION_FAILED",
+            message="PLAN_CONFIRMATION evidence 없음.",
+            status_code=409,
+        )
+    clarification = await clarifications.get(waiting.clarification_request_id)
+    if (
+        clarification is None
+        or clarification.request_type
+        != ClarificationRequestType.PLAN_CONFIRMATION.value
+        or clarification.status != ClarificationRequestStatus.ANSWERED.value
+        or clarification.response_payload != {"confirmed": True}
+        or clarification.answered_by != requester_id
+    ):
+        raise AppError(
+            code="EXECUTION_PRECONDITION_FAILED",
+            message="ANSWERED PLAN_CONFIRMATION confirmed=true 실패.",
+            status_code=409,
+        )

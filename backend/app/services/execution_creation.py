@@ -8,7 +8,6 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import math
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -22,35 +21,21 @@ from app.agent.plan_validator import _literal_matches_type
 from app.core.errors import AppError
 from app.domain.enums import (
     AgentRequestStatus,
-    AgentToolGrantEffect,
-    ApprovalDecisionMode,
-    ApprovalPolicyStatus,
     AuthorableStepType,
     BindingKind,
-    ClarificationRequestStatus,
-    ClarificationRequestType,
     ExecutionSourceType,
     ExecutionStatus,
-    MCPProtocolEra,
-    MCPServerStatus,
-    MCPToolStatus,
-    MCPTransportType,
-    ResourceGrantResourceType,
-    RiskClass,
     StepStatus,
-    ToolVersionValidationStatus,
+)
+from app.execution.runtime_preflight import (
+    assert_answered_plan_confirmation,
+    assert_current_tool_executable,
 )
 from app.repositories.agent_request import AgentRequestRepository
-from app.repositories.agent_tool_grant import AgentToolGrantRepository
 from app.repositories.agent_version import AgentVersionRepository
-from app.repositories.approval_policy import ApprovalPolicyRepository
-from app.repositories.authorization import AuthorizationRepository
-from app.repositories.clarification_request import ClarificationRequestRepository
 from app.repositories.execution import ExecutionRepository
 from app.repositories.idempotency import IdempotencyRepository
-from app.repositories.mcp_server import MCPServerRepository
 from app.repositories.mcp_tool import MCPToolRepository
-from app.repositories.mcp_tool_policy import MCPToolPolicyRepository
 from app.repositories.parameter_build import ParameterBuildRepository
 from app.repositories.plan_generation import PlanGenerationRepository
 from app.repositories.plan_validation import PlanValidationRepository
@@ -63,12 +48,9 @@ from app.schemas.execution_plan import (
     compute_plan_hash,
 )
 from app.schemas.parameter_binding import ParameterBuildSnapshot
-from app.services.policy_snapshot import build_safe_tool_policy_snapshot
 
 logger = logging.getLogger(__name__)
 
-_EXECUTE_PERMISSION = "mcp.tool.execute"
-_MCP_TOOL_RESOURCE = ResourceGrantResourceType.MCP_TOOL.value
 _OPERATION_SCOPE = "AGENT_REQUEST_EXECUTION_CREATE_V1"
 _TRIGGER_USER = "USER"
 _RESOURCE_EXECUTION = "EXECUTION"
@@ -147,12 +129,6 @@ class ExecutionCreationService:
         self._plans = PlanGenerationRepository(session)
         self._builds = ParameterBuildRepository(session)
         self._tools = MCPToolRepository(session)
-        self._servers = MCPServerRepository(session)
-        self._policies = MCPToolPolicyRepository(session)
-        self._approvals = ApprovalPolicyRepository(session)
-        self._grants = AgentToolGrantRepository(session)
-        self._auth = AuthorizationRepository(session)
-        self._clarifications = ClarificationRequestRepository(session)
         self._executions = ExecutionRepository(session)
         self._idempotency = IdempotencyRepository(session)
 
@@ -481,193 +457,35 @@ class ExecutionCreationService:
             )
         self._validate_bindings(tool_version.input_schema, tool_cfg.bindings)
 
-        if tool_version.validation_status != ToolVersionValidationStatus.VALID.value:
-            raise AppError(
-                code="EXECUTION_PRECONDITION_FAILED",
-                message="ToolVersion.validation_status != VALID.",
-                status_code=409,
-            )
-
-        logical_tool = await self._tools.get(tool_version.mcp_tool_id)
-        if (
-            logical_tool is None
-            or logical_tool.deleted_at is not None
-            or logical_tool.status != MCPToolStatus.ACTIVE.value
-            or logical_tool.current_version_id != tool_version.id
-        ):
-            raise AppError(
-                code="EXECUTION_PRECONDITION_FAILED",
-                message="logical Tool ACTIVE/current_version 실패.",
-                status_code=409,
-            )
-
-        server = await self._servers.get(logical_tool.mcp_server_id)
-        if (
-            server is None
-            or server.deleted_at is not None
-            or server.status != MCPServerStatus.ACTIVE.value
-        ):
-            raise AppError(
-                code="EXECUTION_PRECONDITION_FAILED",
-                message="MCP Server ACTIVE 실패.",
-                status_code=409,
-            )
-        try:
-            MCPTransportType(server.transport_type)
-            MCPProtocolEra(server.protocol_era)
-        except ValueError as exc:
-            raise AppError(
-                code="EXECUTION_PRECONDITION_FAILED",
-                message="invalid transport_type/protocol_era.",
-                status_code=409,
-            ) from exc
-
-        auth = await self._auth.get_resource_authorization_snapshot(
-            request.requester_id,
-            permission_code=_EXECUTE_PERMISSION,
-            resource_type=_MCP_TOOL_RESOURCE,
-            resource_id=logical_tool.id,
+        authz = await assert_current_tool_executable(
+            self._session,
+            requester_id=request.requester_id,
+            agent_version_id=request.agent_version_id,
+            tool_version_id=tool_version.id,
+            expected_policy_snapshot=dict(validation.policy_snapshot),
+            plan_timeout_seconds=step.timeout_seconds,
         )
-        if not (
-            auth.user_exists
-            and auth.user_active
-            and auth.permission_present
-            and auth.resource_grant_present
-        ):
-            raise AppError(
-                code="FORBIDDEN",
-                message="mcp.tool.execute + MCP_TOOL ResourceGrant 필요.",
-                status_code=403,
-            )
 
-        grants = await self._grants.list_for_version(request.agent_version_id)
-        grant = next((g for g in grants if g.mcp_tool_id == logical_tool.id), None)
-        if grant is None or grant.effect != AgentToolGrantEffect.ALLOW.value:
-            raise AppError(
-                code="FORBIDDEN",
-                message="AgentToolGrant ALLOW 필요.",
-                status_code=403,
-            )
-        if grant.parameter_constraints is not None:
-            raise AppError(
-                code="EXECUTION_PRECONDITION_FAILED",
-                message="parameter_constraints는 fail-closed.",
-                status_code=409,
-            )
-
-        tool_policy = await self._policies.get_by_tool_id(logical_tool.id)
-        if tool_policy is None:
-            raise AppError(
-                code="EXECUTION_PRECONDITION_FAILED",
-                message="MCPToolPolicy 없음.",
-                status_code=409,
-            )
-        try:
-            RiskClass(tool_policy.risk_class)
-        except ValueError as exc:
-            raise AppError(
-                code="EXECUTION_PRECONDITION_FAILED",
-                message="invalid risk_class.",
-                status_code=409,
-            ) from exc
         if (
-            tool_policy.timeout_ms <= 0
-            or tool_policy.max_attempts < 1
-            or tool_policy.max_result_bytes <= 0
-            or not isinstance(tool_policy.requires_confirmation, bool)
-            or not isinstance(tool_policy.requires_approval, bool)
-            or not isinstance(tool_policy.allow_auto_select, bool)
+            authz.grant.requires_confirmation
+            or authz.tool_policy.requires_confirmation
         ):
-            raise AppError(
-                code="EXECUTION_PRECONDITION_FAILED",
-                message="ToolPolicy integrity 실패.",
-                status_code=409,
+            await assert_answered_plan_confirmation(
+                self._session,
+                agent_request_id=request.id,
+                requester_id=request.requester_id,
+                plan_generation_run_id=plan_run.id,
+                plan_hash=plan_run.plan_hash,
+                policy_snapshot=authz.policy_snapshot,
             )
-        expected_timeout = max(1, math.ceil(tool_policy.timeout_ms / 1000))
-        if step.timeout_seconds != expected_timeout:
-            raise AppError(
-                code="EXECUTION_PRECONDITION_FAILED",
-                message="Plan timeout과 ToolPolicy timeout_ms 불일치.",
-                status_code=409,
-            )
-
-        approval_policy = None
-        if tool_policy.requires_approval:
-            if tool_policy.approval_policy_id is None:
-                raise AppError(
-                    code="EXECUTION_PRECONDITION_FAILED",
-                    message="requires_approval인데 approval_policy_id 없음.",
-                    status_code=409,
-                )
-            approval_policy = await self._approvals.get(tool_policy.approval_policy_id)
-            if (
-                approval_policy is None
-                or approval_policy.status != ApprovalPolicyStatus.ACTIVE.value
-                or approval_policy.required_approvals < 1
-                or approval_policy.default_expiry_seconds <= 0
-            ):
-                raise AppError(
-                    code="EXECUTION_PRECONDITION_FAILED",
-                    message="ApprovalPolicy ACTIVE/integrity 실패.",
-                    status_code=409,
-                )
-            try:
-                ApprovalDecisionMode(approval_policy.decision_mode)
-            except ValueError as exc:
-                raise AppError(
-                    code="EXECUTION_PRECONDITION_FAILED",
-                    message="invalid decision_mode.",
-                    status_code=409,
-                ) from exc
-
-        current_policy = build_safe_tool_policy_snapshot(tool_policy, approval_policy)
-        if current_policy != validation.policy_snapshot:
-            raise AppError(
-                code="EXECUTION_PRECONDITION_FAILED",
-                message="current policy snapshot != READY validation snapshot.",
-                status_code=409,
-            )
-
-        if grant.requires_confirmation or tool_policy.requires_confirmation:
-            await self._require_confirmation(request, plan_run, current_policy)
 
         return {
             "validation": validation,
             "plan_run": plan_run,
             "plan": plan,
-            "tool_version": tool_version,
-            "policy_snapshot": current_policy,
+            "tool_version": authz.tool_version,
+            "policy_snapshot": authz.policy_snapshot,
         }
-
-    async def _require_confirmation(
-        self, request: Any, plan_run: Any, policy_snapshot: dict[str, Any]
-    ) -> None:
-        waiting = await self._validations.get_latest_waiting_confirmation_for_plan(
-            agent_request_id=request.id,
-            plan_generation_run_id=plan_run.id,
-            plan_hash=plan_run.plan_hash,
-            policy_snapshot=policy_snapshot,
-        )
-        if waiting is None or waiting.clarification_request_id is None:
-            raise AppError(
-                code="EXECUTION_PRECONDITION_FAILED",
-                message="PLAN_CONFIRMATION evidence 없음.",
-                status_code=409,
-            )
-        clarification = await self._clarifications.get(waiting.clarification_request_id)
-        if (
-            clarification is None
-            or clarification.request_type
-            != ClarificationRequestType.PLAN_CONFIRMATION.value
-            or clarification.status != ClarificationRequestStatus.ANSWERED.value
-            or clarification.response_payload != {"confirmed": True}
-            or clarification.answered_by != request.requester_id
-        ):
-            raise AppError(
-                code="EXECUTION_PRECONDITION_FAILED",
-                message="ANSWERED PLAN_CONFIRMATION confirmed=true 실패.",
-                status_code=409,
-            )
 
     def _validate_bindings(self, input_schema: Any, bindings: dict[str, Any]) -> None:
         if not isinstance(input_schema, dict) or input_schema.get("type") != "object":

@@ -12,7 +12,6 @@ from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import select
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import AppError
@@ -25,9 +24,13 @@ from app.domain.enums import (
     StepStatus,
 )
 from app.execution.claim import _as_utc, _normalize_worker_id
-from app.execution.runtime_preflight import assert_current_tool_executable
+from app.execution.runtime_preflight import (
+    assert_answered_plan_confirmation,
+    assert_current_tool_executable,
+)
 from app.models.execution import Execution, ExecutionStep
 from app.repositories.execution import ExecutionRepository
+from app.repositories.plan_validation import PlanValidationRepository
 from app.schemas.execution_plan import (
     ExecutionPlanStep,
     ExecutionPlanV1,
@@ -172,7 +175,7 @@ class ToolStepAttemptService:
 
         assert execution.agent_version_id is not None
         tool_config = self._validate_tool_lineage(execution, step)
-        await assert_current_tool_executable(
+        authz = await assert_current_tool_executable(
             self._session,
             requester_id=execution.requester_id,
             agent_version_id=execution.agent_version_id,
@@ -180,6 +183,24 @@ class ToolStepAttemptService:
             expected_policy_snapshot=dict(execution.policy_snapshot),
             plan_timeout_seconds=self._plan_timeout_seconds(step),
         )
+
+        # FNC-EXE-009: Approval is out of scope for Attempt foundation.
+        # Do not create ApprovalRequest or WAITING_APPROVAL — fail closed.
+        if authz.tool_policy.requires_approval:
+            raise AppError(
+                code="EXECUTION_PRECONDITION_FAILED",
+                message=(
+                    "ToolPolicy.requires_approval=true: Attempt foundation "
+                    "does not start TOOL Steps (Approval PR scope)."
+                ),
+                status_code=409,
+            )
+
+        if (
+            authz.grant.requires_confirmation
+            or authz.tool_policy.requires_confirmation
+        ):
+            await self._assert_confirmation_evidence(execution, authz.policy_snapshot)
 
         resolved_input = materialize_secret_safe_resolved_input(tool_config.bindings)
         next_attempt_no = step.attempt_count + 1
@@ -201,6 +222,10 @@ class ToolStepAttemptService:
             resolved_input=resolved_input,
         )
 
+        # FOR UPDATE on Execution+Step serializes concurrent starts: the loser
+        # waits, then either sees RUNNING and replays, or still sees READY and
+        # creates the Attempt. No IntegrityError reconcile / session.rollback —
+        # that would abort the caller's broader transaction.
         step.status = StepStatus.RUNNING.value
         if step.started_at is None:
             step.started_at = ts
@@ -208,29 +233,17 @@ class ToolStepAttemptService:
         step.resolved_input = resolved_input
         step.lock_version += 1
 
-        try:
-            attempt = await self._executions.create_attempt(
-                step_execution_id=step.id,
-                attempt_no=next_attempt_no,
-                status=_ATTEMPT_STARTED,
-                worker_id=worker,
-                lease_expires_at=execution.lease_expires_at,
-                idempotency_key=idem_key,
-                request_snapshot=request_snapshot,
-                started_at=ts,
-            )
-            await self._session.flush()
-        except IntegrityError as exc:
-            await self._session.rollback()
-            # Concurrent start on same READY Step — reconcile to the winner.
-            return await self._reconcile_after_unique_race(
-                execution_id=execution_id,
-                step_execution_id=step_execution_id,
-                worker_id=worker,
-                lease_token=lease_token,
-                now=ts,
-                cause=exc,
-            )
+        attempt = await self._executions.create_attempt(
+            step_execution_id=step.id,
+            attempt_no=next_attempt_no,
+            status=_ATTEMPT_STARTED,
+            worker_id=worker,
+            lease_expires_at=execution.lease_expires_at,
+            idempotency_key=idem_key,
+            request_snapshot=request_snapshot,
+            started_at=ts,
+        )
+        await self._session.flush()
 
         return ToolStepAttemptOutcome(
             execution_id=execution.id,
@@ -413,33 +426,34 @@ class ToolStepAttemptService:
             replayed=True,
         )
 
-    async def _reconcile_after_unique_race(
+    async def _assert_confirmation_evidence(
         self,
-        *,
-        execution_id: uuid.UUID,
-        step_execution_id: uuid.UUID,
-        worker_id: str,
-        lease_token: uuid.UUID,
-        now: datetime,
-        cause: IntegrityError,
-    ) -> ToolStepAttemptOutcome:
-        execution = await self._lock_execution(execution_id)
-        self._assert_execution_lease(
-            execution, worker_id=worker_id, lease_token=lease_token, now=now
+        execution: Execution,
+        policy_snapshot: dict[str, Any],
+    ) -> None:
+        if (
+            execution.agent_request_id is None
+            or execution.plan_validation_run_id is None
+        ):
+            raise AppError(
+                code="EXECUTION_PRECONDITION_FAILED",
+                message="PLAN_CONFIRMATION evidence lineage missing on Execution.",
+                status_code=409,
+            )
+        validation = await PlanValidationRepository(self._session).get_by_id(
+            execution.plan_validation_run_id
         )
-        step = await self._lock_step(step_execution_id)
-        if step.execution_id != execution.id:
+        if validation is None:
             raise AppError(
-                code="RESOURCE_CONFLICT",
-                message="Step does not belong to Execution.",
+                code="EXECUTION_PRECONDITION_FAILED",
+                message="Pinned PlanValidationRun not found for confirmation check.",
                 status_code=409,
-            ) from cause
-        if step.status != StepStatus.RUNNING.value:
-            raise AppError(
-                code="RESOURCE_CONFLICT",
-                message="Concurrent Attempt start left Step in unexpected state.",
-                status_code=409,
-            ) from cause
-        return await self._replay_started(
-            execution=execution, step=step, worker_id=worker_id
+            )
+        await assert_answered_plan_confirmation(
+            self._session,
+            agent_request_id=execution.agent_request_id,
+            requester_id=execution.requester_id,
+            plan_generation_run_id=validation.plan_generation_run_id,
+            plan_hash=execution.plan_hash,
+            policy_snapshot=policy_snapshot,
         )

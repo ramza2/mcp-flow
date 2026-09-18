@@ -365,6 +365,9 @@ Dataset은 평가 전 FROZEN하고 실행 중 정답을 변경하지 않는다.
 - StepAttempt persistence (`step_attempts` + canonical statuses)
 - TOOL Step `READY → RUNNING` + `StepAttempt STARTED` atomic transition
 - FNC-EXE-004 runtime preflight reuse (User/Grant/Server/Tool/ToolVersion/Policy)
+- shared current-Tool preflight used by Execution creation + Attempt start
+- `requires_approval=true` Attempt fail-closed (no ApprovalRequest / WAITING_APPROVAL)
+- runtime `requires_confirmation` revalidation via existing PLAN_CONFIRMATION evidence
 - Binding materialization foundation: LITERAL + SECRET_REF only (fail-closed otherwise)
 - secret-safe `resolved_input` / `request_snapshot` (raw secret 미기록)
 - duplicate start idempotent replay (same worker/lease)
