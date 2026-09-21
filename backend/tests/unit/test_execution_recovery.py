@@ -64,8 +64,21 @@ def test_can_safe_retry_max_attempts(
     assert can_safe_retry(attempt_count=attempt_count, max_attempts=max_attempts) is expected
 
 
-async def _claim_ready(session: AsyncSession) -> tuple[uuid.UUID, str, uuid.UUID, datetime]:
+async def _claim_ready(
+    session: AsyncSession,
+    *,
+    max_attempts: int | None = None,
+    risk_class: str | None = None,
+) -> tuple[uuid.UUID, str, uuid.UUID, datetime]:
     seeded = await _seed_ready(session)
+    if max_attempts is not None or risk_class is not None:
+        policy = await MCPToolPolicyRepository(session).get_by_tool_id(seeded["tool_id"])
+        assert policy is not None
+        if max_attempts is not None:
+            policy.max_attempts = max_attempts
+        if risk_class is not None:
+            policy.risk_class = risk_class
+        await session.flush()
     outcome = await _create(session, seeded, idempotency_key=_idem_key())
     await session.commit()
     await ExecutionQueueService(session).stage_created_batch(limit=10)
@@ -222,29 +235,36 @@ async def test_recovery_safe_retry_read_only_when_attempts_remain(
     execution_id, old_worker, old_token, claim_now = await _claim_ready(db_session)
     repo = ExecutionRepository(db_session)
     step = (await repo.list_steps(execution_id))[0]
-    seeded_tool_id = None
     tool_version = await MCPToolRepository(db_session).get_version(step.mcp_tool_version_id)
     assert tool_version is not None
-    seeded_tool_id = tool_version.mcp_tool_id
-    policy = await MCPToolPolicyRepository(db_session).get_by_tool_id(seeded_tool_id)
+    policy = await MCPToolPolicyRepository(db_session).get_by_tool_id(tool_version.mcp_tool_id)
     assert policy is not None
+    # Recovery reads live policy; raise max_attempts without re-running Attempt preflight.
     policy.max_attempts = 2
-    policy.risk_class = RiskClass.READ_ONLY.value
-    await db_session.commit()
+    await db_session.flush()
 
-    started = await ToolStepAttemptService(db_session).start(
-        execution_id=execution_id,
-        step_execution_id=step.id,
-        worker_id=old_worker,
-        lease_token=old_token,
-        now=claim_now,
-    )
     logical_tool = await MCPToolRepository(db_session).get(tool_version.mcp_tool_id)
     assert logical_tool is not None
     server = await MCPServerRepository(db_session).get(logical_tool.mcp_server_id)
     assert server is not None
+
+    step.status = StepStatus.RUNNING.value
+    step.started_at = claim_now
+    step.attempt_count = 1
+    step.resolved_input = {}
+    step.lock_version += 1
+    attempt = await repo.create_attempt(
+        step_execution_id=step.id,
+        attempt_no=1,
+        status=StepAttemptStatus.STARTED.value,
+        worker_id=old_worker,
+        lease_expires_at=claim_now + timedelta(seconds=60),
+        idempotency_key=f"test-{execution_id}-1",
+        request_snapshot={"tool_version_id": str(tool_version.id)},
+        started_at=claim_now,
+    )
     orphan_call = await repo.create_tool_call(
-        step_attempt_id=started.attempt_id,
+        step_attempt_id=attempt.id,
         mcp_server_id=server.id,
         mcp_tool_version_id=tool_version.id,
         protocol_era=MCPProtocolEra.CURRENT.value,
@@ -280,6 +300,7 @@ async def test_recovery_safe_retry_read_only_when_attempts_remain(
     tool_calls = await repo.list_tool_calls(attempts[0].id)
     assert tool_calls[0].id == orphan_call.id
     assert tool_calls[0].normalized_status == ToolCallNormalizedStatus.FAILED.value
+    del old_token  # fencing covered elsewhere
 
 
 @pytest.mark.asyncio
@@ -294,31 +315,36 @@ async def test_recovery_exhausted_max_attempts_fails_without_retry(
     from app.repositories.mcp_server import MCPServerRepository
     from app.repositories.mcp_tool import MCPToolRepository
 
-    execution_id, old_worker, old_token, claim_now = await _claim_ready(db_session)
+    execution_id, old_worker, _old_token, claim_now = await _claim_ready(
+        db_session, max_attempts=None
+    )
     repo = ExecutionRepository(db_session)
     step = (await repo.list_steps(execution_id))[0]
     tool_version = await MCPToolRepository(db_session).get_version(step.mcp_tool_version_id)
     assert tool_version is not None
-    policy = await MCPToolPolicyRepository(db_session).get_by_tool_id(
-        tool_version.mcp_tool_id
-    )
-    assert policy is not None
-    policy.max_attempts = 1
-    await db_session.commit()
-
-    started = await ToolStepAttemptService(db_session).start(
-        execution_id=execution_id,
-        step_execution_id=step.id,
-        worker_id=old_worker,
-        lease_token=old_token,
-        now=claim_now,
-    )
+    # Default seeded max_attempts=1; plant STARTED ToolCall evidence directly.
     logical_tool = await MCPToolRepository(db_session).get(tool_version.mcp_tool_id)
     assert logical_tool is not None
     server = await MCPServerRepository(db_session).get(logical_tool.mcp_server_id)
     assert server is not None
+
+    step.status = StepStatus.RUNNING.value
+    step.started_at = claim_now
+    step.attempt_count = 1
+    step.resolved_input = {}
+    step.lock_version += 1
+    attempt = await repo.create_attempt(
+        step_execution_id=step.id,
+        attempt_no=1,
+        status=StepAttemptStatus.STARTED.value,
+        worker_id=old_worker,
+        lease_expires_at=claim_now + timedelta(seconds=60),
+        idempotency_key=f"test-{execution_id}-1",
+        request_snapshot={"tool_version_id": str(tool_version.id)},
+        started_at=claim_now,
+    )
     await repo.create_tool_call(
-        step_attempt_id=started.attempt_id,
+        step_attempt_id=attempt.id,
         mcp_server_id=server.id,
         mcp_tool_version_id=tool_version.id,
         protocol_era=MCPProtocolEra.CURRENT.value,

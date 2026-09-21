@@ -8,7 +8,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
-from sqlalchemy import update
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.errors import AppError
@@ -81,6 +81,21 @@ async def _claim_ready(
     async with session_factory() as session:
         staged = await ExecutionQueueService(session).stage_created_batch(limit=10)
         assert staged == 1
+        # Mark EXECUTION_DISPATCH published so leftover unpublished Outbox rows
+        # do not pollute sibling integration suites that share the same DB.
+        from app.models.outbox import OutboxEvent
+
+        now = datetime.now(UTC)
+        rows = (
+            await session.execute(
+                select(OutboxEvent).where(
+                    OutboxEvent.aggregate_id == execution_id,
+                    OutboxEvent.published_at.is_(None),
+                )
+            )
+        ).scalars().all()
+        for row in rows:
+            row.published_at = now
         await session.commit()
 
     claim_now = datetime.now(UTC)
