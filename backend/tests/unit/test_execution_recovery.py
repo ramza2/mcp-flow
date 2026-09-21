@@ -237,10 +237,14 @@ async def test_recovery_safe_retry_read_only_when_attempts_remain(
     step = (await repo.list_steps(execution_id))[0]
     tool_version = await MCPToolRepository(db_session).get_version(step.mcp_tool_version_id)
     assert tool_version is not None
-    policy = await MCPToolPolicyRepository(db_session).get_by_tool_id(tool_version.mcp_tool_id)
-    assert policy is not None
-    # Recovery reads live policy; raise max_attempts without re-running Attempt preflight.
-    policy.max_attempts = 2
+    # Recovery reads pinned Execution.policy_snapshot, not mutable MCPToolPolicy.
+    execution = await repo.get(execution_id)
+    assert execution is not None
+    snapshot = dict(execution.policy_snapshot)
+    tool_policy = dict(snapshot["tool_policy"])
+    tool_policy["max_attempts"] = 2
+    snapshot["tool_policy"] = tool_policy
+    execution.policy_snapshot = snapshot
     await db_session.flush()
 
     logical_tool = await MCPToolRepository(db_session).get(tool_version.mcp_tool_id)

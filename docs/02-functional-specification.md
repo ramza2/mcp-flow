@@ -578,13 +578,17 @@ Persisted evidence decision (Current MCP Runner: ToolCall `STARTED`를 durable c
 
 | Case | Evidence | Decision |
 |---|---|---|
-| A | Step READY, STARTED Attempt/ToolCall 없음 | SAFE TAKEOVER → runner 호출 |
+| A | Step READY, STARTED Attempt/ToolCall 없음 (historical terminal Attempt 허용) | SAFE TAKEOVER → runner 호출 |
 | B | Step RUNNING + STARTED Attempt + ToolCall 없음 | SAFE RESUME (기존 Attempt ownership 이전, 새 Attempt 금지) → runner |
-| C-1 | STARTED ToolCall + `READ_ONLY`/`IDEMPOTENT_WRITE` + `attempt_count < max_attempts` | orphan Attempt/ToolCall terminalize(`WORKER_LEASE_EXPIRED`, retryable) → Step READY → 새 Attempt/ToolCall |
+| C-1 | STARTED ToolCall + pinned snapshot `READ_ONLY`/`IDEMPOTENT_WRITE` + `attempt_count < max_attempts` | orphan Attempt/ToolCall terminalize(`WORKER_LEASE_EXPIRED`, retryable) → Step READY → 새 Attempt/ToolCall |
 | C-1 exhausted | 위 + attempts 소진 | FAILED terminal, MCP 재호출 0 |
-| C-2 | STARTED ToolCall + `NON_IDEMPOTENT_WRITE`/`DESTRUCTIVE`/`UNKNOWN` | ToolCall/Attempt/Step `UNKNOWN_OUTCOME`, Execution `FAILED`, MCP 재호출 0 |
+| C-2 | STARTED ToolCall + pinned snapshot `NON_IDEMPOTENT_WRITE`/`DESTRUCTIVE`/`UNKNOWN` | ToolCall/Attempt/Step `UNKNOWN_OUTCOME`, Execution `FAILED`, MCP 재호출 0 |
 
-`UNKNOWN_OUTCOME`은 Step/Attempt/ToolCall terminal이며 자동 retry 금지. Execution에는 `UNKNOWN_OUTCOME` status가 없으므로 `FAILED`로 fail-closed한다. inconsistent lineage/evidence는 추측 복구하지 않고 `RECOVERY_INCONSISTENT_EVIDENCE`로 fail-closed한다.
+Recovery retry/safety classification은 mutable `MCPToolPolicy`가 아니라 생성 시점 `Execution.policy_snapshot.tool_policy`(`risk_class` / `max_attempts`)를 authority로 사용한다. 실제 remote 재호출 직전 권한/현행 Policy 재검증은 기존 `assert_current_tool_executable` / Attempt start / `McpToolRunner` preflight가 담당한다.
+
+SAFE_RETRY commit 직후 runner 시작 전 crash로 Step이 READY + historical terminal Attempt인 상태는 정상 recovery checkpoint다. STARTED Attempt/ToolCall이 없고 `attempt_count < max_attempts`이면 다시 TAKEOVER_READY한다.
+
+`UNKNOWN_OUTCOME`은 Step/Attempt/ToolCall terminal이며 자동 retry 금지. Execution에는 `UNKNOWN_OUTCOME` status가 없으므로 `FAILED`로 fail-closed한다. inconsistent lineage에서 STARTED ToolCall(possible external side effect)이 있으면 ToolCall/Attempt/Step을 `UNKNOWN_OUTCOME`으로 terminalize하고 Execution은 `FAILED`다. STARTED ToolCall이 없는 pure structural corruption은 `RECOVERY_INCONSISTENT_EVIDENCE` / FAILED로 fail-closed한다.
 
 ## FNC-EXE-012. 부분성공
 

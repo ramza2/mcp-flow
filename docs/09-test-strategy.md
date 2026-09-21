@@ -361,11 +361,17 @@ Dataset은 평가 전 FROZEN하고 실행 중 정답을 변경하지 않는다.
 
 추가 (FNC-EXE-011 expired RUNNING lease recovery vertical slice):
 
-- recovery risk decision: READ_ONLY/IDEMPOTENT_WRITE=safe retry,
-  NON_IDEMPOTENT_WRITE/DESTRUCTIVE/UNKNOWN=unsafe
+- recovery risk decision uses pinned `Execution.policy_snapshot.tool_policy`
+  (READ_ONLY/IDEMPOTENT_WRITE=safe retry; NON_IDEMPOTENT_WRITE/DESTRUCTIVE/UNKNOWN=unsafe);
+  mutable MCPToolPolicy drift must not reclassify past ambiguous calls
 - max_attempts remaining → safe retry / exhausted → terminal FAILED (MCP 0)
 - expired RUNNING + Step READY → takeover + 새 lease_token + old token heartbeat 거절 +
   started_at/queued_at/ready_at 보존
+- SAFE_RETRY commit 후 runner crash gap: READY + historical terminal Attempt →
+  재 takeover → Attempt #2 + MCP 1회
+- pinned NON_IDEMPOTENT snapshot + live policy READ_ONLY → UNKNOWN_OUTCOME / MCP 0
+- pinned READ_ONLY SAFE_RETRY + live policy drift → runner preflight fail-closed /
+  MCP 0 / Execution terminal (중간 RUNNING strand 금지)
 - 동시 recovery worker 2 → winner 1 / loser NO_OP
 - Step RUNNING + STARTED Attempt + ToolCall 없음 → existing Attempt resume,
   새 Attempt 없음, runner MCP 1회
@@ -377,7 +383,9 @@ Dataset은 평가 전 FROZEN하고 실행 중 정답을 변경하지 않는다.
   ToolCall·Attempt·Step UNKNOWN_OUTCOME / Execution FAILED
 - stale original worker finalize → fencing reject
 - non-expired RUNNING / terminal Execution → recovery 대상 아님
-- corrupted lineage → FAIL_INCONSISTENT / MCP 0
+- corrupted lineage (no STARTED ToolCall) → FAIL_INCONSISTENT / FAILED / MCP 0
+- corrupted lineage + STARTED ToolCall → FAIL_INCONSISTENT /
+  ToolCall·Attempt·Step UNKNOWN_OUTCOME / Execution FAILED / MCP 0
 - duplicate recovery publish → takeover/remote side effect 중복 없음
 - outbox poll restart → expired candidate 재발견
 - recovery payload는 execution_id only (secret/args/policy snapshot 금지)

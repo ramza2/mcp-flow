@@ -1184,7 +1184,7 @@ QUEUED  → worker/lease/heartbeat 모두 null
 
 Lease heartbeat는 `RUNNING` + 동일 worker_id + 동일 lease_token + 미만료 lease에서만 연장한다. 만료된 lease를 heartbeat로 되살리지 않는다.
 
-expired `RUNNING` lease takeover(`FNC-EXE-011`)는 별도 recovery service가 담당한다. takeover는 새 `worker_id` / `lease_token` / `lease_expires_at` / `heartbeat_at`만 부여하고 `started_at`/`queued_at`/`ready_at`은 보존한다. recovery decision은 `execution_steps` / `step_attempts` / `tool_calls` persisted evidence와 `MCPToolPolicy.risk_class` / `max_attempts`를 기준으로 한다. 이번 vertical slice는 synchronous Current `tools/call` evidence만 사용하며 MRTR/Approval/task-handle recovery는 후속이다.
+expired `RUNNING` lease takeover(`FNC-EXE-011`)는 별도 recovery service가 담당한다. takeover는 새 `worker_id` / `lease_token` / `lease_expires_at` / `heartbeat_at`만 부여하고 `started_at`/`queued_at`/`ready_at`은 보존한다. recovery retry/safety decision은 `execution_steps` / `step_attempts` / `tool_calls` persisted evidence와 **pinned** `Execution.policy_snapshot.tool_policy`(`risk_class` / `max_attempts`)를 기준으로 한다. mutable `MCPToolPolicy`는 remote 재호출 직전 runtime preflight에서만 재검증한다. READY + historical terminal Attempt(STARTED 없음)는 SAFE_RETRY crash gap 이후의 정상 checkpoint다. 이번 vertical slice는 synchronous Current `tools/call` evidence만 사용하며 MRTR/Approval/task-handle recovery는 후속이다.
 
 Queue/claim은 coordination 책임만 가지며 User/ResourceGrant/ToolPolicy 재검증, Secret resolve, MCP call, StepAttempt 생성은 수행하지 않는다.
 

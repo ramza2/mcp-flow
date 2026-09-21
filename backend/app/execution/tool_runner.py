@@ -326,13 +326,44 @@ class McpToolRunner:
                         status_code=409,
                     )
 
-                attempt_outcome = await ToolStepAttemptService(session).start(
-                    execution_id=execution.id,
-                    step_execution_id=step.id,
-                    worker_id=worker,
-                    lease_token=lease_token,
-                    now=now,
-                )
+                try:
+                    attempt_outcome = await ToolStepAttemptService(session).start(
+                        execution_id=execution.id,
+                        step_execution_id=step.id,
+                        worker_id=worker,
+                        lease_token=lease_token,
+                        now=now,
+                    )
+                except AppError as exc:
+                    # Do not strand RUNNING + READY after recovery/claim when
+                    # runtime preflight rejects (e.g. pinned policy_snapshot drift).
+                    if step.status not in _STEP_TERMINAL_STATUSES:
+                        step.status = StepStatus.FAILED.value
+                        step.error_code = exc.code
+                        step.error_message = exc.message
+                        step.finished_at = now
+                        step.lock_version += 1
+                    if execution.status == ExecutionStatus.RUNNING.value:
+                        execution.status = ExecutionStatus.FAILED.value
+                        execution.error_code = exc.code
+                        execution.error_message = exc.message
+                        execution.finished_at = now
+                        execution.worker_id = None
+                        execution.lease_token = None
+                        execution.lease_expires_at = None
+                        execution.heartbeat_at = None
+                        execution.lock_version += 1
+                    return _PrepareResult(
+                        outcome=ToolRunOutcome(
+                            execution_id=execution.id,
+                            step_execution_id=step.id,
+                            attempt_id=None,
+                            tool_call_id=None,
+                            mcp_called=False,
+                            terminal_status=StepStatus.FAILED.value,
+                            reason=exc.code,
+                        )
+                    )
                 attempt = await executions.get_attempt(attempt_outcome.attempt_id)
                 if attempt is None or attempt.status != StepAttemptStatus.STARTED.value:
                     raise AppError(

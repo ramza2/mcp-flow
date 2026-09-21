@@ -31,9 +31,7 @@ from app.domain.enums import (
 from app.execution.claim import _as_utc, _normalize_worker_id
 from app.models.execution import Execution, ExecutionStep, StepAttempt, ToolCall
 from app.repositories.execution import ExecutionRepository
-from app.repositories.mcp_server import MCPServerRepository
 from app.repositories.mcp_tool import MCPToolRepository
-from app.repositories.mcp_tool_policy import MCPToolPolicyRepository
 from app.schemas.execution_plan import DETERMINISTIC_TOOL_STEP_ID
 
 logger = logging.getLogger(__name__)
@@ -46,6 +44,26 @@ _UNSAFE_RISKS = frozenset(
         RiskClass.NON_IDEMPOTENT_WRITE.value,
         RiskClass.DESTRUCTIVE.value,
         RiskClass.UNKNOWN.value,
+    }
+)
+
+_ATTEMPT_TERMINAL = frozenset(
+    {
+        StepAttemptStatus.SUCCEEDED.value,
+        StepAttemptStatus.FAILED.value,
+        StepAttemptStatus.TIMED_OUT.value,
+        StepAttemptStatus.CANCELLED.value,
+        StepAttemptStatus.UNKNOWN_OUTCOME.value,
+    }
+)
+_STEP_TERMINAL = frozenset(
+    {
+        StepStatus.SUCCEEDED.value,
+        StepStatus.FAILED.value,
+        StepStatus.TIMED_OUT.value,
+        StepStatus.CANCELLED.value,
+        StepStatus.SKIPPED.value,
+        StepStatus.UNKNOWN_OUTCOME.value,
     }
 )
 
@@ -357,14 +375,7 @@ class ExecutionRecoveryService:
     ) -> RecoveryDecision:
         del now  # decision uses persisted evidence only
         if step.status == StepStatus.READY.value:
-            attempts = await self._executions.list_attempts(step.id)
-            if attempts:
-                raise AppError(
-                    code="RESOURCE_CONFLICT",
-                    message="READY Step unexpectedly has Attempts.",
-                    status_code=409,
-                )
-            return RecoveryDecision.TAKEOVER_READY
+            return await self._decide_ready_checkpoint(execution=execution, step=step)
 
         if step.status != StepStatus.RUNNING.value:
             raise AppError(
@@ -448,7 +459,9 @@ class ExecutionRecoveryService:
                 status_code=409,
             )
 
-        risk_class, max_attempts = await self._load_risk_and_attempts(step)
+        risk_class, max_attempts = await self._load_risk_and_attempts(
+            execution=execution, step=step
+        )
         if is_unsafe_ambiguous_risk(risk_class):
             return RecoveryDecision.UNKNOWN_OUTCOME
         if is_safe_retry_risk(risk_class):
@@ -463,8 +476,140 @@ class ExecutionRecoveryService:
             status_code=409,
         )
 
-    async def _load_risk_and_attempts(self, step: ExecutionStep) -> tuple[str, int]:
-        assert step.mcp_tool_version_id is not None
+    async def _decide_ready_checkpoint(
+        self, *, execution: Execution, step: ExecutionStep
+    ) -> RecoveryDecision:
+        """READY is a valid recovery checkpoint, including post-SAFE_RETRY crash.
+
+        Historical terminal Attempts are allowed. STARTED Attempt/ToolCall is not.
+        """
+        attempts = await self._executions.list_attempts(step.id)
+        started = [a for a in attempts if a.status == StepAttemptStatus.STARTED.value]
+        if started:
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message="READY Step has STARTED Attempt.",
+                status_code=409,
+            )
+        for attempt in attempts:
+            if attempt.status not in _ATTEMPT_TERMINAL:
+                raise AppError(
+                    code="RESOURCE_CONFLICT",
+                    message="READY Step has non-terminal Attempt.",
+                    status_code=409,
+                )
+            if attempt.step_execution_id != step.id:
+                raise AppError(
+                    code="RESOURCE_CONFLICT",
+                    message="StepAttempt lineage does not match Step.",
+                    status_code=409,
+                )
+            tool_calls = await self._executions.list_tool_calls(attempt.id)
+            if any(
+                tc.normalized_status == ToolCallNormalizedStatus.STARTED.value
+                for tc in tool_calls
+            ):
+                raise AppError(
+                    code="RESOURCE_CONFLICT",
+                    message="READY Step has STARTED ToolCall evidence.",
+                    status_code=409,
+                )
+
+        if not attempts:
+            if step.attempt_count != 0:
+                raise AppError(
+                    code="RESOURCE_CONFLICT",
+                    message="READY Step attempt_count does not match Attempt history.",
+                    status_code=409,
+                )
+            return RecoveryDecision.TAKEOVER_READY
+
+        attempt_nos = sorted(a.attempt_no for a in attempts)
+        expected = list(range(1, len(attempt_nos) + 1))
+        if attempt_nos != expected:
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message="READY Step Attempt numbers are not contiguous.",
+                status_code=409,
+            )
+        if step.attempt_count != attempt_nos[-1] or step.attempt_count != len(attempts):
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message="READY Step attempt_count does not match Attempt history.",
+                status_code=409,
+            )
+
+        _risk_class, max_attempts = await self._load_risk_and_attempts(
+            execution=execution, step=step
+        )
+        if can_safe_retry(
+            attempt_count=step.attempt_count, max_attempts=max_attempts
+        ):
+            return RecoveryDecision.TAKEOVER_READY
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message=(
+                "READY Step attempt_count is exhausted;"
+                " cannot takeover for another Attempt."
+            ),
+            status_code=409,
+        )
+
+    async def _load_risk_and_attempts(
+        self, *, execution: Execution, step: ExecutionStep
+    ) -> tuple[str, int]:
+        """Pinned Execution.policy_snapshot is recovery retry authority.
+
+        Mutable MCPToolPolicy is re-checked only at remote invocation preflight.
+        """
+        snapshot = execution.policy_snapshot
+        if not isinstance(snapshot, dict):
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message="Execution.policy_snapshot is missing or malformed.",
+                status_code=409,
+            )
+        tool_policy = snapshot.get("tool_policy")
+        if not isinstance(tool_policy, dict):
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message="Execution.policy_snapshot.tool_policy is missing.",
+                status_code=409,
+            )
+        risk_class = tool_policy.get("risk_class")
+        max_attempts = tool_policy.get("max_attempts")
+        try:
+            RiskClass(risk_class)
+        except (TypeError, ValueError) as exc:
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message="Execution.policy_snapshot risk_class is invalid.",
+                status_code=409,
+            ) from exc
+        if (
+            not isinstance(max_attempts, int)
+            or isinstance(max_attempts, bool)
+            or max_attempts < 1
+        ):
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message="Execution.policy_snapshot max_attempts is invalid.",
+                status_code=409,
+            )
+
+        snapshot_tool_id = tool_policy.get("mcp_tool_id")
+        if not isinstance(snapshot_tool_id, str) or not snapshot_tool_id:
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message="Execution.policy_snapshot mcp_tool_id is missing.",
+                status_code=409,
+            )
+        if step.mcp_tool_version_id is None:
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message="TOOL Step is missing mcp_tool_version_id.",
+                status_code=409,
+            )
         tool_version = await MCPToolRepository(self._session).get_version(
             step.mcp_tool_version_id
         )
@@ -474,45 +619,16 @@ class ExecutionRecoveryService:
                 message="ToolVersion not found for recovery decision.",
                 status_code=409,
             )
-        logical_tool = await MCPToolRepository(self._session).get(tool_version.mcp_tool_id)
-        if logical_tool is None:
+        if str(tool_version.mcp_tool_id) != snapshot_tool_id:
             raise AppError(
                 code="RESOURCE_CONFLICT",
-                message="MCP Tool not found for recovery decision.",
+                message=(
+                    "Execution.policy_snapshot mcp_tool_id does not match"
+                    " Step ToolVersion lineage."
+                ),
                 status_code=409,
             )
-        server = await MCPServerRepository(self._session).get(logical_tool.mcp_server_id)
-        if server is None:
-            raise AppError(
-                code="RESOURCE_CONFLICT",
-                message="MCP Server not found for recovery decision.",
-                status_code=409,
-            )
-        policy = await MCPToolPolicyRepository(self._session).get_by_tool_id(
-            logical_tool.id
-        )
-        if policy is None:
-            raise AppError(
-                code="RESOURCE_CONFLICT",
-                message="MCPToolPolicy not found for recovery decision.",
-                status_code=409,
-            )
-        try:
-            RiskClass(policy.risk_class)
-        except ValueError as exc:
-            raise AppError(
-                code="RESOURCE_CONFLICT",
-                message="MCPToolPolicy.risk_class is invalid.",
-                status_code=409,
-            ) from exc
-        if policy.max_attempts < 1:
-            raise AppError(
-                code="RESOURCE_CONFLICT",
-                message="MCPToolPolicy.max_attempts is invalid.",
-                status_code=409,
-            )
-        return policy.risk_class, policy.max_attempts
-
+        return str(risk_class), max_attempts
     async def _lock_foundation_step(self, execution: Execution) -> ExecutionStep:
         if execution.source_type != ExecutionSourceType.AGENT_REQUEST.value:
             raise AppError(
@@ -645,43 +761,68 @@ class ExecutionRecoveryService:
         now: datetime,
         message: str,
     ) -> None:
-        if step is not None and step.status not in {
-            StepStatus.SUCCEEDED.value,
-            StepStatus.FAILED.value,
-            StepStatus.TIMED_OUT.value,
-            StepStatus.CANCELLED.value,
-            StepStatus.SKIPPED.value,
-            StepStatus.UNKNOWN_OUTCOME.value,
-        }:
-            step.status = StepStatus.FAILED.value
+        started_tool_call_present = False
+        if step is not None:
+            attempts = await self._executions.list_attempts(step.id)
+            for attempt in attempts:
+                tool_calls = await self._executions.list_tool_calls(attempt.id)
+                if any(
+                    tc.normalized_status == ToolCallNormalizedStatus.STARTED.value
+                    for tc in tool_calls
+                ):
+                    started_tool_call_present = True
+                    break
+
+        # STARTED ToolCall is durable send evidence. When lineage is inconsistent
+        # we cannot safely classify risk, so do not assert FAILED on that call.
+        ambiguous_side_effect = started_tool_call_present
+        attempt_terminal = (
+            StepAttemptStatus.UNKNOWN_OUTCOME.value
+            if ambiguous_side_effect
+            else StepAttemptStatus.FAILED.value
+        )
+        tool_call_terminal = (
+            ToolCallNormalizedStatus.UNKNOWN_OUTCOME.value
+            if ambiguous_side_effect
+            else ToolCallNormalizedStatus.FAILED.value
+        )
+
+        if step is not None and step.status not in _STEP_TERMINAL:
+            step.status = (
+                StepStatus.UNKNOWN_OUTCOME.value
+                if ambiguous_side_effect
+                else StepStatus.FAILED.value
+            )
             step.error_code = _ERROR_CODE_INCONSISTENT
             step.error_message = message
             step.finished_at = now
             step.lock_version += 1
-            started = await self._executions.get_started_attempt(step.id)
-            if started is not None:
-                locked = await self._executions.get_attempt_with_lock(started.id)
-                if locked is not None and locked.status == StepAttemptStatus.STARTED.value:
-                    locked.status = StepAttemptStatus.FAILED.value
-                    locked.error_layer = _ERROR_LAYER
-                    locked.error_code = _ERROR_CODE_INCONSISTENT
-                    locked.error_message = message
-                    locked.is_retryable = False
-                    locked.finished_at = now
-                    tool_call = await self._executions.get_tool_call_for_attempt(locked.id)
-                    if (
-                        tool_call is not None
-                        and tool_call.normalized_status
-                        == ToolCallNormalizedStatus.STARTED.value
-                    ):
-                        locked_tc = await self._executions.get_tool_call_with_lock(
-                            tool_call.id
-                        )
+
+            attempts = await self._executions.list_attempts(step.id)
+            for attempt_row in attempts:
+                locked = await self._executions.get_attempt_with_lock(attempt_row.id)
+                if locked is None:
+                    continue
+                tool_calls = await self._executions.list_tool_calls(locked.id)
+                started_calls = [
+                    tc
+                    for tc in tool_calls
+                    if tc.normalized_status == ToolCallNormalizedStatus.STARTED.value
+                ]
+                if locked.status == StepAttemptStatus.STARTED.value or started_calls:
+                    if locked.status == StepAttemptStatus.STARTED.value:
+                        locked.status = attempt_terminal
+                        locked.error_layer = _ERROR_LAYER
+                        locked.error_code = _ERROR_CODE_INCONSISTENT
+                        locked.error_message = message
+                        locked.is_retryable = False
+                        locked.finished_at = now
+                    for tc in started_calls:
+                        locked_tc = await self._executions.get_tool_call_with_lock(tc.id)
                         if locked_tc is not None:
-                            locked_tc.normalized_status = (
-                                ToolCallNormalizedStatus.FAILED.value
-                            )
+                            locked_tc.normalized_status = tool_call_terminal
                             locked_tc.finished_at = now
+
         execution.status = ExecutionStatus.FAILED.value
         execution.error_code = _ERROR_CODE_INCONSISTENT
         execution.error_message = message
