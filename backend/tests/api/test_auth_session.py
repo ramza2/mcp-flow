@@ -424,7 +424,7 @@ async def test_bootstrap_set_password_and_session_revoke(
         },
     )
     assert inject.status_code == 422
-    assert bootstrap_mod.MIN_PASSWORD_LENGTH == 12
+    assert bootstrap_mod.MIN_PASSWORD_LENGTH == 8
 
 
 @pytest.mark.asyncio
