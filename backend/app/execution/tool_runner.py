@@ -56,6 +56,7 @@ from app.execution.runtime_preflight import (
     assert_current_tool_executable,
 )
 from app.execution.secret_materialize import materialize_tool_arguments
+from app.execution.lineage import assert_resume_attempt_lineage
 from app.execution.tool_step_attempt import ToolStepAttemptService
 from app.mcp.auth_headers import build_mcp_auth_headers
 from app.mcp.contracts import NormalizedToolResult
@@ -397,6 +398,45 @@ class McpToolRunner:
                         message="ToolCall already terminal while Step remains RUNNING.",
                         status_code=409,
                     )
+
+                if attempt_outcome.replayed:
+                    # Replay skipped fresh READY start lineage checks; re-assert
+                    # immutable plan/input snapshots before creating a ToolCall.
+                    try:
+                        assert_resume_attempt_lineage(
+                            execution=execution,
+                            step=step,
+                            attempt=attempt,
+                            worker_id=worker,
+                        )
+                    except AppError as exc:
+                        if step.status not in _STEP_TERMINAL_STATUSES:
+                            step.status = StepStatus.FAILED.value
+                            step.error_code = exc.code
+                            step.error_message = exc.message
+                            step.finished_at = now
+                            step.lock_version += 1
+                        if execution.status == ExecutionStatus.RUNNING.value:
+                            execution.status = ExecutionStatus.FAILED.value
+                            execution.error_code = exc.code
+                            execution.error_message = exc.message
+                            execution.finished_at = now
+                            execution.worker_id = None
+                            execution.lease_token = None
+                            execution.lease_expires_at = None
+                            execution.heartbeat_at = None
+                            execution.lock_version += 1
+                        return _PrepareResult(
+                            outcome=ToolRunOutcome(
+                                execution_id=execution.id,
+                                step_execution_id=step.id,
+                                attempt_id=attempt.id,
+                                tool_call_id=None,
+                                mcp_called=False,
+                                terminal_status=StepStatus.FAILED.value,
+                                reason=exc.code,
+                            )
+                        )
 
                 tool_version = await MCPToolRepository(session).get_version(
                     step.mcp_tool_version_id

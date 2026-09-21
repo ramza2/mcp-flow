@@ -579,7 +579,8 @@ Persisted evidence decision (Current MCP Runner: ToolCall `STARTED`를 durable c
 | Case | Evidence | Decision |
 |---|---|---|
 | A | Step READY, STARTED Attempt/ToolCall 없음 (historical terminal Attempt 허용) | SAFE TAKEOVER → runner 호출 |
-| B | Step RUNNING + STARTED Attempt + ToolCall 없음 | SAFE RESUME (기존 Attempt ownership 이전, 새 Attempt 금지) → runner |
+| B | Step RUNNING + STARTED Attempt + ToolCall 없음 + immutable plan/input lineage OK | SAFE RESUME (기존 Attempt ownership 이전, 새 Attempt 금지) → runner |
+| B' | 위 + plan_hash/step_snapshot/resolved_input/request_snapshot/attempt_count 변조 | FAIL_INCONSISTENT / FAILED, MCP 0, ToolCall 미생성 |
 | C-1 | STARTED ToolCall + pinned snapshot `READ_ONLY`/`IDEMPOTENT_WRITE` + `attempt_count < max_attempts` | orphan Attempt/ToolCall terminalize(`WORKER_LEASE_EXPIRED`, retryable) → Step READY → 새 Attempt/ToolCall |
 | C-1 exhausted | 위 + attempts 소진 | FAILED terminal, MCP 재호출 0 |
 | C-2 | STARTED ToolCall + pinned snapshot `NON_IDEMPOTENT_WRITE`/`DESTRUCTIVE`/`UNKNOWN` | ToolCall/Attempt/Step `UNKNOWN_OUTCOME`, Execution `FAILED`, MCP 재호출 0 |

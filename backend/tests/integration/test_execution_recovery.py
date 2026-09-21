@@ -800,6 +800,214 @@ async def test_pg_recovery_n_outbox_scan_rediscovers_expired(
 
 @pytest.mark.integration
 @pytest.mark.asyncio
+async def test_pg_recovery_resume_rejects_tampered_plan_hash(
+    integration_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    execution_id, old_worker, old_token, claim_now = await _claim_ready(
+        integration_session_factory
+    )
+    await _start_attempt_and_tool_call(
+        integration_session_factory,
+        execution_id=execution_id,
+        worker_id=old_worker,
+        lease_token=old_token,
+        now=claim_now,
+        with_tool_call=False,
+    )
+    async with integration_session_factory() as session:
+        execution = await ExecutionRepository(session).get(execution_id)
+        assert execution is not None
+        execution.plan_hash = "0" * 64
+        await session.commit()
+    await _set_lease_expired(
+        integration_session_factory,
+        execution_id=execution_id,
+        expired_at=claim_now - timedelta(seconds=1),
+    )
+    async with integration_session_factory() as session:
+        outcome = await ExecutionRecoveryService(session, lease_seconds=60).recover(
+            execution_id=execution_id,
+            worker_id="tamper-plan-hash",
+            now=claim_now + timedelta(seconds=2),
+        )
+        await session.commit()
+        assert outcome.decision == RecoveryDecision.FAIL_INCONSISTENT
+        assert outcome.invoke_runner is False
+    async with integration_session_factory() as session:
+        execution = await ExecutionRepository(session).get(execution_id)
+        assert execution is not None
+        assert execution.status == ExecutionStatus.FAILED.value
+        step = (await ExecutionRepository(session).list_steps(execution_id))[0]
+        assert step.status == StepStatus.FAILED.value
+        attempts = await ExecutionRepository(session).list_attempts(step.id)
+        assert attempts[0].status == StepAttemptStatus.FAILED.value
+        assert await ExecutionRepository(session).list_tool_calls(attempts[0].id) == []
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_pg_recovery_resume_rejects_tampered_step_snapshot(
+    integration_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    execution_id, old_worker, old_token, claim_now = await _claim_ready(
+        integration_session_factory
+    )
+    await _start_attempt_and_tool_call(
+        integration_session_factory,
+        execution_id=execution_id,
+        worker_id=old_worker,
+        lease_token=old_token,
+        now=claim_now,
+        with_tool_call=False,
+    )
+    async with integration_session_factory() as session:
+        step = (await ExecutionRepository(session).list_steps(execution_id))[0]
+        snapshot = dict(step.step_snapshot)
+        snapshot["name"] = "tampered-step-name"
+        step.step_snapshot = snapshot
+        await session.commit()
+    await _set_lease_expired(
+        integration_session_factory,
+        execution_id=execution_id,
+        expired_at=claim_now - timedelta(seconds=1),
+    )
+    async with integration_session_factory() as session:
+        outcome = await ExecutionRecoveryService(session, lease_seconds=60).recover(
+            execution_id=execution_id,
+            worker_id="tamper-step-snapshot",
+            now=claim_now + timedelta(seconds=2),
+        )
+        await session.commit()
+        assert outcome.decision == RecoveryDecision.FAIL_INCONSISTENT
+        assert outcome.invoke_runner is False
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_pg_recovery_resume_rejects_tampered_resolved_input(
+    integration_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    execution_id, old_worker, old_token, claim_now = await _claim_ready(
+        integration_session_factory
+    )
+    await _start_attempt_and_tool_call(
+        integration_session_factory,
+        execution_id=execution_id,
+        worker_id=old_worker,
+        lease_token=old_token,
+        now=claim_now,
+        with_tool_call=False,
+    )
+    async with integration_session_factory() as session:
+        step = (await ExecutionRepository(session).list_steps(execution_id))[0]
+        step.resolved_input = {"tampered": True}
+        await session.commit()
+    await _set_lease_expired(
+        integration_session_factory,
+        execution_id=execution_id,
+        expired_at=claim_now - timedelta(seconds=1),
+    )
+    async with integration_session_factory() as session:
+        outcome = await ExecutionRecoveryService(session, lease_seconds=60).recover(
+            execution_id=execution_id,
+            worker_id="tamper-resolved-input",
+            now=claim_now + timedelta(seconds=2),
+        )
+        await session.commit()
+        assert outcome.decision == RecoveryDecision.FAIL_INCONSISTENT
+        assert outcome.invoke_runner is False
+    async with integration_session_factory() as session:
+        execution = await ExecutionRepository(session).get(execution_id)
+        assert execution is not None
+        assert execution.status == ExecutionStatus.FAILED.value
+        step = (await ExecutionRepository(session).list_steps(execution_id))[0]
+        attempts = await ExecutionRepository(session).list_attempts(step.id)
+        assert await ExecutionRepository(session).list_tool_calls(attempts[0].id) == []
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_pg_recovery_resume_rejects_tampered_attempt_request_snapshot(
+    integration_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    execution_id, old_worker, old_token, claim_now = await _claim_ready(
+        integration_session_factory
+    )
+    attempt_id, _ = await _start_attempt_and_tool_call(
+        integration_session_factory,
+        execution_id=execution_id,
+        worker_id=old_worker,
+        lease_token=old_token,
+        now=claim_now,
+        with_tool_call=False,
+    )
+    async with integration_session_factory() as session:
+        attempt = await ExecutionRepository(session).get_attempt(attempt_id)
+        assert attempt is not None
+        snapshot = dict(attempt.request_snapshot or {})
+        snapshot["tampered"] = True
+        attempt.request_snapshot = snapshot
+        await session.commit()
+    await _set_lease_expired(
+        integration_session_factory,
+        execution_id=execution_id,
+        expired_at=claim_now - timedelta(seconds=1),
+    )
+    async with integration_session_factory() as session:
+        outcome = await ExecutionRecoveryService(session, lease_seconds=60).recover(
+            execution_id=execution_id,
+            worker_id="tamper-request-snapshot",
+            now=claim_now + timedelta(seconds=2),
+        )
+        await session.commit()
+        assert outcome.decision == RecoveryDecision.FAIL_INCONSISTENT
+        assert outcome.invoke_runner is False
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_pg_recovery_resume_rejects_attempt_count_mismatch(
+    integration_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from app.models.execution import ExecutionStep
+
+    execution_id, old_worker, old_token, claim_now = await _claim_ready(
+        integration_session_factory
+    )
+    await _start_attempt_and_tool_call(
+        integration_session_factory,
+        execution_id=execution_id,
+        worker_id=old_worker,
+        lease_token=old_token,
+        now=claim_now,
+        with_tool_call=False,
+    )
+    async with integration_session_factory() as session:
+        step = (await ExecutionRepository(session).list_steps(execution_id))[0]
+        await session.execute(
+            update(ExecutionStep)
+            .where(ExecutionStep.id == step.id)
+            .values(attempt_count=99)
+        )
+        await session.commit()
+    await _set_lease_expired(
+        integration_session_factory,
+        execution_id=execution_id,
+        expired_at=claim_now - timedelta(seconds=1),
+    )
+    async with integration_session_factory() as session:
+        outcome = await ExecutionRecoveryService(session, lease_seconds=60).recover(
+            execution_id=execution_id,
+            worker_id="tamper-attempt-count",
+            now=claim_now + timedelta(seconds=2),
+        )
+        await session.commit()
+        assert outcome.decision == RecoveryDecision.FAIL_INCONSISTENT
+        assert outcome.invoke_runner is False
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
 async def test_pg_recovery_safe_retry_crash_gap_then_ready_takeover(
     integration_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:

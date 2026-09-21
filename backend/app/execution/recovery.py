@@ -29,6 +29,7 @@ from app.domain.enums import (
     ToolCallNormalizedStatus,
 )
 from app.execution.claim import _as_utc, _normalize_worker_id
+from app.execution.lineage import assert_resume_attempt_lineage
 from app.models.execution import Execution, ExecutionStep, StepAttempt, ToolCall
 from app.repositories.execution import ExecutionRepository
 from app.repositories.mcp_tool import MCPToolRepository
@@ -237,6 +238,7 @@ class ExecutionRecoveryService:
         if decision == RecoveryDecision.RESUME_ATTEMPT:
             token = self._assign_lease(execution, worker_id=worker, now=ts)
             attempt = await self._require_single_started_attempt(step)
+            # Lineage already asserted in _decide before ownership transfer.
             attempt.worker_id = worker
             attempt.lease_expires_at = execution.lease_expires_at
             await self._session.flush()
@@ -437,6 +439,12 @@ class ExecutionRecoveryService:
                     message="Attempt has non-STARTED ToolCall evidence only.",
                     status_code=409,
                 )
+            assert_resume_attempt_lineage(
+                execution=execution,
+                step=step,
+                attempt=attempt,
+                worker_id=None,
+            )
             return RecoveryDecision.RESUME_ATTEMPT
 
         tool_call = started_calls[0]
@@ -761,67 +769,76 @@ class ExecutionRecoveryService:
         now: datetime,
         message: str,
     ) -> None:
-        started_tool_call_present = False
-        if step is not None:
-            attempts = await self._executions.list_attempts(step.id)
-            for attempt in attempts:
-                tool_calls = await self._executions.list_tool_calls(attempt.id)
-                if any(
-                    tc.normalized_status == ToolCallNormalizedStatus.STARTED.value
-                    for tc in tool_calls
-                ):
-                    started_tool_call_present = True
-                    break
+        # Scan the whole Execution so multi-step/corruption cases still surface
+        # STARTED ToolCall send evidence.
+        steps = await self._executions.list_steps(execution.id)
+        started_tool_call_pairs: list[tuple[StepAttempt, ToolCall]] = []
+        for step_row in steps:
+            attempts = await self._executions.list_attempts(step_row.id)
+            for attempt_row in attempts:
+                tool_calls = await self._executions.list_tool_calls(attempt_row.id)
+                for tc in tool_calls:
+                    if tc.normalized_status == ToolCallNormalizedStatus.STARTED.value:
+                        started_tool_call_pairs.append((attempt_row, tc))
 
-        # STARTED ToolCall is durable send evidence. When lineage is inconsistent
-        # we cannot safely classify risk, so do not assert FAILED on that call.
-        ambiguous_side_effect = started_tool_call_present
+        ambiguous_side_effect = bool(started_tool_call_pairs)
         attempt_terminal = (
             StepAttemptStatus.UNKNOWN_OUTCOME.value
             if ambiguous_side_effect
             else StepAttemptStatus.FAILED.value
         )
-        tool_call_terminal = (
-            ToolCallNormalizedStatus.UNKNOWN_OUTCOME.value
+        step_terminal = (
+            StepStatus.UNKNOWN_OUTCOME.value
             if ambiguous_side_effect
-            else ToolCallNormalizedStatus.FAILED.value
+            else StepStatus.FAILED.value
         )
 
-        if step is not None and step.status not in _STEP_TERMINAL:
-            step.status = (
-                StepStatus.UNKNOWN_OUTCOME.value
-                if ambiguous_side_effect
-                else StepStatus.FAILED.value
-            )
-            step.error_code = _ERROR_CODE_INCONSISTENT
-            step.error_message = message
-            step.finished_at = now
-            step.lock_version += 1
+        # Possible external side-effect evidence wins: parent Attempt is forced
+        # to UNKNOWN_OUTCOME even if it was already FAILED/TIMED_OUT/etc.
+        for attempt_row, tool_call_row in started_tool_call_pairs:
+            locked_attempt = await self._executions.get_attempt_with_lock(attempt_row.id)
+            if locked_attempt is not None:
+                locked_attempt.status = StepAttemptStatus.UNKNOWN_OUTCOME.value
+                locked_attempt.error_layer = _ERROR_LAYER
+                locked_attempt.error_code = _ERROR_CODE_INCONSISTENT
+                locked_attempt.error_message = message
+                locked_attempt.is_retryable = False
+                if locked_attempt.finished_at is None:
+                    locked_attempt.finished_at = now
+            locked_tc = await self._executions.get_tool_call_with_lock(tool_call_row.id)
+            if locked_tc is not None:
+                locked_tc.normalized_status = (
+                    ToolCallNormalizedStatus.UNKNOWN_OUTCOME.value
+                )
+                locked_tc.finished_at = now
 
-            attempts = await self._executions.list_attempts(step.id)
-            for attempt_row in attempts:
-                locked = await self._executions.get_attempt_with_lock(attempt_row.id)
-                if locked is None:
-                    continue
-                tool_calls = await self._executions.list_tool_calls(locked.id)
-                started_calls = [
-                    tc
-                    for tc in tool_calls
-                    if tc.normalized_status == ToolCallNormalizedStatus.STARTED.value
-                ]
-                if locked.status == StepAttemptStatus.STARTED.value or started_calls:
-                    if locked.status == StepAttemptStatus.STARTED.value:
+        target_steps = steps if steps else ([step] if step is not None else [])
+        for step_row in target_steps:
+            if step_row is None or step_row.status in _STEP_TERMINAL:
+                continue
+            locked_step = await self._executions.lock_step(step_row.id)
+            if locked_step is None or locked_step.status in _STEP_TERMINAL:
+                continue
+            locked_step.status = step_terminal
+            locked_step.error_code = _ERROR_CODE_INCONSISTENT
+            locked_step.error_message = message
+            locked_step.finished_at = now
+            locked_step.lock_version += 1
+
+            if not ambiguous_side_effect:
+                started = await self._executions.get_started_attempt(locked_step.id)
+                if started is not None:
+                    locked = await self._executions.get_attempt_with_lock(started.id)
+                    if (
+                        locked is not None
+                        and locked.status == StepAttemptStatus.STARTED.value
+                    ):
                         locked.status = attempt_terminal
                         locked.error_layer = _ERROR_LAYER
                         locked.error_code = _ERROR_CODE_INCONSISTENT
                         locked.error_message = message
                         locked.is_retryable = False
                         locked.finished_at = now
-                    for tc in started_calls:
-                        locked_tc = await self._executions.get_tool_call_with_lock(tc.id)
-                        if locked_tc is not None:
-                            locked_tc.normalized_status = tool_call_terminal
-                            locked_tc.finished_at = now
 
         execution.status = ExecutionStatus.FAILED.value
         execution.error_code = _ERROR_CODE_INCONSISTENT

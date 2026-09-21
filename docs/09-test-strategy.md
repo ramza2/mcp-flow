@@ -375,6 +375,9 @@ Dataset은 평가 전 FROZEN하고 실행 중 정답을 변경하지 않는다.
 - 동시 recovery worker 2 → winner 1 / loser NO_OP
 - Step RUNNING + STARTED Attempt + ToolCall 없음 → existing Attempt resume,
   새 Attempt 없음, runner MCP 1회
+- RESUME lineage tamper (plan_hash / step_snapshot / resolved_input /
+  request_snapshot / attempt_count) → FAIL_INCONSISTENT / MCP 0 / ToolCall 0
+  (runner replay도 동일 immutable lineage를 remote ToolCall 생성 전에 재검증)
 - READ_ONLY + STARTED ToolCall + max_attempts=2 → orphan terminalize → Step READY →
   attempt #2 + 새 ToolCall + MCP 1회
 - IDEMPOTENT_WRITE safe retry 최소 1 case

@@ -16,14 +16,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import AppError
 from app.domain.enums import (
-    AuthorableStepType,
-    BindingKind,
     ExecutionSourceType,
     ExecutionStatus,
     StepAttemptStatus,
     StepStatus,
 )
 from app.execution.claim import _as_utc, _normalize_worker_id
+from app.execution.lineage import (
+    assert_agent_request_plan_step_lineage,
+    build_secret_safe_request_snapshot,
+    materialize_secret_safe_resolved_input,
+)
 from app.execution.runtime_preflight import (
     assert_answered_plan_confirmation,
     assert_current_tool_executable,
@@ -31,13 +34,16 @@ from app.execution.runtime_preflight import (
 from app.models.execution import Execution, ExecutionStep
 from app.repositories.execution import ExecutionRepository
 from app.repositories.plan_validation import PlanValidationRepository
-from app.schemas.execution_plan import (
-    ExecutionPlanStep,
-    ExecutionPlanV1,
-    ToolStepConfigV1,
-    compute_plan_hash,
-)
-from app.schemas.parameter_binding import BindingValue
+from app.schemas.execution_plan import ToolStepConfigV1
+
+# Re-export for existing imports.
+__all__ = [
+    "ToolStepAttemptOutcome",
+    "ToolStepAttemptService",
+    "build_attempt_idempotency_key",
+    "build_secret_safe_request_snapshot",
+    "materialize_secret_safe_resolved_input",
+]
 
 _ATTEMPT_STARTED = StepAttemptStatus.STARTED.value
 
@@ -60,71 +66,6 @@ def build_attempt_idempotency_key(
     return (
         f"execution:{execution_id}:step:{step_execution_id}:attempt:{attempt_no}"
     )
-
-
-def materialize_secret_safe_resolved_input(
-    bindings: dict[str, BindingValue],
-) -> dict[str, Any]:
-    """Project Tool bindings into secret-safe resolved_input.
-
-    LITERAL → value
-    SECRET_REF → reference-only object (no secret material)
-    Other BindingKinds → fail closed (not supported by AgentRequest foundation).
-    """
-    resolved: dict[str, Any] = {}
-    for key, binding in bindings.items():
-        kind = binding.kind
-        if kind == BindingKind.LITERAL:
-            resolved[key] = binding.value
-        elif kind == BindingKind.SECRET_REF:
-            resolved[key] = {
-                "kind": BindingKind.SECRET_REF.value,
-                "secret_id": str(binding.secret_id),
-            }
-        else:
-            raise AppError(
-                code="EXECUTION_PRECONDITION_FAILED",
-                message=(
-                    f"Unsupported BindingKind {kind.value!r} for TOOL Step Attempt "
-                    "foundation (LITERAL/SECRET_REF only)."
-                ),
-                status_code=409,
-            )
-    return resolved
-
-
-def build_secret_safe_request_snapshot(
-    *,
-    tool_version_id: uuid.UUID,
-    step_key: str,
-    bindings: dict[str, BindingValue],
-    resolved_input: dict[str, Any],
-) -> dict[str, Any]:
-    """Attempt request snapshot without raw secret material."""
-    safe_bindings: dict[str, Any] = {}
-    for key, binding in bindings.items():
-        if binding.kind == BindingKind.LITERAL:
-            safe_bindings[key] = {
-                "kind": BindingKind.LITERAL.value,
-                "value": binding.value,
-            }
-        elif binding.kind == BindingKind.SECRET_REF:
-            safe_bindings[key] = {
-                "kind": BindingKind.SECRET_REF.value,
-                "secret_id": str(binding.secret_id),
-            }
-        else:
-            raise AppError(
-                code="EXECUTION_PRECONDITION_FAILED",
-                message=f"Unsupported BindingKind {binding.kind.value!r}.",
-                status_code=409,
-            )
-    return {
-        "tool_version_id": str(tool_version_id),
-        "step_key": step_key,
-        "bindings": safe_bindings,
-        "resolved_input": resolved_input,
-    }
 
 
 class ToolStepAttemptService:
@@ -327,62 +268,7 @@ class ToolStepAttemptService:
     def _validate_tool_lineage(
         self, execution: Execution, step: ExecutionStep
     ) -> ToolStepConfigV1:
-        if (
-            step.step_type != AuthorableStepType.TOOL.value
-            or step.mcp_tool_version_id is None
-        ):
-            raise AppError(
-                code="RESOURCE_CONFLICT",
-                message="Only TOOL Steps with mcp_tool_version_id can start Attempts.",
-                status_code=409,
-            )
-        try:
-            plan = ExecutionPlanV1.model_validate(execution.plan_snapshot)
-            plan_step = ExecutionPlanStep.model_validate(step.step_snapshot)
-        except Exception as exc:
-            raise AppError(
-                code="RESOURCE_CONFLICT",
-                message="Execution plan/step snapshot is invalid.",
-                status_code=409,
-            ) from exc
-        if compute_plan_hash(execution.plan_snapshot) != execution.plan_hash:
-            raise AppError(
-                code="RESOURCE_CONFLICT",
-                message="Execution plan snapshot/hash lineage is inconsistent.",
-                status_code=409,
-            )
-        if len(plan.steps) != 1:
-            raise AppError(
-                code="RESOURCE_CONFLICT",
-                message="AgentRequest foundation Execution plan must contain one Step.",
-                status_code=409,
-            )
-        expected = plan.steps[0]
-        if expected.model_dump(mode="json") != step.step_snapshot:
-            raise AppError(
-                code="RESOURCE_CONFLICT",
-                message="Execution plan/step snapshot lineage is inconsistent.",
-                status_code=409,
-            )
-        try:
-            tool_config = ToolStepConfigV1.model_validate(expected.config)
-        except Exception as exc:
-            raise AppError(
-                code="RESOURCE_CONFLICT",
-                message="Execution TOOL Step config is invalid.",
-                status_code=409,
-            ) from exc
-        if (
-            plan_step.id != step.step_key
-            or plan_step.type != AuthorableStepType.TOOL
-            or step.mcp_tool_version_id != tool_config.tool_version_id
-        ):
-            raise AppError(
-                code="RESOURCE_CONFLICT",
-                message="TOOL Step ToolVersion lineage is inconsistent.",
-                status_code=409,
-            )
-        return tool_config
+        return assert_agent_request_plan_step_lineage(execution, step)
 
     def _plan_timeout_seconds(self, step: ExecutionStep) -> int | None:
         timeout = step.step_snapshot.get("timeout_seconds")

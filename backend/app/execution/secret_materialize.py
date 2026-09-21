@@ -23,7 +23,7 @@ async def materialize_tool_arguments(
     """Build in-memory MCP tool arguments from a secret-safe ``resolved_input``.
 
     ``resolved_input`` shape (see
-    ``ToolStepAttemptService.materialize_secret_safe_resolved_input``):
+    ``app.execution.lineage.materialize_secret_safe_resolved_input``):
 
     - LITERAL key -> raw JSON value (passed through unchanged)
     - SECRET_REF key -> ``{"kind": "SECRET_REF", "secret_id": "<uuid>"}``
