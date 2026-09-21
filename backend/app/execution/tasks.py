@@ -16,6 +16,7 @@ from app.core.secrets import DatabaseSecretResolver
 from app.db.session import dispose_db, get_session_factory, init_db, session_scope
 from app.execution.claim import ExecutionClaimService
 from app.execution.queue import validate_execution_dispatch_event
+from app.execution.recovery import ExecutionRecoveryService
 from app.execution.tool_runner import McpToolRunner
 from app.infrastructure.celery_app import celery_app
 from app.mcp.current import CurrentMCPClient
@@ -235,5 +236,92 @@ def claim_execution_task(
         retry = self.retry
         raise retry(
             exc=RuntimeError("transient database failure during execution claim"),
+            countdown=countdown,
+        ) from exc
+
+
+async def _recover_once(*, execution_id: uuid.UUID, worker_id: str) -> None:
+    settings = get_settings()
+    init_db(settings)
+    try:
+        invoke_runner = False
+        lease_token: uuid.UUID | None = None
+        async with session_scope() as session:
+            outcome = await ExecutionRecoveryService(
+                session, lease_seconds=settings.execution_lease_seconds
+            ).recover(execution_id=execution_id, worker_id=worker_id)
+            await session.commit()
+            logger.info(
+                "execution recovery handled execution_id=%s worker_id=%s"
+                " decision=%s taken_over=%s invoke_runner=%s reason=%s",
+                execution_id,
+                worker_id,
+                outcome.decision,
+                outcome.taken_over,
+                outcome.invoke_runner,
+                outcome.reason,
+            )
+            invoke_runner = outcome.invoke_runner
+            lease_token = outcome.lease_token
+
+        if invoke_runner and lease_token is not None:
+            await _run_mcp_tool_step(
+                execution_id=execution_id,
+                worker_id=worker_id,
+                lease_token=lease_token,
+                settings=settings,
+            )
+    finally:
+        await dispose_db()
+
+
+@celery_app.task(
+    bind=True,
+    name="mcpflow.execution.recover",
+    max_retries=None,
+)
+def recover_execution_task(self: object, *, execution_id: str) -> None:
+    """Recover an expired RUNNING Execution; duplicate delivery is a DB no-op."""
+    try:
+        execution_uuid = uuid.UUID(execution_id)
+    except (TypeError, ValueError):
+        logger.warning("discarding malformed execution recovery task payload")
+        return
+
+    request = getattr(self, "request", None)
+    worker_id = str(getattr(request, "hostname", "") or "").strip()
+    if not worker_id:
+        logger.warning(
+            "discarding execution recovery without worker identity execution_id=%s",
+            execution_uuid,
+        )
+        return
+
+    try:
+        asyncio.run(_recover_once(execution_id=execution_uuid, worker_id=worker_id))
+    except AppError as exc:
+        logger.error(
+            "discarding execution recovery due durable conflict execution_id=%s code=%s",
+            execution_uuid,
+            exc.code,
+        )
+        return
+    except DBAPIError as exc:
+        if not _is_retryable_database_error(exc):
+            raise
+        retry_count = int(getattr(request, "retries", 0) or 0)
+        countdown = min(
+            _CLAIM_DB_RETRY_BASE_SECONDS * (2**retry_count),
+            _CLAIM_DB_RETRY_MAX_SECONDS,
+        )
+        logger.warning(
+            "retrying execution recovery after transient database failure"
+            " execution_id=%s retry=%s",
+            execution_uuid,
+            retry_count + 1,
+        )
+        retry = self.retry
+        raise retry(
+            exc=RuntimeError("transient database failure during execution recovery"),
             countdown=countdown,
         ) from exc

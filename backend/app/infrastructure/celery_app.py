@@ -20,7 +20,10 @@ celery_app = Celery(
 )
 celery_app.conf.update(
     task_default_queue="execution",
-    task_routes={"mcpflow.execution.claim": {"queue": "execution"}},
+    task_routes={
+        "mcpflow.execution.claim": {"queue": "execution"},
+        "mcpflow.execution.recover": {"queue": "execution"},
+    },
     task_serializer="json",
     accept_content=["json"],
     result_serializer="json",

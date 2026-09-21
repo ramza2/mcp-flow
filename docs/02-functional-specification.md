@@ -507,7 +507,7 @@ Execution CREATED
 
 중복 broker delivery는 정상 조건이며 이미 `RUNNING` 또는 terminal인 Execution은 DB claim에서 no-op 처리한다. Redis 장애 시 `QUEUED + unpublished Outbox`를 PostgreSQL에 유지하고 복구 후 재전달한다.
 
-이번 foundation의 lease는 Execution orchestration ownership이며 Tool side-effect idempotency나 StepAttempt retry token이 아니다. expired `RUNNING` lease takeover/recovery는 `FNC-EXE-011` 후속 범위로 남긴다.
+이번 foundation의 lease는 Execution orchestration ownership이며 Tool side-effect idempotency나 StepAttempt retry token이 아니다. expired `RUNNING` lease takeover/recovery는 `FNC-EXE-011`을 따른다.
 
 ## FNC-EXE-004. 실행 직전 재검증
 
@@ -558,7 +558,38 @@ Approval Step 또는 ToolPolicy가 요구하면 `WAITING_APPROVAL`로 전환한�
 
 Worker lease, MCP task handle, persisted state를 사용해 재시작 후 복구한다. 동일 non-idempotent Tool을 무조건 재호출하지 않는다.
 
-Queue/Claim foundation에서는 unpublished Outbox 재전달과 duplicate claim no-op까지만 구현한다. `RUNNING` Execution의 lease가 만료된 뒤 새 worker가 takeover하여 Tool을 재실행할지 판단하는 로직은 StepAttempt/Tool side-effect 증적이 필요한 후속 복구 범위다.
+이번 vertical slice는 **AgentRequest + single TOOL Step + synchronous Current MCP `tools/call` persisted evidence**만 대상으로 한다. MRTR `WAITING_INPUT`, Approval `WAITING_APPROVAL`, MCP task-handle persistence, Workflow multi-step, Schedule recovery는 후속 범위다.
+
+PostgreSQL이 source of truth다. outbox process가 expired `RUNNING` candidate를 bounded scan하여 Celery `mcpflow.execution.recover`(payload: `execution_id` only)를 publish하고, worker는 DB evidence로 decision 후 필요 시 기존 `McpToolRunner`를 호출한다. Redis/Celery는 delivery/coordination만 담당한다.
+
+Recovery candidate:
+
+```text
+Execution.status == RUNNING
+lease_expires_at IS NOT NULL
+lease_expires_at <= now
+source_type == AGENT_REQUEST
+exactly one foundation TOOL Step
+```
+
+`ExecutionClaimService.claim()`(QUEUED → RUNNING)과 분리된 `ExecutionRecoveryService`가 expired RUNNING을 atomic takeover한다. takeover 성공 시 `worker_id` / 새 `lease_token` / `lease_expires_at` / `heartbeat_at`만 갱신하고 `started_at` / `queued_at` / Step `ready_at`은 재작성하지 않는다. stale worker의 renew/finalize는 이전 `lease_token` fencing으로 거부된다.
+
+Persisted evidence decision (Current MCP Runner: ToolCall `STARTED`를 durable commit한 뒤에만 network call):
+
+| Case | Evidence | Decision |
+|---|---|---|
+| A | Step READY, STARTED Attempt/ToolCall 없음 (historical terminal Attempt 허용) | SAFE TAKEOVER → runner 호출 |
+| B | Step RUNNING + STARTED Attempt + ToolCall 없음 + immutable plan/input lineage OK | SAFE RESUME (기존 Attempt ownership 이전, 새 Attempt 금지) → runner |
+| B' | 위 + plan_hash/step_snapshot/resolved_input/request_snapshot/attempt_count 변조 | FAIL_INCONSISTENT / FAILED, MCP 0, ToolCall 미생성 |
+| C-1 | STARTED ToolCall + pinned snapshot `READ_ONLY`/`IDEMPOTENT_WRITE` + `attempt_count < max_attempts` | orphan Attempt/ToolCall terminalize(`WORKER_LEASE_EXPIRED`, retryable) → Step READY → 새 Attempt/ToolCall |
+| C-1 exhausted | 위 + attempts 소진 | FAILED terminal, MCP 재호출 0 |
+| C-2 | STARTED ToolCall + pinned snapshot `NON_IDEMPOTENT_WRITE`/`DESTRUCTIVE`/`UNKNOWN` | ToolCall/Attempt/Step `UNKNOWN_OUTCOME`, Execution `FAILED`, MCP 재호출 0 |
+
+Recovery retry/safety classification은 mutable `MCPToolPolicy`가 아니라 생성 시점 `Execution.policy_snapshot.tool_policy`(`risk_class` / `max_attempts`)를 authority로 사용한다. 실제 remote 재호출 직전 권한/현행 Policy 재검증은 기존 `assert_current_tool_executable` / Attempt start / `McpToolRunner` preflight가 담당한다.
+
+SAFE_RETRY commit 직후 runner 시작 전 crash로 Step이 READY + historical terminal Attempt인 상태는 정상 recovery checkpoint다. STARTED Attempt/ToolCall이 없고 `attempt_count < max_attempts`이면 다시 TAKEOVER_READY한다.
+
+`UNKNOWN_OUTCOME`은 Step/Attempt/ToolCall terminal이며 자동 retry 금지. Execution에는 `UNKNOWN_OUTCOME` status가 없으므로 `FAILED`로 fail-closed한다. inconsistent lineage에서 STARTED ToolCall(possible external side effect)이 있으면 ToolCall/Attempt/Step을 `UNKNOWN_OUTCOME`으로 terminalize하고 Execution은 `FAILED`다. STARTED ToolCall이 없는 pure structural corruption은 `RECOVERY_INCONSISTENT_EVIDENCE` / FAILED로 fail-closed한다.
 
 ## FNC-EXE-012. 부분성공
 
