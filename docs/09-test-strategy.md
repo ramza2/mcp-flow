@@ -377,6 +377,60 @@ Dataset은 평가 전 FROZEN하고 실행 중 정답을 변경하지 않는다.
 - Celery claim task는 Attempt를 자동 시작하지 않음
 - MCP tools/call / ToolCall / SecretResolver / terminal Step·Execution 미구현
 
+추가 (MCP Tool Runner vertical slice):
+
+- Secret crypto: AES-256-GCM encrypt/decrypt round-trip(API_KEY 등), invalid
+  payload/key_version/nonce fail-closed, decrypt 실패 시 ciphertext/평문이
+  `AppError.message`에 노출되지 않음
+- `DatabaseSecretResolver`: ACTIVE는 해석 성공, REVOKED/EXPIRED/만료/missing/
+  master key 부재는 모두 `None` (fail-closed, 500 아님)
+- `CurrentMCPClient.call_tool` (httpx.MockTransport 기반):
+  - happy path `tools/call` → `structuredContent` 정규화
+  - `isError=true` → `protocol_success=true`, `tool_error=true`
+  - 결과 과대 → `MCPResultTooLargeError`, 원문 body 미보존
+  - `input_required` → `MCP_INPUT_REQUIRED_UNSUPPORTED` (detect-only, `requestState` 미노출,
+    `outcome_unknown=false`)
+  - connect/pool timeout → `outcome_unknown=false`
+  - response headers 대기 중 `ReadTimeout` / mid-body `ReadTimeout` /
+    `WriteTimeout` → `outcome_unknown=true` (전송 후 모호성; headers 단계도 pre-send로
+    오분류하지 않음)
+  - 전송 후 invalid JSON / malformed JSON-RPC → `outcome_unknown=true`
+  - 전송 후 invalid tool result object / invalid `content` /
+    invalid `structuredContent` → `outcome_unknown=true`
+  - HTTP 4xx → `outcome_unknown=false`; HTTP 5xx(전송 후) → `outcome_unknown=true`
+  - `Authorization` 헤더는 실제 요청에는 포함되나 오류 메시지/로그에는 노출되지 않음
+- `McpToolRunner` (TX1/network/TX2, §17 참조):
+  - `requires_approval` fail-closed 재검증 — MCP 호출 0
+  - BEARER 인증: secret은 `call_tool`에는 전달되나 Execution/Step/Attempt/ToolCall의
+    어떤 JSON 필드·`error_message`·로그에도 원문이 남지 않음
+  - `SECRET_REF` 인자: 성공 후에도 `resolved_input`은 참조(`secret_id`)만 보존
+  - `SECRET_REF` 대상 secret 없음 → remote 호출 0, Step/Execution `FAILED`
+  - auth `NONE` + SECRET_REF 없음 → master-key 로딩 0 (lazy); 잘못된 설정 키도
+    이 경로를 strand하지 않음
+  - BEARER/SECRET_REF가 필요한데 master-key가 없거나 잘못됨 → pre-send fail-closed,
+    MCP 호출 0, Execution/Step/Attempt/ToolCall이 `RUNNING`/`STARTED`에 방치되지 않음
+  - output schema 불일치 → `FAILED`, 원문 `structured_content`가 오류 메시지에 노출되지 않음
+  - output schema 일치 → `SUCCEEDED`
+  - `NON_IDEMPOTENT_WRITE` + timeout `outcome_unknown=true` → 호출 1회만,
+    Step `UNKNOWN_OUTCOME`, Execution은 canonical 상태가 없으므로 `FAILED`로 fail-closed
+  - `DESTRUCTIVE` + HTTP 5xx `outcome_unknown=true` → Step/Attempt/ToolCall
+    `UNKNOWN_OUTCOME`, Execution `FAILED` (자동 재시도 없음)
+  - `READ_ONLY` + invalid tool result `outcome_unknown=true` → safe failure
+    정책으로 Step `FAILED` (UNKNOWN_OUTCOME 아님)
+  - lease mismatch → MCP 호출 0
+  - remote 성공 직후 lease 만료 → finalizer fencing reject, stale worker가 terminal
+    상태를 덮어쓰지 않음
+  - 기존 `ToolCall STARTED`(Step `RUNNING` + Attempt `STARTED`) 재진입 → MCP 호출 0,
+    동일 ToolCall 유지, 새 ToolCall/status 발명 없음 (FNC-EXE-011 복구 범위)
+  - 이미 terminal(`SUCCEEDED`)인 Step에 대한 중복/동시 runner 실행 → MCP 호출 0
+- Compose: `worker`에만 `secret_master_key` Docker secret mount
+  (`MCPFLOW_SECRET_MASTER_KEY_FILE=/run/secrets/secret_master_key`); 키 파일은
+  gitignored local/server 경로, Secret CRUD API 없음
+- 마이그레이션(`0016`): `secret_records`(평문 컬럼 부재, kind/status CHECK, unique
+  name, fingerprint/status index)와 `tool_calls`(FK RESTRICT/CASCADE,
+  `normalized_status` CHECK, `request_meta`/`response_meta` object-type CHECK,
+  `(step_attempt_id, remote_request_id)` unique) round-trip(upgrade→downgrade→upgrade)
+
 
 ## 9. Repository Integration Test
 

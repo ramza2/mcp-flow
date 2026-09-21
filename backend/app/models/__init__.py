@@ -11,7 +11,7 @@ from app.models.auth import (
     UserRole,
 )
 from app.models.conversation import AgentRequest, Conversation, ConversationMessage
-from app.models.execution import Execution, ExecutionStep, StepAttempt
+from app.models.execution import Execution, ExecutionStep, StepAttempt, ToolCall
 from app.models.idempotency import ApiIdempotencyRecord
 from app.models.mcp import (
     MCPServer,
@@ -28,6 +28,7 @@ from app.models.outbox import OutboxEvent
 from app.models.parameter_build import ParameterBuildRun
 from app.models.plan_generation import PlanGenerationRun, PlanGenerationToolRef
 from app.models.plan_validation import PlanValidationRun
+from app.models.secret import SecretRecord
 from app.models.session import Session
 from app.models.tool_selection import (
     ClarificationRequest,
@@ -48,6 +49,8 @@ __all__ = [
     "Execution",
     "ExecutionStep",
     "StepAttempt",
+    "ToolCall",
+    "SecretRecord",
     "EmbeddingProfile",
     "LLMProfile",
     "MCPServer",

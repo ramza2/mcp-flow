@@ -455,6 +455,18 @@ Execution 최종상태를 Redis에만 저장하지 않는다.
 - TOOL Step Attempt foundation: worker/lease 검증 + FNC-EXE-004 preflight 후
   동일 transaction에서 Step `READY → RUNNING` + `StepAttempt STARTED`
 - Attempt starter는 claim task에 자동 연결하지 않음 (MCP call/terminal 처리 전)
+- MCP Tool Runner(`app/execution/tool_runner.py`)는 network I/O를 DB transaction 밖에서
+  수행하기 위해 3단계로 나뉜다.
+  ```text
+  TX1 (locked)  — worker/lease 재검증, requires_approval fail-closed 재확인,
+                  SECRET_REF 인자 해석에 필요한 참조만 조회
+  network       — DB transaction 밖에서 CurrentMCPClient.call_tool 실행
+                  (secret 원문은 이 단계에서만 메모리에 존재)
+  TX2 (locked)  — 동일 lease 재검증 후 ToolCall/StepAttempt/Step/Execution의
+                  terminal 전이를 단일 transaction에 반영
+  ```
+  TX1과 TX2 사이 lease가 만료되거나 worker가 교체되면 TX2는 no-op으로 처리하고
+  중복 MCP 호출을 만들지 않는다.
 
 `RUNNING → QUEUED` 식으로 업무상태를 되돌려 Worker 재전달을 표현하지 않는다.
 

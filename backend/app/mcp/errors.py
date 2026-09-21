@@ -7,6 +7,10 @@ class MCPClientError(Exception):
     """Transport/protocol failure talking to a remote MCP server.
 
     Does not carry Authorization headers, request bodies, or secret material.
+
+    ``outcome_unknown`` is adapter-level certainty about whether an external
+    side effect may already have occurred (post-send ambiguity). It is not a
+    Domain enum.
     """
 
     def __init__(
@@ -16,12 +20,14 @@ class MCPClientError(Exception):
         error_code: str,
         message: str,
         retryable: bool = False,
+        outcome_unknown: bool = False,
     ) -> None:
         super().__init__(message)
         self.error_layer = error_layer
         self.error_code = error_code
         self.message = message
         self.retryable = retryable
+        self.outcome_unknown = outcome_unknown
 
 
 class DiscoverUnsupportedError(MCPClientError):
@@ -38,4 +44,18 @@ class DiscoverUnsupportedError(MCPClientError):
             error_code=error_code,
             message=message,
             retryable=False,
+            outcome_unknown=False,
+        )
+
+
+class MCPResultTooLargeError(MCPClientError):
+    """Response exceeded ToolPolicy.max_result_bytes before full buffering."""
+
+    def __init__(self, *, max_result_bytes: int) -> None:
+        super().__init__(
+            error_layer="PROTOCOL",
+            error_code="MCP_RESULT_TOO_LARGE",
+            message=f"MCP response exceeded max_result_bytes={max_result_bytes}.",
+            retryable=False,
+            outcome_unknown=False,
         )

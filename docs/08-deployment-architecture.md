@@ -368,6 +368,18 @@ SESSION_SIGNING_KEY_FILE=
 - Docker secret/file mount 또는 외부 Secret Store
 - DB의 `secret_records` 암호화 master key는 DB와 분리
 - Runtime Process별 필요한 Secret만 mount
+- Compose baseline: `worker`만 `secret_master_key`를
+  `/run/secrets/secret_master_key`로 mount하고
+  `MCPFLOW_SECRET_MASTER_KEY_FILE`로 참조한다
+  - local: `infra/secrets/local/secret_master_key` (gitignored;
+    `python infra/scripts/generate_local_secrets.py`로 생성)
+  - server: `infra/secrets/server/secret_master_key` (gitignored;
+    `./scripts/deploy.sh`의 `ensure_secrets`가 generator를 `--force` 없이
+    호출해 **기존 secret은 보존**하고 누락분(예: upgrade 시
+    `secret_master_key`)만 생성한 뒤 `compose config/up` 전에 검증)
+- Master key는 별도 백업한다. `secret_records`가 의존하는 동안 교체하지
+  않는다. 단순 파일 교체 + worker restart는 회전이 아니며, 자동 회전은
+  PR #30에 없다. DB volume reset은 회전 수단이 아니다.
 
 Git에 실제 credential을 commit하지 않는다.
 

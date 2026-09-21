@@ -121,13 +121,12 @@ ensure_config() {
 
 ensure_secrets() {
   mkdir -p "$SECRETS_DIR"
-  if find "$SECRETS_DIR" -maxdepth 1 -type f 2>/dev/null | grep -q .; then
-    log "Server secrets already exist; preserving them"
-  else
-    require_cmd python3
-    log "Generating server secrets"
-    python3 "$ROOT_DIR/infra/scripts/generate_local_secrets.py" --dir "$SECRETS_DIR"
-  fi
+  require_cmd python3
+  # Always invoke the generator without --force so existing values are
+  # preserved and any newly required files (e.g. secret_master_key on an
+  # upgraded server) are created before compose config/up.
+  log "Ensuring server secrets (existing files preserved)"
+  python3 "$ROOT_DIR/infra/scripts/generate_local_secrets.py" --dir "$SECRETS_DIR"
 
   local required=(
     postgres_admin_password
@@ -135,6 +134,7 @@ ensure_secrets() {
     postgres_app_password
     minio_root_user
     minio_root_password
+    secret_master_key
   )
   local item
   for item in "${required[@]}"; do

@@ -182,6 +182,34 @@ class StepAttemptStatus(StrEnum):
     UNKNOWN_OUTCOME = "UNKNOWN_OUTCOME"
 
 
+class SecretKind(StrEnum):
+    """docs/05 §5.3 secret_records.secret_kind."""
+
+    API_KEY = "API_KEY"
+    OAUTH_TOKEN_SET = "OAUTH_TOKEN_SET"
+    BASIC_AUTH = "BASIC_AUTH"
+    CUSTOM = "CUSTOM"
+
+
+class SecretStatus(StrEnum):
+    """docs/05 §5.3 secret_records.status."""
+
+    ACTIVE = "ACTIVE"
+    EXPIRED = "EXPIRED"
+    REVOKED = "REVOKED"
+
+
+class ToolCallNormalizedStatus(StrEnum):
+    """docs/05 §13.6 tool_calls.normalized_status (aligned with StepAttempt)."""
+
+    STARTED = "STARTED"
+    SUCCEEDED = "SUCCEEDED"
+    FAILED = "FAILED"
+    TIMED_OUT = "TIMED_OUT"
+    CANCELLED = "CANCELLED"
+    UNKNOWN_OUTCOME = "UNKNOWN_OUTCOME"
+
+
 class ApprovalStatus(StrEnum):
     PENDING = "PENDING"
     APPROVED = "APPROVED"

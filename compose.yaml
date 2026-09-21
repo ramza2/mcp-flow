@@ -141,8 +141,10 @@ services:
       MCPFLOW_DB_PASSWORD_FILE: /run/secrets/postgres_app_password
       MCPFLOW_REDIS_URL: redis://redis:6379/0
       MCPFLOW_EXECUTION_LEASE_SECONDS: ${MCPFLOW_EXECUTION_LEASE_SECONDS:-60}
+      MCPFLOW_SECRET_MASTER_KEY_FILE: /run/secrets/secret_master_key
     secrets:
       - postgres_app_password
+      - secret_master_key
     networks:
       - app
       - data
@@ -329,3 +331,5 @@ secrets:
     file: ./infra/secrets/local/minio_root_user
   minio_root_password:
     file: ./infra/secrets/local/minio_root_password
+  secret_master_key:
+    file: ./infra/secrets/local/secret_master_key

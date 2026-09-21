@@ -1,17 +1,14 @@
-"""Secret resolution boundary for MCP auth (docs/05).
-
-Re-exports the shared core secret resolver so existing MCP imports remain stable.
-"""
-
-from __future__ import annotations
+"""MCP package re-exports for SecretResolver."""
 
 from app.core.secrets import (
+    DatabaseSecretResolver,
     ResolvedSecret,
     SecretResolver,
     UnimplementedSecretResolver,
 )
 
 __all__ = [
+    "DatabaseSecretResolver",
     "ResolvedSecret",
     "SecretResolver",
     "UnimplementedSecretResolver",
