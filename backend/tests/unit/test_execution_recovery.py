@@ -8,6 +8,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.errors import AppError
 from app.domain.enums import (
     ExecutionStatus,
     RiskClass,
@@ -120,8 +121,6 @@ async def test_recovery_takeover_ready_preserves_timestamps(
     step = (await repo.list_steps(execution_id))[0]
     assert step.ready_at == ready_at
     assert step.status == StepStatus.READY.value
-
-    from app.core.errors import AppError
 
     with pytest.raises(AppError) as exc_info:
         await ExecutionClaimService(db_session, lease_seconds=60).renew_lease(
