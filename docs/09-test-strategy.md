@@ -358,7 +358,30 @@ Dataset은 평가 전 FROZEN하고 실행 중 정답을 변경하지 않는다.
 - Redis unavailable 시 `QUEUED + unpublished Outbox` 유지
 - Queue/Claim 중 SecretResolver/MCP/LLM/ApprovalRequest/StepAttempt/ToolCall 호출 0
 - Queue/Claim 후 create Idempotency-Key replay가 최초 `CREATED` response snapshot 유지
-- expired RUNNING lease takeover는 미구현 범위임을 회귀로 고정
+
+추가 (FNC-EXE-011 expired RUNNING lease recovery vertical slice):
+
+- recovery risk decision: READ_ONLY/IDEMPOTENT_WRITE=safe retry,
+  NON_IDEMPOTENT_WRITE/DESTRUCTIVE/UNKNOWN=unsafe
+- max_attempts remaining → safe retry / exhausted → terminal FAILED (MCP 0)
+- expired RUNNING + Step READY → takeover + 새 lease_token + old token heartbeat 거절 +
+  started_at/queued_at/ready_at 보존
+- 동시 recovery worker 2 → winner 1 / loser NO_OP
+- Step RUNNING + STARTED Attempt + ToolCall 없음 → existing Attempt resume,
+  새 Attempt 없음, runner MCP 1회
+- READ_ONLY + STARTED ToolCall + max_attempts=2 → orphan terminalize → Step READY →
+  attempt #2 + 새 ToolCall + MCP 1회
+- IDEMPOTENT_WRITE safe retry 최소 1 case
+- READ_ONLY + STARTED ToolCall + max_attempts=1 → MCP 0 / FAILED / 새 Attempt 없음
+- NON_IDEMPOTENT_WRITE/DESTRUCTIVE/UNKNOWN + STARTED ToolCall → MCP 0 /
+  ToolCall·Attempt·Step UNKNOWN_OUTCOME / Execution FAILED
+- stale original worker finalize → fencing reject
+- non-expired RUNNING / terminal Execution → recovery 대상 아님
+- corrupted lineage → FAIL_INCONSISTENT / MCP 0
+- duplicate recovery publish → takeover/remote side effect 중복 없음
+- outbox poll restart → expired candidate 재발견
+- recovery payload는 execution_id only (secret/args/policy snapshot 금지)
+- schema migration 없음 (기존 executions/steps/attempts/tool_calls evidence)
 
 추가 (TOOL Step Attempt foundation):
 
@@ -420,8 +443,10 @@ Dataset은 평가 전 FROZEN하고 실행 중 정답을 변경하지 않는다.
   - lease mismatch → MCP 호출 0
   - remote 성공 직후 lease 만료 → finalizer fencing reject, stale worker가 terminal
     상태를 덮어쓰지 않음
-  - 기존 `ToolCall STARTED`(Step `RUNNING` + Attempt `STARTED`) 재진입 → MCP 호출 0,
-    동일 ToolCall 유지, 새 ToolCall/status 발명 없음 (FNC-EXE-011 복구 범위)
+  - 기존 `ToolCall STARTED`(Step `RUNNING` + Attempt `STARTED`) 재진입(동일 lease) →
+    MCP 호출 0, 동일 ToolCall 유지 (recovery가 orphan을 정리하기 전 Runner 가드)
+  - expired lease + STARTED ToolCall → FNC-EXE-011 recovery decision
+    (safe retry / UNKNOWN_OUTCOME / exhausted) 후 runner 재진입
   - 이미 terminal(`SUCCEEDED`)인 Step에 대한 중복/동시 runner 실행 → MCP 호출 0
 - Compose: `worker`에만 `secret_master_key` Docker secret mount
   (`MCPFLOW_SECRET_MASTER_KEY_FILE=/run/secrets/secret_master_key`); 키 파일은

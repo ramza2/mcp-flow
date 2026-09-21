@@ -348,9 +348,8 @@ class McpToolRunner:
                         == ToolCallNormalizedStatus.STARTED.value
                     ):
                         # ToolCall STARTED is durable invocation evidence only.
-                        # PR #30 does not recover interrupted attempts (FNC-EXE-011);
-                        # never reissue tools/call — especially not NON_IDEMPOTENT /
-                        # DESTRUCTIVE — and do not invent a new status.
+                        # FNC-EXE-011 recovery must resolve this before the runner
+                        # is invoked again; never reissue tools/call here.
                         return _PrepareResult(
                             outcome=ToolRunOutcome(
                                 execution_id=execution.id,
