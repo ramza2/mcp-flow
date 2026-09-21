@@ -1052,7 +1052,6 @@ async def test_pg_recovery_inconsistent_with_started_tool_call_unknown_outcome(
     integration_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     """Corrupted lineage + STARTED ToolCall → UNKNOWN_OUTCOME, not FAILED assertion."""
-    from app.models.execution import ExecutionStep
 
     seeded = await _seed_ready_with_policy(
         integration_session_factory,
