@@ -771,6 +771,8 @@ app/mcp/auth_headers.py — 인증 헤더 구성/redaction (Authorization 등 se
 
 MCP Tool Runner vertical slice(현재 범위)는 `tools/call` happy path, `isError` 업무오류, timeout(connect/read) 분류, 결과과대(`MCPResultTooLargeError`) 처리를 구현한다. §15 MRTR은 `input_required` 응답을 감지해 명시적으로 `MCP_INPUT_REQUIRED_UNSUPPORTED`로 실패 처리(detect-only)하며, 실제 WAITING_INPUT round-trip 재개는 이후 범위다.
 
+`ToolPolicy.max_result_bytes` overflow while streaming a dispatched `tools/call` response raises `MCP_RESULT_TOO_LARGE` with `outcome_unknown=true` (post-send ambiguity; oversized body is not retained). Unsafe risk classes become Step/Attempt/ToolCall `UNKNOWN_OUTCOME` / Execution `FAILED`. Local `result_inline_max_bytes` overflow after a complete valid remote result remains `RESULT_TOO_LARGE_FOR_INLINE` and is not `UNKNOWN_OUTCOME`.
+
 Runner 실행 경계(`app/execution/tool_runner.py`)는 network I/O 동안 DB transaction을 열지 않는다.
 
 ```text

@@ -49,7 +49,12 @@ class DiscoverUnsupportedError(MCPClientError):
 
 
 class MCPResultTooLargeError(MCPClientError):
-    """Response exceeded ToolPolicy.max_result_bytes before full buffering."""
+    """Response exceeded ToolPolicy.max_result_bytes while reading a dispatched call.
+
+    Raised only after ``tools/call`` has been sent and bytes are accumulating from
+    the HTTP response body. That is post-send ambiguity (``outcome_unknown=true``),
+    not a pre-send fence. Oversized body content is never retained on the exception.
+    """
 
     def __init__(self, *, max_result_bytes: int) -> None:
         super().__init__(
@@ -57,5 +62,5 @@ class MCPResultTooLargeError(MCPClientError):
             error_code="MCP_RESULT_TOO_LARGE",
             message=f"MCP response exceeded max_result_bytes={max_result_bytes}.",
             retryable=False,
-            outcome_unknown=False,
+            outcome_unknown=True,
         )

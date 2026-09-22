@@ -432,6 +432,8 @@ Dataset은 평가 전 FROZEN하고 실행 중 정답을 변경하지 않는다.
   - 전송 후 invalid tool result object / invalid `content` /
     invalid `structuredContent` → `outcome_unknown=true`
   - HTTP 4xx → `outcome_unknown=false`; HTTP 5xx(전송 후) → `outcome_unknown=true`
+  - response body가 `ToolPolicy.max_result_bytes`를 초과 → `MCP_RESULT_TOO_LARGE`,
+    `retryable=false`, `outcome_unknown=true` (전송 후 모호성; oversized body 미보존)
   - `Authorization` 헤더는 실제 요청에는 포함되나 오류 메시지/로그에는 노출되지 않음
 - `McpToolRunner` (TX1 / B1 secret / B2 final gate / B3 network / TX2, §14.3 참조):
   - `requires_approval` fail-closed 재검증 — MCP 호출 0
@@ -452,6 +454,14 @@ Dataset은 평가 전 FROZEN하고 실행 중 정답을 변경하지 않는다.
   - RESUME/TAKEOVER 후에도 동일 final gate 적용; valid TAKEOVER_READY는 MCP 1회
   - output schema 불일치 → `FAILED`, 원문 `structured_content`가 오류 메시지에 노출되지 않음
   - output schema 일치 → `SUCCEEDED`
+  - `NON_IDEMPOTENT_WRITE`/`DESTRUCTIVE`/`UNKNOWN` + `MCP_RESULT_TOO_LARGE`
+    (`outcome_unknown=true`) → 호출 1회, Step/Attempt/ToolCall `UNKNOWN_OUTCOME`,
+    Execution `FAILED`, lease clear, 자동 재시도 없음
+  - `READ_ONLY`/`IDEMPOTENT_WRITE` + `MCP_RESULT_TOO_LARGE` → safe-risk 분류로
+    Step `FAILED` (UNKNOWN_OUTCOME 아님)
+  - complete remote result 후 `result_inline_max_bytes` 초과 →
+    `RESULT_TOO_LARGE_FOR_INLINE` / `FAILED` (UNKNOWN_OUTCOME으로 바꾸지 않음;
+    `ToolPolicy.max_result_bytes` post-send overflow와 구분)
   - `NON_IDEMPOTENT_WRITE` + timeout `outcome_unknown=true` → 호출 1회만,
     Step `UNKNOWN_OUTCOME`, Execution은 canonical 상태가 없으므로 `FAILED`로 fail-closed
   - `DESTRUCTIVE` + HTTP 5xx `outcome_unknown=true` → Step/Attempt/ToolCall
@@ -466,6 +476,7 @@ Dataset은 평가 전 FROZEN하고 실행 중 정답을 변경하지 않는다.
   - expired lease + STARTED ToolCall → FNC-EXE-011 recovery decision
     (safe retry / UNKNOWN_OUTCOME / exhausted) 후 runner 재진입
   - 이미 terminal(`SUCCEEDED`)인 Step에 대한 중복/동시 runner 실행 → MCP 호출 0
+  - terminal `UNKNOWN_OUTCOME` evidence는 recovery가 자동 재발행하지 않음
 - Compose: `worker`에만 `secret_master_key` Docker secret mount
   (`MCPFLOW_SECRET_MASTER_KEY_FILE=/run/secrets/secret_master_key`); 키 파일은
   gitignored local/server 경로, Secret CRUD API 없음
