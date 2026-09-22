@@ -439,6 +439,9 @@ Dataset은 평가 전 FROZEN하고 실행 중 정답을 변경하지 않는다.
   - `requires_approval` fail-closed 재검증 — MCP 호출 0
   - BEARER 인증: secret은 `call_tool`에는 전달되나 Execution/Step/Attempt/ToolCall의
     어떤 JSON 필드·`error_message`·로그에도 원문이 남지 않음
+  - remote MCP가 BEARER/SECRET_REF plaintext를 content/structuredContent/_meta/
+    JSON-RPC error.message/허용 response header에 echo해도 persistence는
+    `[REDACTED]`로 재귀 치환; schema validation은 in-memory 원본으로 수행
   - `SECRET_REF` 인자: 성공 후에도 `resolved_input`은 참조(`secret_id`)만 보존
   - `SECRET_REF` 대상 secret 없음 → remote 호출 0, Step/Execution `FAILED`
   - auth `NONE` + SECRET_REF 없음 → master-key 로딩 0 (lazy); 잘못된 설정 키도
