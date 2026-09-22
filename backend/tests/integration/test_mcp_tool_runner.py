@@ -29,7 +29,7 @@ from app.execution.claim import ExecutionClaimService
 from app.execution.queue import ExecutionQueueService
 from app.execution.tool_runner import McpToolRunner, _PreparedCall
 from app.mcp.contracts import NormalizedToolResult
-from app.mcp.errors import MCPClientError
+from app.mcp.errors import MCPClientError, MCPResultTooLargeError
 from app.models.auth import ResourceGrant
 from app.repositories.agent_request import AgentRequestRepository
 from app.repositories.execution import ExecutionRepository
@@ -782,3 +782,101 @@ async def test_pg_final_gate_secret_then_authz_revoke(
             + str(tool_calls[0].request_meta or "")
         )
         assert token_value not in persisted
+
+
+# ---------------------------------------------------------------------------
+# ToolPolicy.max_result_bytes overflow (post-send ambiguity)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "risk_class",
+    [RiskClass.NON_IDEMPOTENT_WRITE.value, RiskClass.DESTRUCTIVE.value],
+)
+async def test_pg_runner_mcp_result_too_large_unsafe_unknown_outcome(
+    integration_session_factory: async_sessionmaker[AsyncSession],
+    risk_class: str,
+) -> None:
+    seeded = await _seed_ready_with_risk_class(
+        integration_session_factory, risk_class=risk_class
+    )
+    execution_id, worker_id, lease_token = await _claim_ready_execution(
+        integration_session_factory, seeded=seeded
+    )
+
+    client = _StubCurrentMCPClient(error=MCPResultTooLargeError(max_result_bytes=10))
+    runner = McpToolRunner(
+        session_factory=integration_session_factory,
+        mcp_client=client,
+        secret_resolver_factory=_unimplemented_resolver_factory,
+        lease_seconds=60,
+        result_inline_max_bytes=256_000,
+    )
+    outcome = await runner.run_claimed_execution(
+        execution_id=execution_id, worker_id=worker_id, lease_token=lease_token
+    )
+    assert outcome.mcp_called is True
+    assert outcome.terminal_status == StepStatus.UNKNOWN_OUTCOME.value
+    assert len(client.calls) == 1
+
+    async with integration_session_factory() as session:
+        execution = await ExecutionRepository(session).get(execution_id)
+        assert execution is not None
+        assert execution.status == ExecutionStatus.FAILED.value
+        assert execution.worker_id is None
+        assert execution.lease_token is None
+        step = (await ExecutionRepository(session).list_steps(execution_id))[0]
+        assert step.status == StepStatus.UNKNOWN_OUTCOME.value
+        attempts = await ExecutionRepository(session).list_attempts(step.id)
+        assert attempts[0].status == StepAttemptStatus.UNKNOWN_OUTCOME.value
+        assert attempts[0].error_code == "MCP_RESULT_TOO_LARGE"
+        tool_calls = await ExecutionRepository(session).list_tool_calls(attempts[0].id)
+        assert (
+            tool_calls[0].normalized_status
+            == ToolCallNormalizedStatus.UNKNOWN_OUTCOME.value
+        )
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "risk_class",
+    [RiskClass.READ_ONLY.value, RiskClass.IDEMPOTENT_WRITE.value],
+)
+async def test_pg_runner_mcp_result_too_large_safe_failed(
+    integration_session_factory: async_sessionmaker[AsyncSession],
+    risk_class: str,
+) -> None:
+    seeded = await _seed_ready_with_risk_class(
+        integration_session_factory, risk_class=risk_class
+    )
+    execution_id, worker_id, lease_token = await _claim_ready_execution(
+        integration_session_factory, seeded=seeded
+    )
+
+    client = _StubCurrentMCPClient(error=MCPResultTooLargeError(max_result_bytes=10))
+    runner = McpToolRunner(
+        session_factory=integration_session_factory,
+        mcp_client=client,
+        secret_resolver_factory=_unimplemented_resolver_factory,
+        lease_seconds=60,
+        result_inline_max_bytes=256_000,
+    )
+    outcome = await runner.run_claimed_execution(
+        execution_id=execution_id, worker_id=worker_id, lease_token=lease_token
+    )
+    assert outcome.mcp_called is True
+    assert outcome.terminal_status == StepStatus.FAILED.value
+    assert len(client.calls) == 1
+
+    async with integration_session_factory() as session:
+        execution = await ExecutionRepository(session).get(execution_id)
+        assert execution is not None
+        assert execution.status == ExecutionStatus.FAILED.value
+        step = (await ExecutionRepository(session).list_steps(execution_id))[0]
+        assert step.status == StepStatus.FAILED.value
+        attempts = await ExecutionRepository(session).list_attempts(step.id)
+        assert attempts[0].error_code == "MCP_RESULT_TOO_LARGE"
+        assert attempts[0].status == StepAttemptStatus.FAILED.value

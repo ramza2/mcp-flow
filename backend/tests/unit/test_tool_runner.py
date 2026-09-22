@@ -300,6 +300,16 @@ def _tool_call_error(*, error_layer: str, outcome_unknown: bool) -> MCPClientErr
         (RiskClass.UNKNOWN.value, "TIMEOUT", True, StepStatus.UNKNOWN_OUTCOME.value),
         (RiskClass.NON_IDEMPOTENT_WRITE.value, "TIMEOUT", False, StepStatus.FAILED.value),
         (RiskClass.DESTRUCTIVE.value, "AUTH", False, StepStatus.FAILED.value),
+        # ToolPolicy.max_result_bytes overflow: adapter outcome_unknown=true;
+        # unsafe → UNKNOWN_OUTCOME, safe → FAILED (not UNKNOWN).
+        (
+            RiskClass.NON_IDEMPOTENT_WRITE.value,
+            "PROTOCOL",
+            True,
+            StepStatus.UNKNOWN_OUTCOME.value,
+        ),
+        (RiskClass.READ_ONLY.value, "PROTOCOL", True, StepStatus.FAILED.value),
+        (RiskClass.IDEMPOTENT_WRITE.value, "PROTOCOL", True, StepStatus.FAILED.value),
     ],
 )
 def test_classify_mcp_failure_matrix(
@@ -307,6 +317,34 @@ def test_classify_mcp_failure_matrix(
 ) -> None:
     exc = _tool_call_error(error_layer=error_layer, outcome_unknown=outcome_unknown)
     assert _classify_mcp_failure(exc, risk_class=risk_class) == expected
+
+
+def test_classify_mcp_result_too_large_error_matrix() -> None:
+    from app.mcp.errors import MCPResultTooLargeError
+
+    exc = MCPResultTooLargeError(max_result_bytes=10)
+    assert exc.outcome_unknown is True
+    assert exc.retryable is False
+    assert (
+        _classify_mcp_failure(exc, risk_class=RiskClass.NON_IDEMPOTENT_WRITE.value)
+        == StepStatus.UNKNOWN_OUTCOME.value
+    )
+    assert (
+        _classify_mcp_failure(exc, risk_class=RiskClass.DESTRUCTIVE.value)
+        == StepStatus.UNKNOWN_OUTCOME.value
+    )
+    assert (
+        _classify_mcp_failure(exc, risk_class=RiskClass.UNKNOWN.value)
+        == StepStatus.UNKNOWN_OUTCOME.value
+    )
+    assert (
+        _classify_mcp_failure(exc, risk_class=RiskClass.READ_ONLY.value)
+        == StepStatus.FAILED.value
+    )
+    assert (
+        _classify_mcp_failure(exc, risk_class=RiskClass.IDEMPOTENT_WRITE.value)
+        == StepStatus.FAILED.value
+    )
 
 
 def _fake_row(**fields):

@@ -439,8 +439,8 @@ class CurrentMCPClient:
         ``remote_request_id`` is caller-supplied (``ToolCall.remote_request_id``)
         so the JSON-RPC id is stable across a Phase C finalizer's fencing check.
         The response body is streamed and fenced against ``max_result_bytes``;
-        exceeding it raises :class:`MCPResultTooLargeError` before the full body
-        is buffered.
+        exceeding it raises :class:`MCPResultTooLargeError` with
+        ``outcome_unknown=true`` (tools/call already dispatched; body not retained).
 
         Returns ``(NormalizedToolResult, response_meta, first_byte_at)``.
         MRTR ``resultType=input_required`` is unsupported in this slice and

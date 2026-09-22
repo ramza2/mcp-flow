@@ -118,9 +118,11 @@ async def test_oversized_body_raises_without_retaining_body() -> None:
 
     assert exc.value.error_code == "MCP_RESULT_TOO_LARGE"
     assert exc.value.retryable is False
-    assert exc.value.outcome_unknown is False
+    assert exc.value.outcome_unknown is True
+    assert exc.value.error_layer == "PROTOCOL"
     # The raised error must never carry/retain the oversized body content.
     assert big_chunk.decode() not in str(exc.value)
+    assert big_chunk.decode() not in exc.value.message
     assert not hasattr(exc.value, "body")
     assert not hasattr(exc.value, "content")
 
