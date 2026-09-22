@@ -154,6 +154,40 @@ class _PreparedCall:
     lease_token: uuid.UUID
 
 
+def _prepared_invocation_lineage_matches(
+    *,
+    execution: Execution,
+    step: ExecutionStep,
+    attempt: StepAttempt,
+    tool_call: ToolCall,
+    prepared: _PreparedCall,
+) -> bool:
+    return (
+        step.execution_id == execution.id
+        and attempt.step_execution_id == step.id
+        and tool_call.step_attempt_id == attempt.id
+        and tool_call.remote_request_id == prepared.remote_request_id
+        and tool_call.mcp_server_id == prepared.mcp_server_id
+        and tool_call.mcp_tool_version_id == prepared.mcp_tool_version_id
+        and tool_call.normalized_status == ToolCallNormalizedStatus.STARTED.value
+        and step.status == StepStatus.RUNNING.value
+        and attempt.status == StepAttemptStatus.STARTED.value
+    )
+
+
+def _final_gate_evidence_already_terminal(
+    step: ExecutionStep, attempt: StepAttempt, tool_call: ToolCall
+) -> bool:
+    """Another terminalizer finished Step/Attempt/ToolCall — stale runner must not overwrite."""
+    if step.status in _STEP_TERMINAL_STATUSES:
+        return True
+    if attempt.status != StepAttemptStatus.STARTED.value:
+        return True
+    if tool_call.normalized_status != ToolCallNormalizedStatus.STARTED.value:
+        return True
+    return False
+
+
 @dataclass(frozen=True, slots=True)
 class _PrepareResult:
     prepared: _PreparedCall | None = None
@@ -280,7 +314,8 @@ class McpToolRunner:
 
         gate = await self._final_pre_send_gate(prepared)
         if isinstance(gate, ToolRunOutcome):
-            # Lease lost / ownership moved — do not overwrite the new owner's state.
+            # Lease lost (NO_OP) or fail-closed terminalization already committed in
+            # the final gate transaction — never overwrite a new owner's state.
             auth_headers.clear()
             arguments.clear()
             return gate
@@ -310,6 +345,70 @@ class McpToolRunner:
         """Production no-op. Integration tests monkeypatch this to mutate DB state."""
         del prepared
 
+    def _final_gate_fail_closed_lineage_corruption(
+        self,
+        *,
+        execution: Execution,
+        step: ExecutionStep | None,
+        attempt: StepAttempt | None,
+        tool_call: ToolCall | None,
+        prepared: _PreparedCall,
+        now: datetime,
+    ) -> ToolRunOutcome:
+        """Valid lease owner, corrupt STARTED evidence — terminalize without MCP."""
+        call_error = _PreSendFailClosed(
+            error_code="RESOURCE_CONFLICT",
+            message="Final pre-send invocation lineage is inconsistent.",
+        )
+        if (
+            step is not None
+            and attempt is not None
+            and tool_call is not None
+            and execution.status == ExecutionStatus.RUNNING.value
+        ):
+            terminal = _apply_terminal_transition(
+                execution=execution,
+                step=step,
+                attempt=attempt,
+                tool_call=tool_call,
+                call_error=call_error,
+                result=None,
+                response_meta=None,
+                first_byte_at=None,
+                risk_class=prepared.risk_class,
+                output_schema=prepared.output_schema,
+                result_inline_max_bytes=self._result_inline_max_bytes,
+                now=now,
+            )
+            return ToolRunOutcome(
+                execution_id=execution.id,
+                step_execution_id=step.id,
+                attempt_id=attempt.id,
+                tool_call_id=tool_call.id,
+                mcp_called=False,
+                terminal_status=terminal,
+                reason=call_error.error_code,
+            )
+
+        execution.status = ExecutionStatus.FAILED.value
+        execution.error_code = call_error.error_code
+        execution.error_message = call_error.message
+        execution.finished_at = now
+        execution.worker_id = None
+        execution.lease_token = None
+        execution.lease_expires_at = None
+        execution.heartbeat_at = None
+        execution.lock_version += 1
+        return ToolRunOutcome(
+            execution_id=execution.id,
+            step_execution_id=prepared.step_id,
+            attempt_id=prepared.attempt_id,
+            tool_call_id=prepared.tool_call_id,
+            mcp_called=False,
+            terminal_status=StepStatus.FAILED.value,
+            reason=call_error.error_code,
+        )
+
     async def _final_pre_send_gate(
         self, prepared: _PreparedCall
     ) -> ToolRunOutcome | _PreSendFailClosed | None:
@@ -319,8 +418,8 @@ class McpToolRunner:
           - ``None`` — gate passed; caller may invoke ``call_tool`` immediately
           - ``_PreSendFailClosed`` — still owns lease; caller must terminalize
             via ``_finalize_locked`` without a remote call
-          - ``ToolRunOutcome`` — lease/ownership lost; do not overwrite the new
-            owner's state (no finalize)
+          - ``ToolRunOutcome`` — lease/ownership lost (NO_OP), or lineage corruption
+            fail-closed terminalization committed in-gate (do not finalize again)
         """
         async with self._session_factory() as session:
             async with session.begin():
@@ -347,28 +446,38 @@ class McpToolRunner:
                 tool_call = await executions.get_tool_call_with_lock(
                     prepared.tool_call_id
                 )
-                if (
-                    step is None
-                    or attempt is None
-                    or tool_call is None
-                    or step.execution_id != execution.id
-                    or attempt.step_execution_id != step.id
-                    or tool_call.step_attempt_id != attempt.id
-                    or tool_call.remote_request_id != prepared.remote_request_id
-                    or tool_call.mcp_server_id != prepared.mcp_server_id
-                    or tool_call.mcp_tool_version_id != prepared.mcp_tool_version_id
-                    or tool_call.normalized_status
-                    != ToolCallNormalizedStatus.STARTED.value
-                    or step.status != StepStatus.RUNNING.value
-                    or attempt.status != StepAttemptStatus.STARTED.value
+                if step is None or attempt is None or tool_call is None:
+                    return self._final_gate_fail_closed_lineage_corruption(
+                        execution=execution,
+                        step=step,
+                        attempt=attempt,
+                        tool_call=tool_call,
+                        prepared=prepared,
+                        now=now,
+                    )
+                if _prepared_invocation_lineage_matches(
+                    execution=execution,
+                    step=step,
+                    attempt=attempt,
+                    tool_call=tool_call,
+                    prepared=prepared,
                 ):
-                    # Ownership or lineage moved after Phase A — never send, and
-                    # never overwrite another worker's / terminalizer's state.
+                    pass  # lineage OK — continue authz checks below
+                elif _final_gate_evidence_already_terminal(step, attempt, tool_call):
                     return self._noop(
                         prepared.execution_id,
-                        "FINAL_GATE_LINEAGE_MISMATCH",
+                        "FINAL_GATE_EVIDENCE_ALREADY_TERMINAL",
                         step_id=prepared.step_id,
-                        status=None if execution is None else execution.status,
+                        status=execution.status,
+                    )
+                else:
+                    return self._final_gate_fail_closed_lineage_corruption(
+                        execution=execution,
+                        step=step,
+                        attempt=attempt,
+                        tool_call=tool_call,
+                        prepared=prepared,
+                        now=now,
                     )
 
                 try:
