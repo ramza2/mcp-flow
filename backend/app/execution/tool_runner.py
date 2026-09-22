@@ -85,6 +85,7 @@ from app.execution.secret_redaction import (
     redact_text,
     sanitize_for_persistence,
 )
+from app.approval.wait import ApprovalWaitService
 from app.execution.tool_step_attempt import ApprovalWaitOutcome, ToolStepAttemptService
 from app.mcp.auth_headers import build_mcp_auth_headers
 from app.mcp.contracts import NormalizedToolResult
@@ -636,6 +637,24 @@ class McpToolRunner:
                         )
                     )
                 if exec_waiting and step_waiting:
+                    # Require exactly one PENDING ApprovalRequest — do not treat
+                    # missing evidence as a valid wait.
+                    try:
+                        await ApprovalWaitService(session).reuse_pending(
+                            execution=execution, step=step
+                        )
+                    except AppError as exc:
+                        return _PrepareResult(
+                            outcome=ToolRunOutcome(
+                                execution_id=execution.id,
+                                step_execution_id=step.id,
+                                attempt_id=None,
+                                tool_call_id=None,
+                                mcp_called=False,
+                                terminal_status=None,
+                                reason=exc.code,
+                            )
+                        )
                     return _PrepareResult(
                         outcome=self._noop(
                             execution.id,
@@ -739,6 +758,25 @@ class McpToolRunner:
                             )
                         )
                     if exec_waiting or step_waiting:
+                        return _PrepareResult(
+                            outcome=ToolRunOutcome(
+                                execution_id=execution.id,
+                                step_execution_id=step.id,
+                                attempt_id=None,
+                                tool_call_id=None,
+                                mcp_called=False,
+                                terminal_status=None,
+                                reason=exc.code,
+                            )
+                        )
+                    # Orphan PENDING while still RUNNING/READY is durable
+                    # inconsistency — do not terminalize or clear lease.
+                    if (
+                        exc.code == "RESOURCE_CONFLICT"
+                        and execution.status == ExecutionStatus.RUNNING.value
+                        and step.status == StepStatus.READY.value
+                        and "PENDING ApprovalRequest already exists" in exc.message
+                    ):
                         return _PrepareResult(
                             outcome=ToolRunOutcome(
                                 execution_id=execution.id,

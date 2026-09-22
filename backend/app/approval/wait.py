@@ -102,22 +102,20 @@ class ApprovalWaitService:
                 status_code=409,
             )
 
-        # Another concurrent waiter may already have inserted PENDING under the
-        # partial unique index while we waited for row locks.
+        # RUNNING + READY with a pre-existing PENDING request is inconsistent
+        # durable evidence (not a normal concurrency path under FOR UPDATE).
+        # Do not silently repair into WAITING_APPROVAL.
         existing = await self._requests.find_pending_for_step(
             execution_id=execution.id, step_execution_id=step.id
         )
         if existing is not None:
-            self._apply_waiting_state(execution=execution, step=step)
-            execution.lock_version += 1
-            step.lock_version += 1
-            await self._session.flush()
-            return ApprovalWaitOutcome(
-                execution_id=execution.id,
-                step_execution_id=step.id,
-                approval_request_id=existing.id,
-                context_hash=existing.context_hash,
-                reused_existing=True,
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message=(
+                    "PENDING ApprovalRequest already exists while Execution is "
+                    "RUNNING and Step is READY."
+                ),
+                status_code=409,
             )
 
         resolved_input = materialize_secret_safe_resolved_input(tool_config.bindings)

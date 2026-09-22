@@ -673,3 +673,184 @@ async def test_both_waiting_idempotent_reuse_no_mutation(
         assert pending.context_hash == before["context_hash"]
         assert step.attempt_count == 0
         assert (await ExecutionRepository(session).list_attempts(step.id)) == []
+
+
+@pytest.mark.asyncio
+async def test_both_waiting_without_pending_fail_closed(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from datetime import UTC, datetime
+
+    from app.core.errors import AppError
+    from app.execution.tool_step_attempt import ToolStepAttemptService
+    from app.models.approval import ApprovalRequest
+    from sqlalchemy import delete, func, select
+
+    execution_id, worker_id, lease_token = await _enter_waiting(
+        db_session_factory, monkeypatch
+    )
+    async with db_session_factory() as session:
+        step = (await ExecutionRepository(session).list_steps(execution_id))[0]
+        await session.execute(
+            delete(ApprovalRequest).where(
+                ApprovalRequest.execution_id == execution_id,
+                ApprovalRequest.step_execution_id == step.id,
+            )
+        )
+        await session.commit()
+        step_id = step.id
+        execution = await ExecutionRepository(session).get(execution_id)
+        assert execution is not None
+        before_exec = execution.status
+        before_step = step.status
+        before_lock_e = execution.lock_version
+        before_lock_s = step.lock_version
+
+    async with db_session_factory() as session:
+        with pytest.raises(AppError) as exc:
+            await ToolStepAttemptService(session).start(
+                execution_id=execution_id,
+                step_execution_id=step_id,
+                worker_id=worker_id,
+                lease_token=lease_token,
+            )
+        assert exc.value.code == "RESOURCE_CONFLICT"
+        await session.rollback()
+
+    runner = McpToolRunner(
+        session_factory=db_session_factory,
+        mcp_client=_NeverCalledMCPClient(),
+        secret_resolver_factory=_unimplemented_resolver_factory,
+        lease_seconds=60,
+        result_inline_max_bytes=256_000,
+    )
+    outcome = await runner.run_claimed_execution(
+        execution_id=execution_id, worker_id=worker_id, lease_token=lease_token
+    )
+    assert outcome.mcp_called is False
+    assert outcome.reason == "RESOURCE_CONFLICT"
+    assert outcome.terminal_status != StepStatus.WAITING_APPROVAL.value
+
+    async with db_session_factory() as session:
+        execution = await ExecutionRepository(session).get(execution_id)
+        assert execution is not None
+        step = (await ExecutionRepository(session).list_steps(execution_id))[0]
+        assert execution.status == before_exec
+        assert step.status == before_step
+        assert execution.lock_version == before_lock_e
+        assert step.lock_version == before_lock_s
+        assert step.attempt_count == 0
+        assert (await ExecutionRepository(session).list_attempts(step.id)) == []
+        count = (
+            await session.execute(
+                select(func.count())
+                .select_from(ApprovalRequest)
+                .where(ApprovalRequest.execution_id == execution_id)
+            )
+        ).scalar_one()
+        assert count == 0
+
+
+@pytest.mark.asyncio
+async def test_running_ready_orphan_pending_fail_closed(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from datetime import UTC, datetime, timedelta
+
+    from app.core.errors import AppError
+    from app.execution.tool_step_attempt import ToolStepAttemptService
+    from app.models.approval import ApprovalRequest
+    from sqlalchemy import func, select
+
+    _install_no_side_effects(monkeypatch)
+    execution_id, worker_id, lease_token, approval_id = await _claim_approval_required(
+        db_session_factory
+    )
+    async with db_session_factory() as session:
+        execution = await ExecutionRepository(session).get(execution_id)
+        assert execution is not None
+        step = (await ExecutionRepository(session).list_steps(execution_id))[0]
+        assert execution.status == ExecutionStatus.RUNNING.value
+        assert step.status == StepStatus.READY.value
+        now = datetime.now(UTC)
+        orphan = ApprovalRequest(
+            execution_id=execution_id,
+            step_execution_id=step.id,
+            approval_policy_id=approval_id,
+            status=ApprovalStatus.PENDING.value,
+            decision_mode="ANY",
+            required_approvals=1,
+            approval_scope={"roles": ["approver"]},
+            context_snapshot={"schema_version": "approval_context.v1"},
+            context_hash="d" * 64,
+            requested_at=now,
+            expires_at=now + timedelta(hours=1),
+            resolved_at=None,
+            requested_by=execution.requester_id,
+        )
+        session.add(orphan)
+        await session.commit()
+        orphan_id = orphan.id
+        step_id = step.id
+        before_hash = orphan.context_hash
+        before_scope = dict(orphan.approval_scope or {})
+
+    async with db_session_factory() as session:
+        with pytest.raises(AppError) as exc:
+            await ToolStepAttemptService(session).start(
+                execution_id=execution_id,
+                step_execution_id=step_id,
+                worker_id=worker_id,
+                lease_token=lease_token,
+            )
+        assert exc.value.code == "RESOURCE_CONFLICT"
+        await session.rollback()
+
+    runner = McpToolRunner(
+        session_factory=db_session_factory,
+        mcp_client=_NeverCalledMCPClient(),
+        secret_resolver_factory=_unimplemented_resolver_factory,
+        lease_seconds=60,
+        result_inline_max_bytes=256_000,
+    )
+    outcome = await runner.run_claimed_execution(
+        execution_id=execution_id, worker_id=worker_id, lease_token=lease_token
+    )
+    assert outcome.mcp_called is False
+    assert outcome.reason == "RESOURCE_CONFLICT"
+
+    async with db_session_factory() as session:
+        execution = await ExecutionRepository(session).get(execution_id)
+        assert execution is not None
+        step = (await ExecutionRepository(session).list_steps(execution_id))[0]
+        assert execution.status == ExecutionStatus.RUNNING.value
+        assert step.status == StepStatus.READY.value
+        assert execution.worker_id == worker_id
+        assert execution.lease_token == lease_token
+        assert step.attempt_count == 0
+        assert (await ExecutionRepository(session).list_attempts(step.id)) == []
+        rows = (
+            await session.execute(
+                select(ApprovalRequest).where(
+                    ApprovalRequest.execution_id == execution_id
+                )
+            )
+        ).scalars().all()
+        assert len(rows) == 1
+        assert rows[0].id == orphan_id
+        assert rows[0].status == ApprovalStatus.PENDING.value
+        assert rows[0].context_hash == before_hash
+        assert rows[0].approval_scope == before_scope
+        count = (
+            await session.execute(
+                select(func.count())
+                .select_from(ApprovalRequest)
+                .where(
+                    ApprovalRequest.execution_id == execution_id,
+                    ApprovalRequest.status == ApprovalStatus.PENDING.value,
+                )
+            )
+        ).scalar_one()
+        assert count == 1
