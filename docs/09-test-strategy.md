@@ -433,7 +433,7 @@ Dataset은 평가 전 FROZEN하고 실행 중 정답을 변경하지 않는다.
     invalid `structuredContent` → `outcome_unknown=true`
   - HTTP 4xx → `outcome_unknown=false`; HTTP 5xx(전송 후) → `outcome_unknown=true`
   - `Authorization` 헤더는 실제 요청에는 포함되나 오류 메시지/로그에는 노출되지 않음
-- `McpToolRunner` (TX1/network/TX2, §17 참조):
+- `McpToolRunner` (TX1 / B1 secret / B2 final gate / B3 network / TX2, §14.3 참조):
   - `requires_approval` fail-closed 재검증 — MCP 호출 0
   - BEARER 인증: secret은 `call_tool`에는 전달되나 Execution/Step/Attempt/ToolCall의
     어떤 JSON 필드·`error_message`·로그에도 원문이 남지 않음
@@ -443,6 +443,13 @@ Dataset은 평가 전 FROZEN하고 실행 중 정답을 변경하지 않는다.
     이 경로를 strand하지 않음
   - BEARER/SECRET_REF가 필요한데 master-key가 없거나 잘못됨 → pre-send fail-closed,
     MCP 호출 0, Execution/Step/Attempt/ToolCall이 `RUNNING`/`STARTED`에 방치되지 않음
+  - Phase A 통과 후 / actual `tools/call` 전 final pre-send gate TOCTOU:
+    deterministic seam으로 ResourceGrant / `mcp.tool.execute` / AgentToolGrant /
+    MCPToolPolicy(timeout·risk_class·max_result_bytes) / Tool INACTIVE·current_version /
+    Server INACTIVE / endpoint·auth drift / lease ownership·expiry 를 mutate →
+    MCP 호출 0, FAILED terminal + lease cleanup (lease lost는 overwrite 금지)
+  - secret materialize 후 authz revoke → remote 0, plaintext persistence 없음
+  - RESUME/TAKEOVER 후에도 동일 final gate 적용; valid TAKEOVER_READY는 MCP 1회
   - output schema 불일치 → `FAILED`, 원문 `structured_content`가 오류 메시지에 노출되지 않음
   - output schema 일치 → `SUCCEEDED`
   - `NON_IDEMPOTENT_WRITE` + timeout `outcome_unknown=true` → 호출 1회만,

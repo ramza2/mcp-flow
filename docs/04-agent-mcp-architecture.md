@@ -771,6 +771,32 @@ app/mcp/auth_headers.py — 인증 헤더 구성/redaction (Authorization 등 se
 
 MCP Tool Runner vertical slice(현재 범위)는 `tools/call` happy path, `isError` 업무오류, timeout(connect/read) 분류, 결과과대(`MCPResultTooLargeError`) 처리를 구현한다. §15 MRTR은 `input_required` 응답을 감지해 명시적으로 `MCP_INPUT_REQUIRED_UNSUPPORTED`로 실패 처리(detect-only)하며, 실제 WAITING_INPUT round-trip 재개는 이후 범위다.
 
+Runner 실행 경계(`app/execution/tool_runner.py`)는 network I/O 동안 DB transaction을 열지 않는다.
+
+```text
+Phase A / TX1
+  lease·lineage 검증
+  Attempt start 또는 replay preflight (`assert_current_tool_executable`)
+  ToolCall STARTED durable commit
+    ↓
+Phase B1 (no DB TX)
+  SECRET_REF / server auth secret materialize (memory-only)
+    ↓
+Phase B2 / short TX — final pre-send gate
+  Execution lease·lineage 재검증
+  current mutable authz/policy 재검증 (`assert_current_tool_executable`)
+  prepared invocation-critical drift fail-closed
+  (endpoint/auth/transport/remote_name 등; policy는 Execution.policy_snapshot equality)
+    ↓
+Phase B3 (no DB TX)
+  CurrentMCPClient.call_tool
+    ↓
+Phase C / TX2
+  fenced terminal finalize
+```
+
+Phase B2 reject 시 remote `tools/call`은 0회다. DB gate commit과 이후 socket write 사이의 절대적 linearizability는 보장하지 않는다. fresh path와 RESUME/TAKEOVER replay path 모두 동일 final gate를 통과한다.
+
 ---
 
 ## 15. MRTR 기반 실행 중 사용자 입력
