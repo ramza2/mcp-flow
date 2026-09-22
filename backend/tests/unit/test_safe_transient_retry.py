@@ -458,18 +458,22 @@ async def test_mcp_result_too_large_no_retry(
         execution_id=execution_id, worker_id=worker_id, lease_token=lease_token
     )
     assert client.calls == 1
-    # READ_ONLY + outcome_unknown → TIMED_OUT/FAILED classification, not retry
-    assert outcome.terminal_status in {
-        StepStatus.FAILED.value,
-        StepStatus.TIMED_OUT.value,
-        StepStatus.UNKNOWN_OUTCOME.value,
-    }
+    assert outcome.terminal_status == StepStatus.FAILED.value
     async with db_session_factory() as session:
+        execution = await ExecutionRepository(session).get(execution_id)
+        assert execution is not None
+        assert execution.status == ExecutionStatus.FAILED.value
         step = (await ExecutionRepository(session).list_steps(execution_id))[0]
+        assert step.status == StepStatus.FAILED.value
         assert step.attempt_count == 1
         attempts = await ExecutionRepository(session).list_attempts(step.id)
+        assert len(attempts) == 1
+        assert attempts[0].status == StepAttemptStatus.FAILED.value
         assert attempts[0].error_code == "MCP_RESULT_TOO_LARGE"
         assert attempts[0].is_retryable is False
+        tool_calls = await ExecutionRepository(session).list_tool_calls(attempts[0].id)
+        assert len(tool_calls) == 1
+        assert tool_calls[0].normalized_status == ToolCallNormalizedStatus.FAILED.value
 
 
 @pytest.mark.asyncio
@@ -651,3 +655,205 @@ async def test_duplicate_runner_after_success_no_extra_attempt(
         step = (await ExecutionRepository(session).list_steps(execution_id))[0]
         attempts = await ExecutionRepository(session).list_attempts(step.id)
         assert len(attempts) == 1
+
+
+# ---------------------------------------------------------------------------
+# Safety regressions: IDEMPOTENT_WRITE / backoff / lease / timeout clamp
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_idempotent_write_normal_path_no_auto_retry(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """IDEMPOTENT_WRITE must not auto-retry on the normal Runner path.
+
+    StepAttempt.idempotency_key is lineage/dedup only — not remote MCP
+    side-effect idempotency.
+    """
+    _install_no_side_effects(monkeypatch)
+    execution_id, worker_id, lease_token = await _claim_with_policy(
+        db_session_factory,
+        max_attempts=3,
+        risk_class=RiskClass.IDEMPOTENT_WRITE.value,
+    )
+    client = _FailThenSucceedClient(first_error=_CONNECT_ERR)
+    outcome = await _runner(db_session_factory, client).run_claimed_execution(
+        execution_id=execution_id, worker_id=worker_id, lease_token=lease_token
+    )
+    assert client.calls == 1
+    assert outcome.terminal_status == StepStatus.FAILED.value
+    async with db_session_factory() as session:
+        execution = await ExecutionRepository(session).get(execution_id)
+        assert execution is not None
+        assert execution.status == ExecutionStatus.FAILED.value
+        step = (await ExecutionRepository(session).list_steps(execution_id))[0]
+        assert step.status == StepStatus.FAILED.value
+        assert step.attempt_count == 1
+        attempts = await ExecutionRepository(session).list_attempts(step.id)
+        assert len(attempts) == 1
+        tool_calls = await ExecutionRepository(session).list_tool_calls(attempts[0].id)
+        assert len(tool_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_non_null_backoff_policy_blocks_runner_retry(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pinned non-null backoff_policy must refuse auto-retry (no silent ignore)."""
+    _install_no_side_effects(monkeypatch)
+    execution_id, worker_id, lease_token = await _claim_with_policy(
+        db_session_factory,
+        max_attempts=3,
+        backoff_policy={"initial_ms": 25},
+    )
+    async with db_session_factory() as session:
+        execution = await ExecutionRepository(session).get(execution_id)
+        assert execution is not None
+        tool_policy = (execution.policy_snapshot or {}).get("tool_policy") or {}
+        assert tool_policy.get("backoff_policy") == {"initial_ms": 25}
+
+    client = _FailThenSucceedClient(first_error=_CONNECT_ERR)
+    outcome = await _runner(db_session_factory, client).run_claimed_execution(
+        execution_id=execution_id, worker_id=worker_id, lease_token=lease_token
+    )
+    assert client.calls == 1
+    assert outcome.terminal_status == StepStatus.FAILED.value
+    async with db_session_factory() as session:
+        step = (await ExecutionRepository(session).list_steps(execution_id))[0]
+        assert step.attempt_count == 1
+        attempts = await ExecutionRepository(session).list_attempts(step.id)
+        assert len(attempts) == 1
+        tool_calls = await ExecutionRepository(session).list_tool_calls(attempts[0].id)
+        assert len(tool_calls) == 1
+        assert attempts[0].error_code == "MCP_NETWORK_ERROR"
+
+
+@pytest.mark.asyncio
+async def test_lease_lost_between_retry_attempts_no_second_call(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """After SAFE_RETRY checkpoint, expired lease must stop Attempt 2 via prepare fencing."""
+    _install_no_side_effects(monkeypatch)
+    execution_id, worker_id, lease_token = await _claim_with_policy(
+        db_session_factory, max_attempts=3
+    )
+    client = _FailThenSucceedClient(first_error=_CONNECT_ERR)
+    runner = _runner(db_session_factory, client)
+    original_finalize = runner._finalize_locked
+
+    async def expire_lease_after_checkpoint(*args: Any, **kwargs: Any):
+        outcome = await original_finalize(*args, **kwargs)
+        if outcome.reason == "SAFE_RETRY_READY":
+            async with db_session_factory() as session:
+                execution = await ExecutionRepository(session).get(execution_id)
+                assert execution is not None
+                # Deterministic ownership loss before Attempt 2 prepare.
+                execution.lease_expires_at = datetime.now(UTC) - timedelta(seconds=1)
+                await session.commit()
+        return outcome
+
+    monkeypatch.setattr(runner, "_finalize_locked", expire_lease_after_checkpoint)
+    outcome = await runner.run_claimed_execution(
+        execution_id=execution_id, worker_id=worker_id, lease_token=lease_token
+    )
+    assert client.calls == 1
+    assert outcome.mcp_called is False
+    assert outcome.reason == "LEASE_MISMATCH"
+    async with db_session_factory() as session:
+        execution = await ExecutionRepository(session).get(execution_id)
+        assert execution is not None
+        # Stale worker must not terminalize / overwrite after lease loss.
+        assert execution.status == ExecutionStatus.RUNNING.value
+        step = (await ExecutionRepository(session).list_steps(execution_id))[0]
+        assert step.status == StepStatus.READY.value
+        attempts = await ExecutionRepository(session).list_attempts(step.id)
+        assert len(attempts) == 1
+        assert attempts[0].status == StepAttemptStatus.FAILED.value
+        tool_calls = await ExecutionRepository(session).list_tool_calls(attempts[0].id)
+        assert len(tool_calls) == 1
+        assert tool_calls[0].normalized_status != ToolCallNormalizedStatus.STARTED.value
+        # No stranded Attempt 2 / STARTED ToolCall.
+        started = [
+            a
+            for a in attempts
+            if a.status == StepAttemptStatus.STARTED.value
+        ]
+        assert started == []
+
+
+@pytest.mark.asyncio
+async def test_second_call_timeout_ms_clamped_to_remaining_budget(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Second tools/call must receive remaining Step budget, not full policy timeout."""
+    _install_no_side_effects(monkeypatch)
+    execution_id, worker_id, lease_token = await _claim_with_policy(
+        db_session_factory, max_attempts=3, timeout_ms=30_000
+    )
+
+    class _TimeoutRecordingClient:
+        def __init__(self) -> None:
+            self.timeouts: list[int] = []
+            self.calls = 0
+
+        async def call_tool(self, endpoint: str, **kwargs: Any):
+            self.calls += 1
+            self.timeouts.append(int(kwargs["timeout_ms"]))
+            if self.calls == 1:
+                raise _CONNECT_ERR
+            result = NormalizedToolResult(
+                protocol_success=True,
+                tool_error=False,
+                content=[{"type": "text", "text": "ok"}],
+                raw_size_bytes=4,
+                duration_ms=1,
+            )
+            return result, {"http_status": 200}, datetime.now(UTC)
+
+    client = _TimeoutRecordingClient()
+    runner = _runner(db_session_factory, client)
+    original_finalize = runner._finalize_locked
+    started_at_before: dict[str, datetime | None] = {"value": None}
+
+    async def age_step_after_checkpoint(*args: Any, **kwargs: Any):
+        outcome = await original_finalize(*args, **kwargs)
+        if outcome.reason == "SAFE_RETRY_READY":
+            async with db_session_factory() as session:
+                step = (await ExecutionRepository(session).list_steps(execution_id))[0]
+                started_at_before["value"] = step.started_at
+                # Deterministic elapsed time: 10s into a 30s Step budget.
+                assert step.started_at is not None
+                step.started_at = datetime.now(UTC) - timedelta(seconds=10)
+                # Preserve the original started_at for assertion after run by
+                # recording the aged value as the canonical one we expect unchanged.
+                started_at_before["value"] = step.started_at
+                await session.commit()
+        return outcome
+
+    monkeypatch.setattr(runner, "_finalize_locked", age_step_after_checkpoint)
+    outcome = await runner.run_claimed_execution(
+        execution_id=execution_id, worker_id=worker_id, lease_token=lease_token
+    )
+    assert outcome.terminal_status == StepStatus.SUCCEEDED.value
+    assert client.calls == 2
+    assert len(client.timeouts) == 2
+    first_ms, second_ms = client.timeouts
+    assert first_ms == 30_000
+    assert second_ms > 0
+    assert second_ms <= first_ms
+    assert second_ms < 30_000
+    # Remaining after ~10s of a 30s budget should be ~20s (allow small skew).
+    assert 15_000 <= second_ms <= 21_000
+    async with db_session_factory() as session:
+        step = (await ExecutionRepository(session).list_steps(execution_id))[0]
+        assert started_at_before["value"] is not None
+        assert step.started_at is not None
+        # Retry must not reset started_at (DB may strip tzinfo on round-trip).
+        assert abs(
+            (step.started_at.replace(tzinfo=UTC) - started_at_before["value"]).total_seconds()
+        ) < 0.001
