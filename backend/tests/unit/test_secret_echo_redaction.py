@@ -131,6 +131,68 @@ def test_redact_text_overlapping_prefers_longer() -> None:
     ) == REDACTION_MARKER
 
 
+def test_redact_text_marker_not_re_redacted_by_shorter_secret() -> None:
+    """A: longer secret → marker; shorter substring of marker must not nest."""
+    protected = collect_protected_plaintexts(
+        secret_argument_values=["TOKENACT", "ACT"]
+    )
+    assert redact_text("TOKENACT", protected) == REDACTION_MARKER
+
+
+def test_redact_text_marker_intact_when_secret_is_redacted_substring() -> None:
+    """B: secrets that are substrings of REDACTED must not corrupt the marker."""
+    for fragment in ("RED", "ACT", "ED"):
+        protected = collect_protected_plaintexts(
+            secret_argument_values=["TOKENACT", fragment]
+        )
+        assert redact_text("TOKENACT", protected) == REDACTION_MARKER
+        assert redact_text(REDACTION_MARKER, protected) == REDACTION_MARKER
+        assert REDACTION_MARKER in redact_text(f"x{REDACTION_MARKER}y", protected)
+
+
+def test_redact_text_multiple_overlapping_embedded_in_larger_string() -> None:
+    """C: overlapping secrets embedded in ordinary surrounding text."""
+    protected = collect_protected_plaintexts(
+        secret_argument_values=["TOKENACT", "TOKEN", "ACT"]
+    )
+    out = redact_text("pre:TOKENACT:mid:ACT:post", protected)
+    assert "TOKENACT" not in out
+    assert "TOKEN" not in out
+    assert out == f"pre:{REDACTION_MARKER}:mid:{REDACTION_MARKER}:post"
+
+
+def test_sanitize_dict_key_collision_preserves_all_entries() -> None:
+    """D: colliding sanitized keys keep every entry; no plaintext; deterministic.
+
+    Collision policy: insertion order; first key keeps the sanitized form;
+    later collisions append ``#N`` (N≥2) until unique — e.g. ``[REDACTED]``,
+    ``[REDACTED]#2``.
+    """
+    secret = "sk-collision-secret-zz9"
+    protected = collect_protected_plaintexts(secret_argument_values=[secret])
+    value = {
+        secret: "a",
+        REDACTION_MARKER: "b",
+        "plain": "c",
+    }
+    out = sanitize_for_persistence(value, protected)
+    blob = json.dumps(out, default=str)
+    assert secret not in blob
+    assert out["plain"] == "c"
+    assert set(out.values()) == {"a", "b", "c"}
+    assert REDACTION_MARKER in out
+    assert f"{REDACTION_MARKER}#2" in out
+    assert out[REDACTION_MARKER] in {"a", "b"}
+    assert out[f"{REDACTION_MARKER}#2"] in {"a", "b"}
+    assert out[REDACTION_MARKER] != out[f"{REDACTION_MARKER}#2"]
+    # Deterministic: secret key comes first → owns bare marker; literal second.
+    assert out[REDACTION_MARKER] == "a"
+    assert out[f"{REDACTION_MARKER}#2"] == "b"
+    # Non-colliding keys unchanged aside from redaction.
+    again = sanitize_for_persistence({"x": 1, "y": 2}, protected)
+    assert again == {"x": 1, "y": 2}
+
+
 def test_sanitize_noop_without_protected() -> None:
     original = {"a": "b"}
     assert sanitize_for_persistence(original, ()) is original
