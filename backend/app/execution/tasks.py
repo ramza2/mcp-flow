@@ -14,8 +14,12 @@ from app.core.errors import AppError
 from app.core.secret_crypto import load_master_key_from_settings
 from app.core.secrets import DatabaseSecretResolver
 from app.db.session import dispose_db, get_session_factory, init_db, session_scope
+from app.execution.approval_resume import ApprovalResumeClaimService
 from app.execution.claim import ExecutionClaimService
-from app.execution.queue import validate_execution_dispatch_event
+from app.execution.queue import (
+    validate_execution_approval_resume_event,
+    validate_execution_dispatch_event,
+)
 from app.execution.recovery import ExecutionRecoveryService
 from app.execution.tool_runner import McpToolRunner
 from app.infrastructure.celery_app import celery_app
@@ -323,5 +327,155 @@ def recover_execution_task(self: object, *, execution_id: str) -> None:
         retry = self.retry
         raise retry(
             exc=RuntimeError("transient database failure during execution recovery"),
+            countdown=countdown,
+        ) from exc
+
+
+async def _approval_resume_once(
+    *,
+    execution_id: uuid.UUID,
+    approval_request_id: uuid.UUID,
+    outbox_event_id: uuid.UUID,
+    worker_id: str,
+) -> None:
+    settings = get_settings()
+    init_db(settings)
+    try:
+        claimed = False
+        lease_token: uuid.UUID | None = None
+        async with session_scope() as session:
+            event = await OutboxRepository(session).get(outbox_event_id)
+            if event is None:
+                logger.warning(
+                    "discarding approval resume with missing outbox evidence"
+                    " execution_id=%s outbox_event_id=%s",
+                    execution_id,
+                    outbox_event_id,
+                )
+                return
+            try:
+                evidenced_execution_id, evidenced_approval_id = (
+                    validate_execution_approval_resume_event(event)
+                )
+            except AppError:
+                logger.error(
+                    "discarding approval resume with corrupt outbox evidence"
+                    " outbox_event_id=%s",
+                    outbox_event_id,
+                )
+                return
+            if (
+                evidenced_execution_id != execution_id
+                or evidenced_approval_id != approval_request_id
+            ):
+                logger.error(
+                    "discarding approval resume with mismatched outbox lineage"
+                    " outbox_event_id=%s",
+                    outbox_event_id,
+                )
+                return
+
+            service = ApprovalResumeClaimService(
+                session,
+                lease_seconds=settings.execution_lease_seconds,
+            )
+            outcome = await service.claim(
+                execution_id=execution_id,
+                approval_request_id=approval_request_id,
+                worker_id=worker_id,
+            )
+            await session.commit()
+            logger.info(
+                "approval resume claim handled execution_id=%s approval_request_id=%s"
+                " outbox_event_id=%s worker_id=%s claimed=%s reason=%s",
+                execution_id,
+                approval_request_id,
+                outbox_event_id,
+                worker_id,
+                outcome.claimed,
+                outcome.reason,
+            )
+            claimed = outcome.claimed
+            lease_token = outcome.lease_token
+
+        if claimed and lease_token is not None:
+            await _run_mcp_tool_step(
+                execution_id=execution_id,
+                worker_id=worker_id,
+                lease_token=lease_token,
+                settings=settings,
+            )
+    finally:
+        await dispose_db()
+
+
+@celery_app.task(
+    bind=True,
+    name="mcpflow.execution.approval_resume",
+    max_retries=None,
+)
+def approval_resume_task(
+    self: object,
+    *,
+    execution_id: str,
+    approval_request_id: str,
+    outbox_event_id: str,
+) -> None:
+    """Resume WAITING_APPROVAL after APPROVED; duplicate delivery is a DB no-op."""
+    try:
+        execution_uuid = uuid.UUID(execution_id)
+        approval_uuid = uuid.UUID(approval_request_id)
+        event_uuid = uuid.UUID(outbox_event_id)
+    except (TypeError, ValueError):
+        logger.warning("discarding malformed approval resume task payload")
+        return
+
+    request = getattr(self, "request", None)
+    worker_id = str(getattr(request, "hostname", "") or "").strip()
+    if not worker_id:
+        logger.warning(
+            "discarding approval resume without worker identity execution_id=%s"
+            " outbox_event_id=%s",
+            execution_uuid,
+            event_uuid,
+        )
+        return
+
+    try:
+        asyncio.run(
+            _approval_resume_once(
+                execution_id=execution_uuid,
+                approval_request_id=approval_uuid,
+                outbox_event_id=event_uuid,
+                worker_id=worker_id,
+            )
+        )
+    except AppError as exc:
+        logger.error(
+            "discarding approval resume due durable conflict execution_id=%s"
+            " outbox_event_id=%s code=%s",
+            execution_uuid,
+            event_uuid,
+            exc.code,
+        )
+        return
+    except DBAPIError as exc:
+        if not _is_retryable_database_error(exc):
+            raise
+        retry_count = int(getattr(request, "retries", 0) or 0)
+        countdown = min(
+            _CLAIM_DB_RETRY_BASE_SECONDS * (2**retry_count),
+            _CLAIM_DB_RETRY_MAX_SECONDS,
+        )
+        logger.warning(
+            "retrying approval resume after transient database failure"
+            " execution_id=%s outbox_event_id=%s retry=%s",
+            execution_uuid,
+            outbox_event_id,
+            retry_count + 1,
+        )
+        retry = self.retry
+        raise retry(
+            exc=RuntimeError("transient database failure during approval resume"),
             countdown=countdown,
         ) from exc

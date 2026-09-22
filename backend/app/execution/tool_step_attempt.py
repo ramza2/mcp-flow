@@ -15,6 +15,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.approval.evidence import find_valid_approved_evidence
 from app.approval.wait import ApprovalWaitOutcome, ApprovalWaitService
 from app.core.errors import AppError
 from app.domain.enums import (
@@ -142,7 +143,10 @@ class ToolStepAttemptService:
         ):
             await self._assert_confirmation_evidence(execution, authz.policy_snapshot)
 
-        # FNC-EXE-009 / FNC-APR-002: ToolPolicy approval waits before Attempt.
+        # FNC-EXE-009 / FNC-APR-002/004: ToolPolicy approval before Attempt.
+        # A) no approval history → create PENDING wait
+        # B) exact APPROVED evidence for current context → continue to Attempt
+        # C) historical APPROVED but context mismatch → fail closed (no new PENDING)
         if authz.tool_policy.requires_approval:
             if authz.approval_policy is None:
                 raise AppError(
@@ -150,14 +154,23 @@ class ToolStepAttemptService:
                     message="requires_approval인데 ApprovalPolicy 없음.",
                     status_code=409,
                 )
-            return await ApprovalWaitService(self._session).enter_for_tool_step(
+            evidence = await find_valid_approved_evidence(
+                self._session,
                 execution=execution,
                 step=step,
-                tool_config=tool_config,
                 tool_policy=authz.tool_policy,
                 approval_policy=authz.approval_policy,
-                now=ts,
             )
+            if evidence is None:
+                return await ApprovalWaitService(self._session).enter_for_tool_step(
+                    execution=execution,
+                    step=step,
+                    tool_config=tool_config,
+                    tool_policy=authz.tool_policy,
+                    approval_policy=authz.approval_policy,
+                    now=ts,
+                )
+            # Approval satisfied for exact current context — continue to Attempt.
 
         resolved_input = materialize_secret_safe_resolved_input(tool_config.bindings)
         next_attempt_no = step.attempt_count + 1

@@ -25,9 +25,21 @@ class FakePublisher:
     def __init__(self, *, fail: bool = False) -> None:
         self.fail = fail
         self.calls: list[tuple[object, object]] = []
+        self.resume_calls: list[tuple[object, object, object]] = []
 
     def publish_execution(self, *, execution_id: object, outbox_event_id: object) -> None:
         self.calls.append((execution_id, outbox_event_id))
+        if self.fail:
+            raise ConnectionError("redis unavailable")
+
+    def publish_approval_resume(
+        self,
+        *,
+        execution_id: object,
+        approval_request_id: object,
+        outbox_event_id: object,
+    ) -> None:
+        self.resume_calls.append((execution_id, approval_request_id, outbox_event_id))
         if self.fail:
             raise ConnectionError("redis unavailable")
 

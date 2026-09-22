@@ -695,11 +695,21 @@ Decision 값:
 APPROVE REJECT
 ```
 
-중복/만료/권한/context hash를 transaction에서 검증한다.
+한 actor는 ApprovalRequest당 한 번만 결정할 수 있다 (`UNIQUE(approval_request_id, decided_by)`).
+
+집계:
+
+- `ANY`: 첫 APPROVE → APPROVED, 첫 REJECT → REJECTED
+- `ALL`, required_approvals=N: 임의 REJECT → REJECTED; APPROVE 수 ≥ N → APPROVED; 아니면 PENDING
+- `QUORUM`, required_approvals=N: APPROVE 수 ≥ N → APPROVED; REJECT 수 ≥ N → REJECTED; 아니면 PENDING
+
+권한은 매 decision마다 현재 DB 상태로 검증한다: User ACTIVE, `approval.decide`, approver_scope(`null`/`{}`/`{"role_codes":[...]}`만), self-approval 규칙, PENDING·미만료, exact context_hash. `ApprovalDecision.context_hash`는 서버 파생이다.
+
+최종 APPROVE는 동일 TX에서 `EXECUTION_APPROVAL_RESUME` Outbox를 만들고 Execution/Step은 `WAITING_APPROVAL`을 유지한다(API가 RUNNING으로 올리지 않는다). REJECT/EXPIRED는 Step+Execution을 `FAILED`(`APPROVAL_REJECTED`/`APPROVAL_EXPIRED`)로 종료하며 Execution `REJECTED`/`EXPIRED`를 만들지 않는다. 만료 sweep은 outbox iteration의 bounded `expire_due_batch`다.
 
 ## FNC-APR-004. 실행 재개
 
-승인된 경우 후속 Tool 직전 최신 Permission과 context hash를 확인하고 동일 Execution을 재개한다.
+승인된 경우 동일 Execution을 새 lease로 재개한다(새 Execution 금지). resume claim은 APPROVED 증거·context hash·mutable authz를 검증한 뒤 `WAITING_APPROVAL → RUNNING` + Step `READY`로 전환하고 기존 McpToolRunner를 호출한다. Attempt 시작 전 gate와 B2 final pre-send gate에서 exact APPROVED evidence를 다시 확인한다. approval은 mutable authorization bypass가 아니며, context drift 시 이전 승인은 무효다. 동일 context의 safe retry는 추가 인간 승인 없이 같은 APPROVED evidence로 진행할 수 있다.
 
 ---
 

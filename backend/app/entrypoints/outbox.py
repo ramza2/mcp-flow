@@ -7,6 +7,7 @@ import logging
 import signal
 from dataclasses import dataclass
 
+from app.approval.expiry import ApprovalExpiryService
 from app.core.config import Settings, get_settings
 from app.db.session import dispose_db, init_db, session_scope
 from app.execution.queue import ExecutionQueueService, OutboxRelayService
@@ -25,6 +26,8 @@ class OutboxIterationResult:
     recovery_selected: int
     recovery_published: int
     recovery_failed: int
+    approval_expiry_selected: int
+    approval_expiry_expired: int
 
 
 async def run_iteration(*, settings: Settings | None = None) -> OutboxIterationResult:
@@ -34,6 +37,16 @@ async def run_iteration(*, settings: Settings | None = None) -> OutboxIterationR
         stager = ExecutionQueueService(session)
         staged = await stager.stage_created_batch(limit=cfg.outbox_batch_size)
         await session.commit()
+
+    approval_expiry_selected = 0
+    approval_expiry_expired = 0
+    async with session_scope() as session:
+        expiry = await ApprovalExpiryService(session).expire_due_batch(
+            limit=cfg.outbox_batch_size
+        )
+        await session.commit()
+        approval_expiry_selected = expiry.selected
+        approval_expiry_expired = expiry.expired
 
     publisher = CeleryExecutionQueuePublisher()
     async with session_scope() as session:
@@ -72,6 +85,8 @@ async def run_iteration(*, settings: Settings | None = None) -> OutboxIterationR
         recovery_selected=recovery_selected,
         recovery_published=recovery_published,
         recovery_failed=recovery_failed,
+        approval_expiry_selected=approval_expiry_selected,
+        approval_expiry_expired=approval_expiry_expired,
     )
 
 
@@ -94,11 +109,19 @@ async def _run() -> None:
             # of retrying corrupted durable state forever.
             # Expired RUNNING recovery candidates remain durable in PostgreSQL; a
             # failed recovery publish is rediscovered on the next poll.
+            # Expired PENDING ApprovalRequests are terminalized by expire_due_batch
+            # in the same iteration (no separate scheduler).
             result = await run_iteration(settings=settings)
-            if result.staged or result.selected or result.recovery_selected:
+            if (
+                result.staged
+                or result.selected
+                or result.recovery_selected
+                or result.approval_expiry_selected
+            ):
                 logger.info(
                     "outbox iteration staged=%s selected=%s published=%s failed=%s"
-                    " recovery_selected=%s recovery_published=%s recovery_failed=%s",
+                    " recovery_selected=%s recovery_published=%s recovery_failed=%s"
+                    " approval_expiry_selected=%s approval_expiry_expired=%s",
                     result.staged,
                     result.selected,
                     result.published,
@@ -106,6 +129,8 @@ async def _run() -> None:
                     result.recovery_selected,
                     result.recovery_published,
                     result.recovery_failed,
+                    result.approval_expiry_selected,
+                    result.approval_expiry_expired,
                 )
             try:
                 await asyncio.wait_for(

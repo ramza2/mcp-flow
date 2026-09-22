@@ -803,7 +803,17 @@ Decision:
 }
 ```
 
-승인 거절/만료를 Execution status `REJECTED/EXPIRED`로 반환하지 않는다. Execution 완료상태는 Plan completion policy에 따라 별도로 결정된다.
+`POST /approvals/{approval_id}/decisions` (현재 구현):
+
+- Session + CSRF + `CurrentPrincipalDep`
+- body: `decision` (`APPROVE`|`REJECT`), optional `comment` (client는 `context_hash`를 제출하지 않음)
+- 201 only when a decision row is persisted
+- response (safe subset): `decision_id`, `approval_request_id`, `approval_status`, `execution_id`, `step_execution_id`, `execution_status`, `step_status`, `decision`, `decided_by`, `decided_at`, `resume_enqueued`
+- APPROVED → `resume_enqueued=true`이며 Execution/Step은 `WAITING_APPROVAL` 유지(API가 RUNNING으로 올리지 않음)
+- 권한/scope/self/comment/expiry/context 실패 → 403/409/422, decision row 없음
+- 동일 actor 재투표 → 409 `RESOURCE_CONFLICT`
+
+승인 거절/만료를 Execution status `REJECTED/EXPIRED`로 반환하지 않는다. ToolPolicy foundation에서 REJECT/EXPIRED는 Execution/Step `FAILED`로 종료한다.
 
 ---
 

@@ -1074,9 +1074,15 @@ context_hash
 decided_at
 ```
 
-Decision persistence foundation만 존재한다. ANY/ALL/QUORUM aggregation, approve/reject API, resume은 후속 범위다.
+Decision persistence:
 
-승인 결과는 Execution 전체 상태로 `REJECTED`/`EXPIRED`를 생성하지 않는다. 해당 Approval Step의 오류정책과 required 여부에 따라 Execution은 `FAILED`, `PARTIALLY_SUCCEEDED`, `CANCELLED` 등으로 판정한다.
+- `UNIQUE(approval_request_id, decided_by)` — one actor one vote
+- `ApprovalDecision.context_hash`는 서버 파생(요청 body에 없음)
+- ANY/ALL/QUORUM aggregation은 snapshotted request fields를 사용한다(나중 Policy 변경 대체 금지)
+- APPROVED 시 `EXECUTION_APPROVAL_RESUME` Outbox(`execution:{id}:approval:{request_id}:resume`)를 동일 TX에 기록한다
+- PENDING expiry partial index(`expires_at WHERE status='PENDING'`)는 bounded sweep용이다
+
+승인 결과는 Execution 전체 상태로 `REJECTED`/`EXPIRED`를 생성하지 않는다. ToolPolicy pre-Attempt foundation에서 REJECT/EXPIRED는 Step+Execution `FAILED`(`APPROVAL_REJECTED`/`APPROVAL_EXPIRED`)로 종료한다.
 
 ---
 
@@ -1422,6 +1428,18 @@ aggregate_id   = execution.id
 dedupe_key     = execution:{execution_id}:initial
 payload        = {"execution_id": "..."}
 ```
+
+Approval resume (FNC-APR-004):
+
+```text
+event_type     = EXECUTION_APPROVAL_RESUME
+aggregate_type = EXECUTION
+aggregate_id   = execution.id
+dedupe_key     = execution:{execution_id}:approval:{approval_request_id}:resume
+payload        = {"execution_id": "...", "approval_request_id": "..."}
+```
+
+Outbox relay supports exactly `EXECUTION_DISPATCH` and `EXECUTION_APPROVAL_RESUME` (unknown/corrupt fail closed).
 
 `published_at IS NULL`이면 미발행/재시도 대상이며 별도 Outbox status enum을 만들지 않는다. broker publish 성공 후 DB mark 전에 process가 종료될 수 있으므로 같은 event가 재전달될 수 있다. Consumer는 `outbox_event_id` lineage를 확인하고 DB Execution claim으로 중복을 제거한다.
 

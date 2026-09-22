@@ -1,4 +1,4 @@
-"""ApprovalRequest repository — persistence foundation for FNC-APR-002."""
+"""ApprovalRequest repository — persistence for FNC-APR-002/003/004."""
 
 from __future__ import annotations
 
@@ -22,6 +22,15 @@ class ApprovalRequestRepository:
         result = await self._session.execute(stmt)
         return result.scalar_one_or_none()
 
+    async def lock_for_update(self, request_id: uuid.UUID) -> ApprovalRequest | None:
+        stmt = (
+            select(ApprovalRequest)
+            .where(ApprovalRequest.id == request_id)
+            .with_for_update()
+        )
+        result = await self._session.execute(stmt)
+        return result.scalar_one_or_none()
+
     async def find_pending_for_step(
         self, *, execution_id: uuid.UUID, step_execution_id: uuid.UUID
     ) -> ApprovalRequest | None:
@@ -32,6 +41,35 @@ class ApprovalRequestRepository:
         )
         result = await self._session.execute(stmt)
         return result.scalar_one_or_none()
+
+    async def find_approved_for_step(
+        self, *, execution_id: uuid.UUID, step_execution_id: uuid.UUID
+    ) -> list[ApprovalRequest]:
+        stmt = (
+            select(ApprovalRequest)
+            .where(
+                ApprovalRequest.execution_id == execution_id,
+                ApprovalRequest.step_execution_id == step_execution_id,
+                ApprovalRequest.status == ApprovalStatus.APPROVED.value,
+            )
+            .order_by(ApprovalRequest.resolved_at.desc(), ApprovalRequest.id.desc())
+        )
+        return list((await self._session.execute(stmt)).scalars().all())
+
+    async def list_expired_pending_ids(
+        self, *, now: datetime, limit: int
+    ) -> list[uuid.UUID]:
+        """Candidate ids only — callers lock Execution → Step → Request in order."""
+        stmt = (
+            select(ApprovalRequest.id)
+            .where(
+                ApprovalRequest.status == ApprovalStatus.PENDING.value,
+                ApprovalRequest.expires_at <= now,
+            )
+            .order_by(ApprovalRequest.expires_at.asc(), ApprovalRequest.id.asc())
+            .limit(limit)
+        )
+        return list((await self._session.execute(stmt)).scalars().all())
 
     async def create_pending(
         self,

@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.errors import AppError
 from app.domain.enums import ExecutionSourceType, ExecutionStatus
 from app.models.execution import Execution
+from app.models.outbox import OutboxEvent
 from app.repositories.outbox import OutboxRepository
 
 _MAX_BATCH_SIZE = 500
@@ -23,6 +24,14 @@ class ExecutionQueuePublisher(Protocol):
         self,
         *,
         execution_id: uuid.UUID,
+        outbox_event_id: uuid.UUID,
+    ) -> None: ...
+
+    def publish_approval_resume(
+        self,
+        *,
+        execution_id: uuid.UUID,
+        approval_request_id: uuid.UUID,
         outbox_event_id: uuid.UUID,
     ) -> None: ...
 
@@ -79,6 +88,46 @@ def validate_execution_dispatch_event(row: object) -> uuid.UUID:
             status_code=409,
         )
     return execution_id
+
+
+def validate_execution_approval_resume_event(
+    row: object,
+) -> tuple[uuid.UUID, uuid.UUID]:
+    """Validate ID-only approval-resume Outbox evidence."""
+    payload = getattr(row, "payload", None)
+    if not isinstance(payload, dict) or set(payload) != {
+        "execution_id",
+        "approval_request_id",
+    }:
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message="Approval resume Outbox payload is corrupted.",
+            status_code=409,
+        )
+    try:
+        execution_id = uuid.UUID(str(payload["execution_id"]))
+        approval_request_id = uuid.UUID(str(payload["approval_request_id"]))
+    except (TypeError, ValueError) as exc:
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message="Approval resume Outbox payload is corrupted.",
+            status_code=409,
+        ) from exc
+    expected_dedupe = (
+        f"execution:{execution_id}:approval:{approval_request_id}:resume"
+    )
+    if (
+        getattr(row, "event_type", None) != "EXECUTION_APPROVAL_RESUME"
+        or getattr(row, "aggregate_type", None) != "EXECUTION"
+        or execution_id != getattr(row, "aggregate_id", None)
+        or getattr(row, "dedupe_key", None) != expected_dedupe
+    ):
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message="Approval resume Outbox lineage is corrupted.",
+            status_code=409,
+        )
+    return execution_id, approval_request_id
 
 
 class ExecutionQueueService:
@@ -158,26 +207,50 @@ class OutboxRelayService:
         published = 0
         failed = 0
         for row in rows:
-            execution_id = validate_execution_dispatch_event(row)
             try:
-                publisher.publish_execution(
-                    execution_id=execution_id,
-                    outbox_event_id=row.id,
-                )
+                await self._publish_one(row, publisher=publisher, now=now)
+                published += 1
+            except AppError:
+                # Corrupt / unknown event types fail closed — do not mark published.
+                raise
             except Exception:
-                # Broker/network failures are retryable delivery failures. Do not
-                # persist exception strings because broker URLs may contain secrets.
                 attempt_at = now or datetime.now(UTC)
                 await self._outbox.record_publish_failure(row, now=attempt_at)
                 failed += 1
-            else:
-                # Capture the timestamp after publish returns so a slow or retried
-                # broker connection cannot backdate published_at to the attempt start.
-                attempt_at = now or datetime.now(UTC)
-                await self._outbox.mark_published(row, now=attempt_at)
-                published += 1
         return PublishBatchResult(
             selected=len(rows),
             published=published,
             failed=failed,
         )
+
+    async def _publish_one(
+        self,
+        row: OutboxEvent,
+        *,
+        publisher: ExecutionQueuePublisher,
+        now: datetime | None,
+    ) -> None:
+        event_type = getattr(row, "event_type", None)
+        if event_type == "EXECUTION_DISPATCH":
+            execution_id = validate_execution_dispatch_event(row)
+            publisher.publish_execution(
+                execution_id=execution_id,
+                outbox_event_id=row.id,
+            )
+        elif event_type == "EXECUTION_APPROVAL_RESUME":
+            execution_id, approval_request_id = (
+                validate_execution_approval_resume_event(row)
+            )
+            publisher.publish_approval_resume(
+                execution_id=execution_id,
+                approval_request_id=approval_request_id,
+                outbox_event_id=row.id,
+            )
+        else:
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message=f"Unsupported Outbox event_type {event_type!r}.",
+                status_code=409,
+            )
+        attempt_at = now or datetime.now(UTC)
+        await self._outbox.mark_published(row, now=attempt_at)
