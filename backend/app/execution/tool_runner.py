@@ -27,6 +27,12 @@ Never Celery-retries MCP failures. Never auto-retries ``UNKNOWN_OUTCOME``.
 Execution never receives ``UNKNOWN_OUTCOME`` (not a canonical Execution
 status) — ambiguous outcomes surface as Execution ``FAILED`` with an
 explanatory ``error_message``.
+
+Bounded safe retry (FNC-EXE-006): for READ_ONLY + retryable MCPClientError,
+Phase C may checkpoint (terminal Attempt/ToolCall + Step READY + Execution
+RUNNING) and loop into a new Attempt/ToolCall via the same prepare → final
+pre-send → call path. max_attempts counts total Attempts. Step timeout is
+total across Attempts from Step.started_at.
 """
 
 from __future__ import annotations
@@ -61,6 +67,14 @@ from app.domain.enums import (
 from app.execution.claim import ExecutionClaimService, _as_utc, _normalize_worker_id
 from app.execution.lineage import assert_resume_attempt_lineage
 from app.execution.result_validator import validate_tool_result
+from app.execution.retry_decision import (
+    decide_safe_transient_retry,
+    pinned_backoff_policy,
+    pinned_max_attempts,
+    pinned_risk_class,
+    remaining_step_timeout_ms,
+    step_timeout_budget_exhausted,
+)
 from app.execution.runtime_preflight import (
     assert_answered_plan_confirmation,
     assert_current_tool_executable,
@@ -85,6 +99,7 @@ from app.repositories.plan_validation import PlanValidationRepository
 
 logger = logging.getLogger(__name__)
 
+_REASON_SAFE_RETRY_READY = "SAFE_RETRY_READY"
 _SAFE_RISK_CLASSES = frozenset({RiskClass.READ_ONLY.value, RiskClass.IDEMPOTENT_WRITE.value})
 _STEP_TERMINAL_STATUSES = frozenset(
     {
@@ -148,6 +163,7 @@ class _PreparedCall:
     endpoint: str
     tool_name: str
     timeout_ms: int
+    policy_timeout_ms: int
     resolved_input: dict[str, Any]
     auth_type: str
     auth_secret_id: uuid.UUID | None
@@ -301,64 +317,70 @@ class McpToolRunner:
         worker_id: str,
         lease_token: uuid.UUID,
     ) -> ToolRunOutcome:
-        prep = await self._prepare(
-            execution_id=execution_id, worker_id=worker_id, lease_token=lease_token
-        )
-        if prep.prepared is None:
-            assert prep.outcome is not None
-            return prep.outcome
-
-        prepared = prep.prepared
-        protected: tuple[str, ...] = ()
-        try:
-            auth_headers, arguments, protected = await self._resolve_secrets(prepared)
-        except AppError as exc:
-            call_error = _PreSendFailClosed(error_code=exc.code, message=exc.message)
-            return await self._finalize_locked(
-                prepared,
-                call_error=call_error,
-                result=None,
-                response_meta=None,
-                first_byte_at=None,
-                protected=(),
+        while True:
+            prep = await self._prepare(
+                execution_id=execution_id, worker_id=worker_id, lease_token=lease_token
             )
+            if prep.prepared is None:
+                assert prep.outcome is not None
+                return prep.outcome
 
-        try:
-            # Deterministic TOCTOU test seam (production no-op): mutate mutable
-            # authorization/policy after Phase A and secret materialize, before the
-            # final pre-send gate.
-            await self._after_phase_a_before_final_gate(prepared)
-
-            gate = await self._final_pre_send_gate(prepared)
-            if isinstance(gate, ToolRunOutcome):
-                # Lease lost (NO_OP) or fail-closed terminalization already committed in
-                # the final gate transaction — never overwrite a new owner's state.
-                return gate
-            if isinstance(gate, _PreSendFailClosed):
+            prepared = prep.prepared
+            protected: tuple[str, ...] = ()
+            try:
+                auth_headers, arguments, protected = await self._resolve_secrets(
+                    prepared
+                )
+            except AppError as exc:
+                call_error = _PreSendFailClosed(error_code=exc.code, message=exc.message)
                 return await self._finalize_locked(
                     prepared,
-                    call_error=gate,
+                    call_error=call_error,
                     result=None,
                     response_meta=None,
                     first_byte_at=None,
-                    protected=protected,
+                    protected=(),
                 )
 
-            result, response_meta, first_byte_at, call_error = await self._call_remote(
-                prepared, auth_headers, arguments
-            )
-            return await self._finalize_locked(
-                prepared,
-                call_error=call_error,
-                result=result,
-                response_meta=response_meta,
-                first_byte_at=first_byte_at,
-                protected=protected,
-            )
-        finally:
-            auth_headers.clear()
-            arguments.clear()
-            protected = ()
+            try:
+                # Deterministic TOCTOU test seam (production no-op): mutate mutable
+                # authorization/policy after Phase A and secret materialize, before the
+                # final pre-send gate.
+                await self._after_phase_a_before_final_gate(prepared)
+
+                gate = await self._final_pre_send_gate(prepared)
+                if isinstance(gate, ToolRunOutcome):
+                    # Lease lost (NO_OP) or fail-closed terminalization already committed
+                    # in the final gate transaction — never overwrite a new owner's state.
+                    return gate
+                if isinstance(gate, _PreSendFailClosed):
+                    return await self._finalize_locked(
+                        prepared,
+                        call_error=gate,
+                        result=None,
+                        response_meta=None,
+                        first_byte_at=None,
+                        protected=protected,
+                    )
+
+                result, response_meta, first_byte_at, call_error = await self._call_remote(
+                    prepared, auth_headers, arguments
+                )
+                outcome = await self._finalize_locked(
+                    prepared,
+                    call_error=call_error,
+                    result=result,
+                    response_meta=response_meta,
+                    first_byte_at=first_byte_at,
+                    protected=protected,
+                )
+                if outcome.reason == _REASON_SAFE_RETRY_READY:
+                    continue
+                return outcome
+            finally:
+                auth_headers.clear()
+                arguments.clear()
+                protected = ()
 
     async def _after_phase_a_before_final_gate(self, prepared: _PreparedCall) -> None:
         """Production no-op. Integration tests monkeypatch this to mutate DB state."""
@@ -538,7 +560,7 @@ class McpToolRunner:
                     or server.auth_type != prepared.auth_type
                     or server.auth_secret_id != prepared.auth_secret_id
                     or tool_policy.risk_class != prepared.risk_class
-                    or tool_policy.timeout_ms != prepared.timeout_ms
+                    or tool_policy.timeout_ms != prepared.policy_timeout_ms
                     or tool_policy.max_result_bytes != prepared.max_result_bytes
                 ):
                     return _PreSendFailClosed(
@@ -622,6 +644,41 @@ class McpToolRunner:
                         code="RESOURCE_CONFLICT",
                         message=f"Step status {step.status} unsupported by MCP Tool Runner.",
                         status_code=409,
+                    )
+
+                # Total Step timeout budget spans Attempts; do not start another
+                # Attempt/ToolCall when the budget is already exhausted.
+                if step.status == StepStatus.READY.value and step_timeout_budget_exhausted(
+                    step_started_at=step.started_at,
+                    timeout_seconds=_plan_timeout_seconds(step),
+                    now=now,
+                ):
+                    step.status = StepStatus.TIMED_OUT.value
+                    step.error_code = "STEP_TIMEOUT_EXCEEDED"
+                    step.error_message = (
+                        "Step total timeout budget exhausted before another Attempt."
+                    )
+                    step.finished_at = now
+                    step.lock_version += 1
+                    execution.status = ExecutionStatus.TIMED_OUT.value
+                    execution.error_code = "STEP_TIMEOUT_EXCEEDED"
+                    execution.error_message = step.error_message
+                    execution.finished_at = now
+                    execution.worker_id = None
+                    execution.lease_token = None
+                    execution.lease_expires_at = None
+                    execution.heartbeat_at = None
+                    execution.lock_version += 1
+                    return _PrepareResult(
+                        outcome=ToolRunOutcome(
+                            execution_id=execution.id,
+                            step_execution_id=step.id,
+                            attempt_id=None,
+                            tool_call_id=None,
+                            mcp_called=False,
+                            terminal_status=StepStatus.TIMED_OUT.value,
+                            reason="STEP_TIMEOUT_EXCEEDED",
+                        )
                     )
 
                 try:
@@ -824,10 +881,25 @@ class McpToolRunner:
                     )
 
                 remote_request_id = str(uuid.uuid4())
+                call_timeout_ms = remaining_step_timeout_ms(
+                    step_started_at=step.started_at,
+                    timeout_seconds=_plan_timeout_seconds(step),
+                    policy_timeout_ms=tool_policy.timeout_ms,
+                    now=now,
+                )
+                if call_timeout_ms < 1:
+                    if pre_send_failure is None:
+                        pre_send_failure = _PreSendFailClosed(
+                            error_code="STEP_TIMEOUT_EXCEEDED",
+                            message=(
+                                "Step total timeout budget exhausted before tools/call."
+                            ),
+                        )
+                    call_timeout_ms = 1
                 request_meta = {
                     "method": "tools/call",
                     "tool_name": logical_tool.remote_name,
-                    "timeout_ms": tool_policy.timeout_ms,
+                    "timeout_ms": call_timeout_ms,
                     "auth_type": server.auth_type,
                     "content_type": "application/json",
                 }
@@ -881,7 +953,8 @@ class McpToolRunner:
                     mcp_tool_version_id=tool_version.id,
                     endpoint=str(server.endpoint_url),
                     tool_name=logical_tool.remote_name,
-                    timeout_ms=tool_policy.timeout_ms,
+                    timeout_ms=call_timeout_ms,
+                    policy_timeout_ms=tool_policy.timeout_ms,
                     resolved_input=dict(step.resolved_input or {}),
                     auth_type=server.auth_type,
                     auth_secret_id=server.auth_secret_id,
@@ -1060,6 +1133,52 @@ class McpToolRunner:
                         status_code=409,
                     )
 
+                risk_for_classify = (
+                    pinned_risk_class(execution.policy_snapshot) or prepared.risk_class
+                )
+                classified = (
+                    _classify_mcp_failure(call_error, risk_class=risk_for_classify)
+                    if call_error is not None
+                    else StepStatus.FAILED.value
+                )
+
+                max_attempts = pinned_max_attempts(execution.policy_snapshot) or 1
+                retry = decide_safe_transient_retry(
+                    call_error=None
+                    if call_error is None or isinstance(call_error, _PreSendFailClosed)
+                    else call_error,
+                    classified_terminal=classified,
+                    risk_class=risk_for_classify,
+                    attempt_count=step.attempt_count,
+                    max_attempts=max_attempts,
+                    backoff_policy=pinned_backoff_policy(execution.policy_snapshot),
+                    step_started_at=step.started_at,
+                    timeout_seconds=_plan_timeout_seconds(step),
+                    now=now,
+                )
+
+                if retry.schedule_retry:
+                    attempt_terminal = _apply_retry_checkpoint(
+                        step=step,
+                        attempt=attempt,
+                        tool_call=tool_call,
+                        call_error=call_error,
+                        response_meta=response_meta,
+                        first_byte_at=first_byte_at,
+                        risk_class=risk_for_classify,
+                        now=now,
+                        protected=protected,
+                    )
+                    return ToolRunOutcome(
+                        execution_id=execution.id,
+                        step_execution_id=step.id,
+                        attempt_id=attempt.id,
+                        tool_call_id=tool_call.id,
+                        mcp_called=True,
+                        terminal_status=attempt_terminal,
+                        reason=_REASON_SAFE_RETRY_READY,
+                    )
+
                 terminal = _apply_terminal_transition(
                     execution=execution,
                     step=step,
@@ -1069,7 +1188,7 @@ class McpToolRunner:
                     result=result,
                     response_meta=response_meta,
                     first_byte_at=first_byte_at,
-                    risk_class=prepared.risk_class,
+                    risk_class=risk_for_classify,
                     output_schema=prepared.output_schema,
                     result_inline_max_bytes=self._result_inline_max_bytes,
                     now=now,
@@ -1085,6 +1204,53 @@ class McpToolRunner:
                     terminal_status=terminal,
                     reason="COMPLETED",
                 )
+
+
+def _apply_retry_checkpoint(
+    *,
+    step: ExecutionStep,
+    attempt: StepAttempt,
+    tool_call: ToolCall,
+    call_error: MCPClientError | None,
+    response_meta: dict[str, Any] | None,
+    first_byte_at: datetime | None,
+    risk_class: str,
+    now: datetime,
+    protected: tuple[str, ...] = (),
+) -> str:
+    """Terminalize the current Attempt/ToolCall and return Step to READY.
+
+    Compatible with Recovery SAFE_RETRY crash-gap checkpoint: historical
+    terminal Attempt + READY Step + RUNNING Execution (lease unchanged).
+    """
+    assert call_error is not None
+    terminal = _classify_mcp_failure(call_error, risk_class=risk_class)
+    persist_meta = sanitize_for_persistence(response_meta, protected)
+    error_message = redact_text(call_error.message, protected)
+
+    tool_call.normalized_status = terminal
+    tool_call.response_meta = persist_meta
+    tool_call.response_bytes = None
+    tool_call.first_byte_at = first_byte_at
+    tool_call.finished_at = now
+
+    attempt.status = terminal
+    attempt.error_layer = call_error.error_layer
+    attempt.error_code = call_error.error_code
+    attempt.error_message = error_message
+    attempt.is_retryable = True
+    attempt.result_inline = None
+    attempt.finished_at = now
+
+    # Clear only fields that would make READY look terminal; keep started_at /
+    # attempt_count / ready_at history.
+    step.status = StepStatus.READY.value
+    step.error_code = None
+    step.error_message = None
+    step.result_inline = None
+    step.finished_at = None
+    step.lock_version += 1
+    return terminal
 
 
 def _apply_terminal_transition(

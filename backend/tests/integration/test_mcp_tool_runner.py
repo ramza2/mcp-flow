@@ -93,12 +93,15 @@ async def _seed_ready_with_risk_class(
     session_factory: async_sessionmaker[AsyncSession],
     *,
     risk_class: str,
+    max_attempts: int | None = None,
 ) -> dict[str, Any]:
     async with session_factory() as session:
         seeded = await _seed_validating_pg(session)
         policy = await MCPToolPolicyRepository(session).get_by_tool_id(seeded["tool_id"])
         assert policy is not None
         policy.risk_class = risk_class
+        if max_attempts is not None:
+            policy.max_attempts = max_attempts
         await session.commit()
         outcome = await PlanValidatorService(session).validate(
             agent_request_id=seeded["request_id"]
@@ -1294,3 +1297,250 @@ async def test_pg_schema_validation_before_redaction(
     structured = inline.get("structured_content") or {}
     assert structured.get("status") == "ok"
     assert structured.get("token") == "[REDACTED]"
+
+
+# ---------------------------------------------------------------------------
+# Bounded safe transient retry (FNC-EXE-006)
+# ---------------------------------------------------------------------------
+
+
+class _PgFailThenSucceedClient:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def call_tool(self, endpoint: str, **kwargs: Any):
+        self.calls += 1
+        if self.calls == 1:
+            raise MCPClientError(
+                error_layer="NETWORK",
+                error_code="MCP_NETWORK_ERROR",
+                message="Failed to connect to MCP server.",
+                retryable=True,
+                outcome_unknown=False,
+            )
+        result = NormalizedToolResult(
+            protocol_success=True,
+            tool_error=False,
+            content=[{"type": "text", "text": "ok"}],
+            raw_size_bytes=4,
+            duration_ms=1,
+        )
+        return result, {"http_status": 200}, datetime.now(UTC)
+
+
+class _PgAlwaysFailClient:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def call_tool(self, endpoint: str, **kwargs: Any):
+        self.calls += 1
+        raise MCPClientError(
+            error_layer="NETWORK",
+            error_code="MCP_NETWORK_ERROR",
+            message="Failed to connect to MCP server.",
+            retryable=True,
+            outcome_unknown=False,
+        )
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_pg_read_only_transient_then_success(
+    integration_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    seeded = await _seed_ready_with_risk_class(
+        integration_session_factory,
+        risk_class=RiskClass.READ_ONLY.value,
+        max_attempts=2,
+    )
+    execution_id, worker_id, lease_token = await _claim_ready_execution(
+        integration_session_factory, seeded=seeded
+    )
+    client = _PgFailThenSucceedClient()
+    runner = McpToolRunner(
+        session_factory=integration_session_factory,
+        mcp_client=client,
+        secret_resolver_factory=_unimplemented_resolver_factory,
+        lease_seconds=60,
+        result_inline_max_bytes=256_000,
+    )
+    outcome = await runner.run_claimed_execution(
+        execution_id=execution_id, worker_id=worker_id, lease_token=lease_token
+    )
+    assert client.calls == 2
+    assert outcome.terminal_status == StepStatus.SUCCEEDED.value
+    async with integration_session_factory() as session:
+        step = (await ExecutionRepository(session).list_steps(execution_id))[0]
+        assert step.attempt_count == 2
+        attempts = await ExecutionRepository(session).list_attempts(step.id)
+        assert len(attempts) == 2
+        assert attempts[0].is_retryable is True
+        assert attempts[1].status == StepAttemptStatus.SUCCEEDED.value
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_pg_read_only_retry_exhaustion(
+    integration_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    seeded = await _seed_ready_with_risk_class(
+        integration_session_factory,
+        risk_class=RiskClass.READ_ONLY.value,
+        max_attempts=2,
+    )
+    execution_id, worker_id, lease_token = await _claim_ready_execution(
+        integration_session_factory, seeded=seeded
+    )
+    client = _PgAlwaysFailClient()
+    runner = McpToolRunner(
+        session_factory=integration_session_factory,
+        mcp_client=client,
+        secret_resolver_factory=_unimplemented_resolver_factory,
+        lease_seconds=60,
+        result_inline_max_bytes=256_000,
+    )
+    outcome = await runner.run_claimed_execution(
+        execution_id=execution_id, worker_id=worker_id, lease_token=lease_token
+    )
+    assert client.calls == 2
+    assert outcome.terminal_status == StepStatus.FAILED.value
+    async with integration_session_factory() as session:
+        step = (await ExecutionRepository(session).list_steps(execution_id))[0]
+        assert step.attempt_count == 2
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_pg_unsafe_transient_no_retry(
+    integration_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    seeded = await _seed_ready_with_risk_class(
+        integration_session_factory,
+        risk_class=RiskClass.NON_IDEMPOTENT_WRITE.value,
+        max_attempts=3,
+    )
+    execution_id, worker_id, lease_token = await _claim_ready_execution(
+        integration_session_factory, seeded=seeded
+    )
+    client = _PgAlwaysFailClient()
+    runner = McpToolRunner(
+        session_factory=integration_session_factory,
+        mcp_client=client,
+        secret_resolver_factory=_unimplemented_resolver_factory,
+        lease_seconds=60,
+        result_inline_max_bytes=256_000,
+    )
+    outcome = await runner.run_claimed_execution(
+        execution_id=execution_id, worker_id=worker_id, lease_token=lease_token
+    )
+    assert client.calls == 1
+    assert outcome.terminal_status == StepStatus.FAILED.value
+    async with integration_session_factory() as session:
+        step = (await ExecutionRepository(session).list_steps(execution_id))[0]
+        assert step.attempt_count == 1
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_pg_retry_checkpoint_recovery_continues(
+    integration_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Attempt 1 terminal + Step READY + RUNNING → Recovery TAKEOVER → Attempt 2."""
+    from app.execution.recovery import ExecutionRecoveryService, RecoveryDecision
+
+    seeded = await _seed_ready_with_risk_class(
+        integration_session_factory,
+        risk_class=RiskClass.READ_ONLY.value,
+        max_attempts=2,
+    )
+    execution_id, worker_id, lease_token = await _claim_ready_execution(
+        integration_session_factory, seeded=seeded
+    )
+
+    class _FailOnceStop:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def call_tool(self, *args: Any, **kwargs: Any):
+            self.calls += 1
+            raise MCPClientError(
+                error_layer="NETWORK",
+                error_code="MCP_NETWORK_ERROR",
+                message="connect failed",
+                retryable=True,
+                outcome_unknown=False,
+            )
+
+    fail_client = _FailOnceStop()
+    runner = McpToolRunner(
+        session_factory=integration_session_factory,
+        mcp_client=fail_client,
+        secret_resolver_factory=_unimplemented_resolver_factory,
+        lease_seconds=60,
+        result_inline_max_bytes=256_000,
+    )
+
+    original_finalize = runner._finalize_locked
+
+    async def finalize_stop_after_checkpoint(*args: Any, **kwargs: Any):
+        outcome = await original_finalize(*args, **kwargs)
+        if outcome.reason == "SAFE_RETRY_READY":
+            raise RuntimeError("simulated-worker-crash-after-retry-checkpoint")
+        return outcome
+
+    runner._finalize_locked = finalize_stop_after_checkpoint  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError, match="simulated-worker-crash"):
+        await runner.run_claimed_execution(
+            execution_id=execution_id, worker_id=worker_id, lease_token=lease_token
+        )
+    assert fail_client.calls == 1
+
+    async with integration_session_factory() as session:
+        step = (await ExecutionRepository(session).list_steps(execution_id))[0]
+        assert step.status == StepStatus.READY.value
+        attempts = await ExecutionRepository(session).list_attempts(step.id)
+        assert len(attempts) == 1
+        assert attempts[0].status == StepAttemptStatus.FAILED.value
+        execution = await ExecutionRepository(session).get(execution_id)
+        assert execution is not None
+        assert execution.status == ExecutionStatus.RUNNING.value
+        execution.lease_expires_at = datetime.now(UTC) - timedelta(seconds=1)
+        await session.commit()
+
+    async with integration_session_factory() as session:
+        recovery = ExecutionRecoveryService(session, lease_seconds=60)
+        outcome = await recovery.recover(
+            execution_id=execution_id, worker_id="recovery-worker"
+        )
+        await session.commit()
+        assert outcome.decision == RecoveryDecision.TAKEOVER_READY
+        assert outcome.invoke_runner is True
+        assert outcome.lease_token is not None
+        new_token = outcome.lease_token
+
+    success_client = _StubCurrentMCPClient(
+        result=NormalizedToolResult(
+            protocol_success=True,
+            tool_error=False,
+            content=[{"type": "text", "text": "recovered"}],
+            raw_size_bytes=4,
+            duration_ms=1,
+        )
+    )
+    runner2 = McpToolRunner(
+        session_factory=integration_session_factory,
+        mcp_client=success_client,
+        secret_resolver_factory=_unimplemented_resolver_factory,
+        lease_seconds=60,
+        result_inline_max_bytes=256_000,
+    )
+    final = await runner2.run_claimed_execution(
+        execution_id=execution_id,
+        worker_id="recovery-worker",
+        lease_token=new_token,
+    )
+    assert final.terminal_status == StepStatus.SUCCEEDED.value
+    assert len(success_client.calls) == 1
+    async with integration_session_factory() as session:
+        step = (await ExecutionRepository(session).list_steps(execution_id))[0]
+        assert step.attempt_count == 2

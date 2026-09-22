@@ -1359,6 +1359,12 @@ Retry may create a new Attempt or new Execution according to the documented desi
 
 Keep those concepts explicit.
 
+Normal MCP Tool Runner transient retry (when enabled) is Execution-engine logic on
+the same claimed Execution: new StepAttempt + ToolCall per remote call, pinned
+`max_attempts` as total Attempts, total Step timeout across Attempts, never
+Celery/`self.retry` for MCP, and never automatic retry of `UNKNOWN_OUTCOME` or
+unsafe risk classes.
+
 ---
 
 # 44. Testing

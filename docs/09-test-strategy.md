@@ -457,6 +457,10 @@ Dataset은 평가 전 FROZEN하고 실행 중 정답을 변경하지 않는다.
   - RESUME/TAKEOVER 후에도 동일 final gate 적용; valid TAKEOVER_READY는 MCP 1회
   - output schema 불일치 → `FAILED`, 원문 `structured_content`가 오류 메시지에 노출되지 않음
   - output schema 일치 → `SUCCEEDED`
+  - READ_ONLY + retryable transient → Attempt/ToolCall 새 row로 bounded retry
+    (`max_attempts`=총 Attempt 수, Step 총 timeout, Celery MCP retry 아님);
+    unsafe/`UNKNOWN_OUTCOME`/`MCP_RESULT_TOO_LARGE`/isError/schema mismatch는 재시도 0;
+    SAFE_RETRY READY checkpoint는 Recovery TAKEOVER와 호환
   - `NON_IDEMPOTENT_WRITE`/`DESTRUCTIVE`/`UNKNOWN` + `MCP_RESULT_TOO_LARGE`
     (`outcome_unknown=true`) → 호출 1회, Step/Attempt/ToolCall `UNKNOWN_OUTCOME`,
     Execution `FAILED`, lease clear, 자동 재시도 없음
