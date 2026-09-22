@@ -860,15 +860,23 @@ async def test_final_gate_lineage_corrupt_attempt_status_no_overwrite_when_termi
         execution_id=execution_id, worker_id=worker_id, lease_token=lease_token
     )
     assert outcome.mcp_called is False
-    assert outcome.reason == "FINAL_GATE_EVIDENCE_ALREADY_TERMINAL"
+    assert outcome.reason == "RESOURCE_CONFLICT"
+    assert outcome.terminal_status == StepStatus.FAILED.value
     async with db_session_factory() as session:
         execution = await ExecutionRepository(session).get(execution_id)
         assert execution is not None
-        assert execution.status == ExecutionStatus.RUNNING.value
-        assert execution.worker_id == worker_id
+        assert execution.status == ExecutionStatus.FAILED.value
+        assert execution.worker_id is None
+        assert execution.lease_token is None
+        assert execution.lease_expires_at is None
+        assert execution.heartbeat_at is None
         step = (await ExecutionRepository(session).list_steps(execution_id))[0]
+        assert step.status == StepStatus.FAILED.value
         attempts = await ExecutionRepository(session).list_attempts(step.id)
+        # Pre-existing terminal Attempt status is preserved (not re-written).
         assert attempts[0].status == StepAttemptStatus.FAILED.value
+        tool_calls = await ExecutionRepository(session).list_tool_calls(attempts[0].id)
+        assert tool_calls[0].normalized_status == ToolCallNormalizedStatus.FAILED.value
 
 
 @pytest.mark.asyncio
@@ -902,15 +910,64 @@ async def test_final_gate_already_terminal_evidence_no_overwrite(
         execution_id=execution_id, worker_id=worker_id, lease_token=lease_token
     )
     assert outcome.mcp_called is False
-    assert outcome.reason == "FINAL_GATE_EVIDENCE_ALREADY_TERMINAL"
-    assert outcome.terminal_status == ExecutionStatus.RUNNING.value
+    assert outcome.reason == "RESOURCE_CONFLICT"
+    assert outcome.terminal_status == StepStatus.FAILED.value
     async with db_session_factory() as session:
         execution = await ExecutionRepository(session).get(execution_id)
         assert execution is not None
-        assert execution.status == ExecutionStatus.RUNNING.value
+        assert execution.status == ExecutionStatus.FAILED.value
+        assert execution.worker_id is None
+        assert execution.lease_token is None
+        assert execution.lease_expires_at is None
+        assert execution.heartbeat_at is None
         step = (await ExecutionRepository(session).list_steps(execution_id))[0]
+        # Terminal Step/Attempt/ToolCall values preserved — no overwrite.
         assert step.status == StepStatus.SUCCEEDED.value
         attempts = await ExecutionRepository(session).list_attempts(step.id)
         assert attempts[0].status == StepAttemptStatus.SUCCEEDED.value
         tool_calls = await ExecutionRepository(session).list_tool_calls(attempts[0].id)
         assert tool_calls[0].normalized_status == ToolCallNormalizedStatus.SUCCEEDED.value
+
+
+@pytest.mark.asyncio
+async def test_final_gate_missing_tool_call_fail_closed_clears_running_strand(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_no_side_effects(monkeypatch)
+    execution_id, worker_id, lease_token = await _claim_ready_execution(db_session_factory)
+    client = _NeverCalledMCPClient()
+    runner = McpToolRunner(
+        session_factory=db_session_factory,
+        mcp_client=client,
+        secret_resolver_factory=_resolver_factory,
+        lease_seconds=60,
+        result_inline_max_bytes=256_000,
+    )
+
+    async def mutate(session: AsyncSession, prepared: _PreparedCall) -> None:
+        from app.models.execution import ToolCall
+
+        tool_call = await session.get(ToolCall, prepared.tool_call_id)
+        assert tool_call is not None
+        await session.delete(tool_call)
+
+    _install_seam(monkeypatch, runner, mutate)
+    outcome = await runner.run_claimed_execution(
+        execution_id=execution_id, worker_id=worker_id, lease_token=lease_token
+    )
+    assert outcome.mcp_called is False
+    assert outcome.reason == "RESOURCE_CONFLICT"
+    async with db_session_factory() as session:
+        execution = await ExecutionRepository(session).get(execution_id)
+        assert execution is not None
+        assert execution.status == ExecutionStatus.FAILED.value
+        assert execution.worker_id is None
+        assert execution.lease_token is None
+        step = (await ExecutionRepository(session).list_steps(execution_id))[0]
+        assert step.status == StepStatus.FAILED.value
+        attempts = await ExecutionRepository(session).list_attempts(step.id)
+        assert attempts[0].status == StepAttemptStatus.FAILED.value
+        assert (
+            await ExecutionRepository(session).list_tool_calls(attempts[0].id)
+        ) == []
