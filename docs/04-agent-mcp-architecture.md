@@ -773,6 +773,8 @@ MCP Tool Runner vertical slice(현재 범위)는 `tools/call` happy path, `isErr
 
 `ToolPolicy.max_result_bytes` overflow while streaming a dispatched `tools/call` response raises `MCP_RESULT_TOO_LARGE` with `outcome_unknown=true` (post-send ambiguity; oversized body is not retained). Unsafe risk classes become Step/Attempt/ToolCall `UNKNOWN_OUTCOME` / Execution `FAILED`. Local `result_inline_max_bytes` overflow after a complete valid remote result remains `RESULT_TOO_LARGE_FOR_INLINE` and is not `UNKNOWN_OUTCOME`.
 
+Plaintext credentials resolved for one invocation remain memory-only. Remote echoes of those values in `content` / `structuredContent` / `_meta` / JSON-RPC `error.message` / retained response headers are recursively replaced with `[REDACTED]` in persistence-bound fields; in-memory validation still uses the authentic remote value.
+
 Runner 실행 경계(`app/execution/tool_runner.py`)는 network I/O 동안 DB transaction을 열지 않는다.
 
 ```text

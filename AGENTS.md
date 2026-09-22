@@ -838,6 +838,8 @@ UI
 
 where required.
 
+Plaintext secret material resolved for one MCP `tools/call` is memory-only. If a remote server echoes that material in a result, error, or retained response metadata, persistence-bound data must be redacted; in-memory protocol/schema validation still uses the authentic remote value.
+
 ---
 
 # 22. STDIO MCP

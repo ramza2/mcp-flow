@@ -13,10 +13,12 @@ import pytest
 from app.agent.plan_validator import PlanValidatorService
 from app.core.secret_crypto import encrypt_secret_payload
 from app.core.secrets import DatabaseSecretResolver
+from app.agent.plan_generator import PlanGeneratorService
 from app.domain.enums import (
     ExecutionStatus,
     MCPAuthType,
     MCPToolStatus,
+    ParameterProvenance,
     ResourceGrantResourceType,
     RiskClass,
     SecretKind,
@@ -42,6 +44,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from tests.integration.test_execution_creation import _create, _idem_key, _seed_ready
 from tests.integration.test_execution_creation import _seed_validating as _seed_validating_pg
+from tests.integration.test_plan_generator import _seed_planning
+from tests.integration.test_tool_selector import _seed_authorized_user
 
 
 def _random_master_key() -> bytes:
@@ -105,11 +109,77 @@ async def _seed_ready_with_risk_class(
         return {**seeded, "requester_id": request.requester_id}
 
 
+_CREDENTIAL_SCHEMA = {
+    "type": "object",
+    "properties": {"credential": {"type": "string"}},
+    "required": ["credential"],
+    "additionalProperties": False,
+}
+
+_STATUS_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "status": {"type": "string"},
+        "token": {"type": "string"},
+    },
+    "required": ["status", "token"],
+}
+
+
+async def _seed_ready_secret_ref(
+    session: AsyncSession, *, secret_id: uuid.UUID
+) -> dict[str, Any]:
+    """READY AgentRequest whose Tool binding is a SECRET_REF (no plaintext)."""
+    seeded = await _seed_planning(
+        session,
+        required=["credential"],
+        input_schema=_CREDENTIAL_SCHEMA,
+        entities=[
+            {
+                "name": "credential",
+                "value": str(secret_id),
+                "source": ParameterProvenance.SECRET_REFERENCE.value,
+            }
+        ],
+    )
+    tool = await MCPToolRepository(session).get(seeded["tool_id"])
+    assert tool is not None
+    tool.current_version_id = seeded["tool_version_id"]
+    await MCPToolPolicyRepository(session).create(
+        mcp_tool_id=tool.id,
+        risk_class=RiskClass.READ_ONLY.value,
+        requires_confirmation=False,
+        requires_approval=False,
+        approval_policy_id=None,
+        timeout_ms=30_000,
+        max_attempts=1,
+        backoff_policy=None,
+        max_result_bytes=65536,
+        allow_auto_select=True,
+        data_classification=None,
+        policy_metadata=None,
+    )
+    request = await AgentRequestRepository(session).get(seeded["request_id"])
+    assert request is not None
+    user_id = await _seed_authorized_user(session, tool_ids=[tool.id])
+    request.requester_id = user_id
+    await PlanGeneratorService(session).generate(agent_request_id=seeded["request_id"])
+    await session.commit()
+    outcome = await PlanValidatorService(session).validate(
+        agent_request_id=seeded["request_id"]
+    )
+    assert outcome.decision == "READY"
+    request = await AgentRequestRepository(session).get(seeded["request_id"])
+    assert request is not None
+    return {**seeded, "requester_id": request.requester_id}
+
+
 async def _claim_ready_execution(
     session_factory: async_sessionmaker[AsyncSession],
     *,
     seeded: dict[str, Any] | None = None,
     mutate_server: Callable[[Any], None] | None = None,
+    mutate_tool_version: Callable[[Any], None] | None = None,
     worker_id: str = "pg-runner-worker",
 ) -> tuple[uuid.UUID, str, uuid.UUID]:
     async with session_factory() as session:
@@ -131,7 +201,7 @@ async def _claim_ready_execution(
         await session.commit()
         lease_token = claim.lease_token
 
-    if mutate_server is not None:
+    if mutate_server is not None or mutate_tool_version is not None:
         async with session_factory() as session:
             steps = await ExecutionRepository(session).list_steps(execution_id)
             step = steps[0]
@@ -139,14 +209,51 @@ async def _claim_ready_execution(
                 step.mcp_tool_version_id
             )
             assert tool_version is not None
-            logical_tool = await MCPToolRepository(session).get(tool_version.mcp_tool_id)
-            assert logical_tool is not None
-            server = await MCPServerRepository(session).get(logical_tool.mcp_server_id)
-            assert server is not None
-            mutate_server(server)
+            if mutate_tool_version is not None:
+                mutate_tool_version(tool_version)
+            if mutate_server is not None:
+                logical_tool = await MCPToolRepository(session).get(
+                    tool_version.mcp_tool_id
+                )
+                assert logical_tool is not None
+                server = await MCPServerRepository(session).get(
+                    logical_tool.mcp_server_id
+                )
+                assert server is not None
+                mutate_server(server)
             await session.commit()
 
     return execution_id, worker_id, lease_token
+
+
+async def _assert_pg_no_sentinel(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    execution_id: uuid.UUID,
+    sentinel: str,
+) -> dict[str, Any]:
+    async with session_factory() as session:
+        execution = await ExecutionRepository(session).get(execution_id)
+        assert execution is not None
+        step = (await ExecutionRepository(session).list_steps(execution_id))[0]
+        attempts = await ExecutionRepository(session).list_attempts(step.id)
+        tool_calls = await ExecutionRepository(session).list_tool_calls(attempts[0].id)
+        payload = {
+            "execution_error_message": execution.error_message,
+            "execution_result_summary": execution.result_summary,
+            "step_error_message": step.error_message,
+            "step_result_inline": step.result_inline,
+            "step_resolved_input": step.resolved_input,
+            "attempt_error_message": attempts[0].error_message,
+            "attempt_result_inline": attempts[0].result_inline,
+            "attempt_request_snapshot": attempts[0].request_snapshot,
+            "tool_call_request_meta": tool_calls[0].request_meta,
+            "tool_call_response_meta": tool_calls[0].response_meta,
+            "attempt_error_code": attempts[0].error_code,
+        }
+        blob = json.dumps(payload, default=str)
+        assert sentinel not in blob
+        return payload
 
 
 @pytest.mark.integration
@@ -880,3 +987,310 @@ async def test_pg_runner_mcp_result_too_large_safe_failed(
         attempts = await ExecutionRepository(session).list_attempts(step.id)
         assert attempts[0].error_code == "MCP_RESULT_TOO_LARGE"
         assert attempts[0].status == StepAttemptStatus.FAILED.value
+
+
+# ---------------------------------------------------------------------------
+# Remote secret-echo redaction (persistence boundary)
+# ---------------------------------------------------------------------------
+
+_PG_SENTINEL = "SECRET_SENTINEL_DO_NOT_PERSIST_pg_echo_9d2a"
+
+
+class _PgEchoBearerClient:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    async def call_tool(self, endpoint: str, **kwargs: Any):
+        auth = (kwargs.get("auth_headers") or {}).get("Authorization", "")
+        token = auth.removeprefix("Bearer ").strip() if auth else ""
+        self.calls.append({"endpoint": endpoint, "token_len": len(token)})
+        result = NormalizedToolResult(
+            protocol_success=True,
+            tool_error=False,
+            content=[{"type": "text", "text": f"echo={token}"}],
+            structured_content={"token": token, token: "key"},
+            metadata={"m": token},
+            raw_size_bytes=40,
+            duration_ms=1,
+        )
+        return (
+            result,
+            {
+                "http_status": 200,
+                "response_headers": {"X-Debug-Echo": token},
+            },
+            datetime.now(UTC),
+        )
+
+
+class _PgEchoSecretRefClient:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    async def call_tool(self, endpoint: str, **kwargs: Any):
+        args = dict(kwargs.get("arguments") or {})
+        self.calls.append({"endpoint": endpoint, "arguments": args})
+        secret = str(args.get("credential") or "")
+        result = NormalizedToolResult(
+            protocol_success=True,
+            tool_error=False,
+            content=[{"type": "text", "text": secret}],
+            structured_content={"credential": secret, "wrapped": f"x{secret}y"},
+            metadata={"echo": secret},
+            raw_size_bytes=32,
+            duration_ms=1,
+        )
+        return result, {"http_status": 200}, datetime.now(UTC)
+
+
+class _PgJsonRpcEchoErrorClient:
+    async def call_tool(self, endpoint: str, **kwargs: Any):
+        auth = (kwargs.get("auth_headers") or {}).get("Authorization", "")
+        token = auth.removeprefix("Bearer ").strip() if auth else ""
+        raise MCPClientError(
+            error_layer="PROTOCOL",
+            error_code="MCP_JSONRPC_ERROR",
+            message=f"upstream rejected token={token}",
+            retryable=False,
+            outcome_unknown=False,
+        )
+
+
+class _PgSchemaEchoClient:
+    async def call_tool(self, endpoint: str, **kwargs: Any):
+        auth = (kwargs.get("auth_headers") or {}).get("Authorization", "")
+        token = auth.removeprefix("Bearer ").strip() if auth else ""
+        result = NormalizedToolResult(
+            protocol_success=True,
+            tool_error=False,
+            content=[],
+            structured_content={"status": "ok", "token": token},
+            raw_size_bytes=24,
+            duration_ms=1,
+        )
+        return result, {"http_status": 200}, datetime.now(UTC)
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_pg_bearer_echo_redacted_from_persistence(
+    integration_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    master_key = _random_master_key()
+    async with integration_session_factory() as session:
+        blob = encrypt_secret_payload(
+            master_key, kind=SecretKind.API_KEY.value, material={"value": _PG_SENTINEL}
+        )
+        record = await SecretRecordRepository(session).create(
+            name=f"secret-{uuid.uuid4().hex[:8]}",
+            secret_kind=SecretKind.API_KEY.value,
+            ciphertext=blob.ciphertext,
+            nonce=blob.nonce,
+            key_version=blob.key_version,
+            fingerprint=blob.fingerprint,
+            status=SecretStatus.ACTIVE.value,
+        )
+        await session.commit()
+        secret_id = record.id
+
+    def _set_bearer(server: Any) -> None:
+        server.auth_type = MCPAuthType.BEARER.value
+        server.auth_secret_id = secret_id
+
+    execution_id, worker_id, lease_token = await _claim_ready_execution(
+        integration_session_factory, mutate_server=_set_bearer
+    )
+
+    def _resolver_factory(session: AsyncSession) -> DatabaseSecretResolver:
+        return DatabaseSecretResolver(session, master_key=master_key)
+
+    client = _PgEchoBearerClient()
+    runner = McpToolRunner(
+        session_factory=integration_session_factory,
+        mcp_client=client,
+        secret_resolver_factory=_resolver_factory,
+        lease_seconds=60,
+        result_inline_max_bytes=256_000,
+    )
+    outcome = await runner.run_claimed_execution(
+        execution_id=execution_id, worker_id=worker_id, lease_token=lease_token
+    )
+    assert outcome.mcp_called is True
+    assert outcome.terminal_status == StepStatus.SUCCEEDED.value
+    assert len(client.calls) == 1
+
+    payload = await _assert_pg_no_sentinel(
+        integration_session_factory, execution_id=execution_id, sentinel=_PG_SENTINEL
+    )
+    assert "[REDACTED]" in json.dumps(payload["step_result_inline"], default=str)
+    headers = (payload["tool_call_response_meta"] or {}).get("response_headers") or {}
+    assert headers.get("X-Debug-Echo") == "[REDACTED]"
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_pg_secret_ref_echo_redacted_from_persistence(
+    integration_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    master_key = _random_master_key()
+    async with integration_session_factory() as session:
+        blob = encrypt_secret_payload(
+            master_key, kind=SecretKind.API_KEY.value, material={"value": _PG_SENTINEL}
+        )
+        record = await SecretRecordRepository(session).create(
+            name=f"secret-{uuid.uuid4().hex[:8]}",
+            secret_kind=SecretKind.API_KEY.value,
+            ciphertext=blob.ciphertext,
+            nonce=blob.nonce,
+            key_version=blob.key_version,
+            fingerprint=blob.fingerprint,
+            status=SecretStatus.ACTIVE.value,
+        )
+        await session.commit()
+        secret_id = record.id
+
+    async with integration_session_factory() as session:
+        seeded = await _seed_ready_secret_ref(session, secret_id=secret_id)
+
+    execution_id, worker_id, lease_token = await _claim_ready_execution(
+        integration_session_factory, seeded=seeded
+    )
+
+    def _resolver_factory(session: AsyncSession) -> DatabaseSecretResolver:
+        return DatabaseSecretResolver(session, master_key=master_key)
+
+    client = _PgEchoSecretRefClient()
+    runner = McpToolRunner(
+        session_factory=integration_session_factory,
+        mcp_client=client,
+        secret_resolver_factory=_resolver_factory,
+        lease_seconds=60,
+        result_inline_max_bytes=256_000,
+    )
+    outcome = await runner.run_claimed_execution(
+        execution_id=execution_id, worker_id=worker_id, lease_token=lease_token
+    )
+    assert outcome.mcp_called is True
+    assert outcome.terminal_status == StepStatus.SUCCEEDED.value
+    assert client.calls[0]["arguments"]["credential"] == _PG_SENTINEL
+
+    payload = await _assert_pg_no_sentinel(
+        integration_session_factory, execution_id=execution_id, sentinel=_PG_SENTINEL
+    )
+    resolved = payload["step_resolved_input"] or {}
+    assert resolved.get("credential", {}).get("kind") == "SECRET_REF"
+    assert "[REDACTED]" in json.dumps(payload["step_result_inline"], default=str)
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_pg_jsonrpc_error_echo_redacted_from_persistence(
+    integration_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    master_key = _random_master_key()
+    async with integration_session_factory() as session:
+        blob = encrypt_secret_payload(
+            master_key, kind=SecretKind.API_KEY.value, material={"value": _PG_SENTINEL}
+        )
+        record = await SecretRecordRepository(session).create(
+            name=f"secret-{uuid.uuid4().hex[:8]}",
+            secret_kind=SecretKind.API_KEY.value,
+            ciphertext=blob.ciphertext,
+            nonce=blob.nonce,
+            key_version=blob.key_version,
+            fingerprint=blob.fingerprint,
+            status=SecretStatus.ACTIVE.value,
+        )
+        await session.commit()
+        secret_id = record.id
+
+    def _set_bearer(server: Any) -> None:
+        server.auth_type = MCPAuthType.BEARER.value
+        server.auth_secret_id = secret_id
+
+    execution_id, worker_id, lease_token = await _claim_ready_execution(
+        integration_session_factory, mutate_server=_set_bearer
+    )
+
+    def _resolver_factory(session: AsyncSession) -> DatabaseSecretResolver:
+        return DatabaseSecretResolver(session, master_key=master_key)
+
+    runner = McpToolRunner(
+        session_factory=integration_session_factory,
+        mcp_client=_PgJsonRpcEchoErrorClient(),
+        secret_resolver_factory=_resolver_factory,
+        lease_seconds=60,
+        result_inline_max_bytes=256_000,
+    )
+    outcome = await runner.run_claimed_execution(
+        execution_id=execution_id, worker_id=worker_id, lease_token=lease_token
+    )
+    assert outcome.mcp_called is True
+    assert outcome.terminal_status == StepStatus.FAILED.value
+
+    payload = await _assert_pg_no_sentinel(
+        integration_session_factory, execution_id=execution_id, sentinel=_PG_SENTINEL
+    )
+    assert payload["attempt_error_message"] is not None
+    assert "[REDACTED]" in payload["attempt_error_message"]
+    assert payload["attempt_error_code"] == "MCP_JSONRPC_ERROR"
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_pg_schema_validation_before_redaction(
+    integration_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    master_key = _random_master_key()
+    async with integration_session_factory() as session:
+        blob = encrypt_secret_payload(
+            master_key, kind=SecretKind.API_KEY.value, material={"value": _PG_SENTINEL}
+        )
+        record = await SecretRecordRepository(session).create(
+            name=f"secret-{uuid.uuid4().hex[:8]}",
+            secret_kind=SecretKind.API_KEY.value,
+            ciphertext=blob.ciphertext,
+            nonce=blob.nonce,
+            key_version=blob.key_version,
+            fingerprint=blob.fingerprint,
+            status=SecretStatus.ACTIVE.value,
+        )
+        await session.commit()
+        secret_id = record.id
+
+    def _set_bearer(server: Any) -> None:
+        server.auth_type = MCPAuthType.BEARER.value
+        server.auth_secret_id = secret_id
+
+    def _set_output_schema(tool_version: Any) -> None:
+        tool_version.output_schema = _STATUS_SCHEMA
+
+    execution_id, worker_id, lease_token = await _claim_ready_execution(
+        integration_session_factory,
+        mutate_server=_set_bearer,
+        mutate_tool_version=_set_output_schema,
+    )
+
+    def _resolver_factory(session: AsyncSession) -> DatabaseSecretResolver:
+        return DatabaseSecretResolver(session, master_key=master_key)
+
+    runner = McpToolRunner(
+        session_factory=integration_session_factory,
+        mcp_client=_PgSchemaEchoClient(),
+        secret_resolver_factory=_resolver_factory,
+        lease_seconds=60,
+        result_inline_max_bytes=256_000,
+    )
+    outcome = await runner.run_claimed_execution(
+        execution_id=execution_id, worker_id=worker_id, lease_token=lease_token
+    )
+    assert outcome.mcp_called is True
+    assert outcome.terminal_status == StepStatus.SUCCEEDED.value
+
+    payload = await _assert_pg_no_sentinel(
+        integration_session_factory, execution_id=execution_id, sentinel=_PG_SENTINEL
+    )
+    inline = payload["step_result_inline"] or {}
+    structured = inline.get("structured_content") or {}
+    assert structured.get("status") == "ok"
+    assert structured.get("token") == "[REDACTED]"

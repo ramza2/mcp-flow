@@ -44,7 +44,7 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.errors import AppError
-from app.core.secrets import SecretResolver
+from app.core.secrets import ResolvedSecret, SecretResolver
 from app.domain.enums import (
     CURRENT_MCP_PROTOCOL_VERSION,
     BindingKind,
@@ -53,18 +53,24 @@ from app.domain.enums import (
     MCPProtocolEra,
     MCPTransportType,
     RiskClass,
+    SecretKind,
     StepAttemptStatus,
     StepStatus,
     ToolCallNormalizedStatus,
 )
 from app.execution.claim import ExecutionClaimService, _as_utc, _normalize_worker_id
+from app.execution.lineage import assert_resume_attempt_lineage
 from app.execution.result_validator import validate_tool_result
 from app.execution.runtime_preflight import (
     assert_answered_plan_confirmation,
     assert_current_tool_executable,
 )
 from app.execution.secret_materialize import materialize_tool_arguments
-from app.execution.lineage import assert_resume_attempt_lineage
+from app.execution.secret_redaction import (
+    collect_protected_plaintexts,
+    redact_text,
+    sanitize_for_persistence,
+)
 from app.execution.tool_step_attempt import ToolStepAttemptService
 from app.mcp.auth_headers import build_mcp_auth_headers
 from app.mcp.contracts import NormalizedToolResult
@@ -221,6 +227,27 @@ def _resolved_input_needs_secret(resolved_input: dict[str, Any]) -> bool:
     )
 
 
+def _auth_material_plaintexts(resolved: ResolvedSecret | None) -> list[str]:
+    """Plaintext credential fragments from a resolved auth secret (memory only)."""
+    if resolved is None:
+        return []
+    values: list[str] = []
+    material = resolved.material
+    if resolved.kind == SecretKind.API_KEY.value:
+        value = material.get("value")
+        if isinstance(value, str) and value:
+            values.append(value)
+    elif resolved.kind == SecretKind.OAUTH_TOKEN_SET.value:
+        token = material.get("access_token")
+        if isinstance(token, str) and token:
+            values.append(token)
+    elif resolved.kind == SecretKind.BASIC_AUTH.value:
+        password = material.get("password")
+        if isinstance(password, str) and password:
+            values.append(password)
+    return values
+
+
 async def _assert_confirmation_evidence(
     session: AsyncSession,
     execution: Execution,
@@ -282,8 +309,9 @@ class McpToolRunner:
             return prep.outcome
 
         prepared = prep.prepared
+        protected: tuple[str, ...] = ()
         try:
-            auth_headers, arguments = await self._resolve_secrets(prepared)
+            auth_headers, arguments, protected = await self._resolve_secrets(prepared)
         except AppError as exc:
             call_error = _PreSendFailClosed(error_code=exc.code, message=exc.message)
             return await self._finalize_locked(
@@ -292,41 +320,45 @@ class McpToolRunner:
                 result=None,
                 response_meta=None,
                 first_byte_at=None,
+                protected=(),
             )
 
-        # Deterministic TOCTOU test seam (production no-op): mutate mutable
-        # authorization/policy after Phase A and secret materialize, before the
-        # final pre-send gate.
-        await self._after_phase_a_before_final_gate(prepared)
+        try:
+            # Deterministic TOCTOU test seam (production no-op): mutate mutable
+            # authorization/policy after Phase A and secret materialize, before the
+            # final pre-send gate.
+            await self._after_phase_a_before_final_gate(prepared)
 
-        gate = await self._final_pre_send_gate(prepared)
-        if isinstance(gate, ToolRunOutcome):
-            # Lease lost (NO_OP) or fail-closed terminalization already committed in
-            # the final gate transaction — never overwrite a new owner's state.
-            auth_headers.clear()
-            arguments.clear()
-            return gate
-        if isinstance(gate, _PreSendFailClosed):
-            auth_headers.clear()
-            arguments.clear()
+            gate = await self._final_pre_send_gate(prepared)
+            if isinstance(gate, ToolRunOutcome):
+                # Lease lost (NO_OP) or fail-closed terminalization already committed in
+                # the final gate transaction — never overwrite a new owner's state.
+                return gate
+            if isinstance(gate, _PreSendFailClosed):
+                return await self._finalize_locked(
+                    prepared,
+                    call_error=gate,
+                    result=None,
+                    response_meta=None,
+                    first_byte_at=None,
+                    protected=protected,
+                )
+
+            result, response_meta, first_byte_at, call_error = await self._call_remote(
+                prepared, auth_headers, arguments
+            )
             return await self._finalize_locked(
                 prepared,
-                call_error=gate,
-                result=None,
-                response_meta=None,
-                first_byte_at=None,
+                call_error=call_error,
+                result=result,
+                response_meta=response_meta,
+                first_byte_at=first_byte_at,
+                protected=protected,
             )
-
-        result, response_meta, first_byte_at, call_error = await self._call_remote(
-            prepared, auth_headers, arguments
-        )
-        return await self._finalize_locked(
-            prepared,
-            call_error=call_error,
-            result=result,
-            response_meta=response_meta,
-            first_byte_at=first_byte_at,
-        )
+        finally:
+            auth_headers.clear()
+            arguments.clear()
+            protected = ()
 
     async def _after_phase_a_before_final_gate(self, prepared: _PreparedCall) -> None:
         """Production no-op. Integration tests monkeypatch this to mutate DB state."""
@@ -885,11 +917,13 @@ class McpToolRunner:
 
     async def _resolve_secrets(
         self, prepared: _PreparedCall
-    ) -> tuple[dict[str, str], dict[str, Any]]:
+    ) -> tuple[dict[str, str], dict[str, Any], tuple[str, ...]]:
         needs_secret = (
             prepared.auth_type != MCPAuthType.NONE.value
             or _resolved_input_needs_secret(prepared.resolved_input)
         )
+        auth_material_values: list[str] = []
+        secret_argument_values: list[str] = []
         async with self._session_factory() as session:
             # NONE + no SECRET_REF must not force master-key loading. Resolvers
             # that lazy-load on first resolve() stay idle on this path.
@@ -904,13 +938,27 @@ class McpToolRunner:
                     if prepared.auth_secret_id is not None
                     else None
                 )
+                auth_material_values.extend(_auth_material_plaintexts(resolved))
                 auth_headers = build_mcp_auth_headers(
                     auth_type=prepared.auth_type, resolved=resolved
                 )
             arguments = await materialize_tool_arguments(
                 prepared.resolved_input, secret_resolver=resolver
             )
-        return auth_headers, arguments
+            for key, raw in prepared.resolved_input.items():
+                if (
+                    isinstance(raw, dict)
+                    and raw.get("kind") == BindingKind.SECRET_REF.value
+                ):
+                    materialized = arguments.get(key)
+                    if isinstance(materialized, str) and materialized:
+                        secret_argument_values.append(materialized)
+        protected = collect_protected_plaintexts(
+            auth_headers=auth_headers,
+            secret_argument_values=secret_argument_values,
+            auth_material_values=auth_material_values,
+        )
+        return auth_headers, arguments, protected
 
     async def _heartbeat_loop(self, prepared: _PreparedCall) -> None:
         interval = max(_MIN_HEARTBEAT_INTERVAL_SECONDS, self._lease_seconds // 3)
@@ -977,6 +1025,7 @@ class McpToolRunner:
         result: NormalizedToolResult | None,
         response_meta: dict[str, Any] | None,
         first_byte_at: datetime | None,
+        protected: tuple[str, ...] = (),
     ) -> ToolRunOutcome:
         async with self._session_factory() as session:
             async with session.begin():
@@ -1024,6 +1073,7 @@ class McpToolRunner:
                     output_schema=prepared.output_schema,
                     result_inline_max_bytes=self._result_inline_max_bytes,
                     now=now,
+                    protected=protected,
                 )
                 mcp_called = not isinstance(call_error, _PreSendFailClosed)
                 return ToolRunOutcome(
@@ -1051,20 +1101,25 @@ def _apply_terminal_transition(
     output_schema: Any,
     result_inline_max_bytes: int,
     now: datetime,
+    protected: tuple[str, ...] = (),
 ) -> str:
     """Apply one atomic terminal transition across ToolCall/Attempt/Step/Execution.
 
     Returns the canonical terminal status shared by ToolCall.normalized_status,
     StepAttempt.status, and ExecutionStep.status (Execution maps UNKNOWN_OUTCOME
     to FAILED — Execution has no such canonical status).
+
+    Protocol/schema validation uses the in-memory remote ``result``. Persistence
+    fields are written from redacted copies when ``protected`` is non-empty.
     """
     response_bytes: int | None = None
+    persist_meta = sanitize_for_persistence(response_meta, protected)
 
     if call_error is not None:
         terminal = _classify_mcp_failure(call_error, risk_class=risk_class)
         error_layer = call_error.error_layer
         error_code = call_error.error_code
-        error_message = call_error.message
+        error_message = redact_text(call_error.message, protected)
         result_inline: dict[str, Any] | None = None
     else:
         assert result is not None
@@ -1084,18 +1139,18 @@ def _apply_terminal_transition(
                 error_layer = None
                 error_code = None
                 error_message = None
-                result_inline = serialized
+                result_inline = sanitize_for_persistence(serialized, protected)
         else:
             terminal = StepStatus.FAILED.value
             error_layer = "TOOL" if validation.error_code == "RESULT_TOOL_ERROR" else "PROTOCOL"
             error_code = validation.error_code
-            error_message = validation.error_message
+            error_message = redact_text(validation.error_message or "", protected) or None
             result_inline = None
 
     finished_at = now
 
     tool_call.normalized_status = terminal
-    tool_call.response_meta = response_meta
+    tool_call.response_meta = persist_meta
     tool_call.response_bytes = response_bytes
     tool_call.first_byte_at = first_byte_at
     tool_call.finished_at = finished_at

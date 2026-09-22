@@ -535,6 +535,8 @@ Phase C / TX2     — fenced terminal finalize
 
 final gate reject 시 `tools/call`은 0회이며 materialize된 secret은 폐기한다. MRTR(`input_required`)은 이 범위에서 detect-only로만 처리되며 — 즉 감지 시 Step은 재개 가능한 `WAITING_INPUT`이 아니라 명시적으로 실패 처리된다 — 실제 runtime 입력 round-trip 재개(§15)는 후속 범위다.
 
+Plaintext secret material resolved for an MCP invocation is memory-only. If a remote MCP server reflects that material in a result, error, or retained response metadata, persistence-bound data is recursively redacted while the original in-memory response remains authoritative for protocol/result-schema semantics.
+
 `ToolPolicy.max_result_bytes` overflow while reading a dispatched `tools/call` response is post-send ambiguity (`MCP_RESULT_TOO_LARGE`, `outcome_unknown=true`, `retryable=false`). Unsafe risk classes (`NON_IDEMPOTENT_WRITE` / `DESTRUCTIVE` / `UNKNOWN`) terminalize Step/Attempt/ToolCall as `UNKNOWN_OUTCOME` and Execution as `FAILED` with no automatic retry. This differs from local `result_inline_max_bytes` persistence overflow after a complete remote response (`RESULT_TOO_LARGE_FOR_INLINE`), which remains a known failure and is not `UNKNOWN_OUTCOME`.
 
 ## FNC-EXE-006. Timeout/Retry
