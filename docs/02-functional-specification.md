@@ -546,6 +546,16 @@ Plaintext secret material resolved for an MCP invocation is memory-only. If a re
 - max attempts와 전체 timeout 준수
 - `MCP_RESULT_TOO_LARGE`는 transient가 아니며 retry하지 않는다. unsafe risk에서만 post-send ambiguity로 `UNKNOWN_OUTCOME`을 보존한다.
 
+MCP Tool Runner의 정상 경로 bounded retry(현재 슬라이스):
+
+- `max_attempts`는 **총 Attempt 수**(초기 1 + retries가 아님). `max_attempts=1`이면 remote 1회만.
+- 자동 retry는 Execution Engine 소속이며 Celery `self.retry` / 새 Execution이 아니다. 동일 claimed Execution·lease가 Attempt 시퀀스를 소유한다.
+- retry 가능 조건(전부): `MCPClientError.retryable=true`, pinned `policy_snapshot.tool_policy.risk_class=READ_ONLY`, `attempt_count < max_attempts`, Step 총 timeout 미소진, lease ownership 유지, lineage 일관, terminal이 `UNKNOWN_OUTCOME`이 아님, `backoff_policy is null`(canonical backoff JSON 스키마 부재 시 non-null은 자동 retry 금지).
+- 각 실제 remote 재호출은 **새** StepAttempt + **새** ToolCall을 만들고, 이전 Attempt/ToolCall은 terminal evidence로 남긴다. Attempt start / PR #33 final pre-send gate를 다시 통과한다.
+- Phase C safe-retry checkpoint: historical terminal Attempt/ToolCall + Step `READY` + Execution `RUNNING`(lease 유지). `Step.started_at` / Execution `started_at`은 리셋하지 않으며 Step 총 timeout은 Attempt 전체에 걸쳐 `started_at` 기준이다.
+- `IDEMPOTENT_WRITE` 정상 경로 자동 retry는 이 슬라이스에서 fail-closed(원격 idempotency transport 계약 없음; `StepAttempt.idempotency_key`는 lineage/dedup 전용). Recovery orphan STARTED 경로의 `is_safe_retry_risk`와는 별개다.
+- unsafe(`NON_IDEMPOTENT_WRITE`/`DESTRUCTIVE`/`UNKNOWN`) 및 `UNKNOWN_OUTCOME`은 자동 retry 금지. PR #32 Recovery SAFE_RETRY crash-gap(READY + historical terminal Attempt)과 호환된다.
+
 ## FNC-EXE-007. 결과검증
 
 protocol 성공과 업무 output validation을 분리한다. output schema 불일치는 `SUCCEEDED` 금지.

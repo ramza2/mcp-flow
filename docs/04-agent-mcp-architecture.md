@@ -859,6 +859,8 @@ Canonical `risk_class`:
 
 timeout 후 결과가 불명확한 non-idempotent 호출은 `UNKNOWN_OUTCOME`으로 종료하고 자동 재호출하지 않는다.
 
+MCP Tool Runner 정상 경로 bounded retry(현재): `READ_ONLY` + `retryable` MCP 실패만, pinned `max_attempts`(총 Attempt 수)와 Step 총 timeout 예산 내에서 Execution Engine이 새 Attempt/ToolCall을 만든다. Celery MCP retry가 아니며, `UNKNOWN_OUTCOME`·unsafe risk·non-null `backoff_policy`(스키마 미정의)는 자동 재시도하지 않는다. `IDEMPOTENT_WRITE` 정상 경로 자동 retry는 원격 idempotency 계약이 정의되기 전까지 fail-closed이다.
+
 ---
 
 ## 17. Cancellation, Progress, Tasks
