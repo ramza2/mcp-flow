@@ -233,6 +233,13 @@ class ApprovalDecisionMode(StrEnum):
     QUORUM = "QUORUM"
 
 
+class ApprovalDecisionValue(StrEnum):
+    """docs/05 §12.3 approval_decisions.decision."""
+
+    APPROVE = "APPROVE"
+    REJECT = "REJECT"
+
+
 class JobStatus(StrEnum):
     PENDING = "PENDING"
     QUEUED = "QUEUED"

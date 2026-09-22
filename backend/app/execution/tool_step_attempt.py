@@ -1,7 +1,8 @@
-"""TOOL Step Attempt starter foundation (docs/05 §13.6 / FNC-EXE-004/005 boundary).
+"""TOOL Step Attempt starter foundation (docs/05 §13.6 / FNC-EXE-004/005/009).
 
-Transitions READY → RUNNING and creates StepAttempt STARTED.
-Does NOT call MCP, resolve secrets, create ToolCall rows, or wire into Celery claim.
+Transitions READY → RUNNING and creates StepAttempt STARTED, or — when
+ToolPolicy.requires_approval — READY → WAITING_APPROVAL with a PENDING
+ApprovalRequest and no Attempt/ToolCall/MCP call.
 """
 
 from __future__ import annotations
@@ -14,6 +15,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.approval.wait import ApprovalWaitOutcome, ApprovalWaitService
 from app.core.errors import AppError
 from app.domain.enums import (
     ExecutionSourceType,
@@ -38,6 +40,7 @@ from app.schemas.execution_plan import ToolStepConfigV1
 
 # Re-export for existing imports.
 __all__ = [
+    "ApprovalWaitOutcome",
     "ToolStepAttemptOutcome",
     "ToolStepAttemptService",
     "build_attempt_idempotency_key",
@@ -81,15 +84,11 @@ class ToolStepAttemptService:
         worker_id: str,
         lease_token: uuid.UUID,
         now: datetime | None = None,
-    ) -> ToolStepAttemptOutcome:
+    ) -> ToolStepAttemptOutcome | ApprovalWaitOutcome:
         worker = _normalize_worker_id(worker_id)
         ts = now or datetime.now(UTC)
 
         execution = await self._lock_execution(execution_id)
-        self._assert_execution_lease(
-            execution, worker_id=worker, lease_token=lease_token, now=ts
-        )
-
         step = await self._lock_step(step_execution_id)
         if step.execution_id != execution.id:
             raise AppError(
@@ -97,6 +96,19 @@ class ToolStepAttemptService:
                 message="Step does not belong to Execution.",
                 status_code=409,
             )
+
+        # Concurrent loser / idempotent wait: already WAITING_APPROVAL (lease cleared).
+        if (
+            execution.status == ExecutionStatus.WAITING_APPROVAL.value
+            or step.status == StepStatus.WAITING_APPROVAL.value
+        ):
+            return await ApprovalWaitService(self._session).reuse_pending(
+                execution=execution, step=step
+            )
+
+        self._assert_execution_lease(
+            execution, worker_id=worker, lease_token=lease_token, now=ts
+        )
 
         # Idempotent replay: same worker/lease against already-RUNNING Step.
         if step.status == StepStatus.RUNNING.value:
@@ -125,23 +137,28 @@ class ToolStepAttemptService:
             plan_timeout_seconds=self._plan_timeout_seconds(step),
         )
 
-        # FNC-EXE-009: Approval is out of scope for Attempt foundation.
-        # Do not create ApprovalRequest or WAITING_APPROVAL — fail closed.
-        if authz.tool_policy.requires_approval:
-            raise AppError(
-                code="EXECUTION_PRECONDITION_FAILED",
-                message=(
-                    "ToolPolicy.requires_approval=true: Attempt foundation "
-                    "does not start TOOL Steps (Approval PR scope)."
-                ),
-                status_code=409,
-            )
-
         if (
             authz.grant.requires_confirmation
             or authz.tool_policy.requires_confirmation
         ):
             await self._assert_confirmation_evidence(execution, authz.policy_snapshot)
+
+        # FNC-EXE-009 / FNC-APR-002: ToolPolicy approval waits before Attempt.
+        if authz.tool_policy.requires_approval:
+            if authz.approval_policy is None:
+                raise AppError(
+                    code="EXECUTION_PRECONDITION_FAILED",
+                    message="requires_approval인데 ApprovalPolicy 없음.",
+                    status_code=409,
+                )
+            return await ApprovalWaitService(self._session).enter_for_tool_step(
+                execution=execution,
+                step=step,
+                tool_config=tool_config,
+                tool_policy=authz.tool_policy,
+                approval_policy=authz.approval_policy,
+                now=ts,
+            )
 
         resolved_input = materialize_secret_safe_resolved_input(tool_config.bindings)
         next_attempt_no = step.attempt_count + 1

@@ -1,9 +1,9 @@
 """Security-focused unit tests for McpToolRunner (docs/04 §14 / docs/05 §5.3, §13.6).
 
-Covers: fail-closed requires_approval, BEARER auth secret-safety, SECRET_REF
-argument materialization, output schema validation leak-safety, the
-NON_IDEMPOTENT_WRITE + outcome_unknown -> UNKNOWN_OUTCOME matrix, and
-lease-fencing no-op behavior.
+Covers: requires_approval → WAITING_APPROVAL (no Attempt/ToolCall/MCP), BEARER
+auth secret-safety, SECRET_REF argument materialization, output schema
+validation leak-safety, the NON_IDEMPOTENT_WRITE + outcome_unknown ->
+UNKNOWN_OUTCOME matrix, and lease-fencing no-op behavior.
 """
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ import json
 import os
 import uuid
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -21,6 +21,7 @@ from app.core.errors import AppError
 from app.core.secret_crypto import encrypt_secret_payload
 from app.core.secrets import DatabaseSecretResolver, UnimplementedSecretResolver
 from app.domain.enums import (
+    ApprovalStatus,
     ExecutionStatus,
     MCPAuthType,
     ParameterProvenance,
@@ -38,6 +39,7 @@ from app.mcp.contracts import NormalizedToolResult
 from app.mcp.errors import MCPClientError, MCPResultTooLargeError
 from app.repositories.agent_request import AgentRequestRepository
 from app.repositories.approval_policy import ApprovalPolicyRepository
+from app.repositories.approval_request import ApprovalRequestRepository
 from app.repositories.execution import ExecutionRepository
 from app.repositories.mcp_server import MCPServerRepository
 from app.repositories.mcp_tool import MCPToolRepository
@@ -183,20 +185,25 @@ class _RecordingClient:
 
 
 # ---------------------------------------------------------------------------
-# requires_approval fail-closed
+# requires_approval → WAITING_APPROVAL (FNC-EXE-009 / FNC-APR-002)
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_requires_approval_fail_closed_never_calls_mcp(
+async def test_requires_approval_enters_waiting_approval_no_attempt_or_mcp(
     db_session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """ToolPolicy.requires_approval=true must wait before Attempt/ToolCall/MCP."""
     _install_no_side_effects(monkeypatch)
     async with db_session_factory() as session:
         approval = await ApprovalPolicyRepository(session).create(
             code=f"ap-{uuid.uuid4().hex[:8]}",
             name="Runner Approval Gate",
+            decision_mode="ANY",
+            required_approvals=1,
+            default_expiry_seconds=3600,
+            approver_scope={"roles": ["approver"]},
         )
         await session.commit()
         approval_id = approval.id
@@ -220,21 +227,37 @@ async def test_requires_approval_fail_closed_never_calls_mcp(
         execution_id=execution_id, worker_id=worker_id, lease_token=lease_token
     )
     assert outcome.mcp_called is False
-    assert outcome.terminal_status == StepStatus.FAILED.value
-    assert "requires_approval" in (outcome.reason or "").lower() or outcome.reason == (
-        "EXECUTION_PRECONDITION_FAILED"
-    )
+    assert outcome.terminal_status == StepStatus.WAITING_APPROVAL.value
+    assert outcome.reason == "WAITING_APPROVAL"
+    assert outcome.attempt_id is None
+    assert outcome.tool_call_id is None
 
     async with db_session_factory() as session:
         execution = await ExecutionRepository(session).get(execution_id)
         assert execution is not None
-        assert execution.status == ExecutionStatus.FAILED.value
+        assert execution.status == ExecutionStatus.WAITING_APPROVAL.value
         assert execution.worker_id is None
         assert execution.lease_token is None
+        assert execution.lease_expires_at is None
+        assert execution.heartbeat_at is None
+        assert execution.finished_at is None
         step = (await ExecutionRepository(session).list_steps(execution_id))[0]
-        assert step.status == StepStatus.FAILED.value
-        assert "requires_approval" in (step.error_message or "").lower()
+        assert step.status == StepStatus.WAITING_APPROVAL.value
+        assert step.finished_at is None
+        assert step.attempt_count == 0
         assert (await ExecutionRepository(session).list_attempts(step.id)) == []
+        pending = await ApprovalRequestRepository(session).find_pending_for_step(
+            execution_id=execution_id, step_execution_id=step.id
+        )
+        assert pending is not None
+        assert pending.status == ApprovalStatus.PENDING.value
+        assert pending.approval_policy_id == approval_id
+        assert pending.decision_mode == "ANY"
+        assert pending.required_approvals == 1
+        assert pending.approval_scope == {"roles": ["approver"]}
+        assert pending.resolved_at is None
+        assert pending.requested_by == execution.requester_id
+        assert pending.expires_at == pending.requested_at + timedelta(seconds=3600)
 
 
 # ---------------------------------------------------------------------------

@@ -5,8 +5,6 @@ Internal Agent Runtime schema — not a public HTTP DTO.
 
 from __future__ import annotations
 
-import hashlib
-import json
 import uuid
 from typing import Any, Literal
 
@@ -138,10 +136,6 @@ def default_plan_limits() -> PlanLimits:
 
 def compute_plan_hash(plan_snapshot: dict[str, Any]) -> str:
     """Deterministic SHA-256 over canonical JSON of plan_snapshot only."""
-    payload = json.dumps(
-        plan_snapshot,
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=False,
-    )
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    from app.core.canonical_hash import compute_canonical_json_hash
+
+    return compute_canonical_json_hash(plan_snapshot)

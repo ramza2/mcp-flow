@@ -85,7 +85,7 @@ from app.execution.secret_redaction import (
     redact_text,
     sanitize_for_persistence,
 )
-from app.execution.tool_step_attempt import ToolStepAttemptService
+from app.execution.tool_step_attempt import ApprovalWaitOutcome, ToolStepAttemptService
 from app.mcp.auth_headers import build_mcp_auth_headers
 from app.mcp.contracts import NormalizedToolResult
 from app.mcp.current import CurrentMCPClient
@@ -639,6 +639,15 @@ class McpToolRunner:
                             status=step.status,
                         )
                     )
+                if step.status == StepStatus.WAITING_APPROVAL.value:
+                    return _PrepareResult(
+                        outcome=self._noop(
+                            execution.id,
+                            "WAITING_APPROVAL",
+                            step_id=step.id,
+                            status=step.status,
+                        )
+                    )
                 if step.status not in {StepStatus.READY.value, StepStatus.RUNNING.value}:
                     raise AppError(
                         code="RESOURCE_CONFLICT",
@@ -692,6 +701,22 @@ class McpToolRunner:
                 except AppError as exc:
                     # Do not strand RUNNING + READY after recovery/claim when
                     # runtime preflight rejects (e.g. pinned policy_snapshot drift).
+                    # Approval wait already cleared the lease — do not FAILED it.
+                    if (
+                        execution.status == ExecutionStatus.WAITING_APPROVAL.value
+                        or step.status == StepStatus.WAITING_APPROVAL.value
+                    ):
+                        return _PrepareResult(
+                            outcome=ToolRunOutcome(
+                                execution_id=execution.id,
+                                step_execution_id=step.id,
+                                attempt_id=None,
+                                tool_call_id=None,
+                                mcp_called=False,
+                                terminal_status=StepStatus.WAITING_APPROVAL.value,
+                                reason="WAITING_APPROVAL",
+                            )
+                        )
                     if step.status not in _STEP_TERMINAL_STATUSES:
                         step.status = StepStatus.FAILED.value
                         step.error_code = exc.code
@@ -719,6 +744,20 @@ class McpToolRunner:
                             reason=exc.code,
                         )
                     )
+
+                if isinstance(attempt_outcome, ApprovalWaitOutcome):
+                    return _PrepareResult(
+                        outcome=ToolRunOutcome(
+                            execution_id=execution.id,
+                            step_execution_id=step.id,
+                            attempt_id=None,
+                            tool_call_id=None,
+                            mcp_called=False,
+                            terminal_status=StepStatus.WAITING_APPROVAL.value,
+                            reason="WAITING_APPROVAL",
+                        )
+                    )
+
                 attempt = await executions.get_attempt(attempt_outcome.attempt_id)
                 if attempt is None or attempt.status != StepAttemptStatus.STARTED.value:
                     raise AppError(

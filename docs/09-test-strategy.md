@@ -400,7 +400,13 @@ Dataset은 평가 전 FROZEN하고 실행 중 정답을 변경하지 않는다.
 - TOOL Step `READY → RUNNING` + `StepAttempt STARTED` atomic transition
 - FNC-EXE-004 runtime preflight reuse (User/Grant/Server/Tool/ToolVersion/Policy)
 - shared current-Tool preflight used by Execution creation + Attempt start
-- `requires_approval=true` Attempt fail-closed (no ApprovalRequest / WAITING_APPROVAL)
+- `requires_approval=true` → PENDING ApprovalRequest + Execution/Step WAITING_APPROVAL
+  (Attempt/ToolCall/MCP = 0, lease cleared, attempt_count unchanged)
+- confirmation + approval: evidence 없으면 ApprovalRequest 0 / fail-closed;
+  evidence 있으면 WAITING_APPROVAL
+- ApprovalPolicy INACTIVE / policy snapshot drift → ApprovalRequest 0 / fail-closed
+- duplicate/concurrent wait → PENDING ApprovalRequest 정확히 1
+- secret-safe context_snapshot + deterministic context_hash
 - runtime `requires_confirmation` revalidation via existing PLAN_CONFIRMATION evidence
 - Binding materialization foundation: LITERAL + SECRET_REF only (fail-closed otherwise)
 - secret-safe `resolved_input` / `request_snapshot` (raw secret 미기록)
@@ -409,7 +415,7 @@ Dataset은 평가 전 FROZEN하고 실행 중 정답을 변경하지 않는다.
 - invalid Step state / non-TOOL / corrupted lineage fail-closed
 - concurrent READY start → exactly one Attempt
 - Celery claim task는 Attempt를 자동 시작하지 않음
-- MCP tools/call / ToolCall / SecretResolver / terminal Step·Execution 미구현
+- Approval decide/resume / MRTR / Cancellation 미구현
 
 추가 (MCP Tool Runner vertical slice):
 
@@ -436,7 +442,7 @@ Dataset은 평가 전 FROZEN하고 실행 중 정답을 변경하지 않는다.
     `retryable=false`, `outcome_unknown=true` (전송 후 모호성; oversized body 미보존)
   - `Authorization` 헤더는 실제 요청에는 포함되나 오류 메시지/로그에는 노출되지 않음
 - `McpToolRunner` (TX1 / B1 secret / B2 final gate / B3 network / TX2, §14.3 참조):
-  - `requires_approval` fail-closed 재검증 — MCP 호출 0
+  - `requires_approval=true` → WAITING_APPROVAL foundation (Attempt/ToolCall/MCP = 0)
   - BEARER 인증: secret은 `call_tool`에는 전달되나 Execution/Step/Attempt/ToolCall의
     어떤 JSON 필드·`error_message`·로그에도 원문이 남지 않음
   - remote MCP가 BEARER/SECRET_REF plaintext를 content/structuredContent/_meta/
@@ -685,6 +691,17 @@ DRAFT → PUBLISHED → DEPRECATED
 - 중복 decision
 - 승인 후 입력 변경 시 재승인
 - 재시작 복구
+
+Approval wait foundation (현재 구현):
+
+- ToolPolicy `requires_approval` → PENDING ApprovalRequest + WAITING_APPROVAL
+- Attempt/ToolCall/MCP = 0, lease cleared, attempt_count unchanged
+- confirmation + approval / ApprovalPolicy inactive / snapshot drift fail-closed
+- duplicate Runner delivery / concurrent same lease → PENDING 정확히 1
+- secret-safe context_snapshot + deterministic context_hash
+- expires_at = requested_at + default_expiry_seconds
+- migration upgrade/downgrade/re-upgrade for approval_requests / approval_decisions
+- decide API / aggregation / resume는 후속 범위
 
 중요 회귀:
 
