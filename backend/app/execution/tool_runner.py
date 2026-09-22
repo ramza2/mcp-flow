@@ -85,7 +85,8 @@ from app.execution.secret_redaction import (
     redact_text,
     sanitize_for_persistence,
 )
-from app.execution.tool_step_attempt import ToolStepAttemptService
+from app.approval.wait import ApprovalWaitService
+from app.execution.tool_step_attempt import ApprovalWaitOutcome, ToolStepAttemptService
 from app.mcp.auth_headers import build_mcp_auth_headers
 from app.mcp.contracts import NormalizedToolResult
 from app.mcp.current import CurrentMCPClient
@@ -607,6 +608,62 @@ class McpToolRunner:
                     return _PrepareResult(outcome=self._noop(execution_id, "MISSING"))
 
                 now = datetime.now(UTC)
+                steps = await executions.list_steps(execution.id)
+                if len(steps) != 1:
+                    raise AppError(
+                        code="RESOURCE_CONFLICT",
+                        message="AgentRequest Execution must contain exactly one Step.",
+                        status_code=409,
+                    )
+                step = await executions.lock_step(steps[0].id)
+                assert step is not None
+
+                # One-sided WAITING_APPROVAL is atomicity corruption — never
+                # normalize it into a successful wait outcome.
+                exec_waiting = (
+                    execution.status == ExecutionStatus.WAITING_APPROVAL.value
+                )
+                step_waiting = step.status == StepStatus.WAITING_APPROVAL.value
+                if exec_waiting != step_waiting:
+                    return _PrepareResult(
+                        outcome=ToolRunOutcome(
+                            execution_id=execution.id,
+                            step_execution_id=step.id,
+                            attempt_id=None,
+                            tool_call_id=None,
+                            mcp_called=False,
+                            terminal_status=None,
+                            reason="RESOURCE_CONFLICT",
+                        )
+                    )
+                if exec_waiting and step_waiting:
+                    # Require exactly one PENDING ApprovalRequest — do not treat
+                    # missing evidence as a valid wait.
+                    try:
+                        await ApprovalWaitService(session).reuse_pending(
+                            execution=execution, step=step
+                        )
+                    except AppError as exc:
+                        return _PrepareResult(
+                            outcome=ToolRunOutcome(
+                                execution_id=execution.id,
+                                step_execution_id=step.id,
+                                attempt_id=None,
+                                tool_call_id=None,
+                                mcp_called=False,
+                                terminal_status=None,
+                                reason=exc.code,
+                            )
+                        )
+                    return _PrepareResult(
+                        outcome=self._noop(
+                            execution.id,
+                            "WAITING_APPROVAL",
+                            step_id=step.id,
+                            status=step.status,
+                        )
+                    )
+
                 if (
                     execution.status != ExecutionStatus.RUNNING.value
                     or execution.worker_id != worker
@@ -619,16 +676,6 @@ class McpToolRunner:
                             execution.id, "LEASE_MISMATCH", status=execution.status
                         )
                     )
-
-                steps = await executions.list_steps(execution.id)
-                if len(steps) != 1:
-                    raise AppError(
-                        code="RESOURCE_CONFLICT",
-                        message="AgentRequest Execution must contain exactly one Step.",
-                        status_code=409,
-                    )
-                step = await executions.lock_step(steps[0].id)
-                assert step is not None
 
                 if step.status in _STEP_TERMINAL_STATUSES:
                     return _PrepareResult(
@@ -692,6 +739,55 @@ class McpToolRunner:
                 except AppError as exc:
                     # Do not strand RUNNING + READY after recovery/claim when
                     # runtime preflight rejects (e.g. pinned policy_snapshot drift).
+                    # Valid both-side wait already cleared the lease — do not FAILED it.
+                    # One-sided WAITING_APPROVAL is corruption: leave state untouched.
+                    exec_waiting = (
+                        execution.status == ExecutionStatus.WAITING_APPROVAL.value
+                    )
+                    step_waiting = step.status == StepStatus.WAITING_APPROVAL.value
+                    if exec_waiting and step_waiting:
+                        return _PrepareResult(
+                            outcome=ToolRunOutcome(
+                                execution_id=execution.id,
+                                step_execution_id=step.id,
+                                attempt_id=None,
+                                tool_call_id=None,
+                                mcp_called=False,
+                                terminal_status=StepStatus.WAITING_APPROVAL.value,
+                                reason="WAITING_APPROVAL",
+                            )
+                        )
+                    if exec_waiting or step_waiting:
+                        return _PrepareResult(
+                            outcome=ToolRunOutcome(
+                                execution_id=execution.id,
+                                step_execution_id=step.id,
+                                attempt_id=None,
+                                tool_call_id=None,
+                                mcp_called=False,
+                                terminal_status=None,
+                                reason=exc.code,
+                            )
+                        )
+                    # Orphan PENDING while still RUNNING/READY is durable
+                    # inconsistency — do not terminalize or clear lease.
+                    if (
+                        exc.code == "RESOURCE_CONFLICT"
+                        and execution.status == ExecutionStatus.RUNNING.value
+                        and step.status == StepStatus.READY.value
+                        and "PENDING ApprovalRequest already exists" in exc.message
+                    ):
+                        return _PrepareResult(
+                            outcome=ToolRunOutcome(
+                                execution_id=execution.id,
+                                step_execution_id=step.id,
+                                attempt_id=None,
+                                tool_call_id=None,
+                                mcp_called=False,
+                                terminal_status=None,
+                                reason=exc.code,
+                            )
+                        )
                     if step.status not in _STEP_TERMINAL_STATUSES:
                         step.status = StepStatus.FAILED.value
                         step.error_code = exc.code
@@ -719,6 +815,20 @@ class McpToolRunner:
                             reason=exc.code,
                         )
                     )
+
+                if isinstance(attempt_outcome, ApprovalWaitOutcome):
+                    return _PrepareResult(
+                        outcome=ToolRunOutcome(
+                            execution_id=execution.id,
+                            step_execution_id=step.id,
+                            attempt_id=None,
+                            tool_call_id=None,
+                            mcp_called=False,
+                            terminal_status=StepStatus.WAITING_APPROVAL.value,
+                            reason="WAITING_APPROVAL",
+                        )
+                    )
+
                 attempt = await executions.get_attempt(attempt_outcome.attempt_id)
                 if attempt is None or attempt.status != StepAttemptStatus.STARTED.value:
                     raise AppError(

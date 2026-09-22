@@ -1,7 +1,7 @@
 """ORM model package — import models so metadata is registered for Alembic."""
 
 from app.models.agent import Agent, AgentToolGrant, AgentVersion
-from app.models.approval import ApprovalPolicy
+from app.models.approval import ApprovalDecision, ApprovalPolicy, ApprovalRequest
 from app.models.auth import (
     Permission,
     ResourceGrant,
@@ -45,7 +45,9 @@ __all__ = [
     "ApiIdempotencyRecord",
     "Conversation",
     "ConversationMessage",
+    "ApprovalDecision",
     "ApprovalPolicy",
+    "ApprovalRequest",
     "Execution",
     "ExecutionStep",
     "StepAttempt",

@@ -666,6 +666,10 @@ Approval WAITING_APPROVAL
 
 `WAITING_APPROVAL` belongs to Execution/Step.
 
+When `ToolPolicy.requires_approval=true`, enter `WAITING_APPROVAL` **before**
+creating a StepAttempt, ToolCall, or MCP network call. Approval waiting must
+not consume Attempt budget and must clear the Execution worker lease.
+
 Approval reject/expiry does NOT create Execution statuses such as:
 
 ```text
@@ -1571,6 +1575,8 @@ Do not expose raw secrets.
 Do not allow arbitrary STDIO shell commands.
 
 Do not auto-retry UNKNOWN_OUTCOME or unsafe non-idempotent operations.
+
+Do not start StepAttempt / ToolCall / MCP while ToolPolicy requires unresolved approval.
 
 Do not use implicit latest versions for Schedules.
 

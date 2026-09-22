@@ -1057,6 +1057,12 @@ requested_by
 lock_version
 ```
 
+ToolPolicy pre-Attempt approval foundation:
+
+- PENDING row는 `(execution_id, step_execution_id)` partial unique (`WHERE status='PENDING'`)로 중복 active request를 차단한다. 이력(비-PENDING)은 보존한다.
+- `context_snapshot` / `context_hash`는 secret-safe canonical hash 규칙을 따른다.
+- ApprovalRequest 생성과 Execution/Step `WAITING_APPROVAL` + lease clear는 동일 transaction이다.
+
 ### 12.3 `approval_decisions`
 
 ```text
@@ -1067,6 +1073,8 @@ comment
 context_hash
 decided_at
 ```
+
+Decision persistence foundation만 존재한다. ANY/ALL/QUORUM aggregation, approve/reject API, resume은 후속 범위다.
 
 승인 결과는 Execution 전체 상태로 `REJECTED`/`EXPIRED`를 생성하지 않는다. 해당 Approval Step의 오류정책과 required 여부에 따라 Execution은 `FAILED`, `PARTIALLY_SUCCEEDED`, `CANCELLED` 등으로 판정한다.
 
@@ -1248,11 +1256,13 @@ lock_version
 
 ```text
 PENDING → READY | SKIPPED | CANCELLED
-READY → RUNNING | CANCELLED
+READY → RUNNING | WAITING_APPROVAL | CANCELLED
 RUNNING → WAITING_INPUT | WAITING_APPROVAL | SUCCEEDED | FAILED | TIMED_OUT | CANCELLED | UNKNOWN_OUTCOME
 WAITING_INPUT → READY | FAILED | CANCELLED
 WAITING_APPROVAL → READY | FAILED | SKIPPED | CANCELLED
 ```
+
+`READY → WAITING_APPROVAL`은 ToolPolicy pre-Attempt approval wait다. 이 경로에서는 StepAttempt / ToolCall / MCP 호출을 만들지 않으며 `attempt_count`와 `started_at`을 변경하지 않는다. `RUNNING → WAITING_APPROVAL`은 Attempt 시작 이후 mid-execution Approval(authorable APPROVAL Step 등)용이며 현재 single-TOOL foundation 범위 밖이다.
 
 `UNKNOWN_OUTCOME`은 terminal이며 자동 retry하지 않는다.
 

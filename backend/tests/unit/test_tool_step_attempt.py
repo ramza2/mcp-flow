@@ -425,13 +425,17 @@ async def test_agent_version_missing_rejected(db_session: AsyncSession) -> None:
 
 
 @pytest.mark.asyncio
-async def test_requires_approval_fail_closed(
+async def test_requires_approval_enters_waiting_approval(
     db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _install_no_side_effects(monkeypatch)
     approval = await ApprovalPolicyRepository(db_session).create(
         code=f"ap-{uuid.uuid4().hex[:8]}",
         name="Attempt Approval Gate",
+        decision_mode="ANY",
+        required_approvals=1,
+        default_expiry_seconds=1800,
+        approver_scope={"roles": ["ops"]},
     )
     await db_session.flush()
     seeded = await _seed_ready(
@@ -447,22 +451,47 @@ async def test_requires_approval_fail_closed(
     await db_session.commit()
     assert claim.claimed and claim.lease_token is not None
 
-    with pytest.raises(AppError) as exc:
-        await ToolStepAttemptService(db_session).start(
-            execution_id=created.result.id,
-            step_execution_id=claim.ready_step_ids[0],
-            worker_id="worker-approval",
-            lease_token=claim.lease_token,
-        )
-    assert exc.value.status_code == 409
-    assert "requires_approval" in exc.value.message.lower()
+    from app.approval.wait import ApprovalWaitOutcome
+    from app.domain.enums import ApprovalStatus
+    from app.repositories.approval_request import ApprovalRequestRepository
+
+    outcome = await ToolStepAttemptService(db_session).start(
+        execution_id=created.result.id,
+        step_execution_id=claim.ready_step_ids[0],
+        worker_id="worker-approval",
+        lease_token=claim.lease_token,
+    )
+    assert isinstance(outcome, ApprovalWaitOutcome)
+    await db_session.commit()
+
     step = (await ExecutionRepository(db_session).list_steps(created.result.id))[0]
-    assert step.status == StepStatus.READY.value
+    assert step.status == StepStatus.WAITING_APPROVAL.value
     assert step.attempt_count == 0
+    assert step.started_at is None
+    assert step.finished_at is None
     assert (await ExecutionRepository(db_session).list_attempts(step.id)) == []
     execution = await ExecutionRepository(db_session).get(created.result.id)
     assert execution is not None
-    assert execution.status == ExecutionStatus.RUNNING.value
+    assert execution.status == ExecutionStatus.WAITING_APPROVAL.value
+    assert execution.worker_id is None
+    assert execution.lease_token is None
+    assert execution.lease_expires_at is None
+    assert execution.heartbeat_at is None
+    assert execution.finished_at is None
+    pending = await ApprovalRequestRepository(db_session).find_pending_for_step(
+        execution_id=created.result.id, step_execution_id=step.id
+    )
+    assert pending is not None
+    assert pending.status == ApprovalStatus.PENDING.value
+    assert pending.approval_policy_id == approval.id
+    assert pending.decision_mode == "ANY"
+    assert pending.required_approvals == 1
+    assert pending.approval_scope == {"roles": ["ops"]}
+    assert pending.requested_by == execution.requester_id
+    assert pending.resolved_at is None
+    assert (
+        pending.expires_at - pending.requested_at
+    ).total_seconds() == 1800
 
 
 @pytest.mark.asyncio

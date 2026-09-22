@@ -513,7 +513,9 @@ Execution CREATED
 
 User 활성/Permission, Agent grant, Server/Tool state, input, ToolPolicy, Approval snapshot, concurrency를 다시 확인한다.
 
-TOOL Step Attempt foundation에서는 Attempt 생성 직전에 현재 DB 상태로 동일 재검증을 수행한다. Creation-time planning preflight와 코드를 공유하되, Celery claim task는 Attempt를 자동 시작하지 않는다. `ToolPolicy.requires_approval=true`이면 Attempt foundation은 ApprovalRequest/`WAITING_APPROVAL`을 만들지 않고 fail-closed한다(FNC-EXE-009는 후속 Approval PR).
+TOOL Step Attempt / MCP Tool Runner는 Attempt 생성 직전에 현재 DB 상태로 동일 재검증을 수행한다. Creation-time planning preflight와 코드를 공유하되, Celery claim task는 Attempt를 자동 시작하지 않는다.
+
+`ToolPolicy.requires_approval=true`이면 Attempt/`ToolCall`/MCP `tools/call`을 시작하기 전에 ApprovalRequest를 생성하고 Execution/Step을 `WAITING_APPROVAL`로 전환한다(FNC-EXE-009). Approval 대기는 Attempt budget을 소비하지 않는다. confirmation이 함께 요구되면 PLAN_CONFIRMATION evidence가 유효해야만 wait에 진입한다.
 
 MCP Tool Runner는 Phase A(Attempt start / replay preflight + `ToolCall STARTED` durable commit) 이후, 실제 MCP `tools/call` 직전 별도 short transaction(Phase B2 final pre-send gate)에서 `assert_current_tool_executable`을 다시 호출한다. Phase A 통과 후 mutable authorization/policy(User ACTIVE, `mcp.tool.execute`, MCP_TOOL ResourceGrant, AgentToolGrant, Tool/Server ACTIVE·current_version, MCPToolPolicy, ApprovalPolicy, confirmation 조건)가 바뀌면 remote 호출 없이 fail-closed한다. 이 gate는 DB commit과 이후 socket write 사이의 절대적 linearizability를 주장하지 않으며, network I/O 동안 DB transaction을 유지하지 않는다.
 
@@ -523,7 +525,7 @@ Attempt 생성 → Secret 주입 → MCP Adapter → progress/MRTR/cancel 처리
 
 Attempt foundation 범위에서는 Step `READY → RUNNING`과 `StepAttempt STARTED` persistence까지만 구현한다. Secret resolve, MCP `tools/call`, ToolCall row, terminal Step/Execution 전이는 후속 MCP Tool runner 범위다.
 
-MCP Tool Runner vertical slice(`McpToolRunner`)는 `requires_approval` fail-closed 재검증, `SECRET_REF` argument 해석(`app/execution/secret_materialize.py`), `CurrentMCPClient.call_tool`를 통한 실제 `tools/call` 실행, output schema 검증(`app/execution/result_validator.py`), ToolCall/StepAttempt/Step/Execution terminal 전이까지를 구현한다. 호출 경계는 다음 순서를 따른다.
+MCP Tool Runner vertical slice(`McpToolRunner`)는 ToolPolicy approval-wait foundation, `SECRET_REF` argument 해석(`app/execution/secret_materialize.py`), `CurrentMCPClient.call_tool`를 통한 실제 `tools/call` 실행, output schema 검증(`app/execution/result_validator.py`), ToolCall/StepAttempt/Step/Execution terminal 전이까지를 구현한다. 호출 경계는 다음 순서를 따른다.
 
 ```text
 Phase A / TX1     — lease·lineage·Attempt start/replay preflight, ToolCall STARTED durable commit
@@ -577,6 +579,29 @@ Legacy elicitation은 같은 내부 흐름으로 normalize한다.
 
 Approval Step 또는 ToolPolicy가 요구하면 `WAITING_APPROVAL`로 전환한다. 승인/거절/만료 결과는 Approval 엔터티에 남기며 Execution terminal은 Plan completion 정책으로 판정한다.
 
+### ToolPolicy pre-Attempt approval (현재 foundation)
+
+AgentRequest + single TOOL Step에서 `ToolPolicy.requires_approval=true`이면:
+
+```text
+runtime preflight (authz / Tool / Server / Policy / ApprovalPolicy / confirmation)
+→ PENDING ApprovalRequest 생성
+→ Execution RUNNING → WAITING_APPROVAL
+→ Step READY → WAITING_APPROVAL
+→ worker lease 해제 (worker_id / lease_token / lease_expires_at / heartbeat_at = null)
+→ StepAttempt = 0, ToolCall = 0, MCP tools/call = 0
+```
+
+불변식:
+
+- Approval은 external side effect 이전에 발생한다 (fake Attempt로 wait를 표현하지 않는다).
+- ApprovalRequest 생성과 WAITING_APPROVAL 전이는 동일 DB transaction이다.
+- `context_snapshot`은 secret-safe이며 `context_hash`는 canonical JSON SHA-256으로 exact context에 바인딩한다.
+- Approval wait lifetime은 `ApprovalRequest.expires_at`가 관할하며 MCP tools/call timeout을 소비하지 않는다.
+- `Step.started_at`은 MCP Attempt 시작 시각이므로 approval wait 진입만으로 설정/재설정하지 않는다.
+- WAITING_APPROVAL은 active worker lease가 없다. expired RUNNING recovery는 WAITING_APPROVAL을 candidate로 취급하지 않는다.
+- Decision aggregation / approve·reject API / same-Execution resume은 후속 범위다.
+
 ## FNC-EXE-010. 취소
 
 취소 요청 → `CANCEL_REQUESTED` → 신규 Step 차단 → 가능한 remote cancel → 안전한 종료 후 `CANCELLED`.
@@ -585,7 +610,7 @@ Approval Step 또는 ToolPolicy가 요구하면 `WAITING_APPROVAL`로 전환한�
 
 Worker lease, MCP task handle, persisted state를 사용해 재시작 후 복구한다. 동일 non-idempotent Tool을 무조건 재호출하지 않는다.
 
-이번 vertical slice는 **AgentRequest + single TOOL Step + synchronous Current MCP `tools/call` persisted evidence**만 대상으로 한다. MRTR `WAITING_INPUT`, Approval `WAITING_APPROVAL`, MCP task-handle persistence, Workflow multi-step, Schedule recovery는 후속 범위다.
+이번 vertical slice는 **AgentRequest + single TOOL Step + synchronous Current MCP `tools/call` persisted evidence**만 대상으로 한다. MRTR `WAITING_INPUT`, Approval decision/resume, MCP task-handle persistence, Workflow multi-step, Schedule recovery는 후속 범위다. Approval wait foundation(`WAITING_APPROVAL` + PENDING ApprovalRequest)은 lease 없는 non-terminal 상태이므로 expired RUNNING recovery candidate에 포함되지 않는다.
 
 PostgreSQL이 source of truth다. outbox process가 expired `RUNNING` candidate를 bounded scan하여 Celery `mcpflow.execution.recover`(payload: `execution_id` only)를 publish하고, worker는 DB evidence로 decision 후 필요 시 기존 `McpToolRunner`를 호출한다. Redis/Celery는 delivery/coordination만 담당한다.
 
@@ -642,6 +667,19 @@ reject comment
 ## FNC-APR-002. 요청 생성
 
 Tool/입력/위험/선행결과/요청자를 masked snapshot으로 저장하고 context hash를 계산한다.
+
+현재 AgentRequest + single TOOL foundation은 선행 Step 결과가 없으므로 최소 reproducible context만 저장한다:
+
+```text
+schema_version
+execution_id, step_execution_id, step_key
+requester_id, agent_version_id, mcp_tool_version_id
+plan_hash, risk_class
+resolved_input (SECRET_REF는 reference-only)
+tool_policy / approval_policy safe identifiers
+```
+
+`context_hash`는 docs/05 §21 canonical JSON hash(정렬·UTF-8·SHA-256 lowercase hex)이며 secret plaintext를 포함하지 않는다. 동일 Execution+Step에 대해 PENDING ApprovalRequest는 최대 하나(PostgreSQL partial unique index)다.
 
 ## FNC-APR-003. Decision
 
