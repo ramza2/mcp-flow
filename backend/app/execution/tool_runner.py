@@ -6,9 +6,17 @@ current-tool-executable + confirmation/approval fail-closed checks on replay,
 verify CURRENT + STREAMABLE_HTTP only, create ``ToolCall`` STARTED, and commit
 before any network I/O.
 
-Phase B (network, no DB transaction held): resolve the server auth secret and
-materialize SECRET_REF tool arguments in memory only, run a lease-heartbeat
-task concurrently, then call ``CurrentMCPClient.call_tool``.
+Phase B1 (no DB transaction): resolve the server auth secret and materialize
+SECRET_REF tool arguments in memory only.
+
+Phase B2 (short TX, final pre-send gate): re-lock Execution and re-run canonical
+``assert_current_tool_executable`` plus lease/lineage/prepared-invocation drift
+checks immediately before the remote call. Mutable authorization/policy changes
+after Phase A are fail-closed here. This gate does not claim absolute
+linearizability between DB commit and the subsequent socket write.
+
+Phase B3 (network, no DB transaction held): call ``CurrentMCPClient.call_tool``
+with a concurrent lease-heartbeat task.
 
 Phase C (TX2, short, FOR UPDATE fencing): re-lock the same Execution/Step/
 Attempt/ToolCall rows, verify worker/lease/lineage has not moved, and apply
@@ -137,11 +145,34 @@ class _PreparedCall:
     resolved_input: dict[str, Any]
     auth_type: str
     auth_secret_id: uuid.UUID | None
+    protocol_era: str
+    transport_type: str
     risk_class: str
     output_schema: Any
     max_result_bytes: int
     worker_id: str
     lease_token: uuid.UUID
+
+
+def _prepared_invocation_lineage_matches(
+    *,
+    execution: Execution,
+    step: ExecutionStep,
+    attempt: StepAttempt,
+    tool_call: ToolCall,
+    prepared: _PreparedCall,
+) -> bool:
+    return (
+        step.execution_id == execution.id
+        and attempt.step_execution_id == step.id
+        and tool_call.step_attempt_id == attempt.id
+        and tool_call.remote_request_id == prepared.remote_request_id
+        and tool_call.mcp_server_id == prepared.mcp_server_id
+        and tool_call.mcp_tool_version_id == prepared.mcp_tool_version_id
+        and tool_call.normalized_status == ToolCallNormalizedStatus.STARTED.value
+        and step.status == StepStatus.RUNNING.value
+        and attempt.status == StepAttemptStatus.STARTED.value
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -263,6 +294,29 @@ class McpToolRunner:
                 first_byte_at=None,
             )
 
+        # Deterministic TOCTOU test seam (production no-op): mutate mutable
+        # authorization/policy after Phase A and secret materialize, before the
+        # final pre-send gate.
+        await self._after_phase_a_before_final_gate(prepared)
+
+        gate = await self._final_pre_send_gate(prepared)
+        if isinstance(gate, ToolRunOutcome):
+            # Lease lost (NO_OP) or fail-closed terminalization already committed in
+            # the final gate transaction — never overwrite a new owner's state.
+            auth_headers.clear()
+            arguments.clear()
+            return gate
+        if isinstance(gate, _PreSendFailClosed):
+            auth_headers.clear()
+            arguments.clear()
+            return await self._finalize_locked(
+                prepared,
+                call_error=gate,
+                result=None,
+                response_meta=None,
+                first_byte_at=None,
+            )
+
         result, response_meta, first_byte_at, call_error = await self._call_remote(
             prepared, auth_headers, arguments
         )
@@ -273,6 +327,217 @@ class McpToolRunner:
             response_meta=response_meta,
             first_byte_at=first_byte_at,
         )
+
+    async def _after_phase_a_before_final_gate(self, prepared: _PreparedCall) -> None:
+        """Production no-op. Integration tests monkeypatch this to mutate DB state."""
+        del prepared
+
+    def _final_gate_fail_closed_lineage_corruption(
+        self,
+        *,
+        execution: Execution,
+        step: ExecutionStep | None,
+        attempt: StepAttempt | None,
+        tool_call: ToolCall | None,
+        prepared: _PreparedCall,
+        now: datetime,
+    ) -> ToolRunOutcome:
+        """Valid lease owner + inconsistent/missing evidence — fail closed, MCP 0.
+
+        Already-terminal Step/Attempt/ToolCall rows are preserved. Non-terminal
+        evidence is FAILED. Execution is always FAILED with lease cleared so the
+        runner cannot strand RUNNING ownership.
+        """
+        error_code = "RESOURCE_CONFLICT"
+        error_message = "Final pre-send invocation lineage is inconsistent."
+
+        if step is not None and step.status not in _STEP_TERMINAL_STATUSES:
+            step.status = StepStatus.FAILED.value
+            step.error_code = error_code
+            step.error_message = error_message
+            step.finished_at = now
+            step.lock_version += 1
+
+        if attempt is not None and attempt.status == StepAttemptStatus.STARTED.value:
+            attempt.status = StepAttemptStatus.FAILED.value
+            attempt.error_layer = "PROTOCOL"
+            attempt.error_code = error_code
+            attempt.error_message = error_message
+            attempt.is_retryable = False
+            attempt.finished_at = now
+
+        if (
+            tool_call is not None
+            and tool_call.normalized_status == ToolCallNormalizedStatus.STARTED.value
+        ):
+            tool_call.normalized_status = ToolCallNormalizedStatus.FAILED.value
+            tool_call.finished_at = now
+
+        execution.status = ExecutionStatus.FAILED.value
+        execution.error_code = error_code
+        execution.error_message = error_message
+        execution.finished_at = now
+        execution.worker_id = None
+        execution.lease_token = None
+        execution.lease_expires_at = None
+        execution.heartbeat_at = None
+        execution.lock_version += 1
+
+        return ToolRunOutcome(
+            execution_id=execution.id,
+            step_execution_id=step.id if step is not None else prepared.step_id,
+            attempt_id=attempt.id if attempt is not None else prepared.attempt_id,
+            tool_call_id=(
+                tool_call.id if tool_call is not None else prepared.tool_call_id
+            ),
+            mcp_called=False,
+            terminal_status=StepStatus.FAILED.value,
+            reason=error_code,
+        )
+
+    async def _final_pre_send_gate(
+        self, prepared: _PreparedCall
+    ) -> ToolRunOutcome | _PreSendFailClosed | None:
+        """Short TX: revalidate lease/lineage + current authz/policy before network.
+
+        Returns:
+          - ``None`` — gate passed; caller may invoke ``call_tool`` immediately
+          - ``_PreSendFailClosed`` — still owns lease; caller must terminalize
+            via ``_finalize_locked`` without a remote call
+          - ``ToolRunOutcome`` — lease/ownership lost (NO_OP), or lineage corruption
+            fail-closed terminalization committed in-gate (do not finalize again)
+        """
+        async with self._session_factory() as session:
+            async with session.begin():
+                executions = ExecutionRepository(session)
+                execution = await executions.lock_execution(prepared.execution_id)
+                now = datetime.now(UTC)
+                if (
+                    execution is None
+                    or execution.status != ExecutionStatus.RUNNING.value
+                    or execution.worker_id != prepared.worker_id
+                    or execution.lease_token != prepared.lease_token
+                    or execution.lease_expires_at is None
+                    or _as_utc(execution.lease_expires_at) <= _as_utc(now)
+                ):
+                    return self._noop(
+                        prepared.execution_id,
+                        "LEASE_MISMATCH",
+                        step_id=prepared.step_id,
+                        status=None if execution is None else execution.status,
+                    )
+
+                step = await executions.lock_step(prepared.step_id)
+                attempt = await executions.get_attempt_with_lock(prepared.attempt_id)
+                tool_call = await executions.get_tool_call_with_lock(
+                    prepared.tool_call_id
+                )
+                if step is None or attempt is None or tool_call is None:
+                    return self._final_gate_fail_closed_lineage_corruption(
+                        execution=execution,
+                        step=step,
+                        attempt=attempt,
+                        tool_call=tool_call,
+                        prepared=prepared,
+                        now=now,
+                    )
+                if not _prepared_invocation_lineage_matches(
+                    execution=execution,
+                    step=step,
+                    attempt=attempt,
+                    tool_call=tool_call,
+                    prepared=prepared,
+                ):
+                    # Ownership valid but evidence is terminal, missing identity
+                    # fields, or otherwise inconsistent — never treat this as a
+                    # successful Phase C completion (that would have cleared the
+                    # lease). Fail closed and clear RUNNING strand.
+                    return self._final_gate_fail_closed_lineage_corruption(
+                        execution=execution,
+                        step=step,
+                        attempt=attempt,
+                        tool_call=tool_call,
+                        prepared=prepared,
+                        now=now,
+                    )
+
+                try:
+                    authz = await assert_current_tool_executable(
+                        session,
+                        requester_id=execution.requester_id,
+                        agent_version_id=execution.agent_version_id,
+                        tool_version_id=step.mcp_tool_version_id,
+                        expected_policy_snapshot=dict(execution.policy_snapshot),
+                        plan_timeout_seconds=_plan_timeout_seconds(step),
+                    )
+                    if authz.tool_policy.requires_approval:
+                        return _PreSendFailClosed(
+                            error_code="EXECUTION_PRECONDITION_FAILED",
+                            message=(
+                                "requires_approval=true is not supported by"
+                                " MCP Tool Runner."
+                            ),
+                        )
+                    if (
+                        authz.grant.requires_confirmation
+                        or authz.tool_policy.requires_confirmation
+                    ):
+                        await _assert_confirmation_evidence(
+                            session, execution, authz.policy_snapshot
+                        )
+                except AppError as exc:
+                    return _PreSendFailClosed(
+                        error_code=exc.code, message=exc.message
+                    )
+
+                # Prepared invocation-critical drift (endpoint/auth/transport not
+                # covered by policy_snapshot equality alone). Fail closed — do not
+                # auto-reroute to a new endpoint with stale credentials.
+                server = authz.server
+                logical_tool = authz.logical_tool
+                tool_policy = authz.tool_policy
+                if (
+                    server.id != prepared.mcp_server_id
+                    or authz.tool_version.id != prepared.mcp_tool_version_id
+                    or logical_tool.remote_name != prepared.tool_name
+                    or str(server.endpoint_url or "") != prepared.endpoint
+                    or server.protocol_era != prepared.protocol_era
+                    or server.transport_type != prepared.transport_type
+                    or server.auth_type != prepared.auth_type
+                    or server.auth_secret_id != prepared.auth_secret_id
+                    or tool_policy.risk_class != prepared.risk_class
+                    or tool_policy.timeout_ms != prepared.timeout_ms
+                    or tool_policy.max_result_bytes != prepared.max_result_bytes
+                ):
+                    return _PreSendFailClosed(
+                        error_code="EXECUTION_PRECONDITION_FAILED",
+                        message=(
+                            "Prepared MCP invocation drifted from current"
+                            " Tool/Server/policy state."
+                        ),
+                    )
+
+                if (
+                    server.protocol_era != MCPProtocolEra.CURRENT.value
+                    or server.transport_type != MCPTransportType.STREAMABLE_HTTP.value
+                ):
+                    return _PreSendFailClosed(
+                        error_code="MCP_TRANSPORT_UNSUPPORTED",
+                        message=(
+                            "MCP Tool Runner supports CURRENT + STREAMABLE_HTTP"
+                            " servers only."
+                        ),
+                    )
+                if not server.endpoint_url:
+                    return _PreSendFailClosed(
+                        error_code="MCP_ENDPOINT_MISSING",
+                        message=(
+                            "MCP Server endpoint_url is required for STREAMABLE_HTTP"
+                            " tools/call."
+                        ),
+                    )
+
+                return None
 
     # -- Phase A -----------------------------------------------------------
 
@@ -588,6 +853,8 @@ class McpToolRunner:
                     resolved_input=dict(step.resolved_input or {}),
                     auth_type=server.auth_type,
                     auth_secret_id=server.auth_secret_id,
+                    protocol_era=server.protocol_era,
+                    transport_type=server.transport_type,
                     risk_class=tool_policy.risk_class,
                     output_schema=tool_version.output_schema,
                     max_result_bytes=tool_policy.max_result_bytes,

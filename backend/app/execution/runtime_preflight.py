@@ -3,6 +3,7 @@
 Used by:
 - ExecutionCreationService (creation-time Tool/Server/Grant/Policy checks)
 - ToolStepAttemptService (Attempt-start revalidation)
+- McpToolRunner final pre-send gate (Phase B2, immediately before tools/call)
 
 AgentRequest PlanValidationRun / confirmation *lineage selection* stays in
 ExecutionCreationService. PLAN_CONFIRMATION *evidence* checking is shared via

@@ -6,7 +6,7 @@ import json
 import os
 import uuid
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -16,6 +16,8 @@ from app.core.secrets import DatabaseSecretResolver
 from app.domain.enums import (
     ExecutionStatus,
     MCPAuthType,
+    MCPToolStatus,
+    ResourceGrantResourceType,
     RiskClass,
     SecretKind,
     SecretStatus,
@@ -25,15 +27,17 @@ from app.domain.enums import (
 )
 from app.execution.claim import ExecutionClaimService
 from app.execution.queue import ExecutionQueueService
-from app.execution.tool_runner import McpToolRunner
+from app.execution.tool_runner import McpToolRunner, _PreparedCall
 from app.mcp.contracts import NormalizedToolResult
 from app.mcp.errors import MCPClientError
+from app.models.auth import ResourceGrant
 from app.repositories.agent_request import AgentRequestRepository
 from app.repositories.execution import ExecutionRepository
 from app.repositories.mcp_server import MCPServerRepository
 from app.repositories.mcp_tool import MCPToolRepository
 from app.repositories.mcp_tool_policy import MCPToolPolicyRepository
 from app.repositories.secret import SecretRecordRepository
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from tests.integration.test_execution_creation import _create, _idem_key, _seed_ready
@@ -453,3 +457,328 @@ async def test_pg_started_tool_call_never_reissued(
         assert len(tool_calls) == 1
         assert tool_calls[0].id == existing_tool_call_id
         assert tool_calls[0].normalized_status == ToolCallNormalizedStatus.STARTED.value
+
+
+# ---------------------------------------------------------------------------
+# Final pre-send gate TOCTOU regressions (Phase A → tools/call)
+# ---------------------------------------------------------------------------
+
+
+def _install_presend_seam(
+    monkeypatch: pytest.MonkeyPatch,
+    runner: McpToolRunner,
+    mutate,
+) -> None:
+    async def _seam(prepared: _PreparedCall) -> None:
+        async with runner._session_factory() as session:
+            await mutate(session, prepared)
+            await session.commit()
+
+    monkeypatch.setattr(runner, "_after_phase_a_before_final_gate", _seam)
+
+
+async def _ctx(session: AsyncSession, prepared: _PreparedCall) -> dict[str, Any]:
+    execution = await ExecutionRepository(session).get(prepared.execution_id)
+    assert execution is not None
+    tool_version = await MCPToolRepository(session).get_version(
+        prepared.mcp_tool_version_id
+    )
+    assert tool_version is not None
+    logical_tool = await MCPToolRepository(session).get(tool_version.mcp_tool_id)
+    assert logical_tool is not None
+    server = await MCPServerRepository(session).get(logical_tool.mcp_server_id)
+    assert server is not None
+    return {
+        "execution": execution,
+        "logical_tool": logical_tool,
+        "server": server,
+        "requester_id": execution.requester_id,
+        "agent_version_id": execution.agent_version_id,
+        "tool_id": logical_tool.id,
+    }
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_pg_final_gate_happy_path(
+    integration_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    execution_id, worker_id, lease_token = await _claim_ready_execution(
+        integration_session_factory
+    )
+    client = _StubCurrentMCPClient(
+        result=NormalizedToolResult(protocol_success=True, tool_error=False)
+    )
+    runner = McpToolRunner(
+        session_factory=integration_session_factory,
+        mcp_client=client,
+        secret_resolver_factory=_unimplemented_resolver_factory,
+        lease_seconds=60,
+        result_inline_max_bytes=256_000,
+    )
+    outcome = await runner.run_claimed_execution(
+        execution_id=execution_id, worker_id=worker_id, lease_token=lease_token
+    )
+    assert outcome.mcp_called is True
+    assert len(client.calls) == 1
+    assert outcome.terminal_status == StepStatus.SUCCEEDED.value
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_pg_final_gate_resource_grant_revoke(
+    integration_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    execution_id, worker_id, lease_token = await _claim_ready_execution(
+        integration_session_factory
+    )
+    client = _NeverCalledMCPClient()
+    runner = McpToolRunner(
+        session_factory=integration_session_factory,
+        mcp_client=client,
+        secret_resolver_factory=_unimplemented_resolver_factory,
+        lease_seconds=60,
+        result_inline_max_bytes=256_000,
+    )
+
+    async def mutate(session: AsyncSession, prepared: _PreparedCall) -> None:
+        ctx = await _ctx(session, prepared)
+        grants = (
+            await session.execute(
+                select(ResourceGrant).where(
+                    ResourceGrant.user_id == ctx["requester_id"],
+                    ResourceGrant.resource_type
+                    == ResourceGrantResourceType.MCP_TOOL.value,
+                    ResourceGrant.resource_id == ctx["tool_id"],
+                )
+            )
+        ).scalars().all()
+        for grant in grants:
+            await session.delete(grant)
+
+    _install_presend_seam(monkeypatch, runner, mutate)
+    outcome = await runner.run_claimed_execution(
+        execution_id=execution_id, worker_id=worker_id, lease_token=lease_token
+    )
+    assert outcome.mcp_called is False
+    assert outcome.terminal_status == StepStatus.FAILED.value
+    async with integration_session_factory() as session:
+        execution = await ExecutionRepository(session).get(execution_id)
+        assert execution is not None
+        assert execution.status == ExecutionStatus.FAILED.value
+        assert execution.worker_id is None
+        assert execution.lease_token is None
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_pg_final_gate_policy_drift(
+    integration_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    execution_id, worker_id, lease_token = await _claim_ready_execution(
+        integration_session_factory
+    )
+    client = _NeverCalledMCPClient()
+    runner = McpToolRunner(
+        session_factory=integration_session_factory,
+        mcp_client=client,
+        secret_resolver_factory=_unimplemented_resolver_factory,
+        lease_seconds=60,
+        result_inline_max_bytes=256_000,
+    )
+
+    async def mutate(session: AsyncSession, prepared: _PreparedCall) -> None:
+        ctx = await _ctx(session, prepared)
+        policy = await MCPToolPolicyRepository(session).get_by_tool_id(ctx["tool_id"])
+        assert policy is not None
+        policy.max_result_bytes = int(policy.max_result_bytes) + 1
+
+    _install_presend_seam(monkeypatch, runner, mutate)
+    outcome = await runner.run_claimed_execution(
+        execution_id=execution_id, worker_id=worker_id, lease_token=lease_token
+    )
+    assert outcome.mcp_called is False
+    assert outcome.terminal_status == StepStatus.FAILED.value
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_pg_final_gate_endpoint_drift(
+    integration_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    execution_id, worker_id, lease_token = await _claim_ready_execution(
+        integration_session_factory
+    )
+    client = _NeverCalledMCPClient()
+    runner = McpToolRunner(
+        session_factory=integration_session_factory,
+        mcp_client=client,
+        secret_resolver_factory=_unimplemented_resolver_factory,
+        lease_seconds=60,
+        result_inline_max_bytes=256_000,
+    )
+
+    async def mutate(session: AsyncSession, prepared: _PreparedCall) -> None:
+        ctx = await _ctx(session, prepared)
+        ctx["server"].endpoint_url = "https://attacker.example/mcp"
+
+    _install_presend_seam(monkeypatch, runner, mutate)
+    outcome = await runner.run_claimed_execution(
+        execution_id=execution_id, worker_id=worker_id, lease_token=lease_token
+    )
+    assert outcome.mcp_called is False
+    assert outcome.terminal_status == StepStatus.FAILED.value
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_pg_final_gate_tool_and_server_inactive(
+    integration_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    execution_id, worker_id, lease_token = await _claim_ready_execution(
+        integration_session_factory
+    )
+    client = _NeverCalledMCPClient()
+    runner = McpToolRunner(
+        session_factory=integration_session_factory,
+        mcp_client=client,
+        secret_resolver_factory=_unimplemented_resolver_factory,
+        lease_seconds=60,
+        result_inline_max_bytes=256_000,
+    )
+
+    async def mutate(session: AsyncSession, prepared: _PreparedCall) -> None:
+        ctx = await _ctx(session, prepared)
+        ctx["logical_tool"].status = MCPToolStatus.INACTIVE.value
+
+    _install_presend_seam(monkeypatch, runner, mutate)
+    outcome = await runner.run_claimed_execution(
+        execution_id=execution_id, worker_id=worker_id, lease_token=lease_token
+    )
+    assert outcome.mcp_called is False
+    assert outcome.terminal_status == StepStatus.FAILED.value
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_pg_final_gate_lease_lost_no_side_effect(
+    integration_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    execution_id, worker_id, lease_token = await _claim_ready_execution(
+        integration_session_factory
+    )
+    client = _NeverCalledMCPClient()
+    runner = McpToolRunner(
+        session_factory=integration_session_factory,
+        mcp_client=client,
+        secret_resolver_factory=_unimplemented_resolver_factory,
+        lease_seconds=60,
+        result_inline_max_bytes=256_000,
+    )
+
+    async def mutate(session: AsyncSession, prepared: _PreparedCall) -> None:
+        execution = await ExecutionRepository(session).get(prepared.execution_id)
+        assert execution is not None
+        execution.lease_expires_at = datetime.now(UTC) - timedelta(seconds=5)
+        execution.worker_id = "takeover-worker"
+        execution.lease_token = uuid.uuid4()
+
+    _install_presend_seam(monkeypatch, runner, mutate)
+    outcome = await runner.run_claimed_execution(
+        execution_id=execution_id, worker_id=worker_id, lease_token=lease_token
+    )
+    assert outcome.mcp_called is False
+    assert outcome.reason == "LEASE_MISMATCH"
+    async with integration_session_factory() as session:
+        execution = await ExecutionRepository(session).get(execution_id)
+        assert execution is not None
+        assert execution.status == ExecutionStatus.RUNNING.value
+        assert execution.worker_id == "takeover-worker"
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_pg_final_gate_secret_then_authz_revoke(
+    integration_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    master_key = _random_master_key()
+    token_value = "sk-pg-presend-toctou-secret-999"
+
+    async with integration_session_factory() as session:
+        blob = encrypt_secret_payload(
+            master_key, kind=SecretKind.API_KEY.value, material={"value": token_value}
+        )
+        record = await SecretRecordRepository(session).create(
+            name=f"secret-{uuid.uuid4().hex[:8]}",
+            secret_kind=SecretKind.API_KEY.value,
+            ciphertext=blob.ciphertext,
+            nonce=blob.nonce,
+            key_version=blob.key_version,
+            fingerprint=blob.fingerprint,
+            status=SecretStatus.ACTIVE.value,
+        )
+        await session.commit()
+        secret_id = record.id
+
+    def _set_bearer(server: Any) -> None:
+        server.auth_type = MCPAuthType.BEARER.value
+        server.auth_secret_id = secret_id
+
+    execution_id, worker_id, lease_token = await _claim_ready_execution(
+        integration_session_factory, mutate_server=_set_bearer
+    )
+
+    def _resolver_factory(session: AsyncSession) -> DatabaseSecretResolver:
+        return DatabaseSecretResolver(session, master_key=master_key)
+
+    client = _NeverCalledMCPClient()
+    runner = McpToolRunner(
+        session_factory=integration_session_factory,
+        mcp_client=client,
+        secret_resolver_factory=_resolver_factory,
+        lease_seconds=60,
+        result_inline_max_bytes=256_000,
+    )
+
+    async def mutate(session: AsyncSession, prepared: _PreparedCall) -> None:
+        ctx = await _ctx(session, prepared)
+        grants = (
+            await session.execute(
+                select(ResourceGrant).where(
+                    ResourceGrant.user_id == ctx["requester_id"],
+                    ResourceGrant.resource_type
+                    == ResourceGrantResourceType.MCP_TOOL.value,
+                    ResourceGrant.resource_id == ctx["tool_id"],
+                )
+            )
+        ).scalars().all()
+        for grant in grants:
+            await session.delete(grant)
+
+    _install_presend_seam(monkeypatch, runner, mutate)
+    outcome = await runner.run_claimed_execution(
+        execution_id=execution_id, worker_id=worker_id, lease_token=lease_token
+    )
+    assert outcome.mcp_called is False
+    assert outcome.terminal_status == StepStatus.FAILED.value
+
+    async with integration_session_factory() as session:
+        execution = await ExecutionRepository(session).get(execution_id)
+        assert execution is not None
+        step = (await ExecutionRepository(session).list_steps(execution_id))[0]
+        attempts = await ExecutionRepository(session).list_attempts(step.id)
+        tool_calls = await ExecutionRepository(session).list_tool_calls(attempts[0].id)
+        persisted = (
+            str(execution.error_message or "")
+            + str(step.resolved_input or "")
+            + str(attempts[0].request_snapshot or "")
+            + str(attempts[0].error_message or "")
+            + str(tool_calls[0].request_meta or "")
+        )
+        assert token_value not in persisted

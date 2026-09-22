@@ -216,19 +216,24 @@ async def test_requires_approval_fail_closed_never_calls_mcp(
         lease_seconds=60,
         result_inline_max_bytes=256_000,
     )
-    with pytest.raises(AppError) as exc:
-        await runner.run_claimed_execution(
-            execution_id=execution_id, worker_id=worker_id, lease_token=lease_token
-        )
-    assert exc.value.status_code == 409
-    assert "requires_approval" in exc.value.message.lower()
+    outcome = await runner.run_claimed_execution(
+        execution_id=execution_id, worker_id=worker_id, lease_token=lease_token
+    )
+    assert outcome.mcp_called is False
+    assert outcome.terminal_status == StepStatus.FAILED.value
+    assert "requires_approval" in (outcome.reason or "").lower() or outcome.reason == (
+        "EXECUTION_PRECONDITION_FAILED"
+    )
 
     async with db_session_factory() as session:
         execution = await ExecutionRepository(session).get(execution_id)
         assert execution is not None
-        assert execution.status == ExecutionStatus.RUNNING.value
+        assert execution.status == ExecutionStatus.FAILED.value
+        assert execution.worker_id is None
+        assert execution.lease_token is None
         step = (await ExecutionRepository(session).list_steps(execution_id))[0]
-        assert step.status == StepStatus.READY.value
+        assert step.status == StepStatus.FAILED.value
+        assert "requires_approval" in (step.error_message or "").lower()
         assert (await ExecutionRepository(session).list_attempts(step.id)) == []
 
 
