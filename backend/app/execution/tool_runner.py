@@ -607,6 +607,44 @@ class McpToolRunner:
                     return _PrepareResult(outcome=self._noop(execution_id, "MISSING"))
 
                 now = datetime.now(UTC)
+                steps = await executions.list_steps(execution.id)
+                if len(steps) != 1:
+                    raise AppError(
+                        code="RESOURCE_CONFLICT",
+                        message="AgentRequest Execution must contain exactly one Step.",
+                        status_code=409,
+                    )
+                step = await executions.lock_step(steps[0].id)
+                assert step is not None
+
+                # One-sided WAITING_APPROVAL is atomicity corruption — never
+                # normalize it into a successful wait outcome.
+                exec_waiting = (
+                    execution.status == ExecutionStatus.WAITING_APPROVAL.value
+                )
+                step_waiting = step.status == StepStatus.WAITING_APPROVAL.value
+                if exec_waiting != step_waiting:
+                    return _PrepareResult(
+                        outcome=ToolRunOutcome(
+                            execution_id=execution.id,
+                            step_execution_id=step.id,
+                            attempt_id=None,
+                            tool_call_id=None,
+                            mcp_called=False,
+                            terminal_status=None,
+                            reason="RESOURCE_CONFLICT",
+                        )
+                    )
+                if exec_waiting and step_waiting:
+                    return _PrepareResult(
+                        outcome=self._noop(
+                            execution.id,
+                            "WAITING_APPROVAL",
+                            step_id=step.id,
+                            status=step.status,
+                        )
+                    )
+
                 if (
                     execution.status != ExecutionStatus.RUNNING.value
                     or execution.worker_id != worker
@@ -620,30 +658,11 @@ class McpToolRunner:
                         )
                     )
 
-                steps = await executions.list_steps(execution.id)
-                if len(steps) != 1:
-                    raise AppError(
-                        code="RESOURCE_CONFLICT",
-                        message="AgentRequest Execution must contain exactly one Step.",
-                        status_code=409,
-                    )
-                step = await executions.lock_step(steps[0].id)
-                assert step is not None
-
                 if step.status in _STEP_TERMINAL_STATUSES:
                     return _PrepareResult(
                         outcome=self._noop(
                             execution.id,
                             "STEP_ALREADY_TERMINAL",
-                            step_id=step.id,
-                            status=step.status,
-                        )
-                    )
-                if step.status == StepStatus.WAITING_APPROVAL.value:
-                    return _PrepareResult(
-                        outcome=self._noop(
-                            execution.id,
-                            "WAITING_APPROVAL",
                             step_id=step.id,
                             status=step.status,
                         )
@@ -701,11 +720,13 @@ class McpToolRunner:
                 except AppError as exc:
                     # Do not strand RUNNING + READY after recovery/claim when
                     # runtime preflight rejects (e.g. pinned policy_snapshot drift).
-                    # Approval wait already cleared the lease — do not FAILED it.
-                    if (
+                    # Valid both-side wait already cleared the lease — do not FAILED it.
+                    # One-sided WAITING_APPROVAL is corruption: leave state untouched.
+                    exec_waiting = (
                         execution.status == ExecutionStatus.WAITING_APPROVAL.value
-                        or step.status == StepStatus.WAITING_APPROVAL.value
-                    ):
+                    )
+                    step_waiting = step.status == StepStatus.WAITING_APPROVAL.value
+                    if exec_waiting and step_waiting:
                         return _PrepareResult(
                             outcome=ToolRunOutcome(
                                 execution_id=execution.id,
@@ -715,6 +736,18 @@ class McpToolRunner:
                                 mcp_called=False,
                                 terminal_status=StepStatus.WAITING_APPROVAL.value,
                                 reason="WAITING_APPROVAL",
+                            )
+                        )
+                    if exec_waiting or step_waiting:
+                        return _PrepareResult(
+                            outcome=ToolRunOutcome(
+                                execution_id=execution.id,
+                                step_execution_id=step.id,
+                                attempt_id=None,
+                                tool_call_id=None,
+                                mcp_called=False,
+                                terminal_status=None,
+                                reason=exc.code,
                             )
                         )
                     if step.status not in _STEP_TERMINAL_STATUSES:

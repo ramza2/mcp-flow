@@ -63,12 +63,12 @@ class ApprovalWaitService:
         if ts.tzinfo is None:
             ts = ts.replace(tzinfo=UTC)
 
-        # Idempotent: already waiting with a PENDING request.
-        if (
-            execution.status == ExecutionStatus.WAITING_APPROVAL.value
-            or step.status == StepStatus.WAITING_APPROVAL.value
-        ):
-            return await self._reuse_pending(execution=execution, step=step)
+        exec_waiting = execution.status == ExecutionStatus.WAITING_APPROVAL.value
+        step_waiting = step.status == StepStatus.WAITING_APPROVAL.value
+        if exec_waiting or step_waiting:
+            # Valid reuse requires BOTH sides waiting + exactly one PENDING.
+            # One-sided WAITING_APPROVAL is atomicity corruption — fail closed.
+            return await self.reuse_pending(execution=execution, step=step)
 
         if execution.status != ExecutionStatus.RUNNING.value:
             raise AppError(
@@ -164,12 +164,32 @@ class ApprovalWaitService:
     async def reuse_pending(
         self, *, execution: Execution, step: ExecutionStep
     ) -> ApprovalWaitOutcome:
-        """Idempotent WAITING_APPROVAL reuse (no new ApprovalRequest)."""
-        return await self._reuse_pending(execution=execution, step=step)
+        """Idempotent WAITING_APPROVAL reuse (no new ApprovalRequest, no repair).
 
-    async def _reuse_pending(
-        self, *, execution: Execution, step: ExecutionStep
-    ) -> ApprovalWaitOutcome:
+        Valid only when Execution and Step are both WAITING_APPROVAL and exactly
+        one PENDING ApprovalRequest exists. One-sided wait is fail-closed.
+        """
+        exec_waiting = execution.status == ExecutionStatus.WAITING_APPROVAL.value
+        step_waiting = step.status == StepStatus.WAITING_APPROVAL.value
+        if exec_waiting != step_waiting:
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message=(
+                    "One-sided WAITING_APPROVAL is inconsistent "
+                    f"(execution={execution.status}, step={step.status})."
+                ),
+                status_code=409,
+            )
+        if not (exec_waiting and step_waiting):
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message=(
+                    "Approval wait reuse requires Execution and Step "
+                    "WAITING_APPROVAL."
+                ),
+                status_code=409,
+            )
+
         existing = await self._requests.find_pending_for_step(
             execution_id=execution.id, step_execution_id=step.id
         )
@@ -181,8 +201,7 @@ class ApprovalWaitService:
                 ),
                 status_code=409,
             )
-        # Ensure lease remains cleared if a stale strand left worker fields set.
-        self._apply_waiting_state(execution=execution, step=step)
+        # Do not rewrite statuses or lease fields — valid wait is already durable.
         return ApprovalWaitOutcome(
             execution_id=execution.id,
             step_execution_id=step.id,

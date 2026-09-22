@@ -97,11 +97,10 @@ class ToolStepAttemptService:
                 status_code=409,
             )
 
-        # Concurrent loser / idempotent wait: already WAITING_APPROVAL (lease cleared).
-        if (
-            execution.status == ExecutionStatus.WAITING_APPROVAL.value
-            or step.status == StepStatus.WAITING_APPROVAL.value
-        ):
+        # Concurrent loser / idempotent wait: both sides must already be waiting.
+        exec_waiting = execution.status == ExecutionStatus.WAITING_APPROVAL.value
+        step_waiting = step.status == StepStatus.WAITING_APPROVAL.value
+        if exec_waiting or step_waiting:
             return await ApprovalWaitService(self._session).reuse_pending(
                 execution=execution, step=step
             )

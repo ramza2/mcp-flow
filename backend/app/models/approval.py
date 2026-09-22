@@ -87,6 +87,7 @@ class ApprovalRequest(Base, LockVersionMixin):
             "step_execution_id",
             unique=True,
             postgresql_where=text("status = 'PENDING'"),
+            sqlite_where=text("status = 'PENDING'"),
         ),
     )
 
