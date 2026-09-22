@@ -621,7 +621,7 @@ async def test_final_gate_secret_materialize_then_authz_revoke(
     db_session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _install_no_side_effects(monkeypatch)
+    # Real DatabaseSecretResolver (like other BEARER tests); only MCP is stubbed.
     master_key = os.urandom(32)
     while master_key.strip() != master_key:
         master_key = os.urandom(32)
