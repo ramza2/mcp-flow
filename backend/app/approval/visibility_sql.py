@@ -1,5 +1,13 @@
 """Dialect-isolated SQL predicates for ApprovalRequest approver visibility.
 
+Must match ``validate_approver_scope`` (PR #38) exactly:
+
+- null / {} → open
+- {"role_codes": [...]} → visible only when the object has exactly that key,
+  the array is non-empty, every element is a non-blank string (after trim),
+  and a trimmed element intersects the actor's role codes
+- anything else → not visible (fail closed)
+
 PostgreSQL uses JSONB operators. SQLite (API unit tests) uses json_extract /
 json_each. Do not weaken PostgreSQL semantics for SQLite.
 """
@@ -9,7 +17,7 @@ from __future__ import annotations
 import uuid
 from collections.abc import Sequence
 
-from sqlalchemy import ColumnElement, and_, false, or_, text
+from sqlalchemy import ColumnElement, or_, text
 
 from app.models.approval import ApprovalRequest
 
@@ -19,12 +27,7 @@ def scope_visibility_clause(
     actor_role_codes: Sequence[str],
     dialect_name: str,
 ) -> ColumnElement[bool]:
-    """True when ApprovalRequest.approval_scope allows the actor.
-
-    Supported shapes only (same as validate_approver_scope):
-    null, {}, {"role_codes": ["ROLE_A", ...]}.
-    Malformed scopes do not match (fail closed for list visibility).
-    """
+    """True when ApprovalRequest.approval_scope allows the actor."""
     if dialect_name == "postgresql":
         return _pg_scope_clause(actor_role_codes=actor_role_codes)
     return _sqlite_scope_clause(actor_role_codes=actor_role_codes)
@@ -93,6 +96,8 @@ def _pg_scope_clause(*, actor_role_codes: Sequence[str]) -> ColumnElement[bool]:
     if not actor_role_codes:
         return open_scope
 
+    # jsonb_array_elements (not _text) so non-string elements stay typed and fail closed.
+    # btrim matches validate_approver_scope().strip() for comparison and blank rejection.
     role_match = text(
         "("
         "  jsonb_typeof(approval_requests.approval_scope) = 'object'"
@@ -102,11 +107,18 @@ def _pg_scope_clause(*, actor_role_codes: Sequence[str]) -> ColumnElement[bool]:
         "  ) = 1"
         "  AND jsonb_typeof(approval_requests.approval_scope->'role_codes') = 'array'"
         "  AND jsonb_array_length(approval_requests.approval_scope->'role_codes') > 0"
-        "  AND EXISTS ("
-        "    SELECT 1 FROM jsonb_array_elements_text("
+        "  AND NOT EXISTS ("
+        "    SELECT 1 FROM jsonb_array_elements("
         "      approval_requests.approval_scope->'role_codes'"
-        "    ) AS req(code)"
-        "    WHERE req.code = ANY(:actor_role_codes)"
+        "    ) AS bad(value)"
+        "    WHERE jsonb_typeof(bad.value) <> 'string'"
+        "       OR btrim(bad.value #>> '{}') = ''"
+        "  )"
+        "  AND EXISTS ("
+        "    SELECT 1 FROM jsonb_array_elements("
+        "      approval_requests.approval_scope->'role_codes'"
+        "    ) AS req(value)"
+        "    WHERE btrim(req.value #>> '{}') = ANY(:actor_role_codes)"
         "  )"
         ")"
     ).bindparams(
@@ -124,19 +136,16 @@ def _sqlite_scope_clause(*, actor_role_codes: Sequence[str]) -> ColumnElement[bo
     if not actor_role_codes:
         return open_scope
 
-    bound = [
-        text(
-            "EXISTS ("
-            "  SELECT 1 FROM json_each("
-            "    json_extract(approval_requests.approval_scope, '$.role_codes')"
-            "  ) AS je WHERE je.value = :code"
-            ")"
-        ).bindparams(code=code)
-        for code in actor_role_codes
-    ]
-    role_array_match: ColumnElement[bool] = or_(*bound) if bound else false()
+    # Unique bind names — never reuse a single :code across multiple roles.
+    match_preds: list[str] = []
+    params: dict[str, str] = {}
+    for idx, code in enumerate(actor_role_codes):
+        key = f"scope_actor_code_{idx}"
+        params[key] = code
+        match_preds.append(f"trim(CAST(je.value AS TEXT)) = :{key}")
+    match_sql = " OR ".join(match_preds)
 
-    exactly_role_codes_key = text(
+    role_match = text(
         "("
         "  json_type(approval_requests.approval_scope) = 'object'"
         "  AND ("
@@ -149,6 +158,19 @@ def _sqlite_scope_clause(*, actor_role_codes: Sequence[str]) -> ColumnElement[bo
         "  AND json_array_length("
         "    json_extract(approval_requests.approval_scope, '$.role_codes')"
         "  ) > 0"
+        "  AND NOT EXISTS ("
+        "    SELECT 1 FROM json_each("
+        "      json_extract(approval_requests.approval_scope, '$.role_codes')"
+        "    ) AS bad"
+        "    WHERE bad.type != 'text'"
+        "       OR trim(CAST(bad.value AS TEXT)) = ''"
+        "  )"
+        "  AND EXISTS ("
+        "    SELECT 1 FROM json_each("
+        "      json_extract(approval_requests.approval_scope, '$.role_codes')"
+        "    ) AS je"
+        f"    WHERE ({match_sql})"
+        "  )"
         ")"
-    )
-    return or_(open_scope, and_(exactly_role_codes_key, role_array_match))
+    ).bindparams(**params)
+    return or_(open_scope, role_match)

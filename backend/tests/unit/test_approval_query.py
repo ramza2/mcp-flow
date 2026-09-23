@@ -627,3 +627,89 @@ async def test_get_list_no_mutation(
             (await session.execute(select(OutboxEvent))).scalars().all()
         )
         assert len(outbox_after) == len(outbox_before)
+
+
+@pytest.mark.asyncio
+async def test_sqlite_scope_semantics_match_validate_approver_scope(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SQLite list/detail mirrors validate_approver_scope fail-closed rules."""
+    cases: list[tuple[str, object, bool]] = [
+        ("mixed_non_string", {"role_codes": ["ROLE_A", 123]}, False),
+        ("empty_string", {"role_codes": [""]}, False),
+        ("blank_whitespace", {"role_codes": ["   "]}, False),
+        ("trimmed_match", {"role_codes": [" ROLE_A "]}, True),
+        ("extra_key", {"role_codes": ["ROLE_A"], "legacy": True}, False),
+    ]
+
+    ids: list[tuple[str, uuid.UUID, bool]] = []
+    for label, scope, expect in cases:
+        _e, aid, _r = await _enter_waiting(
+            db_session_factory,
+            monkeypatch,
+            allow_self_approval=True,
+            approver_scope={"role_codes": ["ROLE_A"]},
+        )
+        async with db_session_factory() as session:
+            request = await ApprovalRequestRepository(session).get(aid)
+            assert request is not None
+            request.approval_scope = scope  # type: ignore[assignment]
+            await session.commit()
+        ids.append((label, aid, expect))
+
+    async with db_session_factory() as session:
+        actor = await _create_approver(session, role_code="ROLE_A")
+        await session.commit()
+        inbox = await ApprovalQueryService(session).list_for_actor(actor_user_id=actor)
+        inbox_ids = {item.id for item in inbox.items}
+        for label, aid, expect in ids:
+            if expect:
+                assert aid in inbox_ids, label
+                detail = await ApprovalQueryService(session).get_for_actor(
+                    approval_id=aid, actor_user_id=actor
+                )
+                assert detail.item.id == aid, label
+            else:
+                assert aid not in inbox_ids, label
+                with pytest.raises(AppError) as exc:
+                    await ApprovalQueryService(session).get_for_actor(
+                        approval_id=aid, actor_user_id=actor
+                    )
+                assert exc.value.status_code == 404, label
+
+
+@pytest.mark.asyncio
+async def test_sqlite_multi_role_unique_bind_names(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Actor with multiple roles must match when any role intersects (unique binds)."""
+    _e, approval_id, _r = await _enter_waiting(
+        db_session_factory,
+        monkeypatch,
+        allow_self_approval=False,
+        approver_scope={"role_codes": ["ROLE_SECOND"]},
+    )
+    async with db_session_factory() as session:
+        actor = await UserRepository(session).create(
+            username=f"multi_{uuid.uuid4().hex[:8]}",
+            display_name="Multi",
+            email=f"multi_{uuid.uuid4().hex[:8]}@example.com",
+            status=UserStatus.ACTIVE.value,
+        )
+        await _grant_decide(session, user_id=actor.id, role_code="ROLE_FIRST")
+        await _grant_decide(session, user_id=actor.id, role_code="ROLE_SECOND")
+        await session.commit()
+
+        roles = await UserRoleRepository(session).list_roles(actor.id)
+        assert {r.code for r in roles} >= {"ROLE_FIRST", "ROLE_SECOND"}
+
+        inbox = await ApprovalQueryService(session).list_for_actor(
+            actor_user_id=actor.id
+        )
+        assert any(item.id == approval_id for item in inbox.items)
+        detail = await ApprovalQueryService(session).get_for_actor(
+            approval_id=approval_id, actor_user_id=actor.id
+        )
+        assert detail.item.id == approval_id
