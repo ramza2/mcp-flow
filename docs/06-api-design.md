@@ -803,6 +803,16 @@ Decision:
 }
 ```
 
+`GET /approvals` / `GET /approvals/{approval_id}` (query / pending inbox foundation):
+
+- Session + `CurrentPrincipalDep`; 권한은 현재 DB `approval.decide` (별도 `approval.read` 없음). 부족/비활성 → 403 `AUTH_FORBIDDEN`
+- 기본 `status=PENDING` inbox: actionable만 (미만료, 현재 role scope + snapshotted self 규칙, actor 미투표). 권한 필터는 count/OFFSET 이전
+- filters: `status`, `execution_id`, `requested_by`, `page`, `page_size`, `sort` (`requested_at`/`-requested_at`/`expires_at`/`-expires_at`, default `expires_at` ASC)
+- list item: id/status/execution_id/step_execution_id/requested_by/decision_mode/required_approvals/requested_at/expires_at/resolved_at/approve_count/reject_count/`can_decide`
+- detail: list fields + `safe_context` + `decisions` (decided_at ASC, id ASC). `safe_context`는 stored snapshot 무결성 검증 후 명시 projection; SECRET_REF는 `{kind, masked:true}`만. raw context_snapshot/context_hash/secret_id/approval_scope 비노출
+- 존재하지만 현재 actor 비적격 detail → 404 `NOT_FOUND` (IDOR에 403 미사용)
+- GET은 ApprovalRequest/Decision/Execution/Outbox를 변경하지 않음 (만료 sweep 소유권은 expiry service)
+
 `POST /approvals/{approval_id}/decisions` (현재 구현):
 
 - Session + CSRF + `CurrentPrincipalDep`

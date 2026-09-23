@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import Sequence
 from datetime import datetime
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.domain.enums import ApprovalDecisionValue
 from app.models.approval import ApprovalDecision
 
 
@@ -33,6 +35,33 @@ class ApprovalDecisionRepository:
             ApprovalDecision.decided_by == decided_by,
         )
         return (await self._session.execute(stmt)).scalar_one_or_none()
+
+    async def counts_and_actor_flags(
+        self,
+        *,
+        approval_request_ids: Sequence[uuid.UUID],
+        actor_user_id: uuid.UUID,
+    ) -> dict[uuid.UUID, tuple[int, int, bool]]:
+        """Batch: request_id → (approve_count, reject_count, actor_has_decision)."""
+        if not approval_request_ids:
+            return {}
+        stmt = select(ApprovalDecision).where(
+            ApprovalDecision.approval_request_id.in_(list(approval_request_ids))
+        )
+        rows = list((await self._session.execute(stmt)).scalars().all())
+        result: dict[uuid.UUID, tuple[int, int, bool]] = {
+            rid: (0, 0, False) for rid in approval_request_ids
+        }
+        for row in rows:
+            approve, reject, actor_has = result[row.approval_request_id]
+            if row.decision == ApprovalDecisionValue.APPROVE.value:
+                approve += 1
+            elif row.decision == ApprovalDecisionValue.REJECT.value:
+                reject += 1
+            if row.decided_by == actor_user_id:
+                actor_has = True
+            result[row.approval_request_id] = (approve, reject, actor_has)
+        return result
 
     async def create(
         self,

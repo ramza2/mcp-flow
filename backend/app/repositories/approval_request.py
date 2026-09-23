@@ -3,24 +3,124 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import Sequence
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
-from sqlalchemy import select
+from sqlalchemy import exists, func, not_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.approval.visibility_sql import (
+    scope_visibility_clause,
+    self_approval_visibility_clause,
+)
 from app.domain.enums import ApprovalStatus
-from app.models.approval import ApprovalRequest
+from app.models.approval import ApprovalDecision, ApprovalRequest
+
+SortDir = Literal["asc", "desc"]
 
 
 class ApprovalRequestRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
+    def _dialect_name(self) -> str:
+        return self._session.bind.dialect.name if self._session.bind is not None else "postgresql"
+
     async def get(self, request_id: uuid.UUID) -> ApprovalRequest | None:
         stmt = select(ApprovalRequest).where(ApprovalRequest.id == request_id)
         result = await self._session.execute(stmt)
         return result.scalar_one_or_none()
+
+    def _visibility_filters(
+        self,
+        *,
+        actor_user_id: uuid.UUID,
+        actor_role_codes: Sequence[str],
+        actionable_pending: bool,
+        now: datetime | None,
+    ) -> list[Any]:
+        dialect = self._dialect_name()
+        filters: list[Any] = [
+            scope_visibility_clause(
+                actor_role_codes=actor_role_codes, dialect_name=dialect
+            ),
+            self_approval_visibility_clause(
+                actor_user_id=actor_user_id, dialect_name=dialect
+            ),
+        ]
+        if actionable_pending:
+            assert now is not None
+            filters.append(ApprovalRequest.expires_at > now)
+            decided = exists(
+                select(ApprovalDecision.id).where(
+                    ApprovalDecision.approval_request_id == ApprovalRequest.id,
+                    ApprovalDecision.decided_by == actor_user_id,
+                )
+            )
+            filters.append(not_(decided))
+        return filters
+
+    async def list_visible_for_actor(
+        self,
+        *,
+        actor_user_id: uuid.UUID,
+        actor_role_codes: Sequence[str],
+        status: str,
+        actionable_pending: bool,
+        execution_id: uuid.UUID | None = None,
+        requested_by: uuid.UUID | None = None,
+        page: int = 1,
+        page_size: int = 20,
+        sort_field: str = "expires_at",
+        sort_dir: SortDir = "asc",
+        now: datetime,
+    ) -> tuple[list[ApprovalRequest], int]:
+        """List approvals visible to actor. Auth filters apply before count/page."""
+        stmt = select(ApprovalRequest).where(ApprovalRequest.status == status)
+        if execution_id is not None:
+            stmt = stmt.where(ApprovalRequest.execution_id == execution_id)
+        if requested_by is not None:
+            stmt = stmt.where(ApprovalRequest.requested_by == requested_by)
+        for clause in self._visibility_filters(
+            actor_user_id=actor_user_id,
+            actor_role_codes=actor_role_codes,
+            actionable_pending=actionable_pending,
+            now=now,
+        ):
+            stmt = stmt.where(clause)
+
+        count_stmt = select(func.count()).select_from(stmt.order_by(None).subquery())
+        total = int((await self._session.execute(count_stmt)).scalar_one())
+
+        sort_col = getattr(ApprovalRequest, sort_field)
+        order = sort_col.desc() if sort_dir == "desc" else sort_col.asc()
+        # Stable tie-break on id.
+        rows_stmt = (
+            stmt.order_by(order, ApprovalRequest.id.asc())
+            .offset((page - 1) * page_size)
+            .limit(page_size)
+        )
+        rows = list((await self._session.execute(rows_stmt)).scalars().all())
+        return rows, total
+
+    async def get_visible_for_actor(
+        self,
+        *,
+        approval_id: uuid.UUID,
+        actor_user_id: uuid.UUID,
+        actor_role_codes: Sequence[str],
+    ) -> ApprovalRequest | None:
+        """Return request if actor matches current scope + self rule (any status)."""
+        stmt = select(ApprovalRequest).where(ApprovalRequest.id == approval_id)
+        for clause in self._visibility_filters(
+            actor_user_id=actor_user_id,
+            actor_role_codes=actor_role_codes,
+            actionable_pending=False,
+            now=None,
+        ):
+            stmt = stmt.where(clause)
+        return (await self._session.execute(stmt)).scalar_one_or_none()
 
     async def lock_for_update(self, request_id: uuid.UUID) -> ApprovalRequest | None:
         stmt = (
