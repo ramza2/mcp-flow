@@ -536,12 +536,17 @@ async def test_expired_decision_and_sweep(
 
         actor = await _create_approver(session)
         await session.commit()
+
+    # decide() commits EXPIRED/FAILED then raises APPROVAL_EXPIRED.
+    async with db_session_factory() as session:
         with pytest.raises(AppError) as exc:
             await ApprovalDecisionService(session).decide(
                 approval_id=approval_id, actor_user_id=actor, decision="APPROVE"
             )
         assert exc.value.status_code == 409
-        await session.commit()
+        assert exc.value.code == "APPROVAL_EXPIRED"
+
+    async with db_session_factory() as session:
         request = await ApprovalRequestRepository(session).get(approval_id)
         assert request is not None
         assert request.status == ApprovalStatus.EXPIRED.value
@@ -772,7 +777,7 @@ async def test_broker_publish_failure_leaves_unpublished_outbox(
 
 
 @pytest.mark.asyncio
-async def test_auth_revoked_before_resume(
+async def test_auth_revoked_before_resume_terminalizes(
     db_session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -785,17 +790,98 @@ async def test_auth_revoked_before_resume(
         await ApprovalDecisionService(session).decide(
             approval_id=approval_id, actor_user_id=actor, decision="APPROVE"
         )
-        await session.commit()
         user = await UserRepository(session).get(requester)
         assert user is not None
         user.status = UserStatus.INACTIVE.value
         await session.commit()
-        with pytest.raises(AppError):
-            await ApprovalResumeClaimService(session, lease_seconds=60).claim(
-                execution_id=execution_id,
-                approval_request_id=approval_id,
-                worker_id="resume-worker",
-            )
+
+        outcome = await ApprovalResumeClaimService(session, lease_seconds=60).claim(
+            execution_id=execution_id,
+            approval_request_id=approval_id,
+            worker_id="resume-worker",
+        )
+        await session.commit()
+        assert outcome.claimed is False
+        assert outcome.reason == "PRECONDITION_FAILED"
+
+    async with db_session_factory() as session:
+        request = await ApprovalRequestRepository(session).get(approval_id)
+        assert request is not None
+        assert request.status == ApprovalStatus.APPROVED.value
+        execution = await ExecutionRepository(session).get(execution_id)
+        assert execution is not None
+        assert execution.status == ExecutionStatus.FAILED.value
+        assert execution.error_code == "APPROVAL_RESUME_PRECONDITION_FAILED"
+        assert execution.worker_id is None
+        assert execution.lease_token is None
+        step = (await ExecutionRepository(session).list_steps(execution_id))[0]
+        assert step.status == StepStatus.FAILED.value
+        assert step.error_code == "APPROVAL_RESUME_PRECONDITION_FAILED"
+        assert (await ExecutionRepository(session).list_attempts(step.id)) == []
+
+        # Duplicate resume after failure — no reversal / no lease / no Runner.
+        dup = await ApprovalResumeClaimService(session, lease_seconds=60).claim(
+            execution_id=execution_id,
+            approval_request_id=approval_id,
+            worker_id="resume-worker-2",
+        )
+        await session.commit()
+        assert dup.claimed is False
+        assert dup.reason == "STALE_DELIVERY"
+        execution = await ExecutionRepository(session).get(execution_id)
+        assert execution is not None
+        assert execution.status == ExecutionStatus.FAILED.value
+        assert execution.lease_token is None
+        assert execution.worker_id is None
+
+
+@pytest.mark.asyncio
+async def test_context_drift_before_resume_terminalizes(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.repositories.mcp_tool import MCPToolRepository
+    from app.repositories.mcp_tool_policy import MCPToolPolicyRepository
+
+    execution_id, approval_id, _requester = await _enter_waiting(
+        db_session_factory, monkeypatch
+    )
+    async with db_session_factory() as session:
+        actor = await _create_approver(session)
+        await session.commit()
+        await ApprovalDecisionService(session).decide(
+            approval_id=approval_id, actor_user_id=actor, decision="APPROVE"
+        )
+        step = (await ExecutionRepository(session).list_steps(execution_id))[0]
+        version = await MCPToolRepository(session).get_version(step.mcp_tool_version_id)
+        assert version is not None
+        policy = await MCPToolPolicyRepository(session).get_by_tool_id(
+            version.mcp_tool_id
+        )
+        assert policy is not None
+        policy.risk_class = RiskClass.DESTRUCTIVE.value
+        await session.commit()
+
+        outcome = await ApprovalResumeClaimService(session, lease_seconds=60).claim(
+            execution_id=execution_id,
+            approval_request_id=approval_id,
+            worker_id="resume-worker",
+        )
+        await session.commit()
+        assert outcome.claimed is False
+        assert outcome.reason == "PRECONDITION_FAILED"
+
+    async with db_session_factory() as session:
+        request = await ApprovalRequestRepository(session).get(approval_id)
+        assert request is not None
+        assert request.status == ApprovalStatus.APPROVED.value
+        execution = await ExecutionRepository(session).get(execution_id)
+        assert execution is not None
+        assert execution.status == ExecutionStatus.FAILED.value
+        assert execution.error_code == "APPROVAL_RESUME_PRECONDITION_FAILED"
+        step = (await ExecutionRepository(session).list_steps(execution_id))[0]
+        assert step.status == StepStatus.FAILED.value
+        assert (await ExecutionRepository(session).list_attempts(step.id)) == []
 
 
 @pytest.mark.asyncio

@@ -128,9 +128,45 @@ class ApprovalResumeClaimService:
                 status_code=409,
             )
 
-        await self._assert_resume_preconditions(
-            execution=execution, step=step, request=request, now=ts
+        # Structural / lineage checks — fail closed without mutating WAITING_APPROVAL.
+        tool_config = self._assert_structural_resume_preconditions(
+            execution=execution, step=step, request=request
         )
+        pending = await self._requests.find_pending_for_step(
+            execution_id=execution.id, step_execution_id=step.id
+        )
+        if pending is not None:
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message="PENDING ApprovalRequest still exists; cannot resume.",
+                status_code=409,
+            )
+
+        # Mutable runtime preflight for the exact APPROVED request. On failure,
+        # terminalize Execution/Step FAILED so WAITING_APPROVAL is not stranded
+        # after Outbox publish (ApprovalRequest remains APPROVED).
+        try:
+            await self._assert_mutable_resume_preflight(
+                execution=execution,
+                step=step,
+                request=request,
+                tool_config=tool_config,
+            )
+        except AppError:
+            self._terminalize_resume_precondition_failed(
+                execution=execution, step=step, now=ts
+            )
+            await self._session.flush()
+            return ApprovalResumeClaimOutcome(
+                execution_id=execution.id,
+                approval_request_id=request.id,
+                claimed=False,
+                status=execution.status,
+                worker_id=None,
+                lease_token=None,
+                lease_expires_at=None,
+                reason="PRECONDITION_FAILED",
+            )
 
         token = uuid.uuid4()
         expires_at = ts + timedelta(seconds=self._lease_seconds)
@@ -159,14 +195,13 @@ class ApprovalResumeClaimService:
             ready_step_id=step.id,
         )
 
-    async def _assert_resume_preconditions(
+    def _assert_structural_resume_preconditions(
         self,
         *,
         execution: Execution,
         step: ExecutionStep,
         request: ApprovalRequest,
-        now: datetime,
-    ) -> None:
+    ) -> ToolStepConfigV1:
         if execution.source_type != ExecutionSourceType.AGENT_REQUEST.value:
             raise AppError(
                 code="RESOURCE_CONFLICT",
@@ -186,15 +221,6 @@ class ApprovalResumeClaimService:
             raise AppError(
                 code="RESOURCE_CONFLICT",
                 message="Approval resume requires APPROVED request with resolved_at.",
-                status_code=409,
-            )
-        pending = await self._requests.find_pending_for_step(
-            execution_id=execution.id, step_execution_id=step.id
-        )
-        if pending is not None:
-            raise AppError(
-                code="RESOURCE_CONFLICT",
-                message="PENDING ApprovalRequest still exists; cannot resume.",
                 status_code=409,
             )
         if step.status != StepStatus.WAITING_APPROVAL.value:
@@ -221,7 +247,6 @@ class ApprovalResumeClaimService:
                 status_code=409,
             )
 
-        # Plan / step / tool lineage
         if (
             step.step_key != DETERMINISTIC_TOOL_STEP_ID
             or step.step_type != AuthorableStepType.TOOL.value
@@ -262,7 +287,16 @@ class ApprovalResumeClaimService:
                 message="Step mcp_tool_version_id does not match TOOL config.",
                 status_code=409,
             )
+        return tool_config
 
+    async def _assert_mutable_resume_preflight(
+        self,
+        *,
+        execution: Execution,
+        step: ExecutionStep,
+        request: ApprovalRequest,
+        tool_config: ToolStepConfigV1,
+    ) -> None:
         assert execution.agent_version_id is not None
         authz = await assert_current_tool_executable(
             self._session,
@@ -276,7 +310,9 @@ class ApprovalResumeClaimService:
             authz.grant.requires_confirmation
             or authz.tool_policy.requires_confirmation
         ):
-            await _assert_confirmation_evidence(self._session, execution, authz.policy_snapshot)
+            await _assert_confirmation_evidence(
+                self._session, execution, authz.policy_snapshot
+            )
 
         await assert_current_context_matches_request(
             self._session,
@@ -286,8 +322,27 @@ class ApprovalResumeClaimService:
             tool_policy=authz.tool_policy,
             approval_policy=authz.approval_policy,
         )
-        # Silence unused now — expiry of APPROVED is intentionally not applied.
-        _ = now
+
+    @staticmethod
+    def _terminalize_resume_precondition_failed(
+        *,
+        execution: Execution,
+        step: ExecutionStep,
+        now: datetime,
+    ) -> None:
+        error_code = "APPROVAL_RESUME_PRECONDITION_FAILED"
+        step.status = StepStatus.FAILED.value
+        step.error_code = error_code
+        step.finished_at = now
+        step.lock_version += 1
+        execution.status = ExecutionStatus.FAILED.value
+        execution.error_code = error_code
+        execution.finished_at = now
+        execution.worker_id = None
+        execution.lease_token = None
+        execution.lease_expires_at = None
+        execution.heartbeat_at = None
+        execution.lock_version += 1
 
 
 def _plan_timeout_seconds(step: ExecutionStep) -> int | None:

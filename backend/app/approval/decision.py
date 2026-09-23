@@ -231,8 +231,10 @@ class ApprovalDecisionService:
             await self._terminalize_expired(
                 request=request, execution=execution, step=step, now=ts
             )
+            # Durably commit EXPIRED/FAILED before returning 409 to the client.
+            await self._session.commit()
             raise AppError(
-                code="RESOURCE_CONFLICT",
+                code="APPROVAL_EXPIRED",
                 message="ApprovalRequest has expired.",
                 status_code=409,
             )
@@ -301,6 +303,7 @@ class ApprovalDecisionService:
                 decided_at=ts,
             )
         except IntegrityError as exc:
+            await self._session.rollback()
             raise AppError(
                 code="RESOURCE_CONFLICT",
                 message="Actor has already decided on this ApprovalRequest.",
@@ -335,7 +338,8 @@ class ApprovalDecisionService:
             )
         # else: intermediate — remain PENDING / WAITING_APPROVAL, no Outbox
 
-        await self._session.flush()
+        # Top-level decision TX ownership: durable commit before HTTP 201.
+        await self._session.commit()
 
         return ApprovalDecisionOutcome(
             decision_id=row.id,
