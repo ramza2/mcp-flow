@@ -63,12 +63,17 @@ def _open_scope_clause(*, dialect_name: str) -> ColumnElement[bool]:
         return or_(
             scope.is_(None),
             text("approval_requests.approval_scope = '{}'::jsonb"),
+            # JSON null is not used by SQLAlchemy for None, but accept it fail-open-safe.
+            text("approval_requests.approval_scope = 'null'::jsonb"),
         )
+    # SQLite JSON columns often persist Python None as the text 'null'.
     return or_(
         scope.is_(None),
         text(
             "("
-            "  approval_requests.approval_scope = '{}'"
+            "  approval_requests.approval_scope = 'null'"
+            "  OR json_type(approval_requests.approval_scope) = 'null'"
+            "  OR approval_requests.approval_scope = '{}'"
             "  OR ("
             "    json_type(approval_requests.approval_scope) = 'object'"
             "    AND ("
