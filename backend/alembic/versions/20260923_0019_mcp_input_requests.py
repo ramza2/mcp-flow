@@ -77,20 +77,20 @@ def upgrade() -> None:
         ),
         sa.CheckConstraint(
             "status IN (" + ", ".join(f"'{v}'" for v in _STATUSES) + ")",
-            name="ck_mcp_input_requests_status",
+            name="status",
         ),
         sa.CheckConstraint(
             "protocol_era IN (" + ", ".join(f"'{v}'" for v in _PROTOCOL_ERAS) + ")",
-            name="ck_mcp_input_requests_protocol_era",
+            name="protocol_era",
         ),
-        sa.CheckConstraint("round_no >= 1", name="ck_mcp_input_requests_round_no"),
+        sa.CheckConstraint("round_no >= 1", name="round_no"),
         sa.CheckConstraint(
             "jsonb_typeof(input_requests) = 'object'",
-            name="ck_mcp_input_requests_input_requests_object",
+            name="input_requests_object",
         ),
         sa.CheckConstraint(
             "response_payload IS NULL OR jsonb_typeof(response_payload) = 'object'",
-            name="ck_mcp_input_requests_response_payload_object",
+            name="response_payload_object",
         ),
     )
     op.create_index(

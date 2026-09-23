@@ -114,6 +114,7 @@ async def test_mcp_input_requests_schema_constraints(
             check_map, "ck_mcp_input_requests_input_requests_object"
         )
         assert "jsonb_typeof" in input_def.lower()
+        assert "input_requests" in input_def.lower()
         resp_def = _check_constraint_definition(
             check_map, "ck_mcp_input_requests_response_payload_object"
         )

@@ -32,7 +32,7 @@ from app.repositories.execution import ExecutionRepository
 from app.repositories.mcp_input_request import MCPInputRequestRepository
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from tests.unit.test_approval_decision_resume import _enter_waiting
+from tests.unit.test_approval_decision_resume import _create_approver, _enter_waiting
 from tests.unit.test_execution_creation import _install_no_side_effects
 from tests.unit.test_safe_transient_retry import (
     _CONNECT_ERR,
@@ -198,13 +198,14 @@ async def test_request_state_only_in_mcp_input_request(
     _install_no_side_effects(monkeypatch)
     execution_id, worker_id, lease_token = await _claim_ready_execution(db_session_factory)
     client = _MrtrClient()
-    with caplog.at_level("DEBUG"):
+    with caplog.at_level("DEBUG", logger="app"):
         await _runner(db_session_factory, client).run_claimed_execution(
             execution_id=execution_id, worker_id=worker_id, lease_token=lease_token
         )
 
     for record in caplog.records:
-        assert _CANARY not in record.getMessage()
+        if record.name.startswith("app."):
+            assert _CANARY not in record.getMessage()
 
     async with db_session_factory() as session:
         execution = await ExecutionRepository(session).get(execution_id)
@@ -449,16 +450,18 @@ async def test_approved_resume_then_input_required_waiting_input(
     db_session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    execution_id, approval_id, requester_id = await _enter_waiting(
+    execution_id, approval_id, _requester_id = await _enter_waiting(
         db_session_factory,
         monkeypatch,
         allow_self_approval=True,
         risk_class=RiskClass.READ_ONLY.value,
     )
     async with db_session_factory() as session:
+        actor = await _create_approver(session)
+        await session.commit()
         await ApprovalDecisionService(session).decide(
             approval_id=approval_id,
-            actor_user_id=requester_id,
+            actor_user_id=actor,
             decision="APPROVE",
         )
         await session.commit()

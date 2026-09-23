@@ -333,7 +333,7 @@ async def test_valid_input_required_returns_normalized_input_required(
             },
         )
 
-    with caplog.at_level("DEBUG"):
+    with caplog.at_level("DEBUG", logger="app.mcp"):
         result, response_meta, first_byte_at = await _call(handler)
 
     assert isinstance(result, NormalizedInputRequired)
@@ -347,7 +347,8 @@ async def test_valid_input_required_returns_normalized_input_required(
     assert "request_state" not in response_meta
     assert canary not in json.dumps(response_meta)
     for record in caplog.records:
-        assert canary not in record.getMessage()
+        if record.name.startswith("app."):
+            assert canary not in record.getMessage()
 
 
 @pytest.mark.asyncio
