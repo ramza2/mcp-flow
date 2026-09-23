@@ -44,7 +44,7 @@ import logging
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -58,6 +58,7 @@ from app.domain.enums import (
     MCPAuthType,
     MCPProtocolEra,
     MCPTransportType,
+    McpInputRequestStatus,
     RiskClass,
     SecretKind,
     StepAttemptStatus,
@@ -89,11 +90,12 @@ from app.approval.evidence import require_valid_approved_evidence
 from app.approval.wait import ApprovalWaitService
 from app.execution.tool_step_attempt import ApprovalWaitOutcome, ToolStepAttemptService
 from app.mcp.auth_headers import build_mcp_auth_headers
-from app.mcp.contracts import NormalizedToolResult
+from app.mcp.contracts import NormalizedInputRequired, NormalizedToolResult
 from app.mcp.current import CurrentMCPClient
 from app.mcp.errors import MCPClientError
 from app.models.execution import Execution, ExecutionStep, StepAttempt, ToolCall
 from app.repositories.execution import ExecutionRepository
+from app.repositories.mcp_input_request import MCPInputRequestRepository
 from app.repositories.mcp_server import MCPServerRepository
 from app.repositories.mcp_tool import MCPToolRepository
 from app.repositories.mcp_tool_policy import MCPToolPolicyRepository
@@ -102,6 +104,7 @@ from app.repositories.plan_validation import PlanValidationRepository
 logger = logging.getLogger(__name__)
 
 _REASON_SAFE_RETRY_READY = "SAFE_RETRY_READY"
+_REASON_WAITING_INPUT = "WAITING_INPUT"
 _SAFE_RISK_CLASSES = frozenset({RiskClass.READ_ONLY.value, RiskClass.IDEMPOTENT_WRITE.value})
 _STEP_TERMINAL_STATUSES = frozenset(
     {
@@ -368,6 +371,14 @@ class McpToolRunner:
                 result, response_meta, first_byte_at, call_error = await self._call_remote(
                     prepared, auth_headers, arguments
                 )
+                if isinstance(result, NormalizedInputRequired):
+                    return await self._finalize_input_required(
+                        prepared,
+                        mrtr=result,
+                        response_meta=response_meta,
+                        first_byte_at=first_byte_at,
+                        protected=protected,
+                    )
                 outcome = await self._finalize_locked(
                     prepared,
                     call_error=call_error,
@@ -670,6 +681,46 @@ class McpToolRunner:
                         outcome=self._noop(
                             execution.id,
                             "WAITING_APPROVAL",
+                            step_id=step.id,
+                            status=step.status,
+                        )
+                    )
+
+                # Durable MRTR wait — lease absent; never re-call MCP.
+                exec_mrtr = execution.status == ExecutionStatus.WAITING_INPUT.value
+                step_mrtr = step.status == StepStatus.WAITING_INPUT.value
+                if exec_mrtr != step_mrtr:
+                    return _PrepareResult(
+                        outcome=ToolRunOutcome(
+                            execution_id=execution.id,
+                            step_execution_id=step.id,
+                            attempt_id=None,
+                            tool_call_id=None,
+                            mcp_called=False,
+                            terminal_status=None,
+                            reason="RESOURCE_CONFLICT",
+                        )
+                    )
+                if exec_mrtr and step_mrtr:
+                    open_req = await MCPInputRequestRepository(session).find_open_for_step(
+                        execution_id=execution.id, step_execution_id=step.id
+                    )
+                    if open_req is None:
+                        return _PrepareResult(
+                            outcome=ToolRunOutcome(
+                                execution_id=execution.id,
+                                step_execution_id=step.id,
+                                attempt_id=None,
+                                tool_call_id=None,
+                                mcp_called=False,
+                                terminal_status=None,
+                                reason="RESOURCE_CONFLICT",
+                            )
+                        )
+                    return _PrepareResult(
+                        outcome=self._noop(
+                            execution.id,
+                            _REASON_WAITING_INPUT,
                             step_id=step.id,
                             status=step.status,
                         )
@@ -1194,7 +1245,7 @@ class McpToolRunner:
         auth_headers: dict[str, str],
         arguments: dict[str, Any],
     ) -> tuple[
-        NormalizedToolResult | None,
+        NormalizedToolResult | NormalizedInputRequired | None,
         dict[str, Any] | None,
         datetime | None,
         MCPClientError | None,
@@ -1221,6 +1272,186 @@ class McpToolRunner:
             arguments.clear()
 
     # -- Phase C -------------------------------------------------------------
+
+    async def _finalize_input_required(
+        self,
+        prepared: _PreparedCall,
+        *,
+        mrtr: NormalizedInputRequired,
+        response_meta: dict[str, Any] | None,
+        first_byte_at: datetime | None,
+        protected: tuple[str, ...] = (),
+    ) -> ToolRunOutcome:
+        """Fenced Phase C for valid MRTR input_required — not a Tool failure."""
+        async with self._session_factory() as session:
+            async with session.begin():
+                executions = ExecutionRepository(session)
+                inputs = MCPInputRequestRepository(session)
+                execution = await executions.lock_execution(prepared.execution_id)
+                step = await executions.lock_step(prepared.step_id)
+                attempt = await executions.get_attempt_with_lock(prepared.attempt_id)
+                tool_call = await executions.get_tool_call_with_lock(prepared.tool_call_id)
+
+                now = datetime.now(UTC)
+                if (
+                    execution is None
+                    or step is None
+                    or attempt is None
+                    or tool_call is None
+                    or execution.status != ExecutionStatus.RUNNING.value
+                    or execution.worker_id != prepared.worker_id
+                    or execution.lease_token != prepared.lease_token
+                    or execution.lease_expires_at is None
+                    or _as_utc(execution.lease_expires_at) <= _as_utc(now)
+                    or step.execution_id != execution.id
+                    or attempt.step_execution_id != step.id
+                    or tool_call.step_attempt_id != attempt.id
+                    or tool_call.remote_request_id != prepared.remote_request_id
+                    or tool_call.mcp_server_id != prepared.mcp_server_id
+                    or tool_call.mcp_tool_version_id != prepared.mcp_tool_version_id
+                ):
+                    raise AppError(
+                        code="RESOURCE_CONFLICT",
+                        message="Tool Runner MRTR finalize fencing failed.",
+                        status_code=409,
+                    )
+
+                timeout_seconds = _plan_timeout_seconds(step)
+                persist_meta = sanitize_for_persistence(response_meta, protected) or {}
+                if not isinstance(persist_meta, dict):
+                    persist_meta = {}
+                # Safe transport metadata only — never requestState / inputRequests dump.
+                persist_meta = {
+                    **persist_meta,
+                    "result_type": "input_required",
+                }
+                # Strip accidental leakage if present.
+                persist_meta.pop("requestState", None)
+                persist_meta.pop("request_state", None)
+                persist_meta.pop("inputRequests", None)
+                persist_meta.pop("input_requests", None)
+
+                if step_timeout_budget_exhausted(
+                    step_started_at=step.started_at,
+                    timeout_seconds=timeout_seconds,
+                    now=now,
+                ):
+                    # Persist EXPIRED evidence; no OPEN wait / no WAITING_INPUT.
+                    expires_at = now
+                    if step.started_at is not None and timeout_seconds is not None:
+                        expires_at = _as_utc(step.started_at) + timedelta(
+                            seconds=int(timeout_seconds)
+                        )
+                    await inputs.create(
+                        execution_id=execution.id,
+                        step_execution_id=step.id,
+                        step_attempt_id=attempt.id,
+                        protocol_era=MCPProtocolEra.CURRENT.value,
+                        input_requests=dict(mrtr.input_requests),
+                        request_state=mrtr.request_state,
+                        round_no=1,
+                        status=McpInputRequestStatus.EXPIRED.value,
+                        requested_at=now,
+                        expires_at=expires_at,
+                    )
+                    tool_call.normalized_status = ToolCallNormalizedStatus.SUCCEEDED.value
+                    tool_call.response_meta = persist_meta
+                    tool_call.response_bytes = mrtr.raw_size_bytes
+                    tool_call.first_byte_at = first_byte_at
+                    tool_call.finished_at = now
+
+                    attempt.status = StepAttemptStatus.TIMED_OUT.value
+                    attempt.error_layer = "PROTOCOL"
+                    attempt.error_code = "STEP_TIMEOUT"
+                    attempt.error_message = (
+                        "Step total timeout exhausted before MRTR wait could open."
+                    )
+                    attempt.is_retryable = False
+                    attempt.finished_at = now
+                    attempt.worker_id = None
+                    attempt.lease_expires_at = None
+
+                    step.status = StepStatus.TIMED_OUT.value
+                    step.error_code = "STEP_TIMEOUT"
+                    step.error_message = attempt.error_message
+                    step.finished_at = now
+                    step.lock_version += 1
+
+                    execution.status = ExecutionStatus.TIMED_OUT.value
+                    execution.error_code = "STEP_TIMEOUT"
+                    execution.error_message = attempt.error_message
+                    execution.finished_at = now
+                    execution.worker_id = None
+                    execution.lease_token = None
+                    execution.lease_expires_at = None
+                    execution.heartbeat_at = None
+                    execution.lock_version += 1
+
+                    return ToolRunOutcome(
+                        execution_id=execution.id,
+                        step_execution_id=step.id,
+                        attempt_id=attempt.id,
+                        tool_call_id=tool_call.id,
+                        mcp_called=True,
+                        terminal_status=StepStatus.TIMED_OUT.value,
+                        reason="STEP_TIMEOUT",
+                    )
+
+                assert step.started_at is not None
+                assert timeout_seconds is not None and timeout_seconds >= 1
+                expires_at = _as_utc(step.started_at) + timedelta(
+                    seconds=int(timeout_seconds)
+                )
+
+                # Network ToolCall round completed; logical Attempt remains STARTED.
+                tool_call.normalized_status = ToolCallNormalizedStatus.SUCCEEDED.value
+                tool_call.response_meta = persist_meta
+                tool_call.response_bytes = mrtr.raw_size_bytes
+                tool_call.first_byte_at = first_byte_at
+                tool_call.finished_at = now
+
+                attempt.worker_id = None
+                attempt.lease_expires_at = None
+                # STARTED, finished_at null, no error/result — unchanged status.
+
+                step.status = StepStatus.WAITING_INPUT.value
+                step.finished_at = None
+                step.error_code = None
+                step.error_message = None
+                step.lock_version += 1
+
+                execution.status = ExecutionStatus.WAITING_INPUT.value
+                execution.finished_at = None
+                execution.error_code = None
+                execution.error_message = None
+                execution.worker_id = None
+                execution.lease_token = None
+                execution.lease_expires_at = None
+                execution.heartbeat_at = None
+                execution.lock_version += 1
+
+                await inputs.create(
+                    execution_id=execution.id,
+                    step_execution_id=step.id,
+                    step_attempt_id=attempt.id,
+                    protocol_era=MCPProtocolEra.CURRENT.value,
+                    input_requests=dict(mrtr.input_requests),
+                    request_state=mrtr.request_state,
+                    round_no=1,
+                    status=McpInputRequestStatus.OPEN.value,
+                    requested_at=now,
+                    expires_at=expires_at,
+                )
+
+                return ToolRunOutcome(
+                    execution_id=execution.id,
+                    step_execution_id=step.id,
+                    attempt_id=attempt.id,
+                    tool_call_id=tool_call.id,
+                    mcp_called=True,
+                    terminal_status=StepStatus.WAITING_INPUT.value,
+                    reason=_REASON_WAITING_INPUT,
+                )
 
     async def _finalize_locked(
         self,

@@ -128,7 +128,11 @@ async def test_oversized_body_raises_without_retaining_body() -> None:
 
 
 @pytest.mark.asyncio
-async def test_input_required_raises_unsupported_without_leaking_request_state() -> None:
+async def test_input_required_returns_normalized_without_leaking_request_state() -> None:
+    from app.mcp.contracts import NormalizedInputRequired, NormalizedToolResult
+
+    canary = {"token": "opaque-state-blob-should-never-leak", "n": 1}
+
     def handler(request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content.decode("utf-8"))
         return httpx.Response(
@@ -138,19 +142,61 @@ async def test_input_required_raises_unsupported_without_leaking_request_state()
                 "id": body["id"],
                 "result": {
                     "resultType": "input_required",
-                    "inputRequests": [{"name": "otp"}],
-                    "requestState": "opaque-state-blob-should-never-leak",
+                    "inputRequests": {"otp": {"type": "string"}},
+                    "requestState": canary,
                 },
             },
+        )
+
+    result, response_meta, first_byte_at = await _call(handler)
+
+    assert isinstance(result, NormalizedInputRequired)
+    assert not isinstance(result, NormalizedToolResult)
+    assert result.input_requests == {"otp": {"type": "string"}}
+    assert result.request_state == canary
+    assert result.result_type == "input_required"
+    assert first_byte_at is not None
+    assert "requestState" not in response_meta
+    assert "opaque-state-blob-should-never-leak" not in json.dumps(response_meta)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "result_body",
+    [
+        {"resultType": "input_required", "requestState": "x"},  # missing inputRequests
+        {
+            "resultType": "input_required",
+            "inputRequests": {},
+            "requestState": "x",
+        },  # empty
+        {
+            "resultType": "input_required",
+            "inputRequests": ["otp"],
+            "requestState": "x",
+        },  # wrong type
+        {
+            "resultType": "input_required",
+            "inputRequests": {"otp": {}},
+        },  # missing requestState
+    ],
+)
+async def test_malformed_input_required_is_post_send_protocol_failure(
+    result_body: dict[str, Any],
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content.decode("utf-8"))
+        return httpx.Response(
+            200,
+            json={"jsonrpc": "2.0", "id": body["id"], "result": result_body},
         )
 
     with pytest.raises(MCPClientError) as exc:
         await _call(handler)
 
-    assert exc.value.error_code == "MCP_INPUT_REQUIRED_UNSUPPORTED"
+    assert exc.value.error_code == "MCP_INVALID_INPUT_REQUIRED"
     assert exc.value.retryable is False
-    assert "opaque-state-blob-should-never-leak" not in exc.value.message
-    assert "opaque-state-blob-should-never-leak" not in str(exc.value)
+    assert exc.value.outcome_unknown is True
 
 
 @pytest.mark.asyncio
@@ -261,7 +307,17 @@ async def test_malformed_jsonrpc_after_send_outcome_unknown_true() -> None:
 
 
 @pytest.mark.asyncio
-async def test_input_required_remains_outcome_unknown_false() -> None:
+async def test_valid_input_required_returns_normalized_input_required(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from app.mcp.contracts import NormalizedInputRequired, NormalizedToolResult
+
+    canary = "MRTR-CANARY-REQUEST-STATE-DO-NOT-LOG"
+    input_requests = {
+        "city": {"type": "string", "description": "City name"},
+        "units": {"type": "string", "enum": ["c", "f"]},
+    }
+
     def handler(request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content.decode("utf-8"))
         return httpx.Response(
@@ -271,17 +327,81 @@ async def test_input_required_remains_outcome_unknown_false() -> None:
                 "id": body["id"],
                 "result": {
                     "resultType": "input_required",
-                    "inputRequests": [{"name": "otp"}],
-                    "requestState": "opaque",
+                    "inputRequests": input_requests,
+                    "requestState": {"opaque": True, "token": canary},
                 },
             },
+        )
+
+    with caplog.at_level("DEBUG"):
+        result, response_meta, first_byte_at = await _call(handler)
+
+    assert isinstance(result, NormalizedInputRequired)
+    assert not isinstance(result, NormalizedToolResult)
+    assert result.input_requests == input_requests
+    assert result.request_state == {"opaque": True, "token": canary}
+    assert result.result_type == "input_required"
+    assert result.raw_size_bytes > 0
+    assert first_byte_at is not None
+    assert "requestState" not in response_meta
+    assert "request_state" not in response_meta
+    assert canary not in json.dumps(response_meta)
+    for record in caplog.records:
+        assert canary not in record.getMessage()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("result_body", "message_part"),
+    [
+        (
+            {"resultType": "input_required", "requestState": {"k": 1}},
+            "inputRequests",
+        ),
+        (
+            {
+                "resultType": "input_required",
+                "inputRequests": {},
+                "requestState": {"k": 1},
+            },
+            "inputRequests",
+        ),
+        (
+            {
+                "resultType": "input_required",
+                "inputRequests": ["not-an-object"],
+                "requestState": {"k": 1},
+            },
+            "inputRequests",
+        ),
+        (
+            {
+                "resultType": "input_required",
+                "inputRequests": {"field": {"type": "string"}},
+            },
+            "requestState",
+        ),
+    ],
+)
+async def test_malformed_input_required_is_post_send_protocol_failure(
+    result_body: dict[str, Any],
+    message_part: str,
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content.decode("utf-8"))
+        return httpx.Response(
+            200,
+            json={"jsonrpc": "2.0", "id": body["id"], "result": result_body},
         )
 
     with pytest.raises(MCPClientError) as exc:
         await _call(handler)
 
-    assert exc.value.error_code == "MCP_INPUT_REQUIRED_UNSUPPORTED"
-    assert exc.value.outcome_unknown is False
+    assert exc.value.error_layer == "PROTOCOL"
+    assert exc.value.error_code == "MCP_INVALID_INPUT_REQUIRED"
+    assert message_part in exc.value.message
+    assert exc.value.retryable is False
+    assert exc.value.outcome_unknown is True
 
 
 @pytest.mark.asyncio

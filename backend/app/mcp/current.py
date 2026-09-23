@@ -14,7 +14,7 @@ import httpx
 
 from app.domain.enums import CURRENT_MCP_PROTOCOL_VERSION
 from app.mcp.auth_headers import redact_headers_for_meta
-from app.mcp.contracts import NormalizedToolResult
+from app.mcp.contracts import NormalizedInputRequired, NormalizedToolResult
 from app.mcp.errors import DiscoverUnsupportedError, MCPClientError, MCPResultTooLargeError
 from app.mcp.normalize import RemoteToolDescriptor
 
@@ -433,7 +433,11 @@ class CurrentMCPClient:
         remote_request_id: str,
         auth_headers: Mapping[str, str] | None = None,
         max_result_bytes: int | None = None,
-    ) -> tuple[NormalizedToolResult, dict[str, Any], datetime | None]:
+    ) -> tuple[
+        NormalizedToolResult | NormalizedInputRequired,
+        dict[str, Any],
+        datetime | None,
+    ]:
         """Call ``tools/call``. Never logs Authorization headers, bodies, or requestState.
 
         ``remote_request_id`` is caller-supplied (``ToolCall.remote_request_id``)
@@ -442,10 +446,11 @@ class CurrentMCPClient:
         exceeding it raises :class:`MCPResultTooLargeError` with
         ``outcome_unknown=true`` (tools/call already dispatched; body not retained).
 
-        Returns ``(NormalizedToolResult, response_meta, first_byte_at)``.
-        MRTR ``resultType=input_required`` is unsupported in this slice and
-        raises ``MCP_INPUT_REQUIRED_UNSUPPORTED`` without inspecting/logging
-        the opaque ``requestState``.
+        Returns ``(NormalizedToolResult | NormalizedInputRequired, response_meta,
+        first_byte_at)``. A valid MRTR ``resultType=input_required`` yields
+        ``NormalizedInputRequired`` without logging or inspecting opaque
+        ``requestState``. Malformed MRTR payloads remain post-send protocol
+        failures (``outcome_unknown=True``).
         """
         timeout = httpx.Timeout(timeout_ms / 1000.0)
         headers = self._build_headers("tools/call", mcp_name=tool_name)
@@ -555,15 +560,13 @@ class CurrentMCPClient:
 
         result_type = result.get("resultType")
         if result_type == _INPUT_REQUIRED_RESULT_TYPE:
-            # MRTR requestState is opaque — never log/store/interpret it here.
-            raise MCPClientError(
-                error_layer="PROTOCOL",
-                error_code="MCP_INPUT_REQUIRED_UNSUPPORTED",
-                message=(
-                    "MCP tools/call requested runtime input; MRTR is unsupported"
-                    " by MCP Tool Runner in this slice."
+            # MRTR requestState is opaque — never log/inspect fields inside it.
+            return (
+                self._normalize_input_required(
+                    result, raw_size_bytes=len(raw_chunks), duration_ms=duration_ms
                 ),
-                retryable=False,
+                response_meta,
+                first_byte_at,
             )
 
         content = result.get("content")
@@ -603,3 +606,45 @@ class CurrentMCPClient:
             result_type=result_type if isinstance(result_type, str) else None,
         )
         return normalized, response_meta, first_byte_at
+
+    @staticmethod
+    def _normalize_input_required(
+        result: dict[str, Any],
+        *,
+        raw_size_bytes: int,
+        duration_ms: int,
+    ) -> NormalizedInputRequired:
+        """Validate minimal MRTR structure. Never logs requestState."""
+        if "requestState" not in result:
+            raise MCPClientError(
+                error_layer="PROTOCOL",
+                error_code="MCP_INVALID_INPUT_REQUIRED",
+                message="input_required result requires requestState.",
+                retryable=False,
+                outcome_unknown=True,
+            )
+        if "inputRequests" not in result:
+            raise MCPClientError(
+                error_layer="PROTOCOL",
+                error_code="MCP_INVALID_INPUT_REQUIRED",
+                message="input_required result requires inputRequests.",
+                retryable=False,
+                outcome_unknown=True,
+            )
+        input_requests = result["inputRequests"]
+        if not isinstance(input_requests, dict) or not input_requests:
+            raise MCPClientError(
+                error_layer="PROTOCOL",
+                error_code="MCP_INVALID_INPUT_REQUIRED",
+                message="inputRequests must be a non-empty JSON object.",
+                retryable=False,
+                outcome_unknown=True,
+            )
+        # Preserve requestState exactly — no type coercion beyond JSON decode.
+        request_state = result["requestState"]
+        return NormalizedInputRequired(
+            input_requests=dict(input_requests),
+            request_state=request_state,
+            raw_size_bytes=raw_size_bytes,
+            duration_ms=duration_ms,
+        )
