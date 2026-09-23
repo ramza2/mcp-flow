@@ -670,6 +670,28 @@ When `ToolPolicy.requires_approval=true`, enter `WAITING_APPROVAL` **before**
 creating a StepAttempt, ToolCall, or MCP network call. Approval waiting must
 not consume Attempt budget and must clear the Execution worker lease.
 
+Decision aggregation (FNC-APR-003):
+
+- one actor may decide once per ApprovalRequest (`UNIQUE(approval_request_id, decided_by)`)
+- `ANY`: first APPROVE → APPROVED; first REJECT → REJECTED
+- `ALL` with required_approvals=N: any REJECT → REJECTED; APPROVE count ≥ N → APPROVED; else PENDING
+- `QUORUM` with required_approvals=N: APPROVE count ≥ N → APPROVED; REJECT count ≥ N → REJECTED; else PENDING
+- counts are distinct persisted approvers (do not derive from current Role population)
+- every decision requires current DB User ACTIVE + `approval.decide` + approver_scope match + self-approval rule + PENDING + not expired + exact context hash
+- supported `approver_scope`: null / `{}` / `{"role_codes":[...]}` only; unknown keys fail closed
+- `ApprovalDecision.context_hash` is server-derived; clients must not submit it
+- APPROVED creates durable `EXECUTION_APPROVAL_RESUME` Outbox in the same TX; API does **not** set RUNNING
+- REJECTED/EXPIRED terminalize Step+Execution as FAILED (`APPROVAL_REJECTED` / `APPROVAL_EXPIRED`); never Execution REJECTED/EXPIRED
+
+Same-Execution resume (FNC-APR-004):
+
+- resume claims the **same** Execution with a **fresh** lease; Step WAITING_APPROVAL → READY
+- never create a new Execution for approval resume
+- exact APPROVED evidence is revalidated before Attempt start and again at B2 final pre-send
+- approval does not bypass mutable authorization (User / grants / Tool / Server / policies)
+- context drift invalidates prior approval; do not auto-create replacement PENDING in this slice
+- the same APPROVED evidence may cover safe retries of the exact same Tool context
+
 Approval reject/expiry does NOT create Execution statuses such as:
 
 ```text

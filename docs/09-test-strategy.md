@@ -415,7 +415,7 @@ Dataset은 평가 전 FROZEN하고 실행 중 정답을 변경하지 않는다.
 - invalid Step state / non-TOOL / corrupted lineage fail-closed
 - concurrent READY start → exactly one Attempt
 - Celery claim task는 Attempt를 자동 시작하지 않음
-- Approval decide/resume / MRTR / Cancellation 미구현
+- Approval decide/resume는 FNC-APR-003/004 범위에서 구현; MRTR / Cancellation 미구현
 
 추가 (MCP Tool Runner vertical slice):
 
@@ -692,7 +692,7 @@ DRAFT → PUBLISHED → DEPRECATED
 - 승인 후 입력 변경 시 재승인
 - 재시작 복구
 
-Approval wait foundation (현재 구현):
+Approval wait foundation:
 
 - ToolPolicy `requires_approval` → PENDING ApprovalRequest + WAITING_APPROVAL
 - Attempt/ToolCall/MCP = 0, lease cleared, attempt_count unchanged
@@ -701,11 +701,23 @@ Approval wait foundation (현재 구현):
 - secret-safe context_snapshot + deterministic context_hash
 - expires_at = requested_at + default_expiry_seconds
 - migration upgrade/downgrade/re-upgrade for approval_requests / approval_decisions
-- decide API / aggregation / resume는 후속 범위
+
+Approval decision / resume (FNC-APR-003/004):
+
+- ANY/ALL/QUORUM aggregation + one actor one vote (UNIQUE)
+- `approval.decide` + role_codes scope + self/comment rules
+- context tamper / current drift fail-closed
+- expiry decision path + bounded `expire_due_batch` in outbox iteration
+- APPROVED → durable `EXECUTION_APPROVAL_RESUME` Outbox; API does not set RUNNING
+- same-Execution resume claim + fresh lease; duplicate resume DB no-op
+- Attempt-start + B2 pre-send APPROVED evidence gates
+- approval does not bypass mutable authorization; revoked auth → MCP 0
+- same APPROVED evidence covers safe retries of exact same context
+- PG: concurrent threshold crossing → terminal once / one Outbox; migration 0018 round-trip
 
 중요 회귀:
 
-Approval `REJECTED/EXPIRED`를 Execution `REJECTED/EXPIRED` 상태로 직접 매핑하지 않는다. Plan completion policy에 따라 `FAILED` 또는 `PARTIALLY_SUCCEEDED` 등을 결정한다.
+Approval `REJECTED/EXPIRED`를 Execution `REJECTED/EXPIRED` 상태로 직접 매핑하지 않는다. ToolPolicy foundation에서는 Step+Execution `FAILED`로 종료한다.
 
 ---
 

@@ -1,7 +1,8 @@
 """ApprovalPolicy / ApprovalRequest / ApprovalDecision persistence (docs/05 §12).
 
-ApprovalRequest creation and WAITING_APPROVAL transitions are owned by
-app.approval.wait. Decision aggregation / approve-reject APIs are out of scope.
+ApprovalRequest creation is owned by app.approval.wait. Decision aggregation,
+expiry, and same-Execution resume are owned by app.approval.decision /
+app.approval.expiry / app.execution.approval_resume.
 """
 
 from __future__ import annotations
@@ -89,6 +90,12 @@ class ApprovalRequest(Base, LockVersionMixin):
             postgresql_where=text("status = 'PENDING'"),
             sqlite_where=text("status = 'PENDING'"),
         ),
+        Index(
+            "ix_approval_requests_pending_expires_at",
+            "expires_at",
+            postgresql_where=text("status = 'PENDING'"),
+            sqlite_where=text("status = 'PENDING'"),
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -128,14 +135,15 @@ class ApprovalRequest(Base, LockVersionMixin):
 
 
 class ApprovalDecision(Base):
-    """Persistence foundation for approval decisions (docs/05 §12.3).
-
-    Decision aggregation and REST APIs are intentionally out of scope.
-    PostgreSQL CHECK constraints live in Alembic (SQLite create_all compatible).
-    """
+    """Persisted approval vote (docs/05 §12.3). One actor per ApprovalRequest."""
 
     __tablename__ = "approval_decisions"
     __table_args__ = (
+        UniqueConstraint(
+            "approval_request_id",
+            "decided_by",
+            name="uq_approval_decisions_request_decided_by",
+        ),
         Index("ix_approval_decisions_approval_request_id", "approval_request_id"),
     )
 

@@ -25,6 +25,7 @@ class FakePublisher:
     def __init__(self, *, fail: bool = False) -> None:
         self.fail = fail
         self.calls: list[tuple[uuid.UUID, uuid.UUID]] = []
+        self.resume_calls: list[tuple[uuid.UUID, uuid.UUID, uuid.UUID]] = []
 
     def publish_execution(
         self,
@@ -33,6 +34,17 @@ class FakePublisher:
         outbox_event_id: uuid.UUID,
     ) -> None:
         self.calls.append((execution_id, outbox_event_id))
+        if self.fail:
+            raise ConnectionError("broker unavailable")
+
+    def publish_approval_resume(
+        self,
+        *,
+        execution_id: uuid.UUID,
+        approval_request_id: uuid.UUID,
+        outbox_event_id: uuid.UUID,
+    ) -> None:
+        self.resume_calls.append((execution_id, approval_request_id, outbox_event_id))
         if self.fail:
             raise ConnectionError("broker unavailable")
 

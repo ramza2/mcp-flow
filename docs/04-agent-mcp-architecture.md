@@ -639,7 +639,9 @@ ANSWERED PLAN_CONFIRMATION confirmed=true by requester)이면 새 Clarification�
 
 - `requires_approval=true`는 `WAITING_CONFIRMATION`과 별개다. 유효한 ApprovalPolicy가 있으면 validation은 통과할 수 있다.
 - ApprovalRequest / Step `WAITING_APPROVAL`은 Execution 단계에서 처리한다.
-- ToolPolicy approval은 StepAttempt / ToolCall / MCP `tools/call` 이전에 `READY → WAITING_APPROVAL`로 진입한다. wait는 Attempt budget을 소비하지 않으며 worker lease를 해제한다. decision/resume은 후속 범위다.
+- ToolPolicy approval은 StepAttempt / ToolCall / MCP `tools/call` 이전에 `READY → WAITING_APPROVAL`로 진입한다. wait는 Attempt budget을 소비하지 않으며 worker lease를 해제한다.
+- Decision(FNC-APR-003): ANY/ALL/QUORUM 집계, `approval.decide`+scope+self/comment 규칙, context_hash 재검증, APPROVED 시 `EXECUTION_APPROVAL_RESUME` Outbox(동일 TX). API는 RUNNING으로 올리지 않는다.
+- Resume(FNC-APR-004): 동일 Execution + fresh lease, Step READY → McpToolRunner. Attempt 시작 전·B2 final pre-send에서 exact APPROVED evidence 재검증. approval은 mutable authz bypass가 아니다. 동일 context safe retry는 추가 승인 없이 진행 가능하다.
 - Plan Validator `READY`는 **execution authorization token이 아니다**. Execution 생성 시 Permission/Grant/Tool state/policy를 다시 검증한다.
 - `ToolPolicy.requires_confirmation` / `AgentToolGrant.requires_confirmation`만 confirmation source of truth다. `risk_class`만으로 confirmation을 강제하지 않는다.
 - Generator의 ToolPolicy timeout fallback(30s)은 draft 생성 편의일 뿐 validation 성공을 의미하지 않는다. Validator 시점에 MCPToolPolicy가 반드시 존재해야 한다.

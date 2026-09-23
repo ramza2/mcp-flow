@@ -64,3 +64,35 @@ class CeleryExecutionQueuePublisher:
                 retry=True,
                 retry_policy=celery_app.conf.task_publish_retry_policy,
             )
+
+    def publish_approval_resume(
+        self,
+        *,
+        execution_id: uuid.UUID,
+        approval_request_id: uuid.UUID,
+        outbox_event_id: uuid.UUID,
+    ) -> None:
+        """Publish ID-only approval-resume claim; DB claim is the idempotency boundary."""
+        settings = get_settings()
+        transport_options = {
+            "socket_connect_timeout": settings.celery_publish_connect_timeout,
+            "socket_timeout": settings.celery_publish_socket_timeout,
+            "max_retries": settings.celery_publish_max_retries,
+        }
+        with celery_app.connection_for_write(
+            connect_timeout=settings.celery_publish_connect_timeout,
+            transport_options=transport_options,
+        ) as connection:
+            celery_app.send_task(
+                "mcpflow.execution.approval_resume",
+                kwargs={
+                    "execution_id": str(execution_id),
+                    "approval_request_id": str(approval_request_id),
+                    "outbox_event_id": str(outbox_event_id),
+                },
+                queue="execution",
+                task_id=str(outbox_event_id),
+                connection=connection,
+                retry=True,
+                retry_policy=celery_app.conf.task_publish_retry_policy,
+            )

@@ -85,6 +85,7 @@ from app.execution.secret_redaction import (
     redact_text,
     sanitize_for_persistence,
 )
+from app.approval.evidence import require_valid_approved_evidence
 from app.approval.wait import ApprovalWaitService
 from app.execution.tool_step_attempt import ApprovalWaitOutcome, ToolStepAttemptService
 from app.mcp.auth_headers import build_mcp_auth_headers
@@ -526,13 +527,23 @@ class McpToolRunner:
                         plan_timeout_seconds=_plan_timeout_seconds(step),
                     )
                     if authz.tool_policy.requires_approval:
-                        return _PreSendFailClosed(
-                            error_code="EXECUTION_PRECONDITION_FAILED",
-                            message=(
-                                "requires_approval=true is not supported by"
-                                " MCP Tool Runner."
-                            ),
-                        )
+                        if authz.approval_policy is None:
+                            return _PreSendFailClosed(
+                                error_code="EXECUTION_PRECONDITION_FAILED",
+                                message="requires_approval인데 ApprovalPolicy 없음.",
+                            )
+                        try:
+                            await require_valid_approved_evidence(
+                                session,
+                                execution=execution,
+                                step=step,
+                                tool_policy=authz.tool_policy,
+                                approval_policy=authz.approval_policy,
+                            )
+                        except AppError as exc:
+                            return _PreSendFailClosed(
+                                error_code=exc.code, message=exc.message
+                            )
                     if (
                         authz.grant.requires_confirmation
                         or authz.tool_policy.requires_confirmation
@@ -951,14 +962,25 @@ class McpToolRunner:
                             plan_timeout_seconds=_plan_timeout_seconds(step),
                         )
                         if authz.tool_policy.requires_approval:
-                            pre_send_failure = _PreSendFailClosed(
-                                error_code="EXECUTION_PRECONDITION_FAILED",
-                                message=(
-                                    "requires_approval=true is not supported by"
-                                    " MCP Tool Runner."
-                                ),
-                            )
-                        elif (
+                            if authz.approval_policy is None:
+                                pre_send_failure = _PreSendFailClosed(
+                                    error_code="EXECUTION_PRECONDITION_FAILED",
+                                    message="requires_approval인데 ApprovalPolicy 없음.",
+                                )
+                            else:
+                                try:
+                                    await require_valid_approved_evidence(
+                                        session,
+                                        execution=execution,
+                                        step=step,
+                                        tool_policy=authz.tool_policy,
+                                        approval_policy=authz.approval_policy,
+                                    )
+                                except AppError as exc:
+                                    pre_send_failure = _PreSendFailClosed(
+                                        error_code=exc.code, message=exc.message
+                                    )
+                        if pre_send_failure is None and (
                             authz.grant.requires_confirmation
                             or authz.tool_policy.requires_confirmation
                         ):
