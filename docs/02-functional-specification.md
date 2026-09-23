@@ -535,7 +535,24 @@ Phase B3          — CurrentMCPClient.call_tool (no DB TX held)
 Phase C / TX2     — fenced terminal finalize
 ```
 
-final gate reject 시 `tools/call`은 0회이며 materialize된 secret은 폐기한다. MRTR(`input_required`)은 이 범위에서 detect-only로만 처리되며 — 즉 감지 시 Step은 재개 가능한 `WAITING_INPUT`이 아니라 명시적으로 실패 처리된다 — 실제 runtime 입력 round-trip 재개(§15)는 후속 범위다.
+final gate reject 시 `tools/call`은 0회이며 materialize된 secret은 폐기한다.
+
+MRTR waiting-input foundation(PR #40) 범위:
+
+```text
+tools/call
+→ valid resultType=input_required + inputRequests + opaque requestState
+→ persist mcp_input_requests OPEN
+→ ToolCall STARTED → SUCCEEDED (network round complete)
+→ StepAttempt remains STARTED (logical attempt incomplete)
+→ Step/Execution RUNNING → WAITING_INPUT
+→ worker lease clear
+→ stop safely
+```
+
+아직 구현하지 않는 항목(PR #41): 사용자 input response API, response schema 검증, reject, same-Execution claim/resume, `inputResponses`, exact `requestState` echo, 다음 MRTR round, 최종 Tool result. Legacy elicitation normalize도 후속이다.
+
+malformed `input_required`(missing/empty/wrong-type `inputRequests`, missing `requestState`)는 post-send protocol failure(`MCP_INVALID_INPUT_REQUIRED`, `outcome_unknown=true`)이며 WAITING_INPUT을 만들지 않는다. Step 총 timeout이 이미 소진된 뒤 도착한 valid `input_required`는 OPEN wait 대신 `EXPIRED` evidence + existing `TIMED_OUT` terminalization을 사용한다.
 
 Plaintext secret material resolved for an MCP invocation is memory-only. If a remote MCP server reflects that material in a result, error, or retained response metadata, persistence-bound data is recursively redacted while the original in-memory response remains authoritative for protocol/result-schema semantics.
 
@@ -566,14 +583,17 @@ protocol 성공과 업무 output validation을 분리한다. output schema 불�
 
 Current MCP `input_required` 발생 시:
 
-1. inputRequests/requestState 저장
-2. Step/Execution을 `WAITING_INPUT`
-3. UI에서 사용자 입력
-4. schema 검증
-5. inputResponses + requestState로 원 요청 재호출
-6. 최대 round/timeout 적용
+1. inputRequests/requestState를 `mcp_input_requests`에 저장 (OPEN)
+2. ToolCall network round를 SUCCEEDED로 마감하고 Attempt는 STARTED 유지
+3. Step/Execution을 `WAITING_INPUT`으로 전이하고 worker lease 해제
+4. UI에서 사용자 입력 (PR #41)
+5. schema 검증 (PR #41)
+6. inputResponses + 동일 requestState로 원 요청 재호출 (PR #41)
+7. 최대 round/timeout 적용
 
-Legacy elicitation은 같은 내부 흐름으로 normalize한다.
+PR #40는 1–3(durable wait foundation)만 구현한다. 4–6 resume/response는 PR #41이다.
+
+Legacy elicitation은 같은 내부 흐름으로 normalize한다(후속).
 
 ## FNC-EXE-009. Approval 대기
 
@@ -610,7 +630,7 @@ runtime preflight (authz / Tool / Server / Policy / ApprovalPolicy / confirmatio
 
 Worker lease, MCP task handle, persisted state를 사용해 재시작 후 복구한다. 동일 non-idempotent Tool을 무조건 재호출하지 않는다.
 
-이번 vertical slice는 **AgentRequest + single TOOL Step + synchronous Current MCP `tools/call` persisted evidence**만 대상으로 한다. MRTR `WAITING_INPUT`, Approval decision/resume, MCP task-handle persistence, Workflow multi-step, Schedule recovery는 후속 범위다. Approval wait foundation(`WAITING_APPROVAL` + PENDING ApprovalRequest)은 lease 없는 non-terminal 상태이므로 expired RUNNING recovery candidate에 포함되지 않는다.
+이번 vertical slice는 **AgentRequest + single TOOL Step + synchronous Current MCP `tools/call` persisted evidence**를 대상으로 한다. MRTR durable WAITING_INPUT foundation(PR #40: OPEN `mcp_input_requests` + lease clear)은 포함하되, 사용자 response/resume(PR #41)·Cancellation·Workflow multi-step·Schedule recovery는 후속이다. Approval wait foundation(`WAITING_APPROVAL` + PENDING ApprovalRequest)과 MRTR wait(`WAITING_INPUT` + OPEN MCPInputRequest)는 모두 lease 없는 non-terminal 상태이므로 expired RUNNING recovery candidate에 포함되지 않는다.
 
 PostgreSQL이 source of truth다. outbox process가 expired `RUNNING` candidate를 bounded scan하여 Celery `mcpflow.execution.recover`(payload: `execution_id` only)를 publish하고, worker는 DB evidence로 decision 후 필요 시 기존 `McpToolRunner`를 호출한다. Redis/Celery는 delivery/coordination만 담당한다.
 

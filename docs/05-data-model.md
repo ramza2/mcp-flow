@@ -1315,16 +1315,34 @@ header·raw secret·MRTR `requestState`를 저장하지 않는다.
 
 ```text
 id, execution_id, step_execution_id, step_attempt_id
-protocol_era
-input_requests jsonb
-request_state protected text/json
-round_no
+protocol_era (CURRENT/LEGACY)
+input_requests jsonb (object)
+request_state jsonb (opaque; dedicated storage only)
+round_no (>= 1)
 status(OPEN/ANSWERED/REJECTED/EXPIRED/UNSUPPORTED)
-response_payload
+response_payload (null or jsonb object)
 requested_at, expires_at, answered_at, answered_by
 ```
 
-Current MCP의 `input_required`와 Legacy elicitation을 공통 내부 엔터티로 normalize한다.
+FK: `execution_id`→`executions`, `step_execution_id`→`execution_steps`,
+`step_attempt_id`→`step_attempts`, `answered_by`→`users` (nullable).
+
+Indexes: `execution_id`, `step_execution_id`, `status`, `expires_at`
+(+ partial OPEN `expires_at` lookup).
+
+MRTR waiting-input foundation(PR #40):
+
+- valid Current `input_required` → create OPEN row (`round_no=1`, `protocol_era=CURRENT`)
+- ToolCall network round → SUCCEEDED; StepAttempt remains STARTED
+- Execution/Step → WAITING_INPUT; worker lease cleared
+- `expires_at = Step.started_at + timeout_seconds` (total Step budget; no reset)
+- exhausted Step budget on arrival → EXPIRED evidence + TIMED_OUT (no OPEN / no WAITING_INPUT)
+- `request_state` must never appear in ToolCall meta / Attempt/Step/Execution result·error / logs / normal API
+
+User response / ANSWERED / REJECTED / resume / next round are PR #41.
+
+Current MCP의 `input_required`와 Legacy elicitation을 공통 내부 엔터티로 normalize한다
+(Legacy normalize는 후속).
 
 ### 13.8 Execution Event
 

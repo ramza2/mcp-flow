@@ -32,6 +32,7 @@ from app.domain.enums import (
     MCPCheckType,
     MCPDiscoveryMode,
     MCPProtocolEra,
+    McpInputRequestStatus,
     MCPServerStatus,
     MCPToolStatus,
     MCPTransportType,
@@ -192,6 +193,10 @@ def expect_exact(enum_cls: type[Enum], expected: set[str]) -> None:
         (
             MCPProtocolEra,
             {"CURRENT", "LEGACY"},
+        ),
+        (
+            McpInputRequestStatus,
+            {"OPEN", "ANSWERED", "REJECTED", "EXPIRED", "UNSUPPORTED"},
         ),
         (
             MCPCheckType,

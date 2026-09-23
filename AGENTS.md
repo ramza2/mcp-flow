@@ -765,10 +765,23 @@ Critical rules:
 * Never show it to the user.
 * Never allow the user to edit it.
 * Preserve it exactly when resuming the request.
+* Store `requestState` only in dedicated `mcp_input_requests.request_state`.
+* Never place `requestState` in ToolCall metadata, Attempt/Step/Execution
+  result/error fields, logs, or normal API/UI responses.
 * Enforce a maximum MRTR round count.
-* Enforce total Step timeout.
+* Enforce total Step timeout (includes MRTR wait; do not reset `Step.started_at`).
 
-After valid runtime input:
+MRTR WAITING_INPUT durable invariant (after a valid `tools/call` round):
+
+* occurs after an actual MCP `tools/call`
+* current network ToolCall round is complete (`ToolCall` → `SUCCEEDED`)
+* logical `StepAttempt` remains `STARTED`
+* Execution/Step → `WAITING_INPUT`
+* worker lease cleared
+* `requestState` only in dedicated `MCPInputRequest` storage
+* no auto retry while waiting
+
+After valid runtime input (resume — later PR):
 
 ```text
 WAITING_INPUT
