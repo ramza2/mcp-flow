@@ -99,60 +99,106 @@ async def _enter_waiting_pg_scoped(
 async def test_pg_jsonb_role_codes_visibility_and_pagination(
     integration_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    _e1, match_id, _r1 = await _enter_waiting_pg_scoped(
+    """JSONB role_codes + auth-before-page totals (role-scoped only — DB-shared safe)."""
+    from sqlalchemy import text
+
+    # Isolate from leftover open-scope PENDING rows in the shared PG database.
+    async with integration_session_factory() as session:
+        await session.execute(
+            text(
+                "UPDATE approval_requests SET status = 'CANCELLED', "
+                "resolved_at = COALESCE(resolved_at, NOW()) "
+                "WHERE status = 'PENDING' AND ("
+                "  approval_scope IS NULL"
+                "  OR approval_scope = '{}'::jsonb"
+                "  OR approval_scope = 'null'::jsonb"
+                ")"
+            )
+        )
+        await session.commit()
+
+    suffix = uuid.uuid4().hex[:8].upper()
+    role_match = f"ROLE_PG_Q_{suffix}"
+    role_other = f"ROLE_PG_X_{suffix}"
+
+    # Mixed role-scoped rows for this unique role only (avoids open-scope pollution).
+    eligible_ids: list[uuid.UUID] = []
+    for _ in range(3):
+        _e, aid, _r = await _enter_waiting_pg_scoped(
+            integration_session_factory,
+            role_codes=[role_match],
+            allow_self_approval=False,
+        )
+        eligible_ids.append(aid)
+
+    _e_wrong, wrong_id, _r_wrong = await _enter_waiting_pg_scoped(
         integration_session_factory,
-        role_codes=["ROLE_PG_APPROVER"],
+        role_codes=[role_other],
         allow_self_approval=False,
     )
-    _e2, wrong_id, _r2 = await _enter_waiting_pg_scoped(
+
+    _e_dec, decided_id, _r_dec = await _enter_waiting_pg_scoped(
         integration_session_factory,
-        role_codes=["ROLE_PG_OTHER"],
-        allow_self_approval=False,
-    )
-    _e3, open_id, _r3 = await _enter_waiting_pg_scoped(
-        integration_session_factory,
-        role_codes=None,
+        role_codes=[role_match],
         allow_self_approval=True,
         decision_mode="ALL",
         required_approvals=2,
     )
-    _e4, open_id2, _r4 = await _enter_waiting_pg_scoped(
-        integration_session_factory,
-        role_codes=None,
-        allow_self_approval=True,
-    )
 
     async with integration_session_factory() as session:
-        actor = await _create_approver(session, role_code="ROLE_PG_APPROVER")
+        actor = await _create_approver(session, role_code=role_match)
         await session.commit()
         await ApprovalDecisionService(session).decide(
-            approval_id=open_id,
+            approval_id=decided_id,
             actor_user_id=actor,
             decision="APPROVE",
         )
 
     async with integration_session_factory() as session:
-        request = await ApprovalRequestRepository(session).get(open_id)
-        assert request is not None
-        assert request.status == ApprovalStatus.PENDING.value
-        match_row = await ApprovalRequestRepository(session).get(match_id)
+        decided = await ApprovalRequestRepository(session).get(decided_id)
+        assert decided is not None
+        assert decided.status == ApprovalStatus.PENDING.value
+        match_row = await ApprovalRequestRepository(session).get(eligible_ids[0])
         assert match_row is not None
-        assert match_row.approval_scope == {"role_codes": ["ROLE_PG_APPROVER"]}
+        assert match_row.approval_scope == {"role_codes": [role_match]}
 
-        result = await ApprovalQueryService(session).list_for_actor(
+        page1 = await ApprovalQueryService(session).list_for_actor(
             actor_user_id=actor, page=1, page_size=2, sort="expires_at"
         )
-        assert result.total == 2
-        assert len(result.items) == 2
-        assert result.has_next is False
-        visible_ids = {item.id for item in result.items}
-        assert match_id in visible_ids
-        assert open_id2 in visible_ids
-        assert wrong_id not in visible_ids
-        assert open_id not in visible_ids
+        # Exactly the 3 eligible role-scoped rows (decided + wrong-role excluded).
+        assert page1.total == 3
+        assert len(page1.items) == 2
+        assert page1.has_next is True
+
+        page2 = await ApprovalQueryService(session).list_for_actor(
+            actor_user_id=actor, page=2, page_size=2, sort="expires_at"
+        )
+        assert page2.total == 3
+        assert len(page2.items) == 1
+        assert page2.has_next is False
+
+        visible = {item.id for item in page1.items} | {item.id for item in page2.items}
+        assert set(eligible_ids) == visible
+        assert wrong_id not in visible
+        assert decided_id not in visible
 
         with pytest.raises(AppError) as exc:
             await ApprovalQueryService(session).get_for_actor(
                 approval_id=wrong_id, actor_user_id=actor
             )
         assert exc.value.status_code == 404
+
+    # Open scope {} visibility (membership via execution_id — ignores DB pollution).
+    open_exec, open_id, _open_req = await _enter_waiting_pg_scoped(
+        integration_session_factory,
+        role_codes=None,
+        allow_self_approval=True,
+    )
+    async with integration_session_factory() as session:
+        open_list = await ApprovalQueryService(session).list_for_actor(
+            actor_user_id=actor,
+            execution_id=open_exec,
+        )
+        assert open_list.total == 1
+        assert open_list.items[0].id == open_id
+        assert open_list.items[0].can_decide is True
