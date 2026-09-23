@@ -707,6 +707,8 @@ APPROVE REJECT
 
 최종 APPROVE는 동일 TX에서 `EXECUTION_APPROVAL_RESUME` Outbox를 만들고 Execution/Step은 `WAITING_APPROVAL`을 유지한다(API가 RUNNING으로 올리지 않는다). REJECT/EXPIRED는 Step+Execution을 `FAILED`(`APPROVAL_REJECTED`/`APPROVAL_EXPIRED`)로 종료하며 Execution `REJECTED`/`EXPIRED`를 만들지 않는다. 만료 sweep은 outbox iteration의 bounded `expire_due_batch`다.
 
+조회 권한도 별도 `approval.read` 없이 현재 `approval.decide`를 사용한다. `GET /approvals` 기본값은 actionable PENDING inbox다: status=PENDING, expires_at>now, 현재 role scope + snapshotted self-approval 규칙, 그리고 해당 actor가 아직 decision을 남기지 않은 요청만. 이미 투표한 actor는 요청이 PENDING으로 남아 있어도 기본 inbox에서 제외된다(ALL/QUORUM). 만료되었지만 아직 EXPIRED로 sweep되지 않은 PENDING은 inbox에서 제외하며 GET은 상태를 변경하지 않는다. 비-PENDING status 필터는 현재 권한/scope/self 적격의 최소 history 뷰이며 actionable일 필요는 없다. `GET /approvals/{id}`에서 존재하지만 현재 actor가 볼 수 없으면 403이 아니라 404 `NOT_FOUND`다. raw `context_snapshot` / `context_hash` / `secret_id` / `approval_scope`는 노출하지 않으며 detail은 명시적 masked historical `safe_context` projection만 반환한다.
+
 ## FNC-APR-004. 실행 재개
 
 승인된 경우 동일 Execution을 새 lease로 재개한다(새 Execution 금지). resume claim은 APPROVED 증거·context hash·mutable authz를 검증한 뒤 `WAITING_APPROVAL → RUNNING` + Step `READY`로 전환하고 기존 McpToolRunner를 호출한다. Attempt 시작 전 gate와 B2 final pre-send gate에서 exact APPROVED evidence를 다시 확인한다. approval은 mutable authorization bypass가 아니며, context drift 시 이전 승인은 무효다. 동일 context의 safe retry는 추가 인간 승인 없이 같은 APPROVED evidence로 진행할 수 있다.

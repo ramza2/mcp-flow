@@ -715,6 +715,15 @@ Approval decision / resume (FNC-APR-003/004):
 - same APPROVED evidence covers safe retries of exact same context
 - PG: concurrent threshold crossing → terminal once / one Outbox; migration 0018 round-trip
 
+Approval query / pending inbox:
+
+- default GET `/approvals` = actionable PENDING inbox (`approval.decide` only; no `approval.read`)
+- role_codes / null|{} scope / self-approval visibility; already-decided actor excluded while PENDING
+- expired-unswept PENDING absent from inbox; GET does not mutate to EXPIRED
+- unauthorized detail → 404; auth filtering before total/OFFSET; sort/status validation 422
+- detail `safe_context` masking (SECRET_REF → masked; no context_hash/secret_id/raw snapshot)
+- PG: JSONB role_codes visibility + mixed-row pagination totals + already-decided exclusion
+
 중요 회귀:
 
 Approval `REJECTED/EXPIRED`를 Execution `REJECTED/EXPIRED` 상태로 직접 매핑하지 않는다. ToolPolicy foundation에서는 Step+Execution `FAILED`로 종료한다.

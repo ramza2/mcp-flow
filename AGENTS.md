@@ -683,6 +683,17 @@ Decision aggregation (FNC-APR-003):
 - APPROVED creates durable `EXECUTION_APPROVAL_RESUME` Outbox in the same TX; API does **not** set RUNNING
 - REJECTED/EXPIRED terminalize Step+Execution as FAILED (`APPROVAL_REJECTED` / `APPROVAL_EXPIRED`); never Execution REJECTED/EXPIRED
 
+Approval query / pending inbox:
+
+- GET list/detail use current `approval.decide` (do **not** invent `approval.read`)
+- default `GET /approvals` is the actionable PENDING inbox for the current actor
+- visibility = current DB role scope + snapshotted self-approval rule
+- already-decided actors are excluded from the default PENDING inbox (ALL/QUORUM still PENDING)
+- expired-but-unswept PENDING is excluded from the inbox; GET must not mutate expiry
+- unauthorized detail after global `approval.decide` check → 404 `NOT_FOUND` (not 403)
+- never expose raw `context_snapshot` / `context_hash` / `secret_id` / `approval_scope`
+- detail uses an explicit masked historical `safe_context` projection
+
 Same-Execution resume (FNC-APR-004):
 
 - resume claims the **same** Execution with a **fresh** lease; Step WAITING_APPROVAL → READY
