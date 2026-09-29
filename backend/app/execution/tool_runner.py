@@ -81,6 +81,7 @@ from app.execution.runtime_preflight import (
     assert_current_tool_executable,
 )
 from app.execution.secret_materialize import materialize_tool_arguments
+from app.execution.mrtr_constants import MAX_MRTR_ROUNDS
 from app.execution.mrtr_wait import assert_durable_waiting_input
 from app.execution.secret_redaction import (
     collect_protected_plaintexts,
@@ -181,6 +182,11 @@ class _PreparedCall:
     max_result_bytes: int
     worker_id: str
     lease_token: uuid.UUID
+    # MRTR resume (PR #41): durable ANSWERED response + exact opaque requestState.
+    # None means initial tools/call (no inputResponses / requestState).
+    mrtr_input_request_id: uuid.UUID | None = None
+    mrtr_input_responses: dict[str, Any] | None = None
+    mrtr_request_state: Any = None
 
 
 def _prepared_invocation_lineage_matches(
@@ -248,6 +254,77 @@ def _resolved_input_needs_secret(resolved_input: dict[str, Any]) -> bool:
         isinstance(value, dict) and value.get("kind") == BindingKind.SECRET_REF.value
         for value in resolved_input.values()
     )
+
+
+def _payload_needs_secret(payload: dict[str, Any] | None) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    return any(
+        isinstance(value, dict) and value.get("kind") == BindingKind.SECRET_REF.value
+        for value in payload.values()
+    )
+
+
+async def _load_answered_mrtr_resume(
+    *,
+    inputs: MCPInputRequestRepository,
+    executions: ExecutionRepository,
+    execution: Execution,
+    step: ExecutionStep,
+    attempt: StepAttempt,
+) -> tuple[uuid.UUID, dict[str, Any], Any] | None:
+    """Return (input_request_id, response_payload, request_state) for MRTR resume.
+
+    Requires exactly one ANSWERED request whose round_no matches the count of
+    SUCCEEDED ToolCalls on the STARTED Attempt, with no OPEN/STARTED ToolCall.
+    """
+    open_rows = await inputs.list_open_for_step(
+        execution_id=execution.id, step_execution_id=step.id
+    )
+    if open_rows:
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message="Cannot resume MRTR while an OPEN MCPInputRequest exists.",
+            status_code=409,
+        )
+    history = await inputs.list_for_step(
+        execution_id=execution.id, step_execution_id=step.id
+    )
+    answered = [
+        row
+        for row in history
+        if row.status == McpInputRequestStatus.ANSWERED.value
+        and row.step_attempt_id == attempt.id
+        and isinstance(row.response_payload, dict)
+        and row.response_payload
+    ]
+    if not answered:
+        return None
+    # Resume the highest answered round that still matches ToolCall evidence.
+    answered.sort(key=lambda r: (r.round_no, r.answered_at or r.requested_at))
+    request = answered[-1]
+    tool_calls = await executions.list_tool_calls(attempt.id)
+    if any(
+        tc.normalized_status == ToolCallNormalizedStatus.STARTED.value
+        for tc in tool_calls
+    ):
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message="MRTR resume must not retain a STARTED ToolCall.",
+            status_code=409,
+        )
+    succeeded = [
+        tc
+        for tc in tool_calls
+        if tc.normalized_status == ToolCallNormalizedStatus.SUCCEEDED.value
+    ]
+    if len(tool_calls) != len(succeeded) or len(succeeded) != request.round_no:
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message="MRTR resume ToolCall evidence does not match ANSWERED round_no.",
+            status_code=409,
+        )
+    return request.id, dict(request.response_payload), request.request_state
 
 
 def _auth_material_plaintexts(resolved: ResolvedSecret | None) -> list[str]:
@@ -335,9 +412,12 @@ class McpToolRunner:
             prepared = prep.prepared
             protected: tuple[str, ...] = ()
             try:
-                auth_headers, arguments, protected = await self._resolve_secrets(
-                    prepared
-                )
+                (
+                    auth_headers,
+                    arguments,
+                    input_responses,
+                    protected,
+                ) = await self._resolve_secrets(prepared)
             except AppError as exc:
                 call_error = _PreSendFailClosed(error_code=exc.code, message=exc.message)
                 return await self._finalize_locked(
@@ -371,7 +451,10 @@ class McpToolRunner:
                     )
 
                 result, response_meta, first_byte_at, call_error = await self._call_remote(
-                    prepared, auth_headers, arguments
+                    prepared,
+                    auth_headers,
+                    arguments,
+                    input_responses=input_responses,
                 )
                 if isinstance(result, NormalizedInputRequired):
                     return await self._finalize_input_required(
@@ -907,31 +990,76 @@ class McpToolRunner:
                         status_code=409,
                     )
 
-                existing_tool_call = await executions.get_tool_call_for_attempt(attempt.id)
-                if existing_tool_call is not None:
-                    if (
-                        existing_tool_call.normalized_status
-                        == ToolCallNormalizedStatus.STARTED.value
-                    ):
-                        # ToolCall STARTED is durable invocation evidence only.
-                        # FNC-EXE-011 recovery must resolve this before the runner
-                        # is invoked again; never reissue tools/call here.
+                existing_tool_calls = await executions.list_tool_calls(attempt.id)
+                started_tool_calls = [
+                    tc
+                    for tc in existing_tool_calls
+                    if tc.normalized_status == ToolCallNormalizedStatus.STARTED.value
+                ]
+                if started_tool_calls:
+                    # ToolCall STARTED is durable invocation evidence only.
+                    # FNC-EXE-011 recovery must resolve this before the runner
+                    # is invoked again; never reissue tools/call here.
+                    return _PrepareResult(
+                        outcome=ToolRunOutcome(
+                            execution_id=execution.id,
+                            step_execution_id=step.id,
+                            attempt_id=attempt.id,
+                            tool_call_id=started_tool_calls[0].id,
+                            mcp_called=False,
+                            terminal_status=None,
+                            reason="TOOL_CALL_ALREADY_STARTED",
+                        )
+                    )
+
+                mrtr_resume: tuple[uuid.UUID, dict[str, Any], Any] | None = None
+                if existing_tool_calls:
+                    # Terminal ToolCall(s) while RUNNING are only legal for MRTR
+                    # resume (ANSWERED request + matching SUCCEEDED rounds).
+                    try:
+                        mrtr_resume = await _load_answered_mrtr_resume(
+                            inputs=MCPInputRequestRepository(session),
+                            executions=executions,
+                            execution=execution,
+                            step=step,
+                            attempt=attempt,
+                        )
+                    except AppError as exc:
+                        if step.status not in _STEP_TERMINAL_STATUSES:
+                            step.status = StepStatus.FAILED.value
+                            step.error_code = exc.code
+                            step.error_message = exc.message
+                            step.finished_at = now
+                            step.lock_version += 1
+                        if execution.status == ExecutionStatus.RUNNING.value:
+                            execution.status = ExecutionStatus.FAILED.value
+                            execution.error_code = exc.code
+                            execution.error_message = exc.message
+                            execution.finished_at = now
+                            execution.worker_id = None
+                            execution.lease_token = None
+                            execution.lease_expires_at = None
+                            execution.heartbeat_at = None
+                            execution.lock_version += 1
                         return _PrepareResult(
                             outcome=ToolRunOutcome(
                                 execution_id=execution.id,
                                 step_execution_id=step.id,
                                 attempt_id=attempt.id,
-                                tool_call_id=existing_tool_call.id,
+                                tool_call_id=None,
                                 mcp_called=False,
-                                terminal_status=None,
-                                reason="TOOL_CALL_ALREADY_STARTED",
+                                terminal_status=StepStatus.FAILED.value,
+                                reason=exc.code,
                             )
                         )
-                    raise AppError(
-                        code="RESOURCE_CONFLICT",
-                        message="ToolCall already terminal while Step remains RUNNING.",
-                        status_code=409,
-                    )
+                    if mrtr_resume is None:
+                        raise AppError(
+                            code="RESOURCE_CONFLICT",
+                            message=(
+                                "ToolCall already terminal while Step remains RUNNING."
+                            ),
+                            status_code=409,
+                        )
 
                 if attempt_outcome.replayed:
                     # Replay skipped fresh READY start lineage checks; re-assert
@@ -1087,13 +1215,17 @@ class McpToolRunner:
                             ),
                         )
                     call_timeout_ms = 1
-                request_meta = {
+                request_meta: dict[str, Any] = {
                     "method": "tools/call",
                     "tool_name": logical_tool.remote_name,
                     "timeout_ms": call_timeout_ms,
                     "auth_type": server.auth_type,
                     "content_type": "application/json",
                 }
+                if mrtr_resume is not None:
+                    # Never persist requestState / response values in request_meta.
+                    request_meta["mrtr_resume"] = True
+                    request_meta["mrtr_input_request_id"] = str(mrtr_resume[0])
                 tool_call = await executions.create_tool_call(
                     step_attempt_id=attempt.id,
                     mcp_server_id=server.id,
@@ -1156,6 +1288,15 @@ class McpToolRunner:
                     max_result_bytes=tool_policy.max_result_bytes,
                     worker_id=worker,
                     lease_token=lease_token,
+                    mrtr_input_request_id=(
+                        mrtr_resume[0] if mrtr_resume is not None else None
+                    ),
+                    mrtr_input_responses=(
+                        dict(mrtr_resume[1]) if mrtr_resume is not None else None
+                    ),
+                    mrtr_request_state=(
+                        mrtr_resume[2] if mrtr_resume is not None else None
+                    ),
                 )
                 return _PrepareResult(prepared=prepared)
 
@@ -1181,10 +1322,16 @@ class McpToolRunner:
 
     async def _resolve_secrets(
         self, prepared: _PreparedCall
-    ) -> tuple[dict[str, str], dict[str, Any], tuple[str, ...]]:
+    ) -> tuple[
+        dict[str, str],
+        dict[str, Any],
+        dict[str, Any] | None,
+        tuple[str, ...],
+    ]:
         needs_secret = (
             prepared.auth_type != MCPAuthType.NONE.value
             or _resolved_input_needs_secret(prepared.resolved_input)
+            or _payload_needs_secret(prepared.mrtr_input_responses)
         )
         auth_material_values: list[str] = []
         secret_argument_values: list[str] = []
@@ -1217,12 +1364,27 @@ class McpToolRunner:
                     materialized = arguments.get(key)
                     if isinstance(materialized, str) and materialized:
                         secret_argument_values.append(materialized)
+            materialized_responses: dict[str, Any] | None = None
+            if prepared.mrtr_input_responses is not None:
+                # Same SECRET_REF boundary as tool arguments — reference-only
+                # durable payload → memory-only plaintext for the MCP round.
+                materialized_responses = await materialize_tool_arguments(
+                    prepared.mrtr_input_responses, secret_resolver=resolver
+                )
+                for key, raw in prepared.mrtr_input_responses.items():
+                    if (
+                        isinstance(raw, dict)
+                        and raw.get("kind") == BindingKind.SECRET_REF.value
+                    ):
+                        materialized = materialized_responses.get(key)
+                        if isinstance(materialized, str) and materialized:
+                            secret_argument_values.append(materialized)
         protected = collect_protected_plaintexts(
             auth_headers=auth_headers,
             secret_argument_values=secret_argument_values,
             auth_material_values=auth_material_values,
         )
-        return auth_headers, arguments, protected
+        return auth_headers, arguments, materialized_responses, protected
 
     async def _heartbeat_loop(self, prepared: _PreparedCall) -> None:
         interval = max(_MIN_HEARTBEAT_INTERVAL_SECONDS, self._lease_seconds // 3)
@@ -1252,6 +1414,7 @@ class McpToolRunner:
         prepared: _PreparedCall,
         auth_headers: dict[str, str],
         arguments: dict[str, Any],
+        input_responses: dict[str, Any] | None = None,
     ) -> tuple[
         NormalizedToolResult | NormalizedInputRequired | None,
         dict[str, Any] | None,
@@ -1260,6 +1423,7 @@ class McpToolRunner:
     ]:
         heartbeat_task = asyncio.create_task(self._heartbeat_loop(prepared))
         try:
+            include_mrtr = prepared.mrtr_input_request_id is not None
             result, response_meta, first_byte_at = await self._mcp_client.call_tool(
                 prepared.endpoint,
                 tool_name=prepared.tool_name,
@@ -1268,6 +1432,9 @@ class McpToolRunner:
                 remote_request_id=prepared.remote_request_id,
                 auth_headers=auth_headers,
                 max_result_bytes=prepared.max_result_bytes,
+                input_responses=input_responses if include_mrtr else None,
+                request_state=prepared.mrtr_request_state if include_mrtr else None,
+                include_mrtr_resume=include_mrtr,
             )
             return result, response_meta, first_byte_at, None
         except MCPClientError as exc:
@@ -1278,6 +1445,8 @@ class McpToolRunner:
                 await heartbeat_task
             auth_headers.clear()
             arguments.clear()
+            if input_responses is not None:
+                input_responses.clear()
 
     # -- Phase C -------------------------------------------------------------
 
@@ -1366,6 +1535,15 @@ class McpToolRunner:
                         expires_at = _as_utc(step.started_at) + timedelta(
                             seconds=int(timeout_seconds)
                         )
+                    # Count this round as SUCCEEDED before computing round_no.
+                    prior_succeeded = [
+                        tc
+                        for tc in await executions.list_tool_calls(attempt.id)
+                        if tc.id != tool_call.id
+                        and tc.normalized_status
+                        == ToolCallNormalizedStatus.SUCCEEDED.value
+                    ]
+                    round_no = len(prior_succeeded) + 1
                     await inputs.create(
                         execution_id=execution.id,
                         step_execution_id=step.id,
@@ -1373,7 +1551,7 @@ class McpToolRunner:
                         protocol_era=MCPProtocolEra.CURRENT.value,
                         input_requests=dict(mrtr.input_requests),
                         request_state=mrtr.request_state,
-                        round_no=1,
+                        round_no=round_no,
                         status=McpInputRequestStatus.EXPIRED.value,
                         requested_at=now,
                         expires_at=expires_at,
@@ -1427,6 +1605,69 @@ class McpToolRunner:
                     seconds=int(timeout_seconds)
                 )
 
+                prior_succeeded = [
+                    tc
+                    for tc in await executions.list_tool_calls(attempt.id)
+                    if tc.id != tool_call.id
+                    and tc.normalized_status
+                    == ToolCallNormalizedStatus.SUCCEEDED.value
+                ]
+                round_no = len(prior_succeeded) + 1
+                if round_no > MAX_MRTR_ROUNDS:
+                    max_rounds_message = (
+                        f"MRTR round limit ({MAX_MRTR_ROUNDS}) exceeded."
+                    )
+                    tool_call.normalized_status = ToolCallNormalizedStatus.FAILED.value
+                    tool_call.response_meta = persist_meta
+                    tool_call.response_bytes = mrtr.raw_size_bytes
+                    tool_call.first_byte_at = first_byte_at
+                    tool_call.finished_at = now
+
+                    attempt.status = StepAttemptStatus.FAILED.value
+                    attempt.error_layer = "PROTOCOL"
+                    attempt.error_code = "MAX_MRTR_ROUNDS_EXCEEDED"
+                    attempt.error_message = max_rounds_message
+                    attempt.is_retryable = False
+                    attempt.finished_at = now
+                    attempt.worker_id = None
+                    attempt.lease_expires_at = None
+
+                    step.status = StepStatus.FAILED.value
+                    step.error_code = "MAX_MRTR_ROUNDS_EXCEEDED"
+                    step.error_message = max_rounds_message
+                    step.finished_at = now
+                    step.lock_version += 1
+
+                    execution.status = ExecutionStatus.FAILED.value
+                    execution.error_code = "MAX_MRTR_ROUNDS_EXCEEDED"
+                    execution.error_message = max_rounds_message
+                    execution.finished_at = now
+                    execution.worker_id = None
+                    execution.lease_token = None
+                    execution.lease_expires_at = None
+                    execution.heartbeat_at = None
+                    execution.lock_version += 1
+
+                    return ToolRunOutcome(
+                        execution_id=execution.id,
+                        step_execution_id=step.id,
+                        attempt_id=attempt.id,
+                        tool_call_id=tool_call.id,
+                        mcp_called=True,
+                        terminal_status=StepStatus.FAILED.value,
+                        reason="MAX_MRTR_ROUNDS_EXCEEDED",
+                    )
+
+                open_existing = await inputs.list_open_for_step(
+                    execution_id=execution.id, step_execution_id=step.id
+                )
+                if open_existing:
+                    raise AppError(
+                        code="RESOURCE_CONFLICT",
+                        message="Cannot open a second OPEN MCPInputRequest.",
+                        status_code=409,
+                    )
+
                 # Network ToolCall round completed; logical Attempt remains STARTED.
                 tool_call.normalized_status = ToolCallNormalizedStatus.SUCCEEDED.value
                 tool_call.response_meta = persist_meta
@@ -1461,7 +1702,7 @@ class McpToolRunner:
                     protocol_era=MCPProtocolEra.CURRENT.value,
                     input_requests=dict(mrtr.input_requests),
                     request_state=mrtr.request_state,
-                    round_no=1,
+                    round_no=round_no,
                     status=McpInputRequestStatus.OPEN.value,
                     requested_at=now,
                     expires_at=expires_at,

@@ -48,6 +48,17 @@ class FakePublisher:
         if self.fail:
             raise ConnectionError("broker unavailable")
 
+    def publish_mrtr_resume(
+        self,
+        *,
+        execution_id: uuid.UUID,
+        input_request_id: uuid.UUID,
+        outbox_event_id: uuid.UUID,
+    ) -> None:
+        self.resume_calls.append((execution_id, input_request_id, outbox_event_id))
+        if self.fail:
+            raise ConnectionError("broker unavailable")
+
 
 async def _created_execution(session: AsyncSession) -> tuple[uuid.UUID, str]:
     seeded = await _seed_ready(session)

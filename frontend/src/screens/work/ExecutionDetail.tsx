@@ -5,9 +5,13 @@ import StatusBadge, { RiskBadge } from '../../components/ui/StatusBadge';
 import { TabBar } from '../../components/ui/Tabs';
 import Button from '../../components/ui/Button';
 import { InlineAlert } from '../../components/ui/EmptyState';
+import MrtrInputPanel from '../../components/MrtrInputPanel';
 import { mockExecutions } from '../../data/mock';
 import { labelExecutionSource, type ExecutionStatus, type StepStatus } from '../../domain';
 import PermissionGate from '../../components/PermissionGate';
+
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 type StepRow = {
   id: string;
@@ -78,7 +82,11 @@ export default function ExecutionDetail() {
   const [status, setStatus] = useState<ExecutionStatus>(base.status);
   const [cancelling, setCancelling] = useState(false);
   const [mrtrResponded, setMrtrResponded] = useState(false);
-  const isMrtrExecution = base.id === 'EXE-20260902-00126' || base.status === 'WAITING_INPUT';
+  const [mrtrRejected, setMrtrRejected] = useState(false);
+  const useLiveMrtr = Boolean(executionId && UUID_RE.test(executionId));
+  const isMrtrExecution =
+    !useLiveMrtr &&
+    (base.id === 'EXE-20260902-00126' || base.status === 'WAITING_INPUT');
 
   const steps = useMemo(() => {
     // UNKNOWN_OUTCOME demo must win over CANCELLED fallback for this fixture.
@@ -87,8 +95,12 @@ export default function ExecutionDetail() {
       return MRTR_STEPS.map(s => s.runtimeInput
         ? {
           ...s,
-          runtimeInput: { ...s.runtimeInput, responded: mrtrResponded },
-          status: (mrtrResponded || status === 'RUNNING' ? 'RUNNING' : s.status) as StepStatus,
+          runtimeInput: { ...s.runtimeInput, responded: mrtrResponded || mrtrRejected },
+          status: (mrtrRejected
+            ? 'FAILED'
+            : mrtrResponded || status === 'RUNNING'
+              ? 'RUNNING'
+              : s.status) as StepStatus,
         }
         : s);
     }
@@ -96,14 +108,19 @@ export default function ExecutionDetail() {
       return DEFAULT_STEPS.map((s, i) => (i === 0 ? { ...s, status: 'SUCCEEDED' as StepStatus } : { ...s, status: (status === 'CANCELLED' ? 'CANCELLED' : s.status) as StepStatus }));
     }
     return DEFAULT_STEPS;
-  }, [base.id, base.status, status, mrtrResponded, isMrtrExecution]);
+  }, [base.id, base.status, status, mrtrResponded, mrtrRejected, isMrtrExecution]);
 
   const [selectedStep, setSelectedStep] = useState<StepRow | null>(null);
 
-  /** Runtime MRTR: WAITING_INPUT → user response → Execution RUNNING (and Step RUNNING). */
+  /** Runtime MRTR mock: WAITING_INPUT → user response → Execution RUNNING. */
   const handleMrtrRespond = () => {
     setMrtrResponded(true);
     setStatus('RUNNING');
+  };
+
+  const handleMrtrReject = () => {
+    setMrtrRejected(true);
+    setStatus('FAILED');
   };
 
   const handleCancel = async () => {
@@ -189,6 +206,10 @@ export default function ExecutionDetail() {
             onOpenApproval={() => navigate(`/approvals/${approvalId ?? 'apr-001'}`)}
             steps={steps}
             onMrtrRespond={handleMrtrRespond}
+            onMrtrReject={handleMrtrReject}
+            liveExecutionId={useLiveMrtr ? executionId : undefined}
+            onLiveMrtrResolved={(next) => setStatus(next as ExecutionStatus)}
+            mrtrRejected={mrtrRejected}
           />
         )}
         {tab === 'steps' && <StepsTab steps={steps} selectedStep={selectedStep} onSelectStep={setSelectedStep} />}
@@ -201,7 +222,8 @@ export default function ExecutionDetail() {
 }
 
 function OverviewTab({
-  execution, status, approvalId, onOpenApproval, steps, onMrtrRespond,
+  execution, status, approvalId, onOpenApproval, steps, onMrtrRespond, onMrtrReject,
+  liveExecutionId, onLiveMrtrResolved, mrtrRejected,
 }: {
   execution: typeof mockExecutions[0];
   status: ExecutionStatus;
@@ -209,10 +231,17 @@ function OverviewTab({
   onOpenApproval: () => void;
   steps: StepRow[];
   onMrtrRespond: () => void;
+  onMrtrReject: () => void;
+  liveExecutionId?: string;
+  onLiveMrtrResolved?: (status: string) => void;
+  mrtrRejected: boolean;
 }) {
   // Keep Runtime Input card visible after respond (Step may already be RUNNING).
   const mrtr = steps.find(s => s.runtimeInput)?.runtimeInput;
-  const showMrtrCard = !!mrtr && (status === 'WAITING_INPUT' || !!mrtr.responded);
+  const showMockMrtrCard =
+    !liveExecutionId &&
+    !!mrtr &&
+    (status === 'WAITING_INPUT' || !!mrtr.responded || mrtrRejected);
 
   return (
     <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 max-w-4xl">
@@ -248,12 +277,21 @@ function OverviewTab({
         </div>
       )}
 
-      {showMrtrCard && mrtr && (
+      {liveExecutionId && status === 'WAITING_INPUT' && (
+        <MrtrInputPanel
+          executionId={liveExecutionId}
+          onResolved={onLiveMrtrResolved}
+        />
+      )}
+
+      {showMockMrtrCard && mrtr && (
         <div className="col-span-full bg-amber-50 border border-amber-200 rounded-xl p-4 space-y-2">
           <p className="text-sm font-semibold text-amber-800">
-            {mrtr.responded
-              ? 'MCP Tool input received — Execution resumed'
-              : 'MCP Tool requests information (Runtime WAITING_INPUT)'}
+            {mrtrRejected
+              ? 'MCP Tool input rejected — Execution FAILED'
+              : mrtr.responded
+                ? 'MCP Tool input received — Execution resumed'
+                : 'MCP Tool requests information (Runtime WAITING_INPUT)'}
           </p>
           <div className="text-xs text-amber-700 space-y-0.5">
             <p>MCP Server: {mrtr.server}</p>
@@ -262,11 +300,17 @@ function OverviewTab({
             <p>Round: {mrtr.round} · Remaining: {mrtr.expiresIn}</p>
           </div>
           <p className="text-[10px] text-amber-500 font-mono">requestState is not user-visible / not editable</p>
-          {!mrtr.responded && (
-            <Button size="sm" onClick={onMrtrRespond}>응답 후 Resume</Button>
+          {!mrtr.responded && !mrtrRejected && (
+            <div className="flex gap-2">
+              <Button size="sm" onClick={onMrtrRespond}>응답 후 Resume</Button>
+              <Button size="sm" variant="outline" onClick={onMrtrReject}>거부</Button>
+            </div>
           )}
           {mrtr.responded && status === 'RUNNING' && (
             <InlineAlert type="info" message="응답 제출됨 — Execution RUNNING으로 재개" />
+          )}
+          {mrtrRejected && status === 'FAILED' && (
+            <InlineAlert type="warning" message="입력이 거부되었습니다 — Execution FAILED" />
           )}
         </div>
       )}

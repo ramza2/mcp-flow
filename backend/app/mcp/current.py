@@ -433,6 +433,9 @@ class CurrentMCPClient:
         remote_request_id: str,
         auth_headers: Mapping[str, str] | None = None,
         max_result_bytes: int | None = None,
+        input_responses: dict[str, Any] | None = None,
+        request_state: Any = None,
+        include_mrtr_resume: bool = False,
     ) -> tuple[
         NormalizedToolResult | NormalizedInputRequired,
         dict[str, Any],
@@ -446,6 +449,10 @@ class CurrentMCPClient:
         exceeding it raises :class:`MCPResultTooLargeError` with
         ``outcome_unknown=true`` (tools/call already dispatched; body not retained).
 
+        When ``include_mrtr_resume`` is True, ``inputResponses`` and the exact
+        opaque ``requestState`` (including JSON null) are attached to params.
+        Callers must never log or rewrite ``requestState``.
+
         Returns ``(NormalizedToolResult | NormalizedInputRequired, response_meta,
         first_byte_at)``. A valid MRTR ``resultType=input_required`` yields
         ``NormalizedInputRequired`` without logging or inspecting opaque
@@ -456,17 +463,33 @@ class CurrentMCPClient:
         headers = self._build_headers("tools/call", mcp_name=tool_name)
         if auth_headers:
             headers.update(dict(auth_headers))
+        params_extra: dict[str, Any] = {"name": tool_name, "arguments": arguments}
+        if include_mrtr_resume:
+            if not isinstance(input_responses, dict) or not input_responses:
+                raise MCPClientError(
+                    error_layer="PROTOCOL",
+                    error_code="MCP_INVALID_MRTR_RESUME",
+                    message="MRTR resume requires non-empty inputResponses.",
+                    retryable=False,
+                    outcome_unknown=False,
+                )
+            # Echo requestState exactly — including JSON null. Never normalize.
+            params_extra["inputResponses"] = input_responses
+            params_extra["requestState"] = request_state
         body = self._build_body(
             "tools/call",
-            self._build_params({"name": tool_name, "arguments": arguments}),
+            self._build_params(params_extra),
             remote_request_id,
         )
         client = await self._client()
 
-        # Never log Authorization headers, request bodies, or tool arguments.
+        # Never log Authorization headers, request bodies, tool arguments, or
+        # MRTR requestState / inputResponses.
         logger.info(
-            "MCP RPC request method=tools/call tool_name=%s endpoint_host_only",
+            "MCP RPC request method=tools/call tool_name=%s mrtr_resume=%s"
+            " endpoint_host_only",
             tool_name,
+            include_mrtr_resume,
         )
 
         # ``request_sent`` tracks whether we observed response headers (definite

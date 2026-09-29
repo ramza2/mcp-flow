@@ -721,6 +721,9 @@ async def test_broker_publish_failure_leaves_unpublished_outbox(
             def publish_approval_resume(self, **_kwargs: Any) -> None:
                 raise ConnectionError("broker down")
 
+            def publish_mrtr_resume(self, **_kwargs: Any) -> None:
+                raise AssertionError("mrtr resume unexpected")
+
         result = await OutboxRelayService(session).publish_batch(
             publisher=BadPublisher(), limit=10
         )
@@ -753,6 +756,9 @@ async def test_broker_publish_failure_leaves_unpublished_outbox(
 
             def publish_approval_resume(self, **kwargs: Any) -> None:
                 self.calls.append(kwargs)
+
+            def publish_mrtr_resume(self, **_kwargs: Any) -> None:
+                raise AssertionError("mrtr resume unexpected")
 
         good = GoodPublisher()
         result2 = await OutboxRelayService(session).publish_batch(

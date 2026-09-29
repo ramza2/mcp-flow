@@ -16,9 +16,11 @@ from app.core.secrets import DatabaseSecretResolver
 from app.db.session import dispose_db, get_session_factory, init_db, session_scope
 from app.execution.approval_resume import ApprovalResumeClaimService
 from app.execution.claim import ExecutionClaimService
+from app.execution.mrtr_resume import MrtrResumeClaimService
 from app.execution.queue import (
     validate_execution_approval_resume_event,
     validate_execution_dispatch_event,
+    validate_execution_mrtr_resume_event,
 )
 from app.execution.recovery import ExecutionRecoveryService
 from app.execution.tool_runner import McpToolRunner
@@ -477,5 +479,155 @@ def approval_resume_task(
         retry = self.retry
         raise retry(
             exc=RuntimeError("transient database failure during approval resume"),
+            countdown=countdown,
+        ) from exc
+
+
+async def _mrtr_resume_once(
+    *,
+    execution_id: uuid.UUID,
+    input_request_id: uuid.UUID,
+    outbox_event_id: uuid.UUID,
+    worker_id: str,
+) -> None:
+    settings = get_settings()
+    init_db(settings)
+    try:
+        claimed = False
+        lease_token: uuid.UUID | None = None
+        async with session_scope() as session:
+            event = await OutboxRepository(session).get(outbox_event_id)
+            if event is None:
+                logger.warning(
+                    "discarding mrtr resume with missing outbox evidence"
+                    " execution_id=%s outbox_event_id=%s",
+                    execution_id,
+                    outbox_event_id,
+                )
+                return
+            try:
+                evidenced_execution_id, evidenced_input_id = (
+                    validate_execution_mrtr_resume_event(event)
+                )
+            except AppError:
+                logger.error(
+                    "discarding mrtr resume with corrupt outbox evidence"
+                    " outbox_event_id=%s",
+                    outbox_event_id,
+                )
+                return
+            if (
+                evidenced_execution_id != execution_id
+                or evidenced_input_id != input_request_id
+            ):
+                logger.error(
+                    "discarding mrtr resume with mismatched outbox lineage"
+                    " outbox_event_id=%s",
+                    outbox_event_id,
+                )
+                return
+
+            service = MrtrResumeClaimService(
+                session,
+                lease_seconds=settings.execution_lease_seconds,
+            )
+            outcome = await service.claim(
+                execution_id=execution_id,
+                input_request_id=input_request_id,
+                worker_id=worker_id,
+            )
+            await session.commit()
+            logger.info(
+                "mrtr resume claim handled execution_id=%s input_request_id=%s"
+                " outbox_event_id=%s worker_id=%s claimed=%s reason=%s",
+                execution_id,
+                input_request_id,
+                outbox_event_id,
+                worker_id,
+                outcome.claimed,
+                outcome.reason,
+            )
+            claimed = outcome.claimed
+            lease_token = outcome.lease_token
+
+        if claimed and lease_token is not None:
+            await _run_mcp_tool_step(
+                execution_id=execution_id,
+                worker_id=worker_id,
+                lease_token=lease_token,
+                settings=settings,
+            )
+    finally:
+        await dispose_db()
+
+
+@celery_app.task(
+    bind=True,
+    name="mcpflow.execution.mrtr_resume",
+    max_retries=None,
+)
+def mrtr_resume_task(
+    self: object,
+    *,
+    execution_id: str,
+    input_request_id: str,
+    outbox_event_id: str,
+) -> None:
+    """Resume WAITING_INPUT after ANSWERED; duplicate delivery is a DB no-op."""
+    try:
+        execution_uuid = uuid.UUID(execution_id)
+        input_uuid = uuid.UUID(input_request_id)
+        event_uuid = uuid.UUID(outbox_event_id)
+    except (TypeError, ValueError):
+        logger.warning("discarding malformed mrtr resume task payload")
+        return
+
+    request = getattr(self, "request", None)
+    worker_id = str(getattr(request, "hostname", "") or "").strip()
+    if not worker_id:
+        logger.warning(
+            "discarding mrtr resume without worker identity execution_id=%s"
+            " outbox_event_id=%s",
+            execution_uuid,
+            event_uuid,
+        )
+        return
+
+    try:
+        asyncio.run(
+            _mrtr_resume_once(
+                execution_id=execution_uuid,
+                input_request_id=input_uuid,
+                outbox_event_id=event_uuid,
+                worker_id=worker_id,
+            )
+        )
+    except AppError as exc:
+        logger.error(
+            "discarding mrtr resume due durable conflict execution_id=%s"
+            " outbox_event_id=%s code=%s",
+            execution_uuid,
+            event_uuid,
+            exc.code,
+        )
+        return
+    except DBAPIError as exc:
+        if not _is_retryable_database_error(exc):
+            raise
+        retry_count = int(getattr(request, "retries", 0) or 0)
+        countdown = min(
+            _CLAIM_DB_RETRY_BASE_SECONDS * (2**retry_count),
+            _CLAIM_DB_RETRY_MAX_SECONDS,
+        )
+        logger.warning(
+            "retrying mrtr resume after transient database failure"
+            " execution_id=%s outbox_event_id=%s retry=%s",
+            execution_uuid,
+            outbox_event_id,
+            retry_count + 1,
+        )
+        retry = self.retry
+        raise retry(
+            exc=RuntimeError("transient database failure during mrtr resume"),
             countdown=countdown,
         ) from exc

@@ -1339,7 +1339,14 @@ MRTR waiting-input foundation(PR #40):
 - exhausted Step budget on arrival → EXPIRED evidence + TIMED_OUT (no OPEN / no WAITING_INPUT)
 - `request_state` must never appear in ToolCall meta / Attempt/Step/Execution result·error / logs / normal API
 
-User response / ANSWERED / REJECTED / resume / next round are PR #41.
+User response / ANSWERED / REJECTED / same-Execution resume / next round (PR #41):
+
+- OPEN → ANSWERED + `response_payload` + `EXECUTION_MRTR_RESUME` Outbox (same TX; no MCP call)
+- OPEN → REJECTED terminalizes Attempt/Step/Execution as FAILED (`MRTR_REJECTED`; zero MCP calls)
+- Resume claim: WAITING_INPUT + ANSWERED → RUNNING with fresh lease; Attempt stays STARTED
+- Next ToolCall round sends `inputResponses` + exact opaque `request_state` echo
+- Another valid `input_required` creates a new OPEN row (`round_no = succeeded ToolCall count`)
+- At most one OPEN row per suspended round; MAX_MRTR_ROUNDS bounds wait rounds
 
 Current MCP의 `input_required`와 Legacy elicitation을 공통 내부 엔터티로 normalize한다
 (Legacy normalize는 후속).
@@ -1457,7 +1464,18 @@ dedupe_key     = execution:{execution_id}:approval:{approval_request_id}:resume
 payload        = {"execution_id": "...", "approval_request_id": "..."}
 ```
 
-Outbox relay supports exactly `EXECUTION_DISPATCH` and `EXECUTION_APPROVAL_RESUME` (unknown/corrupt fail closed).
+MRTR resume (PR #41 / FNC-EXE-008):
+
+```text
+event_type     = EXECUTION_MRTR_RESUME
+aggregate_type = EXECUTION
+aggregate_id   = execution.id
+dedupe_key     = execution:{execution_id}:mrtr:{input_request_id}:resume
+payload        = {"execution_id": "...", "input_request_id": "..."}
+```
+
+Outbox relay supports exactly `EXECUTION_DISPATCH`, `EXECUTION_APPROVAL_RESUME`, and
+`EXECUTION_MRTR_RESUME` (unknown/corrupt fail closed).
 
 `published_at IS NULL`이면 미발행/재시도 대상이며 별도 Outbox status enum을 만들지 않는다. broker publish 성공 후 DB mark 전에 process가 종료될 수 있으므로 같은 event가 재전달될 수 있다. Consumer는 `outbox_event_id` lineage를 확인하고 DB Execution claim으로 중복을 제거한다.
 

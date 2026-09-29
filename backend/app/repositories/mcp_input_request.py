@@ -21,6 +21,14 @@ class MCPInputRequestRepository:
         stmt = select(MCPInputRequest).where(MCPInputRequest.id == request_id)
         return (await self._session.execute(stmt)).scalar_one_or_none()
 
+    async def get_with_lock(self, request_id: uuid.UUID) -> MCPInputRequest | None:
+        stmt = (
+            select(MCPInputRequest)
+            .where(MCPInputRequest.id == request_id)
+            .with_for_update()
+        )
+        return (await self._session.execute(stmt)).scalar_one_or_none()
+
     async def list_open_for_step(
         self, *, execution_id: uuid.UUID, step_execution_id: uuid.UUID
     ) -> list[MCPInputRequest]:

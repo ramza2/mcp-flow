@@ -550,7 +550,7 @@ tools/call
 → stop safely
 ```
 
-아직 구현하지 않는 항목(PR #41): 사용자 input response API, response schema 검증, reject, same-Execution claim/resume, `inputResponses`, exact `requestState` echo, 다음 MRTR round, 최종 Tool result. Legacy elicitation normalize도 후속이다.
+PR #41: 사용자 input response API, response schema 검증, reject, same-Execution claim/resume, `inputResponses`, exact `requestState` echo, 다음 MRTR round, 최종 Tool result success path. Legacy elicitation normalize는 후속이다.
 
 malformed `input_required`(missing/empty/wrong-type `inputRequests`, missing `requestState`)는 post-send protocol failure(`MCP_INVALID_INPUT_REQUIRED`, `outcome_unknown=true`)이며 WAITING_INPUT을 만들지 않는다. Step 총 timeout이 이미 소진된 뒤 도착한 valid `input_required`는 OPEN wait 대신 `EXPIRED` evidence + existing `TIMED_OUT` terminalization을 사용한다.
 
