@@ -94,6 +94,35 @@ def _split_locked_markers(text: str) -> list[tuple[bool, str]]:
     return segments
 
 
+def contains_protected_plaintext(value: Any, protected: tuple[str, ...]) -> bool:
+    """Return True if ``value`` embeds any protected plaintext (detect-only).
+
+    Uses the same string/key scan semantics as :func:`sanitize_for_persistence`
+    without mutating or redacting. Empty ``protected`` is always False.
+    """
+    if not protected:
+        return False
+    return _contains_protected(value, protected)
+
+
+def _contains_protected(value: Any, protected: tuple[str, ...]) -> bool:
+    if isinstance(value, str):
+        return any(secret in value for secret in protected if secret)
+    if isinstance(value, list):
+        return any(_contains_protected(item, protected) for item in value)
+    if isinstance(value, tuple):
+        return any(_contains_protected(item, protected) for item in value)
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if isinstance(key, str) and any(
+                secret in key for secret in protected if secret
+            ):
+                return True
+            if _contains_protected(item, protected):
+                return True
+    return False
+
+
 def sanitize_for_persistence(value: Any, protected: tuple[str, ...]) -> Any:
     """Deep-copy ``value`` with known plaintext secrets replaced.
 

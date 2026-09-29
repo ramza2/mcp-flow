@@ -81,8 +81,10 @@ from app.execution.runtime_preflight import (
     assert_current_tool_executable,
 )
 from app.execution.secret_materialize import materialize_tool_arguments
+from app.execution.mrtr_wait import assert_durable_waiting_input
 from app.execution.secret_redaction import (
     collect_protected_plaintexts,
+    contains_protected_plaintext,
     redact_text,
     sanitize_for_persistence,
 )
@@ -689,23 +691,8 @@ class McpToolRunner:
                 # Durable MRTR wait — lease absent; never re-call MCP.
                 exec_mrtr = execution.status == ExecutionStatus.WAITING_INPUT.value
                 step_mrtr = step.status == StepStatus.WAITING_INPUT.value
-                if exec_mrtr != step_mrtr:
-                    return _PrepareResult(
-                        outcome=ToolRunOutcome(
-                            execution_id=execution.id,
-                            step_execution_id=step.id,
-                            attempt_id=None,
-                            tool_call_id=None,
-                            mcp_called=False,
-                            terminal_status=None,
-                            reason="RESOURCE_CONFLICT",
-                        )
-                    )
-                if exec_mrtr and step_mrtr:
-                    open_req = await MCPInputRequestRepository(session).find_open_for_step(
-                        execution_id=execution.id, step_execution_id=step.id
-                    )
-                    if open_req is None:
+                if exec_mrtr or step_mrtr:
+                    if not (exec_mrtr and step_mrtr):
                         return _PrepareResult(
                             outcome=ToolRunOutcome(
                                 execution_id=execution.id,
@@ -717,6 +704,27 @@ class McpToolRunner:
                                 reason="RESOURCE_CONFLICT",
                             )
                         )
+                    try:
+                        await assert_durable_waiting_input(
+                            executions=executions,
+                            inputs=MCPInputRequestRepository(session),
+                            execution=execution,
+                            step=step,
+                        )
+                    except AppError as exc:
+                        if exc.code == "RESOURCE_CONFLICT":
+                            return _PrepareResult(
+                                outcome=ToolRunOutcome(
+                                    execution_id=execution.id,
+                                    step_execution_id=step.id,
+                                    attempt_id=None,
+                                    tool_call_id=None,
+                                    mcp_called=False,
+                                    terminal_status=None,
+                                    reason="RESOURCE_CONFLICT",
+                                )
+                            )
+                        raise
                     return _PrepareResult(
                         outcome=self._noop(
                             execution.id,
@@ -1331,6 +1339,22 @@ class McpToolRunner:
                 persist_meta.pop("inputRequests", None)
                 persist_meta.pop("input_requests", None)
 
+                # requestState/inputRequests must stay exact for resume — never
+                # redact in place. Echoed invocation secrets fail closed.
+                if contains_protected_plaintext(
+                    mrtr.input_requests, protected
+                ) or contains_protected_plaintext(mrtr.request_state, protected):
+                    return _terminalize_mrtr_secret_echo(
+                        execution=execution,
+                        step=step,
+                        attempt=attempt,
+                        tool_call=tool_call,
+                        persist_meta=persist_meta,
+                        response_bytes=mrtr.raw_size_bytes,
+                        first_byte_at=first_byte_at,
+                        now=now,
+                    )
+
                 if step_timeout_budget_exhausted(
                     step_started_at=step.started_at,
                     timeout_seconds=timeout_seconds,
@@ -1567,6 +1591,74 @@ class McpToolRunner:
                     terminal_status=terminal,
                     reason="COMPLETED",
                 )
+
+
+_MRTR_SECRET_ECHO_CODE = "MCP_MRTR_SECRET_ECHO"
+_MRTR_SECRET_ECHO_MESSAGE = (
+    "MRTR input_required reflected protected invocation material; "
+    "WAITING_INPUT was not opened."
+)
+
+
+def _terminalize_mrtr_secret_echo(
+    *,
+    execution: Execution,
+    step: ExecutionStep,
+    attempt: StepAttempt,
+    tool_call: ToolCall,
+    persist_meta: dict[str, Any],
+    response_bytes: int,
+    first_byte_at: datetime | None,
+    now: datetime,
+) -> ToolRunOutcome:
+    """Fail closed when MRTR payload embeds protected plaintext.
+
+    Creates no MCPInputRequest and never enters WAITING_INPUT. Does not
+    persist or log the offending secret value.
+    """
+    tool_call.normalized_status = ToolCallNormalizedStatus.FAILED.value
+    tool_call.response_meta = persist_meta
+    tool_call.response_bytes = response_bytes
+    tool_call.first_byte_at = first_byte_at
+    tool_call.finished_at = now
+
+    attempt.status = StepAttemptStatus.FAILED.value
+    attempt.error_layer = "PROTOCOL"
+    attempt.error_code = _MRTR_SECRET_ECHO_CODE
+    attempt.error_message = _MRTR_SECRET_ECHO_MESSAGE
+    attempt.is_retryable = False
+    attempt.result_inline = None
+    attempt.finished_at = now
+    attempt.worker_id = None
+    attempt.lease_expires_at = None
+
+    step.status = StepStatus.FAILED.value
+    step.error_code = _MRTR_SECRET_ECHO_CODE
+    step.error_message = _MRTR_SECRET_ECHO_MESSAGE
+    step.result_inline = None
+    step.finished_at = now
+    step.lock_version += 1
+
+    execution.status = ExecutionStatus.FAILED.value
+    execution.error_code = _MRTR_SECRET_ECHO_CODE
+    execution.error_message = _MRTR_SECRET_ECHO_MESSAGE
+    execution.result_summary = None
+    execution.finished_at = now
+    execution.worker_id = None
+    execution.lease_token = None
+    execution.lease_expires_at = None
+    execution.heartbeat_at = None
+    execution.lock_version += 1
+
+    return ToolRunOutcome(
+        execution_id=execution.id,
+        step_execution_id=step.id,
+        attempt_id=attempt.id,
+        tool_call_id=tool_call.id,
+        mcp_called=True,
+        terminal_status=StepStatus.FAILED.value,
+        reason=_MRTR_SECRET_ECHO_CODE,
+    )
 
 
 def _apply_retry_checkpoint(

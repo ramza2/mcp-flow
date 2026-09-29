@@ -27,6 +27,7 @@ from app.domain.enums import (
 from app.execution.secret_redaction import (
     REDACTION_MARKER,
     collect_protected_plaintexts,
+    contains_protected_plaintext,
     redact_text,
     sanitize_for_persistence,
 )
@@ -100,6 +101,15 @@ def test_collect_protected_sorts_longest_first_and_skips_empty() -> None:
     assert _LONG in protected
     assert _SHORT in protected
     assert f"Bearer {_LONG}" in protected
+
+
+def test_contains_protected_plaintext_detects_without_mutating() -> None:
+    protected = collect_protected_plaintexts(secret_argument_values=[_SENTINEL])
+    value = {"nested": {"msg": f"x{_SENTINEL}y"}, "ok": 1}
+    assert contains_protected_plaintext(value, protected) is True
+    assert contains_protected_plaintext({"ok": "plain"}, protected) is False
+    assert contains_protected_plaintext(value, ()) is False
+    assert value["nested"]["msg"].endswith(f"{_SENTINEL}y")
 
 
 def test_sanitize_recursive_embedded_and_dict_keys() -> None:

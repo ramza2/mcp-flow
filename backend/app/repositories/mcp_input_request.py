@@ -21,15 +21,37 @@ class MCPInputRequestRepository:
         stmt = select(MCPInputRequest).where(MCPInputRequest.id == request_id)
         return (await self._session.execute(stmt)).scalar_one_or_none()
 
+    async def list_open_for_step(
+        self, *, execution_id: uuid.UUID, step_execution_id: uuid.UUID
+    ) -> list[MCPInputRequest]:
+        """Return all OPEN rows for the step (0/1/>1 handled by callers)."""
+        stmt = (
+            select(MCPInputRequest)
+            .where(
+                MCPInputRequest.execution_id == execution_id,
+                MCPInputRequest.step_execution_id == step_execution_id,
+                MCPInputRequest.status == McpInputRequestStatus.OPEN.value,
+            )
+            .order_by(MCPInputRequest.round_no.asc(), MCPInputRequest.id.asc())
+        )
+        return list((await self._session.execute(stmt)).scalars().all())
+
     async def find_open_for_step(
         self, *, execution_id: uuid.UUID, step_execution_id: uuid.UUID
     ) -> MCPInputRequest | None:
-        stmt = select(MCPInputRequest).where(
-            MCPInputRequest.execution_id == execution_id,
-            MCPInputRequest.step_execution_id == step_execution_id,
-            MCPInputRequest.status == McpInputRequestStatus.OPEN.value,
+        """Return the single OPEN row, or None when zero.
+
+        Callers that must fail closed on duplicates should use
+        :meth:`list_open_for_step` (or ``assert_durable_waiting_input``).
+        """
+        rows = await self.list_open_for_step(
+            execution_id=execution_id, step_execution_id=step_execution_id
         )
-        return (await self._session.execute(stmt)).scalar_one_or_none()
+        if len(rows) == 0:
+            return None
+        if len(rows) > 1:
+            return None
+        return rows[0]
 
     async def list_for_step(
         self, *, execution_id: uuid.UUID, step_execution_id: uuid.UUID
