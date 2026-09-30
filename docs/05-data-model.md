@@ -1195,6 +1195,8 @@ Invariants:
 ```text
 plan_schema_version / plan_snapshot / plan_hash / input_snapshot / policy_snapshot
   are caller-pinned; plan_hash is recomputed and must match before insert
+StaticComplexPlanValidator (docs/04 §9.7) is re-run before first DB insert —
+  caller "already validated" claims are not trusted
 step_key = Plan Step id
 step_type = canonical AuthorableStepType
 sequence_hint = Plan array index (stable)
@@ -1208,7 +1210,8 @@ all Steps remain PENDING (roots are not READY'd)
 ```
 
 Atomicity: Execution + all Steps succeed or the transaction rolls back with zero
-rows. No Outbox / queue / MCP / ApprovalRequest / binding resolve / Predicate
+rows. Static complex-plan rejection and hash mismatch fail before any insert.
+No Outbox / queue / MCP / ApprovalRequest / binding resolve / Predicate
 eval / LOOP expand. AgentRequest creation preflight remains single-TOOL and
 reuses this materializer for Step persistence.
 

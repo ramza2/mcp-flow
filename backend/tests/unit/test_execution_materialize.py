@@ -51,6 +51,7 @@ def _base_plan(
     *,
     steps: list[dict[str, Any]],
     tool_version_id: uuid.UUID,
+    limits: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     # Rewrite TOOL configs to use the seeded ToolVersion id.
     rewritten: list[dict[str, Any]] = []
@@ -64,12 +65,15 @@ def _base_plan(
     response_ids = [s["id"] for s in rewritten if s.get("type") == "TOOL"] or [
         rewritten[-1]["id"]
     ]
+    lim = default_plan_limits().model_dump(mode="json")
+    if limits:
+        lim.update(limits)
     return {
         "schema_version": EXECUTION_PLAN_SCHEMA_VERSION,
         "goal": "materializer fixture",
         "source": {"type": "AGENT", "agent_version_id": str(_AV)},
         "inputs": {},
-        "limits": default_plan_limits().model_dump(mode="json"),
+        "limits": lim,
         "steps": rewritten,
         "completion": {
             "success_policy": "ALL_REQUIRED",
@@ -535,3 +539,210 @@ async def test_no_secret_resolver_or_mcp_on_materialize(
     await db_session.commit()
     assert len(result.steps) == 2
     boom.assert_not_awaited()
+
+
+# --- StaticComplexPlanValidator revalidation (fail before first DB insert) ---
+
+
+async def _assert_static_reject_zero_rows(
+    session: AsyncSession,
+    *,
+    plan: dict[str, Any],
+    requester_id: uuid.UUID,
+    monkeypatch: pytest.MonkeyPatch | None = None,
+) -> AppError:
+    before_e = await _count_executions(session)
+    before_s = await _count_steps(session)
+    before_o = await _count_outbox(session)
+    insert_calls = {"n": 0}
+
+    if monkeypatch is not None:
+        real_create = ExecutionRepository.create_execution
+
+        async def _spy_create(self: ExecutionRepository, **kwargs: Any) -> Any:
+            insert_calls["n"] += 1
+            return await real_create(self, **kwargs)
+
+        monkeypatch.setattr(ExecutionRepository, "create_execution", _spy_create)
+
+    with pytest.raises(AppError) as exc:
+        await _materialize(session, plan_snapshot=plan, requester_id=requester_id)
+    assert exc.value.code == "EXECUTION_PRECONDITION_FAILED"
+    assert "static complex-plan validation failed" in exc.value.message
+    await session.rollback()
+    assert await _count_executions(session) == before_e
+    assert await _count_steps(session) == before_s
+    assert await _count_outbox(session) == before_o
+    assert insert_calls["n"] == 0
+    return exc.value
+
+
+@pytest.mark.asyncio
+async def test_static_reject_missing_dependency_zero_rows(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seeded = await _seed_requester_and_tool(db_session)
+    plan = _base_plan(
+        steps=[_tool("a", depends_on=["missing"])],
+        tool_version_id=seeded["tool_version_id"],
+    )
+    err = await _assert_static_reject_zero_rows(
+        db_session,
+        plan=plan,
+        requester_id=seeded["requester_id"],
+        monkeypatch=monkeypatch,
+    )
+    assert any(d.get("code") == "PLAN_DEPENDENCY_MISSING" for d in err.details)
+
+
+@pytest.mark.asyncio
+async def test_static_reject_cycle_zero_rows(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seeded = await _seed_requester_and_tool(db_session)
+    plan = _base_plan(
+        steps=[
+            _tool("a", depends_on=["b"]),
+            _tool("b", depends_on=["a"]),
+        ],
+        tool_version_id=seeded["tool_version_id"],
+    )
+    err = await _assert_static_reject_zero_rows(
+        db_session,
+        plan=plan,
+        requester_id=seeded["requester_id"],
+        monkeypatch=monkeypatch,
+    )
+    assert any(d.get("code") == "PLAN_CYCLE_DETECTED" for d in err.details)
+
+
+@pytest.mark.asyncio
+async def test_static_reject_forward_sibling_step_output_zero_rows(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seeded = await _seed_requester_and_tool(db_session)
+    # forward/downstream reference
+    forward = _base_plan(
+        steps=[
+            _tool(
+                "a",
+                bindings={
+                    "x": {
+                        "kind": BindingKind.STEP_OUTPUT.value,
+                        "step_id": "b",
+                        "path": "/result",
+                    }
+                },
+            ),
+            _tool("b", depends_on=["a"]),
+        ],
+        tool_version_id=seeded["tool_version_id"],
+    )
+    err = await _assert_static_reject_zero_rows(
+        db_session,
+        plan=forward,
+        requester_id=seeded["requester_id"],
+        monkeypatch=monkeypatch,
+    )
+    assert any(d.get("code") == "PLAN_BINDING_INVALID" for d in err.details)
+
+    # unrelated sibling
+    sibling = _base_plan(
+        steps=[
+            _tool("root"),
+            _tool("left", depends_on=["root"]),
+            _tool(
+                "right",
+                depends_on=["root"],
+                bindings={
+                    "x": {
+                        "kind": BindingKind.STEP_OUTPUT.value,
+                        "step_id": "left",
+                        "path": "/result",
+                    }
+                },
+            ),
+        ],
+        tool_version_id=seeded["tool_version_id"],
+    )
+    err2 = await _assert_static_reject_zero_rows(
+        db_session,
+        plan=sibling,
+        requester_id=seeded["requester_id"],
+        monkeypatch=monkeypatch,
+    )
+    assert any(d.get("code") == "PLAN_BINDING_INVALID" for d in err2.details)
+
+
+@pytest.mark.asyncio
+async def test_static_reject_invalid_loop_body_scope_zero_rows(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seeded = await _seed_requester_and_tool(db_session)
+    plan = _base_plan(
+        steps=[
+            _tool("outside"),
+            _loop("loop1", body_step_ids=["body"]),
+            # body depends on a non-body / non-LOOP step → invalid scope
+            _tool("body", depends_on=["outside"]),
+        ],
+        tool_version_id=seeded["tool_version_id"],
+    )
+    err = await _assert_static_reject_zero_rows(
+        db_session,
+        plan=plan,
+        requester_id=seeded["requester_id"],
+        monkeypatch=monkeypatch,
+    )
+    assert any(
+        d.get("code") == "PLAN_SCHEMA_INVALID"
+        and d.get("step_id") == "body"
+        for d in err.details
+    )
+
+
+@pytest.mark.asyncio
+async def test_static_reject_limit_violation_zero_rows(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seeded = await _seed_requester_and_tool(db_session)
+    plan = _base_plan(
+        steps=[
+            _tool("a"),
+            _tool("b", depends_on=["a"]),
+            _tool("c", depends_on=["b"]),
+        ],
+        tool_version_id=seeded["tool_version_id"],
+        limits={"max_steps": 2},
+    )
+    err = await _assert_static_reject_zero_rows(
+        db_session,
+        plan=plan,
+        requester_id=seeded["requester_id"],
+        monkeypatch=monkeypatch,
+    )
+    assert any(d.get("code") == "PLAN_LIMIT_EXCEEDED" for d in err.details)
+
+
+@pytest.mark.asyncio
+async def test_valid_multistep_still_materializes_after_static_check(
+    db_session: AsyncSession,
+) -> None:
+    seeded = await _seed_requester_and_tool(db_session)
+    plan = _base_plan(
+        steps=[
+            _tool("root"),
+            _tool("left", depends_on=["root"]),
+            _tool("right", depends_on=["root"]),
+            _join("join1", depends_on=["left", "right"]),
+            _tool("final", depends_on=["join1"]),
+        ],
+        tool_version_id=seeded["tool_version_id"],
+    )
+    result = await _materialize(
+        db_session, plan_snapshot=plan, requester_id=seeded["requester_id"]
+    )
+    await db_session.commit()
+    assert result.execution.status == ExecutionStatus.CREATED.value
+    assert len(result.steps) == 5
+    assert all(s.status == StepStatus.PENDING.value for s in result.steps)

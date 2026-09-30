@@ -16,6 +16,7 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agent.complex_plan_validator import StaticComplexPlanValidator
 from app.core.errors import AppError
 from app.domain.enums import AuthorableStepType, ExecutionStatus, StepStatus
 from app.models.execution import Execution, ExecutionStep
@@ -156,19 +157,31 @@ class ExecutionPlanMaterializer:
                 status_code=409,
             )
 
-        if not plan.steps:
-            raise AppError(
-                code="EXECUTION_PRECONDITION_FAILED",
-                message="plan.steps must be non-empty.",
-                status_code=409,
+        # Fail closed even when the caller claims prior validation: reuse the
+        # PR #42 StaticComplexPlanValidator as the single static graph contract.
+        # Must run before any Execution / ExecutionStep insert.
+        static = StaticComplexPlanValidator().validate(plan)
+        if not static.ok:
+            summary = "; ".join(
+                f"{err.code}: {err.message}"
+                + (f" (step={err.step_id})" if err.step_id else "")
+                for err in static.errors[:5]
             )
-
-        step_ids = [s.id for s in plan.steps]
-        if len(set(step_ids)) != len(step_ids):
             raise AppError(
                 code="EXECUTION_PRECONDITION_FAILED",
-                message="plan.steps contain duplicate step ids.",
+                message=(
+                    "static complex-plan validation failed before materialization: "
+                    f"{summary}"
+                ),
                 status_code=409,
+                details=[
+                    {
+                        "code": err.code,
+                        "message": err.message,
+                        "step_id": err.step_id,
+                    }
+                    for err in static.errors
+                ],
             )
 
         projections = [

@@ -360,6 +360,9 @@ Dataset은 평가 전 FROZEN하고 실행 중 정답을 변경하지 않는다.
 - TOOL projects `mcp_tool_version_id`; CONDITION/JOIN/APPROVAL/LOOP → null
 - exact `step_snapshot` preservation; `parent_step_id` always null
 - plan_hash mismatch / malformed Step config → zero rows
+- StaticComplexPlanValidator revalidation before first insert
+  (missing dependency / cycle / forward-sibling STEP_OUTPUT / invalid LOOP scope /
+   limit violation → zero rows, create_execution never called)
 - mid-materialization failure → full TX rollback
 - AgentRequest single-TOOL creation regression (idempotency/preflight unchanged)
 - no Outbox / MCP / ApprovalRequest / Secret resolution
