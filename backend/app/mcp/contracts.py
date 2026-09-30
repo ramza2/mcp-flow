@@ -1,4 +1,4 @@
-"""Normalized MCP Tool call/result contracts — docs/04 §14."""
+"""Normalized MCP Tool call/result contracts — docs/04 §14 / §15."""
 
 from __future__ import annotations
 
@@ -31,3 +31,18 @@ class NormalizedToolResult:
     duration_ms: int = 0
     truncated: bool = False
     result_type: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class NormalizedInputRequired:
+    """MRTR ``resultType=input_required`` — not a completed Tool result.
+
+    ``request_state`` is opaque JSON-compatible data. Callers must never
+    interpret, mutate, log, or place it in ToolCall metadata.
+    """
+
+    input_requests: dict[str, Any]
+    request_state: Any
+    raw_size_bytes: int = 0
+    duration_ms: int = 0
+    result_type: str = "input_required"

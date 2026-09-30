@@ -321,6 +321,16 @@ class MCPProtocolEra(StrEnum):
     LEGACY = "LEGACY"
 
 
+class McpInputRequestStatus(StrEnum):
+    """docs/05 §13.7 mcp_input_requests.status."""
+
+    OPEN = "OPEN"
+    ANSWERED = "ANSWERED"
+    REJECTED = "REJECTED"
+    EXPIRED = "EXPIRED"
+    UNSUPPORTED = "UNSUPPORTED"
+
+
 class MCPCheckType(StrEnum):
     """docs/05 mcp_server_checks.check_type."""
 

@@ -23,6 +23,7 @@ from app.models.mcp import (
     MCPToolVersion,
     ToolEmbedding,
 )
+from app.models.mcp_input_request import MCPInputRequest
 from app.models.model_profile import EmbeddingProfile, LLMProfile
 from app.models.outbox import OutboxEvent
 from app.models.parameter_build import ParameterBuildRun
@@ -62,6 +63,7 @@ __all__ = [
     "MCPToolPolicy",
     "MCPToolVerification",
     "MCPToolVersion",
+    "MCPInputRequest",
     "OutboxEvent",
     "ParameterBuildRun",
     "Permission",

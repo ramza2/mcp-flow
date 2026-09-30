@@ -766,13 +766,26 @@ Tool 업무 오류(`isError`)와 transport/protocol 오류를 분리한다. outp
 Current MCP `tools/call` 요청/응답 매핑과 `NormalizedToolResult` 계약은 `backend/app/mcp/` 아래에 존재한다.
 
 ```text
-app/mcp/current.py    — CurrentMCPClient.call_tool (tools/call 요청·응답 정규화)
-app/mcp/contracts.py  — NormalizedToolResult
+app/mcp/current.py    — CurrentMCPClient.call_tool (tools/call 요청·응답 정규화;
+                          NormalizedToolResult | NormalizedInputRequired)
+app/mcp/contracts.py  — NormalizedToolResult, NormalizedInputRequired
 app/mcp/errors.py     — MCPClientError, MCPResultTooLargeError 등 protocol/network/timeout 오류 분류
 app/mcp/auth_headers.py — 인증 헤더 구성/redaction (Authorization 등 secret 로그 금지)
 ```
 
-MCP Tool Runner vertical slice(현재 범위)는 `tools/call` happy path, `isError` 업무오류, timeout(connect/read) 분류, 결과과대(`MCPResultTooLargeError`) 처리를 구현한다. §15 MRTR은 `input_required` 응답을 감지해 명시적으로 `MCP_INPUT_REQUIRED_UNSUPPORTED`로 실패 처리(detect-only)하며, 실제 WAITING_INPUT round-trip 재개는 이후 범위다.
+MCP Tool Runner vertical slice는 `tools/call` happy path, `isError` 업무오류, timeout(connect/read) 분류, 결과과대(`MCPResultTooLargeError`) 처리를 구현한다.
+
+MRTR waiting-input foundation(PR #40):
+
+```text
+valid input_required
+→ NormalizedInputRequired (requestState opaque; never logged / never in response_meta)
+→ mcp_input_requests OPEN
+→ ToolCall SUCCEEDED (round complete) + Attempt STARTED
+→ Step/Execution WAITING_INPUT + lease clear
+```
+
+사용자 response / schema validation / reject / same-Execution resume / `inputResponses` / requestState echo / 다음 round는 PR #41이다. malformed MRTR는 post-send `MCP_INVALID_INPUT_REQUIRED`(`outcome_unknown=true`)로 실패하며 WAITING_INPUT을 만들지 않는다.
 
 `ToolPolicy.max_result_bytes` overflow while streaming a dispatched `tools/call` response raises `MCP_RESULT_TOO_LARGE` with `outcome_unknown=true` (post-send ambiguity; oversized body is not retained). Unsafe risk classes become Step/Attempt/ToolCall `UNKNOWN_OUTCOME` / Execution `FAILED`. Local `result_inline_max_bytes` overflow after a complete valid remote result remains `RESULT_TOO_LARGE_FOR_INLINE` and is not `UNKNOWN_OUTCOME`.
 
@@ -800,6 +813,7 @@ Phase B3 (no DB TX)
     ↓
 Phase C / TX2
   fenced terminal finalize
+  OR fenced MRTR WAITING_INPUT finalize (OPEN mcp_input_requests + lease clear)
 ```
 
 Phase B2 reject 시 remote `tools/call`은 0회다. DB gate commit과 이후 socket write 사이의 절대적 linearizability는 보장하지 않는다. fresh path와 RESUME/TAKEOVER replay path 모두 동일 final gate를 통과한다.
@@ -817,11 +831,15 @@ resultType = input_required
   + inputRequests
   + opaque requestState
   ↓
-Tool Step = WAITING_INPUT
+persist mcp_input_requests (OPEN)
+ToolCall network round = SUCCEEDED
+StepAttempt remains STARTED
+Tool Step / Execution = WAITING_INPUT
+worker lease cleared
   ↓
-사용자 입력 수집·schema 검증
+사용자 입력 수집·schema 검증          ← PR #41
   ↓
-원 요청 재호출
+원 요청 재호출                        ← PR #41
   + inputResponses
   + requestState echo
   ↓
@@ -831,10 +849,14 @@ complete result 또는 다음 input_required
 규칙:
 
 - `requestState`는 opaque 값으로 취급하고 LLM이 해석·변경하지 않는다.
-- 최대 round 수와 전체 Step timeout을 둔다.
-- input request가 secret·외부 URL 이동·금지 데이터 입력을 요구하면 정책으로 차단한다.
+- `requestState`는 전용 `mcp_input_requests.request_state`에만 저장한다. ToolCall `request_meta`/`response_meta`, Attempt/Step/Execution result·error, 로그, 일반 API/UI에 두지 않는다.
+- 최대 round 수와 전체 Step timeout을 둔다. Step timeout은 MRTR wait를 포함한 총 예산이며 `started_at`을 리셋하지 않는다.
+- input_required는 transient MCP error가 아니며 safe retry / Celery retry / 새 Attempt를 만들지 않는다.
+- input request가 secret·외부 URL 이동·금지 데이터 입력을 요구하면 정책으로 차단한다(response path, PR #41).
 - UI에는 MCP Server가 요청한 입력임을 명확히 표시한다.
-- Legacy elicitation은 `LegacyMCPAdapter`에서 동일한 `WAITING_INPUT` 내부 상태로 normalize한다.
+- Legacy elicitation은 `LegacyMCPAdapter`에서 동일한 `WAITING_INPUT` 내부 상태로 normalize한다(후속).
+
+PR #40 경계: durable OPEN wait + WAITING_INPUT + lease release까지. 사용자 response/resume은 PR #41.
 
 ---
 

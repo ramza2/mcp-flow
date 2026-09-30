@@ -428,8 +428,16 @@ Dataset은 평가 전 FROZEN하고 실행 중 정답을 변경하지 않는다.
   - happy path `tools/call` → `structuredContent` 정규화
   - `isError=true` → `protocol_success=true`, `tool_error=true`
   - 결과 과대 → `MCPResultTooLargeError`, 원문 body 미보존
-  - `input_required` → `MCP_INPUT_REQUIRED_UNSUPPORTED` (detect-only, `requestState` 미노출,
-    `outcome_unknown=false`)
+  - `input_required` → `NormalizedInputRequired` (typed; not `NormalizedToolResult`
+    success). `requestState` opaque 보존, 로그/`response_meta` 미노출.
+    malformed(missing/empty/wrong-type `inputRequests`, missing `requestState`) →
+    `MCP_INVALID_INPUT_REQUIRED`, `outcome_unknown=true` (post-send)
+  - MRTR WAITING_INPUT foundation (PR #40):
+    OPEN `mcp_input_requests` + ToolCall SUCCEEDED + Attempt STARTED +
+    Step/Execution WAITING_INPUT + lease clear; duplicate delivery MCP 0;
+    stale-worker fencing; exhausted Step budget → EXPIRED + TIMED_OUT;
+    Approval APPROVED resume → input_required → WAITING_INPUT (ApprovalRequest 1);
+    restart-durable lineage; `requestState` only in dedicated storage
   - connect/pool timeout → `outcome_unknown=false`
   - response headers 대기 중 `ReadTimeout` / mid-body `ReadTimeout` /
     `WriteTimeout` → `outcome_unknown=true` (전송 후 모호성; headers 단계도 pre-send로
@@ -579,22 +587,33 @@ Current MCP `input_required` 시나리오:
 ```text
 tools/call
 → input_required + inputRequests + requestState
-→ Step/Execution WAITING_INPUT
-→ 사용자 응답
-→ schema validation
-→ inputResponses + 동일 requestState로 재호출
+→ mcp_input_requests OPEN
+→ ToolCall SUCCEEDED (round) / Attempt STARTED
+→ Step/Execution WAITING_INPUT + lease clear
+→ 사용자 응답                         ← PR #41
+→ schema validation                   ← PR #41
+→ inputResponses + 동일 requestState로 재호출  ← PR #41
 → complete
 ```
 
-검증:
+PR #40 검증:
 
-- opaque `requestState` 변경 없음
+- opaque `requestState` 변경/로그/ToolCall meta/일반 result·error 부재
+- 여러 input request key durable round-trip
+- OPEN expires_at = Step.started_at + timeout_seconds
+- exhausted Step budget → EXPIRED + TIMED_OUT (no OPEN wait)
+- duplicate runner after WAITING_INPUT → MCP 0 / single MCPInputRequest
+- stale worker Phase C fencing
+- Approval→MRTR regression (single ApprovalRequest)
+- ordinary Tool success/isError regression
+- PostgreSQL migration 0018→0019 round-trip (SQLite 대체 금지)
+- restart durability (fresh session reconstructs wait lineage)
+
+PR #41 검증(후속):
+
 - requestState가 일반 사용자 UI에서 수정 불가
-- 여러 input request 처리
 - 최대 round 제한
-- timeout/expire
 - 사용자 reject/cancel
-- 재시작 후 대기입력 복구
 - 악성 secret/URL 요청 정책차단
 - Legacy elicitation 동일 내부 WAITING_INPUT normalize
 
