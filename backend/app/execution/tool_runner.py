@@ -49,16 +49,19 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.approval.evidence import require_valid_approved_evidence
+from app.approval.wait import ApprovalWaitService
 from app.core.errors import AppError
 from app.core.secrets import ResolvedSecret, SecretResolver
 from app.domain.enums import (
     CURRENT_MCP_PROTOCOL_VERSION,
+    AuthorableStepType,
     BindingKind,
     ExecutionStatus,
     MCPAuthType,
+    McpInputRequestStatus,
     MCPProtocolEra,
     MCPTransportType,
-    McpInputRequestStatus,
     RiskClass,
     SecretKind,
     StepAttemptStatus,
@@ -67,6 +70,8 @@ from app.domain.enums import (
 )
 from app.execution.claim import ExecutionClaimService, _as_utc, _normalize_worker_id
 from app.execution.lineage import assert_resume_attempt_lineage
+from app.execution.mrtr_constants import MAX_MRTR_ROUNDS
+from app.execution.mrtr_wait import assert_durable_waiting_input
 from app.execution.result_validator import validate_tool_result
 from app.execution.retry_decision import (
     decide_safe_transient_retry,
@@ -81,16 +86,12 @@ from app.execution.runtime_preflight import (
     assert_current_tool_executable,
 )
 from app.execution.secret_materialize import materialize_tool_arguments
-from app.execution.mrtr_constants import MAX_MRTR_ROUNDS
-from app.execution.mrtr_wait import assert_durable_waiting_input
 from app.execution.secret_redaction import (
     collect_protected_plaintexts,
     contains_protected_plaintext,
     redact_text,
     sanitize_for_persistence,
 )
-from app.approval.evidence import require_valid_approved_evidence
-from app.approval.wait import ApprovalWaitService
 from app.execution.tool_step_attempt import ApprovalWaitOutcome, ToolStepAttemptService
 from app.mcp.auth_headers import build_mcp_auth_headers
 from app.mcp.contracts import NormalizedInputRequired, NormalizedToolResult
@@ -401,9 +402,43 @@ class McpToolRunner:
         worker_id: str,
         lease_token: uuid.UUID,
     ) -> ToolRunOutcome:
+        """Run sequential TOOL orchestration under a claimed Execution lease.
+
+        Graph progression and Execution completion are owned by
+        ``ExecutionOrchestrator``. This method remains the Celery/task entry.
+        """
+        from app.execution.orchestrator import ExecutionOrchestrator
+
+        return await ExecutionOrchestrator(
+            session_factory=self._session_factory,
+            tool_runner=self,
+        ).run(
+            execution_id=execution_id,
+            worker_id=worker_id,
+            lease_token=lease_token,
+        )
+
+    async def run_claimed_tool_step(
+        self,
+        *,
+        execution_id: uuid.UUID,
+        step_execution_id: uuid.UUID,
+        worker_id: str,
+        lease_token: uuid.UUID,
+    ) -> ToolRunOutcome:
+        """Invoke MCP for exactly one TOOL Step (safe-retry loop included).
+
+        On TOOL SUCCEEDED this does **not** terminalize the Execution — the
+        orchestrator decides whether to READY the next Step or SUCCEEDED the
+        Execution. Failure / UNKNOWN_OUTCOME / timeout still terminalize the
+        Execution (existing fail-closed behavior).
+        """
         while True:
             prep = await self._prepare(
-                execution_id=execution_id, worker_id=worker_id, lease_token=lease_token
+                execution_id=execution_id,
+                step_execution_id=step_execution_id,
+                worker_id=worker_id,
+                lease_token=lease_token,
             )
             if prep.prepared is None:
                 assert prep.outcome is not None
@@ -704,7 +739,12 @@ class McpToolRunner:
     # -- Phase A -----------------------------------------------------------
 
     async def _prepare(
-        self, *, execution_id: uuid.UUID, worker_id: str, lease_token: uuid.UUID
+        self,
+        *,
+        execution_id: uuid.UUID,
+        step_execution_id: uuid.UUID,
+        worker_id: str,
+        lease_token: uuid.UUID,
     ) -> _PrepareResult:
         worker = _normalize_worker_id(worker_id)
         async with self._session_factory() as session:
@@ -715,15 +755,19 @@ class McpToolRunner:
                     return _PrepareResult(outcome=self._noop(execution_id, "MISSING"))
 
                 now = datetime.now(UTC)
-                steps = await executions.list_steps(execution.id)
-                if len(steps) != 1:
+                step = await executions.lock_step(step_execution_id)
+                if step is None or step.execution_id != execution.id:
                     raise AppError(
                         code="RESOURCE_CONFLICT",
-                        message="AgentRequest Execution must contain exactly one Step.",
+                        message="Step does not belong to the claimed Execution.",
                         status_code=409,
                     )
-                step = await executions.lock_step(steps[0].id)
-                assert step is not None
+                if step.step_type != AuthorableStepType.TOOL.value:
+                    raise AppError(
+                        code="RESOURCE_CONFLICT",
+                        message="McpToolRunner supports TOOL Steps only.",
+                        status_code=409,
+                    )
 
                 # One-sided WAITING_APPROVAL is atomicity corruption — never
                 # normalize it into a successful wait outcome.
@@ -1823,6 +1867,11 @@ class McpToolRunner:
                     protected=protected,
                 )
                 mcp_called = not isinstance(call_error, _PreSendFailClosed)
+                reason = (
+                    "STEP_SUCCEEDED"
+                    if terminal == StepStatus.SUCCEEDED.value
+                    else terminal
+                )
                 return ToolRunOutcome(
                     execution_id=execution.id,
                     step_execution_id=step.id,
@@ -1830,7 +1879,7 @@ class McpToolRunner:
                     tool_call_id=tool_call.id,
                     mcp_called=mcp_called,
                     terminal_status=terminal,
-                    reason="COMPLETED",
+                    reason=reason,
                 )
 
 
@@ -2032,6 +2081,14 @@ def _apply_terminal_transition(
     step.finished_at = finished_at
     step.lock_version += 1
 
+    if terminal == StepStatus.SUCCEEDED.value:
+        # Step success is not Execution success when unfinished Steps remain.
+        # Keep RUNNING + lease; ExecutionOrchestrator promotes the next READY
+        # Step or terminalizes the Execution when the chain is complete.
+        execution.heartbeat_at = finished_at
+        execution.lock_version += 1
+        return terminal
+
     execution_status = (
         ExecutionStatus.FAILED.value
         if terminal == StepStatus.UNKNOWN_OUTCOME.value
@@ -2045,11 +2102,7 @@ def _apply_terminal_transition(
         if terminal == StepStatus.UNKNOWN_OUTCOME.value
         else error_message
     )
-    execution.result_summary = (
-        {"step_key": step.step_key, "status": terminal}
-        if terminal == StepStatus.SUCCEEDED.value
-        else None
-    )
+    execution.result_summary = None
     execution.finished_at = finished_at
     execution.worker_id = None
     execution.lease_token = None

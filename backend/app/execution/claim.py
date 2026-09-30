@@ -16,16 +16,19 @@ from app.domain.enums import (
     ExecutionStatus,
     StepStatus,
 )
-from app.models.execution import Execution, ExecutionStep
-from app.schemas.execution_plan import (
-    DETERMINISTIC_TOOL_STEP_ID,
-    ExecutionPlanStep,
-    ExecutionPlanV1,
-    ToolStepConfigV1,
-    compute_plan_hash,
+from app.execution.orchestrator import (
+    assert_execution_plan_lineage,
+    validate_sequential_tool_chain,
 )
+from app.models.execution import Execution, ExecutionStep
 
 _WORKER_ID_MAX_LEN = 128
+_CLAIMABLE_SOURCES = frozenset(
+    {
+        ExecutionSourceType.AGENT_REQUEST.value,
+        ExecutionSourceType.MANUAL_TOOL_TEST.value,
+    }
+)
 
 
 def _as_utc(value: datetime) -> datetime:
@@ -100,10 +103,12 @@ class ExecutionClaimService:
                 lease_expires_at=execution.lease_expires_at,
                 reason="STALE_DELIVERY",
             )
-        if execution.source_type != ExecutionSourceType.AGENT_REQUEST.value:
+        if execution.source_type not in _CLAIMABLE_SOURCES:
             raise AppError(
                 code="RESOURCE_CONFLICT",
-                message="Queue/Claim foundation supports AgentRequest Executions only.",
+                message=(
+                    "Claim supports AGENT_REQUEST / MANUAL_TOOL_TEST Executions only."
+                ),
                 status_code=409,
             )
         if execution.queued_at is None or execution.started_at is not None:
@@ -134,82 +139,36 @@ class ExecutionClaimService:
             .with_for_update()
         )
         steps = list((await self._session.execute(step_stmt)).scalars().all())
-        if len(steps) != 1:
+        if not steps:
             raise AppError(
                 code="RESOURCE_CONFLICT",
-                message="AgentRequest foundation Execution must contain exactly one Step.",
-                status_code=409,
-            )
-        step = steps[0]
-        if (
-            step.step_key != DETERMINISTIC_TOOL_STEP_ID
-            or step.step_type != AuthorableStepType.TOOL.value
-            or step.status != StepStatus.PENDING.value
-            or step.parent_step_id is not None
-            or step.sequence_hint != 0
-            or step.ready_at is not None
-            or step.started_at is not None
-            or step.attempt_count != 0
-            or step.resolved_input is not None
-        ):
-            raise AppError(
-                code="RESOURCE_CONFLICT",
-                message="ExecutionStep is inconsistent with initial PENDING foundation state.",
+                message="Execution has no Steps to claim.",
                 status_code=409,
             )
 
-        try:
-            plan = ExecutionPlanV1.model_validate(execution.plan_snapshot)
-            plan_step = ExecutionPlanStep.model_validate(step.step_snapshot)
-        except Exception as exc:
-            raise AppError(
-                code="RESOURCE_CONFLICT",
-                message="Execution plan/step snapshot is invalid.",
-                status_code=409,
-            ) from exc
-        if (
-            execution.plan_schema_version != plan.schema_version
-            or compute_plan_hash(execution.plan_snapshot) != execution.plan_hash
-        ):
-            raise AppError(
-                code="RESOURCE_CONFLICT",
-                message="Execution plan snapshot/hash lineage is inconsistent.",
-                status_code=409,
-            )
-        if len(plan.steps) != 1:
-            raise AppError(
-                code="RESOURCE_CONFLICT",
-                message="AgentRequest foundation Execution plan must contain one Step.",
-                status_code=409,
-            )
-        expected_step = plan.steps[0]
-        if expected_step.model_dump(mode="json") != step.step_snapshot:
-            raise AppError(
-                code="RESOURCE_CONFLICT",
-                message="Execution plan/step snapshot lineage is inconsistent.",
-                status_code=409,
-            )
-        try:
-            tool_config = ToolStepConfigV1.model_validate(expected_step.config)
-        except Exception as exc:
-            raise AppError(
-                code="RESOURCE_CONFLICT",
-                message="Execution TOOL Step config is invalid.",
-                status_code=409,
-            ) from exc
-        if (
-            plan_step.id != step.step_key
-            or plan_step.id != expected_step.id
-            or plan_step.type != AuthorableStepType.TOOL
-            or plan_step.depends_on != []
-            or plan_step.when is not None
-            or step.mcp_tool_version_id != tool_config.tool_version_id
-        ):
-            raise AppError(
-                code="RESOURCE_CONFLICT",
-                message="Initial TOOL Step is not readyable by the foundation claim path.",
-                status_code=409,
-            )
+        # All Steps must still be initial PENDING before first claim.
+        for step in steps:
+            if (
+                step.status != StepStatus.PENDING.value
+                or step.parent_step_id is not None
+                or step.ready_at is not None
+                or step.started_at is not None
+                or step.attempt_count != 0
+                or step.resolved_input is not None
+                or step.step_type != AuthorableStepType.TOOL.value
+            ):
+                raise AppError(
+                    code="RESOURCE_CONFLICT",
+                    message=(
+                        "ExecutionStep is inconsistent with initial PENDING "
+                        "sequential TOOL state."
+                    ),
+                    status_code=409,
+                )
+
+        plan = assert_execution_plan_lineage(execution)
+        chain = validate_sequential_tool_chain(plan, steps)
+        root = next(s for s in steps if s.step_key == chain.root_step_key)
 
         token = uuid.uuid4()
         expires_at = ts + timedelta(seconds=self._lease_seconds)
@@ -221,9 +180,10 @@ class ExecutionClaimService:
         execution.started_at = ts
         execution.lock_version += 1
 
-        step.status = StepStatus.READY.value
-        step.ready_at = ts
-        step.lock_version += 1
+        # Exactly one root READY; non-root Steps remain PENDING.
+        root.status = StepStatus.READY.value
+        root.ready_at = ts
+        root.lock_version += 1
         await self._session.flush()
 
         return ExecutionClaimOutcome(
@@ -233,7 +193,7 @@ class ExecutionClaimService:
             worker_id=worker,
             lease_token=token,
             lease_expires_at=expires_at,
-            ready_step_ids=(step.id,),
+            ready_step_ids=(root.id,),
         )
 
     async def renew_lease(

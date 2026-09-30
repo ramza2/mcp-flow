@@ -1217,7 +1217,8 @@ reuses this materializer for Step persistence.
 
 #### Queue / Claim Foundation
 
-AgentRequest source의 initial dispatch만 지원한다.
+AgentRequest source의 initial Outbox dispatch를 지원한다. Claim은
+`AGENT_REQUEST` / `MANUAL_TOOL_TEST`의 sequential TOOL-only chain도 수용한다.
 
 ```text
 CREATED
@@ -1227,7 +1228,8 @@ CREATED
 → outbox relay가 execution queue에 execution_id/outbox_event_id만 publish
 → worker가 QUEUED row를 DB lock으로 claim
 → RUNNING + worker_id + lease_token + lease_expires_at + heartbeat_at + started_at
-→ 같은 transaction에서 single TOOL Step PENDING → READY + ready_at
+→ 같은 transaction에서 single-root TOOL Step PENDING → READY + ready_at
+  (downstream Steps remain PENDING)
 ```
 
 Invariant:
@@ -1235,9 +1237,31 @@ Invariant:
 ```text
 RUNNING → worker_id, lease_token, lease_expires_at 필수
 QUEUED  → worker/lease/heartbeat 모두 null
+claim-time READY count = 1 (linear TOOL chain root only)
+fan-out / fan-in / non-TOOL Steps → claim fail-closed (MCP 0)
 ```
 
 중복 broker delivery는 `RUNNING`/terminal 상태를 되돌리지 않고 no-op 처리한다. `queued_at`, `started_at`, `ready_at`은 최초 transition에서만 설정한다.
+
+#### Sequential TOOL orchestration foundation
+
+`ExecutionOrchestrator` owns graph progression and Execution completion.
+`McpToolRunner.run_claimed_tool_step` owns one TOOL Step invocation (Attempt /
+ToolCall / MCP / MRTR / Approval wait / safe retry).
+
+```text
+claim → root TOOL READY
+→ run_claimed_tool_step(root)
+→ ToolCall/Attempt/Step SUCCEEDED while Execution stays RUNNING (lease kept)
+→ orchestrator PENDING→READY next dependent TOOL
+→ … until all chain Steps SUCCEEDED
+→ Execution SUCCEEDED + finished_at + lease clear
+```
+
+Mid-chain Step failure terminalizes Execution (FAILED / TIMED_OUT /
+UNKNOWN_OUTCOME→FAILED) and never READY’s downstream Steps.
+STEP_OUTPUT / PLAN_INPUT runtime resolve, CONDITION / JOIN / LOOP / parallel,
+and authorable APPROVAL Step runtime are out of this slice.
 
 Lease heartbeat는 `RUNNING` + 동일 worker_id + 동일 lease_token + 미만료 lease에서만 연장한다. 만료된 lease를 heartbeat로 되살리지 않는다.
 

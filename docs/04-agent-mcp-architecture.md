@@ -553,7 +553,29 @@ APPROVAL Step persisted `config` (exact field set):
 
 `approval_policy_id`는 `05-data-model.md`의 ApprovalPolicy를 참조한다.
 실행 시점의 보호대상 Tool·입력·정책을 snapshot하고 승인 이후 실제 호출 직전에 hash를 재검증한다
-(런타임 orchestration은 본 절의 static contract 범위 밖이다).
+(authorable APPROVAL Step runtime orchestration은 본 절의 static contract 범위 밖이다).
+
+### 9.7.1 Sequential TOOL runtime orchestration (foundation)
+
+첫 runtime multi-step slice는 deterministic linear TOOL chain만 실행한다.
+
+```text
+Execution claim
+→ single root TOOL PENDING→READY
+→ TOOL A runs (Step-scoped McpToolRunner)
+→ TOOL A SUCCEEDED; Execution remains RUNNING under the same lease
+→ dependent TOOL B PENDING→READY
+→ … until all required TOOL Steps SUCCEEDED
+→ Execution SUCCEEDED + lease clear
+```
+
+경계:
+
+- `ExecutionOrchestrator` — READY 선택, PENDING→READY progression, Execution completion
+- `McpToolRunner.run_claimed_tool_step` — 단일 TOOL Attempt/ToolCall/MCP
+- Step SUCCEEDED ≠ Execution SUCCEEDED (미완료 Steps가 있으면 lease 유지)
+- fan-out / fan-in / non-TOOL / parallel → fail-closed (이 slice)
+- STEP_OUTPUT·PLAN_INPUT resolve, CONDITION/JOIN/LOOP, authorable APPROVAL Step runtime → 후속
 
 ### 9.5 LOOP
 
