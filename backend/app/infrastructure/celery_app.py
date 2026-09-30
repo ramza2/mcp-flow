@@ -24,6 +24,7 @@ celery_app.conf.update(
         "mcpflow.execution.claim": {"queue": "execution"},
         "mcpflow.execution.recover": {"queue": "execution"},
         "mcpflow.execution.approval_resume": {"queue": "execution"},
+        "mcpflow.execution.mrtr_resume": {"queue": "execution"},
     },
     task_serializer="json",
     accept_content=["json"],

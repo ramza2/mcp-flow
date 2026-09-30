@@ -37,10 +37,13 @@ async def assert_durable_waiting_input(
     execution: Execution,
     step: ExecutionStep,
 ) -> MCPInputRequest:
-    """Validate PR #40 round-1 durable WAITING_INPUT evidence.
+    """Validate durable WAITING_INPUT evidence for the current OPEN MRTR round.
 
     Returns the single OPEN ``MCPInputRequest`` when consistent.
     Raises ``RESOURCE_CONFLICT`` on any invariant failure (no repair).
+
+    Round N wait requires exactly N SUCCEEDED ToolCall rounds on the STARTED
+    Attempt (``request.round_no == len(succeeded)``).
     """
     if execution.status != ExecutionStatus.WAITING_INPUT.value:
         raise _conflict("Execution is not WAITING_INPUT.")
@@ -71,7 +74,9 @@ async def assert_durable_waiting_input(
         or request.step_execution_id != step.id
         or request.status != McpInputRequestStatus.OPEN.value
         or request.protocol_era != MCPProtocolEra.CURRENT.value
-        or request.round_no != 1
+        or not isinstance(request.round_no, int)
+        or isinstance(request.round_no, bool)
+        or request.round_no < 1
     ):
         raise _conflict("OPEN MCPInputRequest lineage is inconsistent.")
 
@@ -113,8 +118,9 @@ async def assert_durable_waiting_input(
     ]
     if not succeeded:
         raise _conflict("WAITING_INPUT requires SUCCEEDED ToolCall round evidence.")
-    # PR #40 round 1: exactly one completed ToolCall round on the STARTED Attempt.
-    if len(tool_calls) != 1 or len(succeeded) != 1:
-        raise _conflict("WAITING_INPUT round-1 ToolCall evidence is inconsistent.")
+    # Every ToolCall on the STARTED Attempt must be a completed SUCCEEDED round,
+    # and the OPEN request round_no must equal that completed count.
+    if len(tool_calls) != len(succeeded) or len(succeeded) != request.round_no:
+        raise _conflict("WAITING_INPUT ToolCall evidence does not match round_no.")
 
     return request

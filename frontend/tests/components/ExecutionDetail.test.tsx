@@ -19,10 +19,25 @@ describe('ExecutionDetail MRTR / UNKNOWN_OUTCOME contracts', () => {
     expect(screen.queryByDisplayValue(/requestState/i)).not.toBeInTheDocument();
     expect(screen.queryByRole('textbox', { name: /requestState/i })).not.toBeInTheDocument();
 
+    expect(screen.getByRole('button', { name: /거부/i })).toBeInTheDocument();
+
     await user.click(screen.getByRole('button', { name: /응답 후 Resume/i }));
 
     expect(await screen.findByText('RUNNING')).toBeInTheDocument();
     expect(screen.getByText(/응답 제출됨 — Execution RUNNING으로 재개/i)).toBeInTheDocument();
+  });
+
+  it('MRTR: reject transitions mock execution to FAILED without requestState', async () => {
+    const user = userEvent.setup();
+    renderWithRouter(<ExecutionDetail />, {
+      path: '/executions/:executionId',
+      route: '/executions/EXE-20260902-00126',
+    });
+
+    await user.click(screen.getByRole('button', { name: /거부/i }));
+    expect(await screen.findByText('FAILED')).toBeInTheDocument();
+    expect(screen.getByText(/입력이 거부되었습니다/i)).toBeInTheDocument();
+    expect(screen.queryByRole('textbox', { name: /requestState/i })).not.toBeInTheDocument();
   });
 
   it('UNKNOWN_OUTCOME: shows ops guidance and hides automatic Retry CTA', () => {

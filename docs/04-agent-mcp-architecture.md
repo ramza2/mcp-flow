@@ -785,7 +785,7 @@ valid input_required
 → Step/Execution WAITING_INPUT + lease clear
 ```
 
-사용자 response / schema validation / reject / same-Execution resume / `inputResponses` / requestState echo / 다음 round는 PR #41이다. malformed MRTR는 post-send `MCP_INVALID_INPUT_REQUIRED`(`outcome_unknown=true`)로 실패하며 WAITING_INPUT을 만들지 않는다.
+사용자 response / schema validation / reject / same-Execution resume / `inputResponses` / requestState echo / 다음 round는 PR #41에서 구현한다. malformed MRTR는 post-send `MCP_INVALID_INPUT_REQUIRED`(`outcome_unknown=true`)로 실패하며 WAITING_INPUT을 만들지 않는다.
 
 `ToolPolicy.max_result_bytes` overflow while streaming a dispatched `tools/call` response raises `MCP_RESULT_TOO_LARGE` with `outcome_unknown=true` (post-send ambiguity; oversized body is not retained). Unsafe risk classes become Step/Attempt/ToolCall `UNKNOWN_OUTCOME` / Execution `FAILED`. Local `result_inline_max_bytes` overflow after a complete valid remote result remains `RESULT_TOO_LARGE_FOR_INLINE` and is not `UNKNOWN_OUTCOME`.
 
@@ -856,7 +856,8 @@ complete result 또는 다음 input_required
 - UI에는 MCP Server가 요청한 입력임을 명확히 표시한다.
 - Legacy elicitation은 `LegacyMCPAdapter`에서 동일한 `WAITING_INPUT` 내부 상태로 normalize한다(후속).
 
-PR #40 경계: durable OPEN wait + WAITING_INPUT + lease release까지. 사용자 response/resume은 PR #41.
+PR #41 경계: OPEN→ANSWERED/REJECTED, `EXECUTION_MRTR_RESUME` Outbox, same-Execution claim,
+`inputResponses` + exact `requestState` echo, multi-round OPEN, minimal Input API/UI.
 
 ---
 

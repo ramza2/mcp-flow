@@ -35,6 +35,14 @@ class ExecutionQueuePublisher(Protocol):
         outbox_event_id: uuid.UUID,
     ) -> None: ...
 
+    def publish_mrtr_resume(
+        self,
+        *,
+        execution_id: uuid.UUID,
+        input_request_id: uuid.UUID,
+        outbox_event_id: uuid.UUID,
+    ) -> None: ...
+
 
 @dataclass(frozen=True, slots=True)
 class PublishBatchResult:
@@ -128,6 +136,44 @@ def validate_execution_approval_resume_event(
             status_code=409,
         )
     return execution_id, approval_request_id
+
+
+def validate_execution_mrtr_resume_event(
+    row: object,
+) -> tuple[uuid.UUID, uuid.UUID]:
+    """Validate ID-only MRTR-resume Outbox evidence."""
+    payload = getattr(row, "payload", None)
+    if not isinstance(payload, dict) or set(payload) != {
+        "execution_id",
+        "input_request_id",
+    }:
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message="MRTR resume Outbox payload is corrupted.",
+            status_code=409,
+        )
+    try:
+        execution_id = uuid.UUID(str(payload["execution_id"]))
+        input_request_id = uuid.UUID(str(payload["input_request_id"]))
+    except (TypeError, ValueError) as exc:
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message="MRTR resume Outbox payload is corrupted.",
+            status_code=409,
+        ) from exc
+    expected_dedupe = f"execution:{execution_id}:mrtr:{input_request_id}:resume"
+    if (
+        getattr(row, "event_type", None) != "EXECUTION_MRTR_RESUME"
+        or getattr(row, "aggregate_type", None) != "EXECUTION"
+        or execution_id != getattr(row, "aggregate_id", None)
+        or getattr(row, "dedupe_key", None) != expected_dedupe
+    ):
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message="MRTR resume Outbox lineage is corrupted.",
+            status_code=409,
+        )
+    return execution_id, input_request_id
 
 
 class ExecutionQueueService:
@@ -244,6 +290,15 @@ class OutboxRelayService:
             publisher.publish_approval_resume(
                 execution_id=execution_id,
                 approval_request_id=approval_request_id,
+                outbox_event_id=row.id,
+            )
+        elif event_type == "EXECUTION_MRTR_RESUME":
+            execution_id, input_request_id = validate_execution_mrtr_resume_event(
+                row
+            )
+            publisher.publish_mrtr_resume(
+                execution_id=execution_id,
+                input_request_id=input_request_id,
                 outbox_event_id=row.id,
             )
         else:

@@ -43,6 +43,17 @@ class FakePublisher:
         if self.fail:
             raise ConnectionError("redis unavailable")
 
+    def publish_mrtr_resume(
+        self,
+        *,
+        execution_id: object,
+        input_request_id: object,
+        outbox_event_id: object,
+    ) -> None:
+        self.resume_calls.append((execution_id, input_request_id, outbox_event_id))
+        if self.fail:
+            raise ConnectionError("redis unavailable")
+
 
 async def _create_one(session: AsyncSession) -> tuple[dict[str, object], object, str]:
     seeded = await _seed_ready(session)
