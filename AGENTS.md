@@ -537,11 +537,13 @@ not
 Semantics:
 
 ```text
-comparison → left Binding + right Binding/value
+comparison → left Binding + right Binding
 exists/is_null → unary Binding
 not → single Predicate child
 and/or → Predicate children
 ```
+
+Constants are represented as `LITERAL` bindings (not bare right-hand values).
 
 The Predicate structure is recursive.
 
