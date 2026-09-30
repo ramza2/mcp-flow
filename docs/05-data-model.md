@@ -1177,8 +1177,40 @@ Materialization:
 ```text
 executions.status = CREATED
 executions.plan_validation_run_id = READY PlanValidationRun.id
-execution_steps.status = PENDING  (foundation: single TOOL step)
+execution_steps.status = PENDING  (AgentRequest foundation: single TOOL step)
 ```
+
+#### Multi-step Execution materialization foundation
+
+Reusable internal materializer (`ExecutionPlanMaterializer`) projects an already
+validated immutable Execution Plan v1 into:
+
+```text
+Execution CREATED
++ N ExecutionStep PENDING  (one per plan.steps[index])
+```
+
+Invariants:
+
+```text
+plan_schema_version / plan_snapshot / plan_hash / input_snapshot / policy_snapshot
+  are caller-pinned; plan_hash is recomputed and must match before insert
+step_key = Plan Step id
+step_type = canonical AuthorableStepType
+sequence_hint = Plan array index (stable)
+step_snapshot = exact Plan Step JSON projection
+TOOL → mcp_tool_version_id = config.tool_version_id
+CONDITION/JOIN/APPROVAL/LOOP → mcp_tool_version_id = null
+parent_step_id = null  (DAG dependency remains in step_snapshot.depends_on)
+iteration_no / ready_at / started_at / finished_at = null
+attempt_count = 0
+all Steps remain PENDING (roots are not READY'd)
+```
+
+Atomicity: Execution + all Steps succeed or the transaction rolls back with zero
+rows. No Outbox / queue / MCP / ApprovalRequest / binding resolve / Predicate
+eval / LOOP expand. AgentRequest creation preflight remains single-TOOL and
+reuses this materializer for Step persistence.
 
 #### Queue / Claim Foundation
 
