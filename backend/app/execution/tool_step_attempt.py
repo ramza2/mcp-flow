@@ -265,10 +265,16 @@ class ToolStepAttemptService:
                 message="Execution must be RUNNING to start a TOOL Step Attempt.",
                 status_code=409,
             )
-        if execution.source_type != ExecutionSourceType.AGENT_REQUEST.value:
+        if execution.source_type not in {
+            ExecutionSourceType.AGENT_REQUEST.value,
+            ExecutionSourceType.MANUAL_TOOL_TEST.value,
+        }:
             raise AppError(
                 code="RESOURCE_CONFLICT",
-                message="Attempt foundation supports AgentRequest Executions only.",
+                message=(
+                    "Attempt foundation supports AGENT_REQUEST / "
+                    "MANUAL_TOOL_TEST Executions only."
+                ),
                 status_code=409,
             )
         if execution.agent_version_id is None:

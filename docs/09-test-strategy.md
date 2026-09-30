@@ -369,6 +369,16 @@ Dataset은 평가 전 FROZEN하고 실행 중 정답을 변경하지 않는다.
 - PostgreSQL atomic multi-row persist/rollback
 - restart recovery (CREATED + plan_validation_run_id + plan_hash 일치)
 
+추가 (Sequential TOOL orchestration foundation — linear chain runtime):
+
+- claim promotes exactly one root TOOL READY; downstream stay PENDING
+- fan-out / fan-in / non-TOOL claim → fail-closed (MCP 0)
+- Step SUCCEEDED keeps Execution RUNNING + lease until chain complete
+- sequential 2/3-TOOL success → N MCP calls; all Steps SUCCEEDED; Execution SUCCEEDED
+- mid-chain failure → Execution FAILED; downstream never READY / MCP not called
+- single-TOOL AgentRequest claim/runner/Approval/MRTR/retry regressions remain green
+- PostgreSQL sequential 3-TOOL orchestration
+
 추가 (Execution Queue / Claim foundation):
 
 - `CREATED → QUEUED + EXECUTION_DISPATCH Outbox` 동일 transaction
@@ -378,7 +388,7 @@ Dataset은 평가 전 FROZEN하고 실행 중 정답을 변경하지 않는다.
 - broker success 후 mark-published 유실을 가정한 duplicate delivery 안전성
 - unpublished Outbox restart recovery
 - DB idempotent claim `QUEUED → RUNNING`
-- initial single TOOL Step `PENDING → READY` same transaction
+- initial root TOOL Step `PENDING → READY` same transaction (downstream stay PENDING)
 - double claim winner 1 / loser no-op
 - already RUNNING/terminal duplicate task no-op
 - worker_id/lease_token/lease expiry/heartbeat contract

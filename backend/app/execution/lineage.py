@@ -19,13 +19,19 @@ from app.domain.enums import (
 )
 from app.models.execution import Execution, ExecutionStep, StepAttempt
 from app.schemas.execution_plan import (
-    DETERMINISTIC_TOOL_STEP_ID,
     ExecutionPlanStep,
     ExecutionPlanV1,
     ToolStepConfigV1,
     compute_plan_hash,
 )
 from app.schemas.parameter_binding import BindingValue
+
+_LINEAGE_SOURCES = frozenset(
+    {
+        ExecutionSourceType.AGENT_REQUEST.value,
+        ExecutionSourceType.MANUAL_TOOL_TEST.value,
+    }
+)
 
 
 def materialize_secret_safe_resolved_input(
@@ -35,7 +41,7 @@ def materialize_secret_safe_resolved_input(
 
     LITERAL → value
     SECRET_REF → reference-only object (no secret material)
-    Other BindingKinds → fail closed (not supported by AgentRequest foundation).
+    Other BindingKinds → fail closed (not supported by this orchestration slice).
     """
     resolved: dict[str, Any] = {}
     for key, binding in bindings.items():
@@ -96,22 +102,25 @@ def build_secret_safe_request_snapshot(
 def assert_agent_request_plan_step_lineage(
     execution: Execution, step: ExecutionStep
 ) -> ToolStepConfigV1:
-    """Validate pinned plan/step snapshots for AgentRequest single-TOOL foundation."""
-    if execution.source_type != ExecutionSourceType.AGENT_REQUEST.value:
+    """Validate pinned plan/step snapshots for a TOOL Step.
+
+    Supports AgentRequest single-TOOL and sequential multi-TOOL MANUAL_TOOL_TEST /
+    AgentRequest materializations. Binding kinds remain LITERAL/SECRET_REF only.
+    """
+    if execution.source_type not in _LINEAGE_SOURCES:
         raise AppError(
             code="RESOURCE_CONFLICT",
-            message="Replay lineage supports AgentRequest Executions only.",
+            message="Replay lineage supports AGENT_REQUEST / MANUAL_TOOL_TEST only.",
             status_code=409,
         )
     if (
         step.step_type != AuthorableStepType.TOOL.value
         or step.mcp_tool_version_id is None
         or step.parent_step_id is not None
-        or step.step_key != DETERMINISTIC_TOOL_STEP_ID
     ):
         raise AppError(
             code="RESOURCE_CONFLICT",
-            message="ExecutionStep is inconsistent with AgentRequest TOOL foundation.",
+            message="ExecutionStep is inconsistent with TOOL orchestration foundation.",
             status_code=409,
         )
 
@@ -137,14 +146,20 @@ def assert_agent_request_plan_step_lineage(
             message="Execution plan snapshot/hash lineage is inconsistent.",
             status_code=409,
         )
-    if len(plan.steps) != 1:
+    if not plan.steps:
         raise AppError(
             code="RESOURCE_CONFLICT",
-            message="AgentRequest foundation Execution plan must contain one Step.",
+            message="Execution plan must contain at least one Step.",
             status_code=409,
         )
 
-    expected = plan.steps[0]
+    expected = next((ps for ps in plan.steps if ps.id == step.step_key), None)
+    if expected is None:
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message=f"No plan step matches step_key={step.step_key!r}.",
+            status_code=409,
+        )
     if expected.model_dump(mode="json") != step.step_snapshot:
         raise AppError(
             code="RESOURCE_CONFLICT",
@@ -164,7 +179,6 @@ def assert_agent_request_plan_step_lineage(
         plan_step.id != step.step_key
         or plan_step.id != expected.id
         or plan_step.type != AuthorableStepType.TOOL
-        or plan_step.depends_on != []
         or plan_step.when is not None
         or step.mcp_tool_version_id != tool_config.tool_version_id
     ):
