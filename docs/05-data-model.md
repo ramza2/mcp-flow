@@ -1012,6 +1012,14 @@ DRAFT → PUBLISHED → DEPRECATED
 
 Published version은 수정하지 않고 변경 시 새 Draft version을 생성한다.
 
+`plan_definition`은 Execution Plan v1 JSON이다. Step Type별 persisted `config` exact shape,
+restricted Predicate AST, Plan BindingValue, LOOP `body_step_ids` / `max_iterations` contract는
+`docs/04-agent-mcp-architecture.md` §9.3–§10.1을 Source of Truth로 한다.
+
+Static complex-plan validation( DAG / typed config / Predicate / binding source / limits )은
+Workflow persistence·runtime orchestration과 분리된 foundation이다. 본 모델은 새 Step Type·상태를
+추가하지 않는다.
+
 ### 11.3 `workflow_version_tool_refs`
 
 Plan JSON은 authoring 원본으로 유지하되 변경영향과 FK 무결성을 위해 TOOL Step projection을 저장한다.

@@ -519,15 +519,41 @@ CONTINUE
 
 ### 9.3 JOIN 정책
 
+Canonical JOIN policies:
+
 ```text
 ALL_SUCCESS
 ALL_COMPLETE
 ANY_SUCCESS
 ```
 
+JOIN Step persisted `config` (exact field set):
+
+```json
+{
+  "policy": "ALL_SUCCESS"
+}
+```
+
+규칙:
+
+- `policy`는 위 세 값만 허용한다.
+- JOIN은 `depends_on`에 하나 이상의 upstream Step ID가 필요하다(fan-in).
+- PARALLEL은 persisted Step Type이 아니다. 병렬은 dependency graph로만 표현한다.
+
 ### 9.4 APPROVAL Step
 
-`config.approval_policy_id`를 통해 `05-data-model.md`의 ApprovalPolicy를 참조한다. 실행 시점의 보호대상 Tool·입력·정책을 snapshot하고 승인 이후 실제 호출 직전에 hash를 재검증한다.
+APPROVAL Step persisted `config` (exact field set):
+
+```json
+{
+  "approval_policy_id": "<uuid>"
+}
+```
+
+`approval_policy_id`는 `05-data-model.md`의 ApprovalPolicy를 참조한다.
+실행 시점의 보호대상 Tool·입력·정책을 snapshot하고 승인 이후 실제 호출 직전에 hash를 재검증한다
+(런타임 orchestration은 본 절의 static contract 범위 밖이다).
 
 ### 9.5 LOOP
 
@@ -538,7 +564,95 @@ FOR_EACH
 WHILE
 ```
 
-반드시 `max_iterations`가 존재하며 system hard limit을 넘을 수 없다. Loop body는 독립 typed DAG scope다.
+LOOP Step persisted `config` (exact field set):
+
+```json
+{
+  "mode": "FOR_EACH",
+  "max_iterations": 10,
+  "collection": { "kind": "PLAN_INPUT", "path": "/items" },
+  "body_step_ids": ["process_item"]
+}
+```
+
+```json
+{
+  "mode": "WHILE",
+  "max_iterations": 10,
+  "predicate": { "op": "eq", "left": { "...": "..." }, "right": { "...": "..." } },
+  "body_step_ids": ["retry_step"]
+}
+```
+
+규칙:
+
+- `max_iterations`는 필수이며 `>= 1`이고 Plan `limits.max_loop_iterations`를 초과할 수 없다.
+- `FOR_EACH`는 `collection`(Plan BindingValue) 필수, `predicate` 금지.
+- `WHILE`는 `predicate`(Predicate AST) 필수, `collection` 금지.
+- `body_step_ids`는 비어 있지 않은 고유 Step ID 목록이다.
+- body Step은 동일 Plan의 top-level `steps`에 존재하며 LOOP 자신일 수 없다.
+- body Step의 `depends_on`은 body 내부 Step 또는 해당 LOOP Step ID만 참조할 수 있다
+  (LOOP가 body entry dependency).
+- Loop body는 typed DAG scope다. nested LOOP는 허용하되 nesting depth ≤ 3.
+- unbounded LOOP는 금지한다.
+
+### 9.6 CONDITION / TOOL config (complex Plan)
+
+CONDITION Step persisted `config`:
+
+```json
+{
+  "predicate": { "op": "eq", "left": { "...": "..." }, "right": { "...": "..." } }
+}
+```
+
+Complex/Workflow Plan의 TOOL Step persisted `config`:
+
+```json
+{
+  "tool_version_id": "<uuid>",
+  "bindings": {
+    "location": { "kind": "PLAN_INPUT", "path": "/location" },
+    "token": { "kind": "SECRET_REF", "secret_id": "<uuid>" }
+  }
+}
+```
+
+AgentRequest foundation TOOL config는 §9.1.1을 따르며 bindings는
+`LITERAL` / `SECRET_REF`만 허용한다. Complex Plan TOOL bindings는
+§8.2의 전체 BindingKind를 사용할 수 있다.
+
+Step 공통 `when` 필드는 optional Predicate AST다(`null` 또는 생략 가능).
+`when`이 있으면 Predicate AST 구조 검증을 통과해야 한다.
+
+### 9.7 Complex Plan static validation foundation
+
+AgentRequest single-TOOL Validator(§11.1)와 별도로, Workflow multi-step 준비를 위한
+**static complex-plan validator**는 다음만 수행한다.
+
+```text
+Step ID / type / typed config
+dependency existence + DAG cycle
+reachability / basic graph consistency
+limits (max_steps, max_parallelism, max_loop_iterations)
+JOIN policy
+Predicate AST structure/operators
+Plan BindingValue source references + JSON Pointer subset
+LOOP body scope + nesting + max_iterations
+```
+
+하지 않는 것:
+
+```text
+Execution / ExecutionStep 생성
+MCP 호출
+ApprovalRequest 생성
+runtime predicate 평가
+STEP_OUTPUT 값 resolve
+parallel worker orchestration
+Workflow persistence / API / UI
+AgentRequest Plan Generator를 complex plan 생성기로 확장
+```
 
 ---
 
@@ -553,12 +667,73 @@ exists is_null
 and or not
 ```
 
+Persisted recursive shape (flat `left/op/right` only 금지):
+
+```json
+{ "op": "eq", "left": { "kind": "STEP_OUTPUT", "step_id": "s1", "path": "/x" }, "right": { "kind": "LITERAL", "value": 1 } }
+```
+
+```json
+{ "op": "exists", "operand": { "kind": "STEP_OUTPUT", "step_id": "s1", "path": "/x" } }
+```
+
+```json
+{ "op": "not", "child": { "op": "is_null", "operand": { "kind": "PLAN_INPUT", "path": "/y" } } }
+```
+
+```json
+{ "op": "and", "children": [ { "...": "..." }, { "...": "..." } ] }
+```
+
+의미:
+
+| op | shape |
+|---|---|
+| `eq` `ne` `gt` `gte` `lt` `lte` `in` `contains` | `left` Binding + `right` Binding |
+| `exists` `is_null` | `operand` Binding |
+| `not` | single `child` Predicate |
+| `and` `or` | non-empty `children` Predicate list |
+
 규칙:
 
 - 임의 함수호출·정규식 코드·파일·network 접근 금지
-- operand type 사전검증
-- 존재하지 않는 path는 null과 구분되는 `MISSING` 처리
-- 평가 입력·결과를 Step 이력에 저장
+- operand type 사전검증은 runtime 평가 단계에서 수행한다(static foundation는 구조/연산자/Binding 참조만)
+- 존재하지 않는 path는 null과 구분되는 `MISSING` 처리(runtime)
+- 평가 입력·결과를 Step 이력에 저장(runtime)
+
+### 10.1 Plan BindingValue + JSON Pointer subset
+
+Complex Plan에서 허용 BindingKind:
+
+```text
+LITERAL
+PLAN_INPUT
+STEP_OUTPUT
+EXECUTION_CONTEXT
+LOOP_CONTEXT
+SECRET_REF
+```
+
+필드 contract:
+
+| kind | required fields |
+|---|---|
+| `LITERAL` | `value` |
+| `SECRET_REF` | `secret_id` (UUID) |
+| `PLAN_INPUT` | `path` |
+| `STEP_OUTPUT` | `step_id`, `path` |
+| `EXECUTION_CONTEXT` | `path` |
+| `LOOP_CONTEXT` | `path` |
+
+`path`는 RFC 6901 JSON Pointer **subset**:
+
+- 비어 있지 않은 string
+- `/`로 시작
+- `~` escape는 `~0` / `~1`만 허용
+- 빈 token(`//`) 및 `#` fragment 금지
+- 임의 expression / template 금지
+
+`STEP_OUTPUT.step_id`는 동일 Plan의 다른 Step ID여야 하며, 자기 참조는 금지한다.
 
 ---
 

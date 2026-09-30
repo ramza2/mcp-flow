@@ -311,6 +311,19 @@ Dataset은 평가 전 FROZEN하고 실행 중 정답을 변경하지 않는다.
 - cancel race / double validator CAS
 - restart recovery (READY + WAITING_CONFIRMATION)
 
+추가 (Static complex-plan validator foundation — Workflow multi-step 준비, runtime 없음):
+
+- valid sequential 2-TOOL DAG
+- valid fan-out / fan-in (JOIN) graph
+- duplicate Step ID / missing dependency / cycle
+- invalid JOIN policy
+- invalid Predicate AST structure/operators
+- invalid binding source Step (`STEP_OUTPUT`)
+- malformed JSON Pointer subset
+- LOOP without / beyond `max_iterations` (+ nesting/body scope)
+- `max_steps` / `max_parallelism` violation
+- existing single-TOOL AgentRequest Plan regression (LITERAL / SECRET_REF 호환)
+
 추가 (Clarification / Confirmation resume foundation):
 
 - clarification response schema validation
