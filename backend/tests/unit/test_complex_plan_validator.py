@@ -365,16 +365,153 @@ def test_max_steps_violation() -> None:
     assert "PLAN_LIMIT_EXCEEDED" in result.error_codes
 
 
-def test_max_parallelism_violation() -> None:
-    # three independent roots → wave width 3
+def test_fan_out_wider_than_max_parallelism_remains_valid() -> None:
+    """max_parallelism is a runtime concurrency cap, not a DAG wave-width ceiling."""
     plan = _base_plan(
         steps=[_tool("a"), _tool("b"), _tool("c")],
         limits={"max_parallelism": 2},
     )
     result = _validate(plan)
+    assert result.ok, result.errors
+
+
+def test_max_parallelism_hard_bound_violation() -> None:
+    from app.schemas.execution_plan import SYSTEM_HARD_MAX_PARALLELISM
+
+    plan = _base_plan(
+        steps=[_tool("a")],
+        limits={"max_parallelism": SYSTEM_HARD_MAX_PARALLELISM + 1},
+    )
+    result = _validate(plan)
     assert not result.ok
     assert "PLAN_LIMIT_EXCEEDED" in result.error_codes
-    assert any("parallel" in e.message for e in result.errors)
+    assert any("max_parallelism" in e.message for e in result.errors)
+
+
+# --- STEP_OUTPUT ancestry ---
+
+
+def test_step_output_direct_upstream_valid() -> None:
+    plan = _base_plan(
+        steps=[
+            _tool("a"),
+            _tool(
+                "b",
+                depends_on=["a"],
+                bindings={
+                    "x": {
+                        "kind": BindingKind.STEP_OUTPUT.value,
+                        "step_id": "a",
+                        "path": "/result",
+                    }
+                },
+            ),
+        ]
+    )
+    assert _validate(plan).ok
+
+
+def test_step_output_transitive_upstream_valid() -> None:
+    plan = _base_plan(
+        steps=[
+            _tool("a"),
+            _tool("b", depends_on=["a"]),
+            _tool(
+                "c",
+                depends_on=["b"],
+                bindings={
+                    "x": {
+                        "kind": BindingKind.STEP_OUTPUT.value,
+                        "step_id": "a",
+                        "path": "/result",
+                    }
+                },
+            ),
+        ]
+    )
+    result = _validate(plan)
+    assert result.ok, result.errors
+
+
+def test_step_output_future_downstream_invalid() -> None:
+    plan = _base_plan(
+        steps=[
+            _tool(
+                "a",
+                bindings={
+                    "x": {
+                        "kind": BindingKind.STEP_OUTPUT.value,
+                        "step_id": "b",
+                        "path": "/result",
+                    }
+                },
+            ),
+            _tool("b", depends_on=["a"]),
+        ]
+    )
+    result = _validate(plan)
+    assert not result.ok
+    assert "PLAN_BINDING_INVALID" in result.error_codes
+    assert any("ancestry" in e.message for e in result.errors)
+
+
+def test_step_output_unrelated_sibling_invalid() -> None:
+    plan = _base_plan(
+        steps=[
+            _tool("root"),
+            _tool("left", depends_on=["root"]),
+            _tool(
+                "right",
+                depends_on=["root"],
+                bindings={
+                    "x": {
+                        "kind": BindingKind.STEP_OUTPUT.value,
+                        "step_id": "left",
+                        "path": "/result",
+                    }
+                },
+            ),
+        ]
+    )
+    result = _validate(plan)
+    assert not result.ok
+    assert "PLAN_BINDING_INVALID" in result.error_codes
+    assert any(e.step_id == "right" for e in result.errors)
+
+
+def test_step_output_invalid_inside_when_predicate() -> None:
+    step_a = _tool("a")
+    step_b = _tool("b", depends_on=["a"])
+    step_b["when"] = {
+        "op": "eq",
+        "left": {
+            "kind": BindingKind.STEP_OUTPUT.value,
+            "step_id": "ghost",
+            "path": "/x",
+        },
+        "right": {"kind": BindingKind.LITERAL.value, "value": 1},
+    }
+    plan = _base_plan(steps=[step_a, step_b])
+    result = _validate(plan)
+    assert not result.ok
+    assert "PLAN_BINDING_INVALID" in result.error_codes
+
+    # sibling reference inside when
+    step_left = _tool("left", depends_on=["a"])
+    step_right = _tool("right", depends_on=["a"])
+    step_right["when"] = {
+        "op": "exists",
+        "operand": {
+            "kind": BindingKind.STEP_OUTPUT.value,
+            "step_id": "left",
+            "path": "/ok",
+        },
+    }
+    plan2 = _base_plan(steps=[_tool("a"), step_left, step_right])
+    result2 = _validate(plan2)
+    assert not result2.ok
+    assert "PLAN_BINDING_INVALID" in result2.error_codes
+    assert any("ancestry" in e.message for e in result2.errors)
 
 
 # --- single-TOOL regression / LITERAL SECRET_REF compatibility ---

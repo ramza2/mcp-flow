@@ -14,6 +14,10 @@ from typing import Any
 from app.domain.enums import AuthorableStepType, BindingKind
 from app.schemas.execution_plan import (
     MAX_LOOP_NESTING_DEPTH,
+    SYSTEM_HARD_MAX_DURATION_SECONDS,
+    SYSTEM_HARD_MAX_LOOP_ITERATIONS,
+    SYSTEM_HARD_MAX_PARALLELISM,
+    SYSTEM_HARD_MAX_STEPS,
     ApprovalStepConfigV1,
     ComplexToolStepConfigV1,
     ConditionStepConfigV1,
@@ -134,25 +138,17 @@ class StaticComplexPlanValidator:
                     )
                 )
 
-        # Limits: max_steps
+        # Limits: configured values vs system hard bounds
+        # max_parallelism is a runtime concurrency cap — do NOT reject DAG wave width.
+        errors.extend(_validate_limit_hard_bounds(plan))
+
+        # Limits: max_steps vs actual step count
         if len(plan.steps) > plan.limits.max_steps:
             errors.append(
                 _issue(
                     "PLAN_LIMIT_EXCEEDED",
                     f"step count {len(plan.steps)} exceeds max_steps="
                     f"{plan.limits.max_steps}",
-                )
-            )
-
-        # Limits: max_parallelism via topological wave width
-        wave_width = _max_parallel_wave_width(plan.steps)
-        if wave_width > plan.limits.max_parallelism:
-            errors.append(
-                _issue(
-                    "PLAN_LIMIT_EXCEEDED",
-                    f"max parallel wave width {wave_width} exceeds "
-                    f"max_parallelism={plan.limits.max_parallelism}",
-                    details={"wave_width": wave_width},
                 )
             )
 
@@ -176,44 +172,67 @@ class StaticComplexPlanValidator:
                         )
                     )
 
-        # Per-step typed config + when + bindings
+        # First pass: collect LOOP body ownership (needed before binding ancestry rules)
         loop_body_owner: dict[str, str] = {}
         loop_configs: dict[str, LoopStepConfigV1] = {}
+        ancestors = _transitive_ancestors(plan.steps)
 
         for step in plan.steps:
-            self._validate_when(step, id_set, errors)
-            cfg = self._validate_step_config(step, id_set, plan, errors)
-            if isinstance(cfg, LoopStepConfigV1):
-                loop_configs[step.id] = cfg
-                for body_id in cfg.body_step_ids:
-                    if body_id not in id_set:
-                        errors.append(
-                            _issue(
-                                "PLAN_SCHEMA_INVALID",
-                                f"LOOP body_step_id={body_id!r} does not exist",
-                                step_id=step.id,
-                            )
+            if step.type != AuthorableStepType.LOOP:
+                continue
+            try:
+                cfg = LoopStepConfigV1.model_validate(step.config)
+            except Exception:
+                continue
+            loop_configs[step.id] = cfg
+            for body_id in cfg.body_step_ids:
+                if body_id not in id_set:
+                    errors.append(
+                        _issue(
+                            "PLAN_SCHEMA_INVALID",
+                            f"LOOP body_step_id={body_id!r} does not exist",
+                            step_id=step.id,
                         )
-                        continue
-                    if body_id == step.id:
-                        errors.append(
-                            _issue(
-                                "PLAN_SCHEMA_INVALID",
-                                "LOOP cannot include itself in body_step_ids",
-                                step_id=step.id,
-                            )
+                    )
+                    continue
+                if body_id == step.id:
+                    errors.append(
+                        _issue(
+                            "PLAN_SCHEMA_INVALID",
+                            "LOOP cannot include itself in body_step_ids",
+                            step_id=step.id,
                         )
-                        continue
-                    if body_id in loop_body_owner:
-                        errors.append(
-                            _issue(
-                                "PLAN_SCHEMA_INVALID",
-                                f"step {body_id!r} belongs to multiple LOOP bodies",
-                                step_id=body_id,
-                            )
+                    )
+                    continue
+                if body_id in loop_body_owner:
+                    errors.append(
+                        _issue(
+                            "PLAN_SCHEMA_INVALID",
+                            f"step {body_id!r} belongs to multiple LOOP bodies",
+                            step_id=body_id,
                         )
-                    else:
-                        loop_body_owner[body_id] = step.id
+                    )
+                else:
+                    loop_body_owner[body_id] = step.id
+
+        # Per-step typed config + when + bindings
+        for step in plan.steps:
+            require_ancestry = step.id not in loop_body_owner
+            self._validate_when(
+                step,
+                id_set=id_set,
+                ancestors=ancestors,
+                require_ancestry=require_ancestry,
+                errors=errors,
+            )
+            self._validate_step_config(
+                step,
+                id_set=id_set,
+                plan=plan,
+                ancestors=ancestors,
+                require_ancestry=require_ancestry,
+                errors=errors,
+            )
 
         # LOOP body depends_on scope + nesting depth
         for loop_id, cfg in loop_configs.items():
@@ -252,7 +271,10 @@ class StaticComplexPlanValidator:
     def _validate_when(
         self,
         step: ExecutionPlanStep,
+        *,
         id_set: set[str],
+        ancestors: dict[str, set[str]],
+        require_ancestry: bool,
         errors: list[ComplexPlanIssue],
     ) -> None:
         if step.when is None:
@@ -281,6 +303,8 @@ class StaticComplexPlanValidator:
             iter_plan_bindings_in_predicate(pred),
             owner_step_id=step.id,
             id_set=id_set,
+            ancestors=ancestors,
+            require_ancestry=require_ancestry,
             errors=errors,
             code="PLAN_BINDING_INVALID",
         )
@@ -288,8 +312,11 @@ class StaticComplexPlanValidator:
     def _validate_step_config(
         self,
         step: ExecutionPlanStep,
+        *,
         id_set: set[str],
         plan: ExecutionPlanV1,
+        ancestors: dict[str, set[str]],
+        require_ancestry: bool,
         errors: list[ComplexPlanIssue],
     ) -> Any:
         if not isinstance(step.config, dict):
@@ -309,6 +336,8 @@ class StaticComplexPlanValidator:
                     list(cfg.bindings.values()),
                     owner_step_id=step.id,
                     id_set=id_set,
+                    ancestors=ancestors,
+                    require_ancestry=require_ancestry,
                     errors=errors,
                     code="PLAN_BINDING_INVALID",
                 )
@@ -323,6 +352,8 @@ class StaticComplexPlanValidator:
                     iter_plan_bindings_in_predicate(cfg.predicate),
                     owner_step_id=step.id,
                     id_set=id_set,
+                    ancestors=ancestors,
+                    require_ancestry=require_ancestry,
                     errors=errors,
                     code="PLAN_BINDING_INVALID",
                 )
@@ -348,6 +379,8 @@ class StaticComplexPlanValidator:
                     bindings,
                     owner_step_id=step.id,
                     id_set=id_set,
+                    ancestors=ancestors,
+                    require_ancestry=require_ancestry,
                     errors=errors,
                     code="PLAN_BINDING_INVALID",
                 )
@@ -386,9 +419,12 @@ class StaticComplexPlanValidator:
         *,
         owner_step_id: str,
         id_set: set[str],
+        ancestors: dict[str, set[str]],
+        require_ancestry: bool,
         errors: list[ComplexPlanIssue],
         code: str,
     ) -> None:
+        owner_ancestors = ancestors.get(owner_step_id, set())
         for binding in bindings:
             if isinstance(binding, PlanStepOutputBinding):
                 if binding.step_id == owner_step_id:
@@ -404,6 +440,16 @@ class StaticComplexPlanValidator:
                         _issue(
                             code,
                             f"STEP_OUTPUT step_id={binding.step_id!r} does not exist",
+                            step_id=owner_step_id,
+                        )
+                    )
+                elif require_ancestry and binding.step_id not in owner_ancestors:
+                    errors.append(
+                        _issue(
+                            code,
+                            f"STEP_OUTPUT step_id={binding.step_id!r} is not in "
+                            f"the transitive dependency ancestry of "
+                            f"{owner_step_id!r}",
                             step_id=owner_step_id,
                         )
                     )
@@ -481,35 +527,57 @@ def _reachable_from_roots(steps: list[ExecutionPlanStep]) -> set[str]:
     return seen
 
 
-def _max_parallel_wave_width(steps: list[ExecutionPlanStep]) -> int:
-    """Largest set of steps that become ready in the same topological wave."""
-    if not steps:
-        return 0
+def _validate_limit_hard_bounds(plan: ExecutionPlanV1) -> list[ComplexPlanIssue]:
+    """Reject configured limit values outside system hard bounds."""
+    errors: list[ComplexPlanIssue] = []
+    checks = (
+        ("max_steps", plan.limits.max_steps, SYSTEM_HARD_MAX_STEPS),
+        (
+            "max_duration_seconds",
+            plan.limits.max_duration_seconds,
+            SYSTEM_HARD_MAX_DURATION_SECONDS,
+        ),
+        ("max_parallelism", plan.limits.max_parallelism, SYSTEM_HARD_MAX_PARALLELISM),
+        (
+            "max_loop_iterations",
+            plan.limits.max_loop_iterations,
+            SYSTEM_HARD_MAX_LOOP_ITERATIONS,
+        ),
+    )
+    for name, value, hard_max in checks:
+        if value > hard_max:
+            errors.append(
+                _issue(
+                    "PLAN_LIMIT_EXCEEDED",
+                    f"limits.{name}={value} exceeds system hard max {hard_max}",
+                )
+            )
+    return errors
+
+
+def _transitive_ancestors(steps: list[ExecutionPlanStep]) -> dict[str, set[str]]:
+    """Map each step id → set of transitive upstream dependency ids."""
     ids = {s.id for s in steps}
-    indegree: dict[str, int] = {s.id: 0 for s in steps}
-    adj: dict[str, list[str]] = defaultdict(list)
-    for step in steps:
-        for dep in step.depends_on:
-            if dep in ids:
-                adj[dep].append(step.id)
-                indegree[step.id] += 1
+    direct: dict[str, list[str]] = {
+        s.id: [d for d in s.depends_on if d in ids] for s in steps
+    }
+    cache: dict[str, set[str]] = {}
 
-    # If cycle exists, wave width is undefined — return 0 (cycle reported separately).
-    if _has_dependency_cycle(steps):
-        return 0
+    def ancestors_of(sid: str, stack: set[str]) -> set[str]:
+        if sid in cache:
+            return cache[sid]
+        if sid in stack:
+            return set()
+        stack.add(sid)
+        result: set[str] = set()
+        for dep in direct.get(sid, []):
+            result.add(dep)
+            result |= ancestors_of(dep, stack)
+        stack.remove(sid)
+        cache[sid] = result
+        return result
 
-    ready = [sid for sid, deg in indegree.items() if deg == 0]
-    max_width = 0
-    while ready:
-        max_width = max(max_width, len(ready))
-        next_ready: list[str] = []
-        for sid in ready:
-            for nxt in adj.get(sid, []):
-                indegree[nxt] -= 1
-                if indegree[nxt] == 0:
-                    next_ready.append(nxt)
-        ready = next_ready
-    return max_width
+    return {s.id: ancestors_of(s.id, set()) for s in steps}
 
 
 def _validate_loop_nesting(

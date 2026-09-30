@@ -33,6 +33,13 @@ DETERMINISTIC_TOOL_STEP_ID = "tool_1"
 DETERMINISTIC_TOOL_STEP_NAME = "Tool Step 1"
 MAX_LOOP_NESTING_DEPTH = 3
 
+# System hard bounds for Plan limits (docs/04 §9.7).
+# max_parallelism is a runtime concurrency cap, not a DAG wave-width ceiling.
+SYSTEM_HARD_MAX_STEPS = 100
+SYSTEM_HARD_MAX_DURATION_SECONDS = 3600
+SYSTEM_HARD_MAX_PARALLELISM = 32
+SYSTEM_HARD_MAX_LOOP_ITERATIONS = 500
+
 
 def _require_non_blank(value: str, *, field_name: str) -> str:
     if not isinstance(value, str) or not value.strip():

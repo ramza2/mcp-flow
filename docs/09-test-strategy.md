@@ -315,13 +315,15 @@ Dataset은 평가 전 FROZEN하고 실행 중 정답을 변경하지 않는다.
 
 - valid sequential 2-TOOL DAG
 - valid fan-out / fan-in (JOIN) graph
+- fan-out ready width > `max_parallelism` still valid (runtime concurrency cap)
 - duplicate Step ID / missing dependency / cycle
 - invalid JOIN policy
 - invalid Predicate AST structure/operators
-- invalid binding source Step (`STEP_OUTPUT`)
+- `STEP_OUTPUT` transitive dependency ancestry (direct/transitive valid; future/sibling invalid)
+- invalid `STEP_OUTPUT` inside `when` / Predicate
 - malformed JSON Pointer subset
 - LOOP without / beyond `max_iterations` (+ nesting/body scope)
-- `max_steps` / `max_parallelism` violation
+- `max_steps` count / `max_parallelism` hard-bound violation
 - existing single-TOOL AgentRequest Plan regression (LITERAL / SECRET_REF 호환)
 
 추가 (Clarification / Confirmation resume foundation):

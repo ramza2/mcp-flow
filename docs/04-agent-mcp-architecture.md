@@ -634,11 +634,30 @@ AgentRequest single-TOOL Validator(§11.1)와 별도로, Workflow multi-step 준
 Step ID / type / typed config
 dependency existence + DAG cycle
 reachability / basic graph consistency
-limits (max_steps, max_parallelism, max_loop_iterations)
+limits value hard bounds + max_steps vs step count + max_loop_iterations
 JOIN policy
 Predicate AST structure/operators
 Plan BindingValue source references + JSON Pointer subset
+STEP_OUTPUT transitive dependency ancestry (top-level)
 LOOP body scope + nesting + max_iterations
+```
+
+`limits.max_parallelism` 의미:
+
+- runtime concurrency cap이다. 미래 orchestrator가 동시에 실행하는 Step 수를
+  최대 N으로 제한한다.
+- DAG에서 동시에 ready일 수 있는 candidate 수가 `max_parallelism`보다 커도
+  static validator는 그 이유만으로 거부하지 않는다.
+- static validator는 설정된 `max_parallelism` 값이 system hard bound
+  (`1 … 32`) 안에 있는지만 검사한다.
+
+System hard bounds (configured limit values):
+
+```text
+max_steps             1 … 100
+max_duration_seconds  1 … 3600
+max_parallelism       1 … 32
+max_loop_iterations   1 … 500
 ```
 
 하지 않는 것:
@@ -649,7 +668,7 @@ MCP 호출
 ApprovalRequest 생성
 runtime predicate 평가
 STEP_OUTPUT 값 resolve
-parallel worker orchestration
+parallel worker orchestration / ready-set scheduling
 Workflow persistence / API / UI
 AgentRequest Plan Generator를 complex plan 생성기로 확장
 ```
@@ -694,6 +713,9 @@ Persisted recursive shape (flat `left/op/right` only 금지):
 | `not` | single `child` Predicate |
 | `and` `or` | non-empty `children` Predicate list |
 
+상수/리터럴은 별도 bare value가 아니라 `LITERAL` Binding으로 표현한다
+(`right: { "kind": "LITERAL", "value": … }`).
+
 규칙:
 
 - 임의 함수호출·정규식 코드·파일·network 접근 금지
@@ -733,7 +755,17 @@ SECRET_REF
 - 빈 token(`//`) 및 `#` fragment 금지
 - 임의 expression / template 금지
 
-`STEP_OUTPUT.step_id`는 동일 Plan의 다른 Step ID여야 하며, 자기 참조는 금지한다.
+`STEP_OUTPUT` static 규칙 (top-level / non-loop-body owning Step):
+
+- `step_id`는 동일 Plan의 다른 Step ID여야 한다(존재 + 자기 참조 금지).
+- `step_id`는 owning Step의 **transitive dependency ancestry**에 속해야 한다
+  (`depends_on`을 재귀적으로 따라가 도달 가능한 upstream만 허용).
+- forward / sibling / unordered 참조는 `PLAN_BINDING_INVALID`.
+- TOOL bindings, Step `when`, CONDITION predicates 및 기타 top-level Predicate
+  Binding에 동일 적용한다.
+- runtime 값 resolve는 하지 않는다.
+- LOOP body 내부 / `LOOP_CONTEXT` runtime 의미는 본 static foundation에서 확정하지 않는다
+  (존재·비자기참조만 적용; body-local ordering은 후속).
 
 ---
 
