@@ -443,6 +443,7 @@ class ExecutionRecoveryService:
                 execution=execution,
                 step=step,
                 attempt=attempt,
+                steps=await self._executions.list_steps(execution.id),
                 worker_id=None,
             )
             return RecoveryDecision.RESUME_ATTEMPT

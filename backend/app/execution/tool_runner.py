@@ -1113,6 +1113,7 @@ class McpToolRunner:
                             execution=execution,
                             step=step,
                             attempt=attempt,
+                            steps=await executions.list_steps(execution.id),
                             worker_id=worker,
                         )
                     except AppError as exc:

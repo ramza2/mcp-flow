@@ -383,6 +383,18 @@ Dataset은 평가 전 FROZEN하고 실행 중 정답을 변경하지 않는다.
 - duplicate delivery after B already READY / Execution SUCCEEDED → no extra MCP,
   Execution not returned to RUNNING
 
+추가 (Runtime Binding resolution — sequential TOOL slice):
+
+- LITERAL / SECRET_REF / PLAN_INPUT / STEP_OUTPUT / EXECUTION_CONTEXT resolve
+- LOOP_CONTEXT fail-closed; JSON Pointer `/`, `~0`/`~1`, null vs MISSING
+- STEP_OUTPUT from `result_inline` snake_case only; non-ancestor / non-SUCCEEDED fail-closed
+- secret PLAN_INPUT plaintext rejected; SECRET_REF never via SecretResolver in resolver
+- Attempt start validates resolved args vs ToolVersion input_schema (MCP 0 on failure)
+- retry/replay requires deterministic recompute == pinned `resolved_input`
+- AgentRequest remains LITERAL/SECRET_REF only; dynamic + Approval/confirmation fail-closed
+- 2-TOOL STEP_OUTPUT handoff + PLAN_INPUT handoff (unit + PostgreSQL)
+- sequential / Approval / MRTR / retry regressions remain green
+
 추가 (Execution Queue / Claim foundation):
 
 - `CREATED → QUEUED + EXECUTION_DISPATCH Outbox` 동일 transaction

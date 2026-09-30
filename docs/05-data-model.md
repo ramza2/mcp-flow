@@ -1325,6 +1325,20 @@ error_code, error_message
 lock_version
 ```
 
+`resolved_input`은 runtime Plan Binding resolve의 secret-safe projection이다.
+
+```text
+LITERAL → value
+SECRET_REF / secret PLAN_INPUT → {"kind":"SECRET_REF","secret_id":"..."}
+PLAN_INPUT / STEP_OUTPUT / EXECUTION_CONTEXT → JSON Pointer result (null allowed; MISSING fail-closed)
+LOOP_CONTEXT → unsupported (fail closed)
+```
+
+`result_inline`은 TOOL SUCCEEDED의 canonical snake_case projection이며
+`STEP_OUTPUT` runtime root다 (`structured_content` 등; camelCase alias 없음).
+Attempt 생성 전 resolve하며, retry/replay는 pinned `resolved_input`과
+deterministic recompute equality를 요구한다.
+
 ### 13.5 Step 상태전이
 
 ```text

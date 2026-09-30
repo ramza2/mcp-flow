@@ -25,7 +25,6 @@ from app.execution.claim import _normalize_worker_id
 from app.execution.lineage import assert_resume_attempt_lineage
 from app.execution.runtime_preflight import assert_current_tool_executable
 from app.models.execution import Execution, ExecutionStep
-from app.models.mcp_input_request import MCPInputRequest
 from app.repositories.execution import ExecutionRepository
 from app.repositories.mcp_input_request import MCPInputRequestRepository
 
@@ -181,6 +180,7 @@ class MrtrResumeClaimService:
                 execution=execution,
                 step=step,
                 attempt=attempt,
+                steps=await self._executions.list_steps(execution.id),
                 worker_id=None,
             )
             tool_calls = await self._executions.list_tool_calls(attempt.id)

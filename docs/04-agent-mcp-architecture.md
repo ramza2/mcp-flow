@@ -376,7 +376,7 @@ SECRET_REFERENCE
 {
   "kind": "STEP_OUTPUT",
   "step_id": "lookup_weather",
-  "path": "/structuredContent/precipitation_probability"
+  "path": "/structured_content/precipitation_probability"
 }
 ```
 
@@ -394,6 +394,56 @@ SECRET_REF
 `path`는 RFC 6901 JSON Pointer subset을 사용한다. 임의 JavaScript/Python/template expression을 실행하지 않는다.
 
 Secret 원문은 LLM, Plan snapshot, 일반 로그에 포함하지 않는다.
+
+### 8.4 Runtime Binding source roots
+
+Sequential TOOL runtime resolve는 BindingKind별 durable root만 사용한다.
+Resolver는 SecretResolver / MCP / LLM / DB write를 호출하지 않는다.
+
+| kind | runtime source root | notes |
+|---|---|---|
+| `LITERAL` | `binding.value` | exact value |
+| `SECRET_REF` | `{"kind":"SECRET_REF","secret_id":"<uuid>"}` | reference-only; plaintext materializes later at MCP invocation |
+| `PLAN_INPUT` | `Execution.input_snapshot` | immutable execution input; secret inputs stay reference-only |
+| `STEP_OUTPUT` | upstream `ExecutionStep.result_inline` | same Execution; SUCCEEDED ancestor only; snake_case result root |
+| `EXECUTION_CONTEXT` | safe projection only | see below |
+| `LOOP_CONTEXT` | unsupported | fail closed until LOOP runtime |
+
+Persisted TOOL `result_inline` root (canonical snake_case — no camelCase alias):
+
+```json
+{
+  "content": ...,
+  "structured_content": ...,
+  "metadata": ...,
+  "result_type": ...,
+  "duration_ms": ...
+}
+```
+
+`EXECUTION_CONTEXT` allowlisted projection:
+
+```json
+{
+  "execution_id": "<uuid>",
+  "source_type": "...",
+  "trigger_type": "...",
+  "trace_id": "..." | null
+}
+```
+
+Explicitly excluded from `EXECUTION_CONTEXT`: `policy_snapshot`, auth/grant details,
+`worker_id`, `lease_token`, lease expiry, secrets, Approval evidence, MRTR
+`requestState`, credential/server material.
+
+JSON Pointer semantics (project subset):
+
+- `/` → the whole selected Binding source root
+- object key / array numeric index traversal
+- `~0` → `~`, `~1` → `/`
+- JSON `null` is a valid resolved value
+- missing path → `MISSING` (fail closed; never coerced to null)
+- no attribute traversal, eval, template, or fuzzy key lookup
 
 ### 8.3 AgentRequest Parameter Builder path
 
@@ -575,7 +625,11 @@ Execution claim
 - `McpToolRunner.run_claimed_tool_step` — 단일 TOOL Attempt/ToolCall/MCP
 - Step SUCCEEDED ≠ Execution SUCCEEDED (미완료 Steps가 있으면 lease 유지)
 - fan-out / fan-in / non-TOOL / parallel → fail-closed (이 slice)
-- STEP_OUTPUT·PLAN_INPUT resolve, CONDITION/JOIN/LOOP, authorable APPROVAL Step runtime → 후속
+- runtime Binding resolve (`LITERAL` / `SECRET_REF` / `PLAN_INPUT` / `STEP_OUTPUT` /
+  `EXECUTION_CONTEXT`) runs before StepAttempt creation; `LOOP_CONTEXT` fail-closed
+- CONDITION/JOIN/LOOP / authorable APPROVAL Step runtime → 후속
+- dynamic Binding + ToolPolicy `requires_approval` / PLAN_CONFIRMATION combination
+  is fail-closed in this slice (existing AgentRequest LITERAL/SECRET_REF Approval path unchanged)
 
 ### 9.5 LOOP
 

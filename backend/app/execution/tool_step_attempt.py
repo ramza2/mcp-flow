@@ -24,20 +24,27 @@ from app.domain.enums import (
     StepAttemptStatus,
     StepStatus,
 )
+from app.execution.binding_resolver import (
+    RuntimeBindingResolver,
+    ToolStepLineage,
+    binding_kinds_include_dynamic,
+)
 from app.execution.claim import _as_utc, _normalize_worker_id
 from app.execution.lineage import (
     assert_agent_request_plan_step_lineage,
+    assert_tool_step_lineage,
     build_secret_safe_request_snapshot,
     materialize_secret_safe_resolved_input,
 )
+from app.execution.resolved_input_schema import validate_resolved_tool_arguments
 from app.execution.runtime_preflight import (
     assert_answered_plan_confirmation,
     assert_current_tool_executable,
 )
 from app.models.execution import Execution, ExecutionStep
 from app.repositories.execution import ExecutionRepository
+from app.repositories.mcp_tool import MCPToolRepository
 from app.repositories.plan_validation import PlanValidationRepository
-from app.schemas.execution_plan import ToolStepConfigV1
 
 # Re-export for existing imports.
 __all__ = [
@@ -127,12 +134,12 @@ class ToolStepAttemptService:
             )
 
         assert execution.agent_version_id is not None
-        tool_config = self._validate_tool_lineage(execution, step)
+        lineage = assert_tool_step_lineage(execution, step)
         authz = await assert_current_tool_executable(
             self._session,
             requester_id=execution.requester_id,
             agent_version_id=execution.agent_version_id,
-            tool_version_id=tool_config.tool_version_id,
+            tool_version_id=lineage.tool_version_id,
             expected_policy_snapshot=dict(execution.policy_snapshot),
             plan_timeout_seconds=self._plan_timeout_seconds(step),
         )
@@ -141,6 +148,16 @@ class ToolStepAttemptService:
             authz.grant.requires_confirmation
             or authz.tool_policy.requires_confirmation
         ):
+            if binding_kinds_include_dynamic(lineage.bindings):
+                raise AppError(
+                    code="EXECUTION_PRECONDITION_FAILED",
+                    message=(
+                        "PLAN_CONFIRMATION with dynamic Plan bindings "
+                        "(PLAN_INPUT/STEP_OUTPUT/EXECUTION_CONTEXT/LOOP_CONTEXT) "
+                        "is not supported in this slice."
+                    ),
+                    status_code=409,
+                )
             await self._assert_confirmation_evidence(execution, authz.policy_snapshot)
 
         # FNC-EXE-009 / FNC-APR-002/004: ToolPolicy approval before Attempt.
@@ -148,6 +165,16 @@ class ToolStepAttemptService:
         # B) exact APPROVED evidence for current context → continue to Attempt
         # C) historical APPROVED but context mismatch → fail closed (no new PENDING)
         if authz.tool_policy.requires_approval:
+            if binding_kinds_include_dynamic(lineage.bindings):
+                raise AppError(
+                    code="EXECUTION_PRECONDITION_FAILED",
+                    message=(
+                        "ToolPolicy requires_approval with dynamic Plan bindings "
+                        "is not supported in this slice."
+                    ),
+                    status_code=409,
+                )
+            tool_config = assert_agent_request_plan_step_lineage(execution, step)
             if authz.approval_policy is None:
                 raise AppError(
                     code="EXECUTION_PRECONDITION_FAILED",
@@ -172,7 +199,39 @@ class ToolStepAttemptService:
                 )
             # Approval satisfied for exact current context — continue to Attempt.
 
-        resolved_input = materialize_secret_safe_resolved_input(tool_config.bindings)
+        steps = await self._executions.list_steps(execution.id)
+        resolved_input = RuntimeBindingResolver().resolve(
+            execution=execution,
+            step=step,
+            steps=steps,
+            bindings=lineage.bindings,
+            plan=lineage.plan,
+        )
+        # Retry/replay pinning: never silently rewrite resolved_input.
+        if step.resolved_input is not None and step.resolved_input != resolved_input:
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message=(
+                    "Deterministic Binding resolution drifted from pinned "
+                    "Step.resolved_input."
+                ),
+                status_code=409,
+            )
+
+        tool_version = await MCPToolRepository(self._session).get_version(
+            lineage.tool_version_id
+        )
+        if tool_version is None:
+            raise AppError(
+                code="EXECUTION_PRECONDITION_FAILED",
+                message="ToolVersion not found for resolved-input schema validation.",
+                status_code=409,
+            )
+        validate_resolved_tool_arguments(
+            input_schema=tool_version.input_schema,
+            resolved_input=resolved_input,
+        )
+
         next_attempt_no = step.attempt_count + 1
         if next_attempt_no < 1:
             raise AppError(
@@ -186,9 +245,9 @@ class ToolStepAttemptService:
             attempt_no=next_attempt_no,
         )
         request_snapshot = build_secret_safe_request_snapshot(
-            tool_version_id=tool_config.tool_version_id,
+            tool_version_id=lineage.tool_version_id,
             step_key=step.step_key,
-            bindings=tool_config.bindings,
+            bindings=lineage.bindings,
             resolved_input=resolved_input,
         )
 
@@ -302,8 +361,8 @@ class ToolStepAttemptService:
 
     def _validate_tool_lineage(
         self, execution: Execution, step: ExecutionStep
-    ) -> ToolStepConfigV1:
-        return assert_agent_request_plan_step_lineage(execution, step)
+    ) -> ToolStepLineage:
+        return assert_tool_step_lineage(execution, step)
 
     def _plan_timeout_seconds(self, step: ExecutionStep) -> int | None:
         timeout = step.step_snapshot.get("timeout_seconds")

@@ -9,8 +9,8 @@ from __future__ import annotations
 from app.core.errors import AppError
 from app.domain.enums import (
     ExecutionStatus,
-    MCPProtocolEra,
     McpInputRequestStatus,
+    MCPProtocolEra,
     StepAttemptStatus,
     StepStatus,
     ToolCallNormalizedStatus,
@@ -100,6 +100,7 @@ async def assert_durable_waiting_input(
         execution=execution,
         step=step,
         attempt=attempt,
+        steps=await executions.list_steps(execution.id),
         worker_id=None,
     )
     if attempt.attempt_no != step.attempt_count:
