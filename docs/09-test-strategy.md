@@ -378,6 +378,10 @@ Dataset은 평가 전 FROZEN하고 실행 중 정답을 변경하지 않는다.
 - mid-chain failure → Execution FAILED; downstream never READY / MCP not called
 - single-TOOL AgentRequest claim/runner/Approval/MRTR/retry regressions remain green
 - PostgreSQL sequential 3-TOOL orchestration
+- PostgreSQL concurrent promote race after A SUCCEEDED: exactly one B PENDING→READY;
+  loser ALREADY_READY/STALE_LEASE no-op; no duplicate Attempt/ToolCall; B MCP ≤ 1
+- duplicate delivery after B already READY / Execution SUCCEEDED → no extra MCP,
+  Execution not returned to RUNNING
 
 추가 (Execution Queue / Claim foundation):
 
