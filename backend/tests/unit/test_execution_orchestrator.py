@@ -360,6 +360,8 @@ async def test_sequential_two_tool_success_keeps_execution_running_until_end(
         lease_token=lease_token,
     )
     assert progressed.execution_complete is False
+    assert progressed.promoted is True
+    assert progressed.reason == "PROMOTED"
 
     async with db_session_factory() as session:
         execution = await ExecutionRepository(session).get(execution_id)
@@ -506,3 +508,195 @@ async def test_mid_chain_failure_does_not_run_downstream(
         assert steps["b"].status == StepStatus.FAILED.value
         assert steps["c"].status == StepStatus.PENDING.value
         assert steps["c"].ready_at is None
+
+
+@pytest.mark.asyncio
+async def test_duplicate_promote_when_b_already_ready_is_noop(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A SUCCEEDED + B READY: duplicate progression must not re-READY or MCP A."""
+    _install_no_side_effects(monkeypatch)
+    async with db_session_factory() as session:
+        seeded = await _seed_executable(session)
+        plan = _plan(
+            [_tool("tool_a"), _tool("tool_b", depends_on=["tool_a"])],
+            seeded["tool_version_id"],
+        )
+        execution_id = await _materialize_queued(
+            session, plan_snapshot=plan, seeded=seeded
+        )
+        claim = await ExecutionClaimService(session, lease_seconds=60).claim(
+            execution_id=execution_id, worker_id="worker-a"
+        )
+        await session.commit()
+        assert claim.lease_token is not None
+        lease_token = claim.lease_token
+
+    client = _StubCurrentMCPClient(
+        result=NormalizedToolResult(protocol_success=True, tool_error=False)
+    )
+    runner = McpToolRunner(
+        session_factory=db_session_factory,
+        mcp_client=client,
+        secret_resolver_factory=_resolver_factory,
+        lease_seconds=60,
+        result_inline_max_bytes=256_000,
+    )
+    orch = ExecutionOrchestrator(
+        session_factory=db_session_factory, tool_runner=runner
+    )
+
+    async with db_session_factory() as session:
+        steps = await ExecutionRepository(session).list_steps(execution_id)
+        root_id = next(s.id for s in steps if s.step_key == "tool_a")
+
+    assert (
+        await runner.run_claimed_tool_step(
+            execution_id=execution_id,
+            step_execution_id=root_id,
+            worker_id="worker-a",
+            lease_token=lease_token,
+        )
+    ).terminal_status == StepStatus.SUCCEEDED.value
+    assert len(client.calls) == 1
+
+    first = await orch._promote_after_success(
+        execution_id=execution_id,
+        completed_step_id=root_id,
+        worker_id="worker-a",
+        lease_token=lease_token,
+    )
+    assert first.promoted is True
+    assert first.reason == "PROMOTED"
+
+    async with db_session_factory() as session:
+        steps = {
+            s.step_key: s
+            for s in await ExecutionRepository(session).list_steps(execution_id)
+        }
+        b_lock = steps["tool_b"].lock_version
+        b_ready_at = steps["tool_b"].ready_at
+        assert steps["tool_b"].status == StepStatus.READY.value
+        execution = await ExecutionRepository(session).get(execution_id)
+        assert execution is not None
+        winner_lease = execution.lease_token
+        winner_worker = execution.worker_id
+
+    second = await orch._promote_after_success(
+        execution_id=execution_id,
+        completed_step_id=root_id,
+        worker_id="worker-a",
+        lease_token=lease_token,
+    )
+    assert second.promoted is False
+    assert second.reason == "ALREADY_READY"
+    assert second.execution_complete is False
+
+    # Stale lease loser must not clear the winner lease.
+    stale = await orch._promote_after_success(
+        execution_id=execution_id,
+        completed_step_id=root_id,
+        worker_id="other-worker",
+        lease_token=uuid.uuid4(),
+    )
+    assert stale.promoted is False
+    assert stale.reason == "STALE_LEASE"
+
+    async with db_session_factory() as session:
+        execution = await ExecutionRepository(session).get(execution_id)
+        assert execution is not None
+        assert execution.status == ExecutionStatus.RUNNING.value
+        assert execution.lease_token == winner_lease
+        assert execution.worker_id == winner_worker
+        steps = {
+            s.step_key: s
+            for s in await ExecutionRepository(session).list_steps(execution_id)
+        }
+        assert len(steps) == 2
+        assert steps["tool_a"].status == StepStatus.SUCCEEDED.value
+        assert steps["tool_b"].status == StepStatus.READY.value
+        assert steps["tool_b"].lock_version == b_lock
+        assert steps["tool_b"].ready_at == b_ready_at
+        assert len(await ExecutionRepository(session).list_attempts(steps["tool_b"].id)) == 0
+
+    assert len(client.calls) == 1  # A only; B not invoked by promote duplicates
+
+
+@pytest.mark.asyncio
+async def test_duplicate_delivery_after_execution_succeeded_is_noop(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_no_side_effects(monkeypatch)
+    async with db_session_factory() as session:
+        seeded = await _seed_executable(session)
+        plan = _plan(
+            [_tool("tool_a"), _tool("tool_b", depends_on=["tool_a"])],
+            seeded["tool_version_id"],
+        )
+        execution_id = await _materialize_queued(
+            session, plan_snapshot=plan, seeded=seeded
+        )
+        claim = await ExecutionClaimService(session, lease_seconds=60).claim(
+            execution_id=execution_id, worker_id="worker-a"
+        )
+        await session.commit()
+        assert claim.lease_token is not None
+        lease_token = claim.lease_token
+
+    client = _StubCurrentMCPClient(
+        result=NormalizedToolResult(protocol_success=True, tool_error=False)
+    )
+    runner = McpToolRunner(
+        session_factory=db_session_factory,
+        mcp_client=client,
+        secret_resolver_factory=_resolver_factory,
+        lease_seconds=60,
+        result_inline_max_bytes=256_000,
+    )
+    first = await runner.run_claimed_execution(
+        execution_id=execution_id,
+        worker_id="worker-a",
+        lease_token=lease_token,
+    )
+    assert first.terminal_status == StepStatus.SUCCEEDED.value
+    assert len(client.calls) == 2
+
+    async with db_session_factory() as session:
+        steps = {
+            s.step_key: s
+            for s in await ExecutionRepository(session).list_steps(execution_id)
+        }
+        a_attempts = await ExecutionRepository(session).list_attempts(steps["tool_a"].id)
+        b_attempts = await ExecutionRepository(session).list_attempts(steps["tool_b"].id)
+        assert len(a_attempts) == 1
+        assert len(b_attempts) == 1
+        a_calls = await ExecutionRepository(session).list_tool_calls(a_attempts[0].id)
+        b_calls = await ExecutionRepository(session).list_tool_calls(b_attempts[0].id)
+        assert len(a_calls) == 1
+        assert len(b_calls) == 1
+
+    second = await runner.run_claimed_execution(
+        execution_id=execution_id,
+        worker_id="worker-a",
+        lease_token=lease_token,
+    )
+    assert second.mcp_called is False
+    assert second.reason == "STEP_ALREADY_TERMINAL"
+    assert len(client.calls) == 2
+
+    async with db_session_factory() as session:
+        execution = await ExecutionRepository(session).get(execution_id)
+        assert execution is not None
+        assert execution.status == ExecutionStatus.SUCCEEDED.value
+        assert execution.worker_id is None
+        assert execution.lease_token is None
+        steps = await ExecutionRepository(session).list_steps(execution_id)
+        assert len(steps) == 2
+        assert {s.status for s in steps} == {StepStatus.SUCCEEDED.value}
+        for step in steps:
+            attempts = await ExecutionRepository(session).list_attempts(step.id)
+            assert len(attempts) == 1
+            tool_calls = await ExecutionRepository(session).list_tool_calls(attempts[0].id)
+            assert len(tool_calls) == 1

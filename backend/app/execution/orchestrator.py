@@ -374,13 +374,25 @@ class ExecutionOrchestrator:
                 return outcome
 
             # Step SUCCEEDED while Execution stays RUNNING — promote next or finish.
-            promoted = await self._promote_after_success(
+            progressed = await self._promote_after_success(
                 execution_id=execution_id,
                 completed_step_id=step_id,
                 worker_id=worker_id,
                 lease_token=lease_token,
             )
-            if promoted.execution_complete:
+            if progressed.reason in {"STALE_LEASE", "MISSING"}:
+                return ToolRunOutcome(
+                    execution_id=outcome.execution_id,
+                    step_execution_id=outcome.step_execution_id,
+                    attempt_id=outcome.attempt_id,
+                    tool_call_id=outcome.tool_call_id,
+                    mcp_called=outcome.mcp_called,
+                    terminal_status=None,
+                    reason="LEASE_MISMATCH"
+                    if progressed.reason == "STALE_LEASE"
+                    else "MISSING",
+                )
+            if progressed.execution_complete:
                 return ToolRunOutcome(
                     execution_id=outcome.execution_id,
                     step_execution_id=outcome.step_execution_id,
@@ -390,7 +402,7 @@ class ExecutionOrchestrator:
                     terminal_status=StepStatus.SUCCEEDED.value,
                     reason=_REASON_EXECUTION_SUCCEEDED,
                 )
-            # Next READY exists — continue under same lease.
+            # PROMOTED / ALREADY_READY — continue under same lease.
             continue
 
     async def _find_waiting_step_id(
@@ -509,19 +521,34 @@ class ExecutionOrchestrator:
         completed_step_id: uuid.UUID,
         worker_id: str,
         lease_token: uuid.UUID,
-    ) -> _ProgressOutcome:
+    ) -> ProgressOutcome:
+        """Promote the next PENDING TOOL or complete the Execution.
+
+        Concurrent duplicate progression is serialized on the Execution row
+        (``FOR UPDATE``). The loser observes READY/terminal state and returns a
+        deterministic no-op reason without mutating lease or creating Steps.
+        """
         async with self._session_factory() as session:
             async with session.begin():
                 executions = ExecutionRepository(session)
                 execution = await executions.lock_execution(execution_id)
                 if execution is None:
-                    raise AppError(
-                        code="RESOURCE_CONFLICT",
-                        message="Execution missing during progression.",
-                        status_code=409,
+                    return ProgressOutcome(
+                        execution_complete=False,
+                        promoted=False,
+                        reason="MISSING",
                     )
                 now = datetime.now(UTC)
-                self._assert_running_lease(execution, worker_id, lease_token, now)
+                if not self._has_running_lease(
+                    execution, worker_id, lease_token, now
+                ):
+                    # Stale/duplicate loser — never clear the winner's lease.
+                    return ProgressOutcome(
+                        execution_complete=execution.status
+                        == ExecutionStatus.SUCCEEDED.value,
+                        promoted=False,
+                        reason="STALE_LEASE",
+                    )
                 steps = await executions.list_steps(execution.id)
                 completed = next(
                     (s for s in steps if s.id == completed_step_id), None
@@ -545,7 +572,11 @@ class ExecutionOrchestrator:
                     and s.step_type == AuthorableStepType.TOOL.value
                 ]
                 if already_ready:
-                    return _ProgressOutcome(execution_complete=False)
+                    return ProgressOutcome(
+                        execution_complete=False,
+                        promoted=False,
+                        reason="ALREADY_READY",
+                    )
 
                 # Find next PENDING whose single dependency is SUCCEEDED.
                 next_key: str | None = None
@@ -557,7 +588,7 @@ class ExecutionOrchestrator:
                     break
 
                 if next_key is None:
-                    # Last step — complete Execution.
+                    # Last step — complete Execution (idempotent if already done).
                     if not all(
                         by_key[k].status == StepStatus.SUCCEEDED.value
                         for k in chain.ordered_step_keys
@@ -567,31 +598,70 @@ class ExecutionOrchestrator:
                             message="Cannot SUCCEEDED Execution with unfinished Steps.",
                             status_code=409,
                         )
+                    if execution.status == ExecutionStatus.SUCCEEDED.value:
+                        return ProgressOutcome(
+                            execution_complete=True,
+                            promoted=False,
+                            reason="ALREADY_COMPLETE",
+                        )
                     self._complete_execution_succeeded(execution, steps, now)
                     await session.flush()
-                    return _ProgressOutcome(execution_complete=True)
+                    return ProgressOutcome(
+                        execution_complete=True,
+                        promoted=False,
+                        reason="EXECUTION_SUCCEEDED",
+                    )
 
                 nxt = by_key[next_key]
-                if nxt.status != StepStatus.PENDING.value:
-                    if nxt.status == StepStatus.SUCCEEDED.value:
-                        # Duplicate progression after both already done.
-                        if all(
-                            by_key[k].status == StepStatus.SUCCEEDED.value
-                            for k in chain.ordered_step_keys
-                        ):
-                            if execution.status == ExecutionStatus.RUNNING.value:
-                                self._complete_execution_succeeded(execution, steps, now)
-                                await session.flush()
-                            return _ProgressOutcome(execution_complete=True)
+                # Re-lock the candidate Step so concurrent promoters serialize
+                # on both Execution and the next Step row.
+                locked_next = await executions.lock_step(nxt.id)
+                if locked_next is None or locked_next.execution_id != execution.id:
+                    raise AppError(
+                        code="RESOURCE_CONFLICT",
+                        message="Next Step missing during progression.",
+                        status_code=409,
+                    )
+                if locked_next.status == StepStatus.READY.value:
+                    return ProgressOutcome(
+                        execution_complete=False,
+                        promoted=False,
+                        reason="ALREADY_READY",
+                    )
+                if locked_next.status == StepStatus.SUCCEEDED.value:
+                    if all(
+                        by_key[k].status == StepStatus.SUCCEEDED.value
+                        for k in chain.ordered_step_keys
+                    ):
+                        if execution.status == ExecutionStatus.RUNNING.value:
+                            self._complete_execution_succeeded(execution, steps, now)
+                            await session.flush()
+                            return ProgressOutcome(
+                                execution_complete=True,
+                                promoted=False,
+                                reason="EXECUTION_SUCCEEDED",
+                            )
+                        return ProgressOutcome(
+                            execution_complete=True,
+                            promoted=False,
+                            reason="ALREADY_COMPLETE",
+                        )
+                    return ProgressOutcome(
+                        execution_complete=False,
+                        promoted=False,
+                        reason="ALREADY_READY",
+                    )
+                if locked_next.status != StepStatus.PENDING.value:
                     raise AppError(
                         code="RESOURCE_CONFLICT",
                         message=(
-                            f"Next Step {next_key!r} is {nxt.status!r}, expected PENDING."
+                            f"Next Step {next_key!r} is {locked_next.status!r}, "
+                            "expected PENDING."
                         ),
                         status_code=409,
                     )
 
-                plan_step = ExecutionPlanStep.model_validate(nxt.step_snapshot)
+                plan_step = ExecutionPlanStep.model_validate(locked_next.step_snapshot)
                 if plan_step.depends_on != [completed.step_key]:
                     raise AppError(
                         code="RESOURCE_CONFLICT",
@@ -599,9 +669,9 @@ class ExecutionOrchestrator:
                         status_code=409,
                     )
 
-                nxt.status = StepStatus.READY.value
-                nxt.ready_at = now
-                nxt.lock_version += 1
+                locked_next.status = StepStatus.READY.value
+                locked_next.ready_at = now
+                locked_next.lock_version += 1
                 execution.heartbeat_at = now
                 execution.lock_version += 1
                 await session.flush()
@@ -610,7 +680,11 @@ class ExecutionOrchestrator:
                     execution_id,
                     next_key,
                 )
-                return _ProgressOutcome(execution_complete=False)
+                return ProgressOutcome(
+                    execution_complete=False,
+                    promoted=True,
+                    reason="PROMOTED",
+                )
 
     async def _finalize_if_all_succeeded(
         self,
@@ -646,27 +720,24 @@ class ExecutionOrchestrator:
                 return True
 
     @staticmethod
-    def _assert_running_lease(
+    def _has_running_lease(
         execution: Execution,
         worker_id: str,
         lease_token: uuid.UUID,
         now: datetime,
-    ) -> None:
+    ) -> bool:
         expires = execution.lease_expires_at
         if expires is not None and expires.tzinfo is None:
             expires = expires.replace(tzinfo=UTC)
-        if (
-            execution.status != ExecutionStatus.RUNNING.value
-            or execution.worker_id != worker_id
-            or execution.lease_token != lease_token
-            or expires is None
-            or expires <= now
-        ):
-            raise AppError(
-                code="RESOURCE_CONFLICT",
-                message="Execution lease fencing failed during orchestration.",
-                status_code=409,
-            )
+        elif expires is not None:
+            expires = expires.astimezone(UTC)
+        return (
+            execution.status == ExecutionStatus.RUNNING.value
+            and execution.worker_id == worker_id
+            and execution.lease_token == lease_token
+            and expires is not None
+            and expires > now
+        )
 
     @staticmethod
     def _complete_execution_succeeded(
@@ -691,5 +762,9 @@ class ExecutionOrchestrator:
 
 
 @dataclass(frozen=True, slots=True)
-class _ProgressOutcome:
+class ProgressOutcome:
+    """Result of sequential progression after a TOOL Step SUCCEEDED."""
+
     execution_complete: bool
+    promoted: bool
+    reason: str
