@@ -24,8 +24,10 @@ from app.domain.enums import (
     AuthorableStepType,
     BindingKind,
     ExecutionSourceType,
-    ExecutionStatus,
-    StepStatus,
+)
+from app.execution.materialize import (
+    ExecutionMaterializeParams,
+    ExecutionPlanMaterializer,
 )
 from app.execution.runtime_preflight import (
     assert_answered_plan_confirmation,
@@ -561,39 +563,29 @@ class ExecutionCreationService:
         validation = ctx["validation"]
         plan_run = ctx["plan_run"]
         plan: ExecutionPlanV1 = ctx["plan"]
-        tool_version = ctx["tool_version"]
         policy_snapshot = ctx["policy_snapshot"]
         now = datetime.now(UTC)
 
-        execution = await self._executions.create_execution(
-            source_type=ExecutionSourceType.AGENT_REQUEST.value,
-            trigger_type=_TRIGGER_USER,
-            requester_id=request.requester_id,
-            agent_request_id=request.id,
-            agent_version_id=request.agent_version_id,
-            plan_validation_run_id=validation.id,
-            status=ExecutionStatus.CREATED.value,
-            plan_schema_version=plan.schema_version,
-            plan_snapshot=dict(plan_run.plan_snapshot),
-            plan_hash=plan_run.plan_hash,
-            input_snapshot={},
-            policy_snapshot=dict(policy_snapshot),
-            trace_id=request.trace_id,
-            requested_at=now,
-            lock_version=1,
+        materialized = await ExecutionPlanMaterializer(self._session).materialize(
+            ExecutionMaterializeParams(
+                source_type=ExecutionSourceType.AGENT_REQUEST.value,
+                trigger_type=_TRIGGER_USER,
+                requester_id=request.requester_id,
+                agent_request_id=request.id,
+                agent_version_id=request.agent_version_id,
+                plan_validation_run_id=validation.id,
+                plan_snapshot=dict(plan_run.plan_snapshot),
+                plan_hash=plan_run.plan_hash,
+                input_snapshot={},
+                policy_snapshot=dict(policy_snapshot),
+                trace_id=request.trace_id,
+                requested_at=now,
+            )
         )
-        step = plan.steps[0]
-        await self._executions.create_step(
-            execution_id=execution.id,
-            step_key=step.id,
-            step_type=AuthorableStepType.TOOL.value,
-            mcp_tool_version_id=tool_version.id,
-            parent_step_id=None,
-            sequence_hint=0,
-            status=StepStatus.PENDING.value,
-            step_snapshot=step.model_dump(mode="json"),
-            lock_version=1,
-        )
+        execution = materialized.execution
+        # AgentRequest foundation preflight still requires single TOOL; keep
+        # response step_count aligned with materialized rows.
+        assert len(materialized.steps) == len(plan.steps)
         result = AgentRequestExecutionCreateResult(
             id=execution.id,
             status=execution.status,
@@ -603,7 +595,7 @@ class ExecutionCreationService:
             agent_version_id=execution.agent_version_id,
             plan_hash=execution.plan_hash,
             requested_at=execution.requested_at,
-            step_count=1,
+            step_count=len(materialized.steps),
         )
         await self._idempotency.create_completed(
             principal_key=principal_key,
