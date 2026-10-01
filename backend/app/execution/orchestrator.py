@@ -23,9 +23,9 @@ from app.domain.enums import AuthorableStepType, ExecutionStatus, StepStatus
 from app.models.execution import Execution, ExecutionStep
 from app.repositories.execution import ExecutionRepository
 from app.schemas.execution_plan import (
+    ComplexToolStepConfigV1,
     ExecutionPlanStep,
     ExecutionPlanV1,
-    ToolStepConfigV1,
     compute_plan_hash,
 )
 
@@ -133,13 +133,13 @@ def validate_sequential_tool_chain(
                 status_code=409,
             )
         try:
-            cfg = ToolStepConfigV1.model_validate(plan_step.config)
+            cfg = ComplexToolStepConfigV1.model_validate(plan_step.config)
         except Exception as exc:
             raise AppError(
                 code="RESOURCE_CONFLICT",
                 message=(
-                    f"TOOL config for {step.step_key!r} must be LITERAL/SECRET_REF "
-                    "bindings only."
+                    f"TOOL config for {step.step_key!r} must be a valid "
+                    "ComplexToolStepConfigV1."
                 ),
                 status_code=409,
             ) from exc

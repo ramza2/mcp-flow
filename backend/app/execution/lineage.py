@@ -8,6 +8,7 @@ before any remote tools/call.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Sequence
 from typing import Any
 
 from app.core.errors import AppError
@@ -17,14 +18,21 @@ from app.domain.enums import (
     ExecutionSourceType,
     StepAttemptStatus,
 )
+from app.execution.binding_resolver import (
+    RuntimeBindingResolver,
+    ToolStepLineage,
+    serialize_plan_bindings,
+)
 from app.models.execution import Execution, ExecutionStep, StepAttempt
 from app.schemas.execution_plan import (
+    ComplexToolStepConfigV1,
     ExecutionPlanStep,
     ExecutionPlanV1,
     ToolStepConfigV1,
     compute_plan_hash,
 )
 from app.schemas.parameter_binding import BindingValue
+from app.schemas.plan_binding import PlanBindingValue, parse_plan_binding_value
 
 _LINEAGE_SOURCES = frozenset(
     {
@@ -37,11 +45,11 @@ _LINEAGE_SOURCES = frozenset(
 def materialize_secret_safe_resolved_input(
     bindings: dict[str, BindingValue],
 ) -> dict[str, Any]:
-    """Project Tool bindings into secret-safe resolved_input.
+    """Project AgentRequest Tool bindings into secret-safe resolved_input.
 
     LITERAL → value
     SECRET_REF → reference-only object (no secret material)
-    Other BindingKinds → fail closed (not supported by this orchestration slice).
+    Other BindingKinds → fail closed (AgentRequest static path only).
     """
     resolved: dict[str, Any] = {}
     for key, binding in bindings.items():
@@ -69,28 +77,27 @@ def build_secret_safe_request_snapshot(
     *,
     tool_version_id: uuid.UUID,
     step_key: str,
-    bindings: dict[str, BindingValue],
+    bindings: dict[str, BindingValue] | dict[str, PlanBindingValue],
     resolved_input: dict[str, Any],
 ) -> dict[str, Any]:
     """Attempt request snapshot without raw secret material."""
     safe_bindings: dict[str, Any] = {}
     for key, binding in bindings.items():
-        if binding.kind == BindingKind.LITERAL:
-            safe_bindings[key] = {
-                "kind": BindingKind.LITERAL.value,
-                "value": binding.value,
-            }
-        elif binding.kind == BindingKind.SECRET_REF:
-            safe_bindings[key] = {
-                "kind": BindingKind.SECRET_REF.value,
-                "secret_id": str(binding.secret_id),
-            }
-        else:
+        try:
+            dumped = binding.model_dump(mode="json")  # type: ignore[union-attr]
+        except Exception as exc:
             raise AppError(
                 code="EXECUTION_PRECONDITION_FAILED",
-                message=f"Unsupported BindingKind {binding.kind.value!r}.",
+                message=f"Unsupported BindingKind {getattr(binding, 'kind', None)!r}.",
+                status_code=409,
+            ) from exc
+        if not isinstance(dumped, dict) or "kind" not in dumped:
+            raise AppError(
+                code="EXECUTION_PRECONDITION_FAILED",
+                message=f"Unsupported binding payload for key {key!r}.",
                 status_code=409,
             )
+        safe_bindings[key] = dumped
     return {
         "tool_version_id": str(tool_version_id),
         "step_key": step_key,
@@ -99,13 +106,11 @@ def build_secret_safe_request_snapshot(
     }
 
 
-def assert_agent_request_plan_step_lineage(
-    execution: Execution, step: ExecutionStep
-) -> ToolStepConfigV1:
-    """Validate pinned plan/step snapshots for a TOOL Step.
+def assert_tool_step_lineage(execution: Execution, step: ExecutionStep) -> ToolStepLineage:
+    """Source-aware TOOL Step lineage.
 
-    Supports AgentRequest single-TOOL and sequential multi-TOOL MANUAL_TOOL_TEST /
-    AgentRequest materializations. Binding kinds remain LITERAL/SECRET_REF only.
+    - AGENT_REQUEST: ToolStepConfigV1 only (LITERAL / SECRET_REF)
+    - MANUAL_TOOL_TEST: ComplexToolStepConfigV1 (full Plan BindingKind set)
     """
     if execution.source_type not in _LINEAGE_SOURCES:
         raise AppError(
@@ -166,28 +171,103 @@ def assert_agent_request_plan_step_lineage(
             message="Execution plan/step snapshot lineage is inconsistent.",
             status_code=409,
         )
-    try:
-        tool_config = ToolStepConfigV1.model_validate(expected.config)
-    except Exception as exc:
-        raise AppError(
-            code="RESOURCE_CONFLICT",
-            message="Execution TOOL Step config is invalid.",
-            status_code=409,
-        ) from exc
-
     if (
         plan_step.id != step.step_key
         or plan_step.id != expected.id
         or plan_step.type != AuthorableStepType.TOOL
         or plan_step.when is not None
-        or step.mcp_tool_version_id != tool_config.tool_version_id
     ):
         raise AppError(
             code="RESOURCE_CONFLICT",
             message="TOOL Step foundation lineage is inconsistent.",
             status_code=409,
         )
-    return tool_config
+
+    agent_request_static_only = (
+        execution.source_type == ExecutionSourceType.AGENT_REQUEST.value
+    )
+    if agent_request_static_only:
+        try:
+            tool_config = ToolStepConfigV1.model_validate(expected.config)
+        except Exception as exc:
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message="Execution TOOL Step config is invalid.",
+                status_code=409,
+            ) from exc
+        if step.mcp_tool_version_id != tool_config.tool_version_id:
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message="TOOL Step foundation lineage is inconsistent.",
+                status_code=409,
+            )
+        bindings = _agent_bindings_as_plan(tool_config.bindings)
+        return ToolStepLineage(
+            tool_version_id=tool_config.tool_version_id,
+            bindings=bindings,
+            plan=plan,
+            plan_step=plan_step,
+            agent_request_static_only=True,
+        )
+
+    try:
+        complex_cfg = ComplexToolStepConfigV1.model_validate(expected.config)
+    except Exception as exc:
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message="Execution TOOL Step config is invalid.",
+            status_code=409,
+        ) from exc
+    if step.mcp_tool_version_id != complex_cfg.tool_version_id:
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message="TOOL Step foundation lineage is inconsistent.",
+            status_code=409,
+        )
+    return ToolStepLineage(
+        tool_version_id=complex_cfg.tool_version_id,
+        bindings=dict(complex_cfg.bindings),
+        plan=plan,
+        plan_step=plan_step,
+        agent_request_static_only=False,
+    )
+
+
+def assert_agent_request_plan_step_lineage(
+    execution: Execution, step: ExecutionStep
+) -> ToolStepConfigV1:
+    """AgentRequest-compatible TOOL lineage (LITERAL / SECRET_REF only).
+
+    MANUAL_TOOL_TEST with only LITERAL/SECRET_REF still returns ToolStepConfigV1.
+    Dynamic Plan bindings on MANUAL_TOOL_TEST raise — callers needing those must
+    use ``assert_tool_step_lineage``.
+    """
+    lineage = assert_tool_step_lineage(execution, step)
+    try:
+        return ToolStepConfigV1.model_validate(
+            {
+                "tool_version_id": str(lineage.tool_version_id),
+                "bindings": serialize_plan_bindings(lineage.bindings),
+            }
+        )
+    except Exception as exc:
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message=(
+                "TOOL Step config is not AgentRequest-compatible "
+                "(LITERAL/SECRET_REF only)."
+            ),
+            status_code=409,
+        ) from exc
+
+
+def _agent_bindings_as_plan(
+    bindings: dict[str, BindingValue],
+) -> dict[str, PlanBindingValue]:
+    out: dict[str, PlanBindingValue] = {}
+    for key, binding in bindings.items():
+        out[key] = parse_plan_binding_value(binding.model_dump(mode="json"))
+    return out
 
 
 def assert_started_attempt_replay_lineage(
@@ -195,14 +275,11 @@ def assert_started_attempt_replay_lineage(
     execution: Execution,
     step: ExecutionStep,
     attempt: StepAttempt,
-    tool_config: ToolStepConfigV1,
+    lineage: ToolStepLineage,
+    steps: Sequence[ExecutionStep],
     worker_id: str | None = None,
 ) -> None:
-    """Validate STARTED Attempt input snapshots against pinned Tool bindings.
-
-    SECRET_REF comparisons are reference-only; secrets are never resolved.
-    """
-    del execution  # reserved for future execution-scoped attempt invariants
+    """Validate STARTED Attempt snapshots against deterministic Binding recompute."""
     if attempt.status != StepAttemptStatus.STARTED.value:
         raise AppError(
             code="RESOURCE_CONFLICT",
@@ -228,18 +305,27 @@ def assert_started_attempt_replay_lineage(
             status_code=409,
         )
 
-    expected_resolved = materialize_secret_safe_resolved_input(tool_config.bindings)
+    expected_resolved = RuntimeBindingResolver().resolve(
+        execution=execution,
+        step=step,
+        steps=steps,
+        bindings=lineage.bindings,
+        plan=lineage.plan,
+    )
     if step.resolved_input != expected_resolved:
         raise AppError(
             code="RESOURCE_CONFLICT",
-            message="Step.resolved_input does not match pinned Tool bindings.",
+            message=(
+                "Step.resolved_input does not match deterministic Binding "
+                "resolution (retry drift)."
+            ),
             status_code=409,
         )
 
     expected_request = build_secret_safe_request_snapshot(
-        tool_version_id=tool_config.tool_version_id,
+        tool_version_id=lineage.tool_version_id,
         step_key=step.step_key,
-        bindings=tool_config.bindings,
+        bindings=lineage.bindings,
         resolved_input=expected_resolved,
     )
     if attempt.request_snapshot != expected_request:
@@ -255,15 +341,17 @@ def assert_resume_attempt_lineage(
     execution: Execution,
     step: ExecutionStep,
     attempt: StepAttempt,
+    steps: Sequence[ExecutionStep],
     worker_id: str | None = None,
-) -> ToolStepConfigV1:
+) -> ToolStepLineage:
     """Full immutable lineage gate for RESUME_ATTEMPT / runner replay."""
-    tool_config = assert_agent_request_plan_step_lineage(execution, step)
+    lineage = assert_tool_step_lineage(execution, step)
     assert_started_attempt_replay_lineage(
         execution=execution,
         step=step,
         attempt=attempt,
-        tool_config=tool_config,
+        lineage=lineage,
+        steps=steps,
         worker_id=worker_id,
     )
-    return tool_config
+    return lineage
