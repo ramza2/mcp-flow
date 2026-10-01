@@ -69,6 +69,13 @@ from app.domain.enums import (
     ToolCallNormalizedStatus,
 )
 from app.execution.claim import ExecutionClaimService, _as_utc, _normalize_worker_id
+from app.execution.completion import (
+    DISPOSITION_FATAL_EXECUTION_FAILURE,
+    DISPOSITION_KNOWN_STEP_FAILURE,
+    DISPOSITION_RETRY,
+    DISPOSITION_SUCCESS,
+    DISPOSITION_WAIT,
+)
 from app.execution.lineage import assert_resume_attempt_lineage
 from app.execution.mrtr_constants import MAX_MRTR_ROUNDS
 from app.execution.mrtr_wait import assert_durable_waiting_input
@@ -151,6 +158,12 @@ class _NoSecretResolver:
 
 @dataclass(frozen=True, slots=True)
 class ToolRunOutcome:
+    """Per-Step runner outcome. Execution aggregation is owned by the orchestrator.
+
+    ``disposition`` is an internal classification (not a public API enum):
+    SUCCESS / KNOWN_STEP_FAILURE / FATAL_EXECUTION_FAILURE / WAIT / RETRY / NOOP.
+    """
+
     execution_id: uuid.UUID
     step_execution_id: uuid.UUID | None
     attempt_id: uuid.UUID | None
@@ -158,6 +171,7 @@ class ToolRunOutcome:
     mcp_called: bool
     terminal_status: str | None
     reason: str
+    disposition: str = "NOOP"
 
 
 @dataclass(frozen=True, slots=True)
@@ -428,10 +442,11 @@ class McpToolRunner:
     ) -> ToolRunOutcome:
         """Invoke MCP for exactly one TOOL Step (safe-retry loop included).
 
-        On TOOL SUCCEEDED this does **not** terminalize the Execution — the
-        orchestrator decides whether to READY the next Step or SUCCEEDED the
-        Execution. Failure / UNKNOWN_OUTCOME / timeout still terminalize the
-        Execution (existing fail-closed behavior).
+        On TOOL SUCCEEDED or ordinary known failure/timeout this does **not**
+        terminalize the Execution — ``ExecutionOrchestrator`` applies
+        ErrorPolicy / ALL_REQUIRED. Mandatory-fatal dispositions
+        (UNKNOWN_OUTCOME, pre-send security/integrity fail-closed) still
+        terminalize Execution here.
         """
         while True:
             prep = await self._prepare(
@@ -580,6 +595,7 @@ class McpToolRunner:
             mcp_called=False,
             terminal_status=StepStatus.FAILED.value,
             reason=error_code,
+            disposition=DISPOSITION_FATAL_EXECUTION_FAILURE,
         )
 
     async def _final_pre_send_gate(
@@ -897,6 +913,7 @@ class McpToolRunner:
                     timeout_seconds=_plan_timeout_seconds(step),
                     now=now,
                 ):
+                    # Known TIMED_OUT — leave Execution RUNNING for ErrorPolicy.
                     step.status = StepStatus.TIMED_OUT.value
                     step.error_code = "STEP_TIMEOUT_EXCEEDED"
                     step.error_message = (
@@ -904,14 +921,7 @@ class McpToolRunner:
                     )
                     step.finished_at = now
                     step.lock_version += 1
-                    execution.status = ExecutionStatus.TIMED_OUT.value
-                    execution.error_code = "STEP_TIMEOUT_EXCEEDED"
-                    execution.error_message = step.error_message
-                    execution.finished_at = now
-                    execution.worker_id = None
-                    execution.lease_token = None
-                    execution.lease_expires_at = None
-                    execution.heartbeat_at = None
+                    execution.heartbeat_at = now
                     execution.lock_version += 1
                     return _PrepareResult(
                         outcome=ToolRunOutcome(
@@ -922,6 +932,7 @@ class McpToolRunner:
                             mcp_called=False,
                             terminal_status=StepStatus.TIMED_OUT.value,
                             reason="STEP_TIMEOUT_EXCEEDED",
+                            disposition=DISPOSITION_KNOWN_STEP_FAILURE,
                         )
                     )
 
@@ -1010,6 +1021,7 @@ class McpToolRunner:
                             mcp_called=False,
                             terminal_status=StepStatus.FAILED.value,
                             reason=exc.code,
+                            disposition=DISPOSITION_FATAL_EXECUTION_FAILURE,
                         )
                     )
 
@@ -1023,6 +1035,7 @@ class McpToolRunner:
                             mcp_called=False,
                             terminal_status=StepStatus.WAITING_APPROVAL.value,
                             reason="WAITING_APPROVAL",
+                            disposition=DISPOSITION_WAIT,
                         )
                     )
 
@@ -1094,6 +1107,7 @@ class McpToolRunner:
                                 mcp_called=False,
                                 terminal_status=StepStatus.FAILED.value,
                                 reason=exc.code,
+                                disposition=DISPOSITION_FATAL_EXECUTION_FAILURE,
                             )
                         )
                     if mrtr_resume is None:
@@ -1142,6 +1156,7 @@ class McpToolRunner:
                                 mcp_called=False,
                                 terminal_status=StepStatus.FAILED.value,
                                 reason=exc.code,
+                                disposition=DISPOSITION_FATAL_EXECUTION_FAILURE,
                             )
                         )
 
@@ -1285,7 +1300,7 @@ class McpToolRunner:
                 )
 
                 if pre_send_failure is not None:
-                    terminal = _apply_terminal_transition(
+                    terminal, disposition = _apply_terminal_transition(
                         execution=execution,
                         step=step,
                         attempt=attempt,
@@ -1308,6 +1323,7 @@ class McpToolRunner:
                             mcp_called=False,
                             terminal_status=terminal,
                             reason=pre_send_failure.error_code,
+                            disposition=disposition,
                         )
                     )
 
@@ -1624,14 +1640,8 @@ class McpToolRunner:
                     step.finished_at = now
                     step.lock_version += 1
 
-                    execution.status = ExecutionStatus.TIMED_OUT.value
-                    execution.error_code = "STEP_TIMEOUT"
-                    execution.error_message = attempt.error_message
-                    execution.finished_at = now
-                    execution.worker_id = None
-                    execution.lease_token = None
-                    execution.lease_expires_at = None
-                    execution.heartbeat_at = None
+                    # Known TIMED_OUT — ErrorPolicy owned by orchestrator.
+                    execution.heartbeat_at = now
                     execution.lock_version += 1
 
                     return ToolRunOutcome(
@@ -1642,6 +1652,7 @@ class McpToolRunner:
                         mcp_called=True,
                         terminal_status=StepStatus.TIMED_OUT.value,
                         reason="STEP_TIMEOUT",
+                        disposition=DISPOSITION_KNOWN_STEP_FAILURE,
                     )
 
                 assert step.started_at is not None
@@ -1701,6 +1712,7 @@ class McpToolRunner:
                         mcp_called=True,
                         terminal_status=StepStatus.FAILED.value,
                         reason="MAX_MRTR_ROUNDS_EXCEEDED",
+                        disposition=DISPOSITION_FATAL_EXECUTION_FAILURE,
                     )
 
                 open_existing = await inputs.list_open_for_step(
@@ -1761,6 +1773,7 @@ class McpToolRunner:
                     mcp_called=True,
                     terminal_status=StepStatus.WAITING_INPUT.value,
                     reason=_REASON_WAITING_INPUT,
+                    disposition=DISPOSITION_WAIT,
                 )
 
     async def _finalize_locked(
@@ -1850,9 +1863,10 @@ class McpToolRunner:
                         mcp_called=True,
                         terminal_status=attempt_terminal,
                         reason=_REASON_SAFE_RETRY_READY,
+                        disposition=DISPOSITION_RETRY,
                     )
 
-                terminal = _apply_terminal_transition(
+                terminal, disposition = _apply_terminal_transition(
                     execution=execution,
                     step=step,
                     attempt=attempt,
@@ -1881,6 +1895,7 @@ class McpToolRunner:
                     mcp_called=mcp_called,
                     terminal_status=terminal,
                     reason=reason,
+                    disposition=disposition,
                 )
 
 
@@ -1949,6 +1964,7 @@ def _terminalize_mrtr_secret_echo(
         mcp_called=True,
         terminal_status=StepStatus.FAILED.value,
         reason=_MRTR_SECRET_ECHO_CODE,
+        disposition=DISPOSITION_FATAL_EXECUTION_FAILURE,
     )
 
 
@@ -2014,12 +2030,12 @@ def _apply_terminal_transition(
     result_inline_max_bytes: int,
     now: datetime,
     protected: tuple[str, ...] = (),
-) -> str:
-    """Apply one atomic terminal transition across ToolCall/Attempt/Step/Execution.
+) -> tuple[str, str]:
+    """Terminalize ToolCall/Attempt/Step; Execution only for fatal dispositions.
 
-    Returns the canonical terminal status shared by ToolCall.normalized_status,
-    StepAttempt.status, and ExecutionStep.status (Execution maps UNKNOWN_OUTCOME
-    to FAILED — Execution has no such canonical status).
+    Returns ``(step_terminal_status, disposition)``. Ordinary known TOOL
+    failures leave Execution RUNNING under the same lease so
+    ``ExecutionOrchestrator`` can apply ErrorPolicy / ALL_REQUIRED.
 
     Protocol/schema validation uses the in-memory remote ``result``. Persistence
     fields are written from redacted copies when ``protected`` is non-empty.
@@ -2028,7 +2044,13 @@ def _apply_terminal_transition(
     persist_meta = sanitize_for_persistence(response_meta, protected)
 
     if call_error is not None:
-        terminal = _classify_mcp_failure(call_error, risk_class=risk_class)
+        if (
+            isinstance(call_error, _PreSendFailClosed)
+            and call_error.error_code == "STEP_TIMEOUT_EXCEEDED"
+        ):
+            terminal = StepStatus.TIMED_OUT.value
+        else:
+            terminal = _classify_mcp_failure(call_error, risk_class=risk_class)
         error_layer = call_error.error_layer
         error_code = call_error.error_code
         error_message = redact_text(call_error.message, protected)
@@ -2084,31 +2106,34 @@ def _apply_terminal_transition(
 
     if terminal == StepStatus.SUCCEEDED.value:
         # Step success is not Execution success when unfinished Steps remain.
-        # Keep RUNNING + lease; ExecutionOrchestrator promotes the next READY
-        # Step or terminalizes the Execution when the chain is complete.
         execution.heartbeat_at = finished_at
         execution.lock_version += 1
-        return terminal
+        return terminal, DISPOSITION_SUCCESS
 
-    execution_status = (
-        ExecutionStatus.FAILED.value
-        if terminal == StepStatus.UNKNOWN_OUTCOME.value
-        else terminal
+    # Mandatory-fatal: UNKNOWN_OUTCOME and pre-send security/integrity fail-closed
+    # (except Step total timeout, which is a known TIMED_OUT).
+    pre_send_fatal = isinstance(call_error, _PreSendFailClosed) and (
+        call_error.error_code != "STEP_TIMEOUT_EXCEEDED"
     )
-    execution.status = execution_status
-    execution.error_code = error_code
-    execution.error_message = (
-        "MCP tool outcome is unknown after a possible external side effect;"
-        " it is not automatically retried."
-        if terminal == StepStatus.UNKNOWN_OUTCOME.value
-        else error_message
-    )
-    execution.result_summary = None
-    execution.finished_at = finished_at
-    execution.worker_id = None
-    execution.lease_token = None
-    execution.lease_expires_at = None
-    execution.heartbeat_at = None
+    if terminal == StepStatus.UNKNOWN_OUTCOME.value or pre_send_fatal:
+        execution.status = ExecutionStatus.FAILED.value
+        execution.error_code = error_code
+        execution.error_message = (
+            "MCP tool outcome is unknown after a possible external side effect;"
+            " it is not automatically retried."
+            if terminal == StepStatus.UNKNOWN_OUTCOME.value
+            else error_message
+        )
+        execution.result_summary = None
+        execution.finished_at = finished_at
+        execution.worker_id = None
+        execution.lease_token = None
+        execution.lease_expires_at = None
+        execution.heartbeat_at = None
+        execution.lock_version += 1
+        return terminal, DISPOSITION_FATAL_EXECUTION_FAILURE
+
+    # Ordinary known TOOL failure/timeout — keep RUNNING + lease for orchestrator.
+    execution.heartbeat_at = finished_at
     execution.lock_version += 1
-
-    return terminal
+    return terminal, DISPOSITION_KNOWN_STEP_FAILURE

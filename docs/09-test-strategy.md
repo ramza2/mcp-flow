@@ -375,9 +375,15 @@ Dataset은 평가 전 FROZEN하고 실행 중 정답을 변경하지 않는다.
 - fan-out / fan-in / non-TOOL claim → fail-closed (MCP 0)
 - Step SUCCEEDED keeps Execution RUNNING + lease until chain complete
 - sequential 2/3-TOOL success → N MCP calls; all Steps SUCCEEDED; Execution SUCCEEDED
-- mid-chain failure → Execution FAILED; downstream never READY / MCP not called
+- mid-chain FAIL_EXECUTION → Execution FAILED/TIMED_OUT; downstream PENDING→SKIPPED; MCP 0
+- MARK_PARTIAL / CONTINUE progression + ALL_REQUIRED aggregation
+  (SUCCEEDED / PARTIALLY_SUCCEEDED / FAILED)
+- UNKNOWN_OUTCOME and precondition fatals ignore CONTINUE/MARK_PARTIAL
+- STEP_OUTPUT from failed CONTINUE ancestor → Binding fail-closed; B MCP 0
+- duplicate progression after continuable failure → B READY at most once
 - single-TOOL AgentRequest claim/runner/Approval/MRTR/retry regressions remain green
 - PostgreSQL sequential 3-TOOL orchestration
+- PostgreSQL MARK_PARTIAL / optional CONTINUE / FAIL_EXECUTION / duplicate progress
 - PostgreSQL concurrent promote race after A SUCCEEDED: exactly one B PENDING→READY;
   loser ALREADY_READY/STALE_LEASE no-op; no duplicate Attempt/ToolCall; B MCP ≤ 1
 - duplicate delivery after B already READY / Execution SUCCEEDED → no extra MCP,

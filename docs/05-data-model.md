@@ -1252,16 +1252,26 @@ ToolCall / MCP / MRTR / Approval wait / safe retry).
 ```text
 claim → root TOOL READY
 → run_claimed_tool_step(root)
-→ ToolCall/Attempt/Step SUCCEEDED while Execution stays RUNNING (lease kept)
-→ orchestrator PENDING→READY next dependent TOOL
-→ … until all chain Steps SUCCEEDED
-→ Execution SUCCEEDED + finished_at + lease clear
+→ ToolCall/Attempt/Step SUCCEEDED (or continuable known failure) while
+  Execution stays RUNNING (lease kept)
+→ orchestrator PENDING→READY next dependent TOOL (ErrorPolicy-aware)
+→ natural end → ALL_REQUIRED aggregation
+→ Execution SUCCEEDED | PARTIALLY_SUCCEEDED | FAILED + finished_at + lease clear
 ```
 
-Mid-chain Step failure terminalizes Execution (FAILED / TIMED_OUT /
-UNKNOWN_OUTCOME→FAILED) and never READY’s downstream Steps.
-STEP_OUTPUT / PLAN_INPUT runtime resolve, CONDITION / JOIN / LOOP / parallel,
-and authorable APPROVAL Step runtime are out of this slice.
+Ordinary known mid-chain failures apply Step `on_error`:
+
+- `FAIL_EXECUTION` → Execution FAILED/TIMED_OUT; downstream PENDING→SKIPPED
+- `MARK_PARTIAL` / `CONTINUE` → keep RUNNING; promote next; aggregate at end
+
+Mandatory-fatal failures (UNKNOWN_OUTCOME, lineage/authz/policy/secret/
+Binding/schema integrity) ignore `on_error`, terminalize Execution FAILED,
+and SKIP remaining PENDING. CONDITION / JOIN / LOOP / parallel and authorable
+APPROVAL Step runtime remain out of this slice.
+
+Multi-Step expired-lease recovery remains foundation-limited: do not re-invoke
+a completed Attempt/ToolCall; complex CONTINUE mid-chain recovery beyond current
+evidence is fail-closed.
 
 Lease heartbeat는 `RUNNING` + 동일 worker_id + 동일 lease_token + 미만료 lease에서만 연장한다. 만료된 lease를 heartbeat로 되살리지 않는다.
 

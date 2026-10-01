@@ -236,11 +236,12 @@ async def test_pg_concurrent_promote_after_a_one_ready_for_b(
             session_factory=integration_session_factory,
             tool_runner=runner,
         )
-        return await orch._promote_after_success(
+        return await orch._progress_after_terminal_step(
             execution_id=execution_id,
             completed_step_id=root_id,
             worker_id="pg-worker",
             lease_token=lease_token,
+            allow_continuable_failure=False,
         )
 
     results = await asyncio.gather(promote_once(), promote_once())

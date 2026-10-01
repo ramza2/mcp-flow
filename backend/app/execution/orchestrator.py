@@ -1,11 +1,11 @@
 """Sequential TOOL-chain Execution orchestration (docs/04/05).
 
-``McpToolRunner`` owns one TOOL Step invocation.
-``ExecutionOrchestrator`` owns graph progression and Execution completion.
+``McpToolRunner`` owns one TOOL Step invocation (ToolCall/Attempt/Step).
+``ExecutionOrchestrator`` owns ErrorPolicy, progression, ALL_REQUIRED
+aggregation, and final Execution terminalization / lease release.
 
 This slice supports only a linear TOOL-only DAG (exactly one root, no fan-out /
-fan-in). CONDITION / JOIN / LOOP / parallel / STEP_OUTPUT resolution are out of
-scope.
+fan-in). CONDITION / JOIN / LOOP / parallel are out of scope.
 """
 
 from __future__ import annotations
@@ -20,6 +20,20 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.errors import AppError
 from app.domain.enums import AuthorableStepType, ExecutionStatus, StepStatus
+from app.execution.completion import (
+    DISPOSITION_FATAL_EXECUTION_FAILURE,
+    DISPOSITION_KNOWN_STEP_FAILURE,
+    DISPOSITION_NOOP,
+    DISPOSITION_RETRY,
+    DISPOSITION_SUCCESS,
+    DISPOSITION_WAIT,
+    aggregate_all_required,
+    build_result_summary,
+    fail_fast_execution_status,
+    is_continuable_known_failure,
+    plan_step_for,
+    skip_remaining_pending,
+)
 from app.models.execution import Execution, ExecutionStep
 from app.repositories.execution import ExecutionRepository
 from app.schemas.execution_plan import (
@@ -35,6 +49,9 @@ _REASON_SAFE_RETRY_READY = "SAFE_RETRY_READY"
 _REASON_WAITING_INPUT = "WAITING_INPUT"
 _REASON_STEP_SUCCEEDED = "STEP_SUCCEEDED"
 _REASON_EXECUTION_SUCCEEDED = "EXECUTION_SUCCEEDED"
+_REASON_EXECUTION_PARTIAL = "EXECUTION_PARTIALLY_SUCCEEDED"
+_REASON_EXECUTION_FAILED = "EXECUTION_FAILED"
+_REASON_EXECUTION_TIMED_OUT = "EXECUTION_TIMED_OUT"
 
 _STEP_TERMINAL = frozenset(
     {
@@ -251,7 +268,7 @@ def assert_execution_plan_lineage(execution: Execution) -> ExecutionPlanV1:
 
 
 class ExecutionOrchestrator:
-    """Claim-time root READY + post-success progression for sequential TOOL chains."""
+    """Claim-time root READY + ErrorPolicy progression + ALL_REQUIRED completion."""
 
     def __init__(
         self,
@@ -280,9 +297,6 @@ class ExecutionOrchestrator:
                 lease_token=lease_token,
             )
             if step_id is None:
-                # Durable wait states clear the lease — route to the Step-scoped
-                # runner so existing WAITING_APPROVAL / WAITING_INPUT noop and
-                # corruption checks remain authoritative.
                 waiting_step_id = await self._find_waiting_step_id(execution_id)
                 if waiting_step_id is not None:
                     return await self._runner.run_claimed_tool_step(
@@ -292,25 +306,27 @@ class ExecutionOrchestrator:
                         lease_token=lease_token,
                     )
 
-                # No READY TOOL — either waiting/terminal, or need final SUCCEEDED.
-                finalized = await self._finalize_if_all_succeeded(
+                finalized = await self._finalize_natural_end(
                     execution_id=execution_id,
                     worker_id=worker_id,
                     lease_token=lease_token,
                 )
                 if last_outcome is not None:
-                    if finalized:
+                    if finalized is not None:
                         return ToolRunOutcome(
                             execution_id=last_outcome.execution_id,
                             step_execution_id=last_outcome.step_execution_id,
                             attempt_id=last_outcome.attempt_id,
                             tool_call_id=last_outcome.tool_call_id,
                             mcp_called=last_outcome.mcp_called,
-                            terminal_status=StepStatus.SUCCEEDED.value,
-                            reason=_REASON_EXECUTION_SUCCEEDED,
+                            terminal_status=finalized.status,
+                            reason=finalized.reason,
+                            disposition=DISPOSITION_SUCCESS
+                            if finalized.status
+                            == ExecutionStatus.SUCCEEDED.value
+                            else DISPOSITION_NOOP,
                         )
                     return last_outcome
-                # Idempotent duplicate delivery after terminalization / lost lease.
                 async with self._session_factory() as session:
                     execution = await ExecutionRepository(session).get(execution_id)
                     steps = (
@@ -328,9 +344,13 @@ class ExecutionOrchestrator:
                         terminal_status=None,
                         reason="MISSING",
                     )
-                if execution.status == ExecutionStatus.SUCCEEDED.value or (
-                    steps and all(s.status == StepStatus.SUCCEEDED.value for s in steps)
-                ):
+                if execution.status in {
+                    ExecutionStatus.SUCCEEDED.value,
+                    ExecutionStatus.PARTIALLY_SUCCEEDED.value,
+                    ExecutionStatus.FAILED.value,
+                    ExecutionStatus.TIMED_OUT.value,
+                    ExecutionStatus.CANCELLED.value,
+                }:
                     return ToolRunOutcome(
                         execution_id=execution_id,
                         step_execution_id=steps[0].id if steps else None,
@@ -357,53 +377,165 @@ class ExecutionOrchestrator:
                 lease_token=lease_token,
             )
             last_outcome = outcome
+            disposition = self._effective_disposition(outcome)
 
-            if outcome.reason == _REASON_SAFE_RETRY_READY:
+            if disposition == DISPOSITION_RETRY or outcome.reason == _REASON_SAFE_RETRY_READY:
                 continue
-            if outcome.reason in {
+            if disposition == DISPOSITION_WAIT or outcome.reason in {
                 "WAITING_APPROVAL",
                 _REASON_WAITING_INPUT,
+            }:
+                return outcome
+            if outcome.reason in {
                 "LEASE_MISMATCH",
                 "MISSING",
                 "STEP_ALREADY_TERMINAL",
                 "RESOURCE_CONFLICT",
+                "TOOL_CALL_ALREADY_STARTED",
             }:
                 return outcome
-            if outcome.terminal_status != StepStatus.SUCCEEDED.value:
-                # Failure/timeout/unknown already terminalized Execution in runner.
-                return outcome
 
-            # Step SUCCEEDED while Execution stays RUNNING — promote next or finish.
-            progressed = await self._promote_after_success(
-                execution_id=execution_id,
-                completed_step_id=step_id,
-                worker_id=worker_id,
-                lease_token=lease_token,
+            if disposition == DISPOSITION_SUCCESS or (
+                outcome.terminal_status == StepStatus.SUCCEEDED.value
+            ):
+                progressed = await self._progress_after_terminal_step(
+                    execution_id=execution_id,
+                    completed_step_id=step_id,
+                    worker_id=worker_id,
+                    lease_token=lease_token,
+                    allow_continuable_failure=False,
+                )
+                ret = self._progress_return(outcome, progressed)
+                if ret is not None:
+                    return ret
+                continue
+
+            if disposition == DISPOSITION_FATAL_EXECUTION_FAILURE or (
+                outcome.terminal_status == StepStatus.UNKNOWN_OUTCOME.value
+            ):
+                await self._stop_execution(
+                    execution_id=execution_id,
+                    completed_step_id=step_id,
+                    worker_id=worker_id,
+                    lease_token=lease_token,
+                    mode="FATAL",
+                    step_terminal=outcome.terminal_status
+                    or StepStatus.FAILED.value,
+                )
+                return ToolRunOutcome(
+                    execution_id=outcome.execution_id,
+                    step_execution_id=outcome.step_execution_id,
+                    attempt_id=outcome.attempt_id,
+                    tool_call_id=outcome.tool_call_id,
+                    mcp_called=outcome.mcp_called,
+                    terminal_status=outcome.terminal_status,
+                    reason=outcome.reason,
+                    disposition=DISPOSITION_FATAL_EXECUTION_FAILURE,
+                )
+
+            if disposition == DISPOSITION_KNOWN_STEP_FAILURE:
+                policy = await self._read_step_on_error(
+                    execution_id=execution_id, step_id=step_id
+                )
+                step_terminal = outcome.terminal_status or StepStatus.FAILED.value
+                if policy == "FAIL_EXECUTION" or not is_continuable_known_failure(
+                    on_error=policy, step_status=step_terminal
+                ):
+                    await self._stop_execution(
+                        execution_id=execution_id,
+                        completed_step_id=step_id,
+                        worker_id=worker_id,
+                        lease_token=lease_token,
+                        mode="FAIL_EXECUTION",
+                        step_terminal=step_terminal,
+                    )
+                    return ToolRunOutcome(
+                        execution_id=outcome.execution_id,
+                        step_execution_id=outcome.step_execution_id,
+                        attempt_id=outcome.attempt_id,
+                        tool_call_id=outcome.tool_call_id,
+                        mcp_called=outcome.mcp_called,
+                        terminal_status=step_terminal,
+                        reason=outcome.reason,
+                        disposition=DISPOSITION_KNOWN_STEP_FAILURE,
+                    )
+
+                # MARK_PARTIAL / CONTINUE — promote next linear Step when eligible.
+                progressed = await self._progress_after_terminal_step(
+                    execution_id=execution_id,
+                    completed_step_id=step_id,
+                    worker_id=worker_id,
+                    lease_token=lease_token,
+                    allow_continuable_failure=True,
+                )
+                ret = self._progress_return(outcome, progressed)
+                if ret is not None:
+                    return ret
+                continue
+
+            # Unclassified — fail closed without applying CONTINUE/MARK_PARTIAL.
+            return outcome
+
+    @staticmethod
+    def _effective_disposition(outcome: Any) -> str:
+        if outcome.disposition and outcome.disposition != DISPOSITION_NOOP:
+            return outcome.disposition
+        if outcome.reason == _REASON_SAFE_RETRY_READY:
+            return DISPOSITION_RETRY
+        if outcome.reason in {"WAITING_APPROVAL", _REASON_WAITING_INPUT}:
+            return DISPOSITION_WAIT
+        if outcome.terminal_status == StepStatus.SUCCEEDED.value:
+            return DISPOSITION_SUCCESS
+        if outcome.terminal_status == StepStatus.UNKNOWN_OUTCOME.value:
+            return DISPOSITION_FATAL_EXECUTION_FAILURE
+        if outcome.terminal_status in {
+            StepStatus.FAILED.value,
+            StepStatus.TIMED_OUT.value,
+        }:
+            # Prefer KNOWN when disposition was omitted; fatal paths set disposition.
+            return DISPOSITION_KNOWN_STEP_FAILURE
+        return DISPOSITION_NOOP
+
+    @staticmethod
+    def _progress_return(outcome: Any, progressed: ProgressOutcome) -> Any | None:
+        from app.execution.tool_runner import ToolRunOutcome
+
+        if progressed.reason in {"STALE_LEASE", "MISSING"}:
+            return ToolRunOutcome(
+                execution_id=outcome.execution_id,
+                step_execution_id=outcome.step_execution_id,
+                attempt_id=outcome.attempt_id,
+                tool_call_id=outcome.tool_call_id,
+                mcp_called=outcome.mcp_called,
+                terminal_status=None,
+                reason="LEASE_MISMATCH"
+                if progressed.reason == "STALE_LEASE"
+                else "MISSING",
             )
-            if progressed.reason in {"STALE_LEASE", "MISSING"}:
-                return ToolRunOutcome(
-                    execution_id=outcome.execution_id,
-                    step_execution_id=outcome.step_execution_id,
-                    attempt_id=outcome.attempt_id,
-                    tool_call_id=outcome.tool_call_id,
-                    mcp_called=outcome.mcp_called,
-                    terminal_status=None,
-                    reason="LEASE_MISMATCH"
-                    if progressed.reason == "STALE_LEASE"
-                    else "MISSING",
-                )
-            if progressed.execution_complete:
-                return ToolRunOutcome(
-                    execution_id=outcome.execution_id,
-                    step_execution_id=outcome.step_execution_id,
-                    attempt_id=outcome.attempt_id,
-                    tool_call_id=outcome.tool_call_id,
-                    mcp_called=outcome.mcp_called,
-                    terminal_status=StepStatus.SUCCEEDED.value,
-                    reason=_REASON_EXECUTION_SUCCEEDED,
-                )
-            # PROMOTED / ALREADY_READY — continue under same lease.
-            continue
+        if progressed.execution_complete:
+            return ToolRunOutcome(
+                execution_id=outcome.execution_id,
+                step_execution_id=outcome.step_execution_id,
+                attempt_id=outcome.attempt_id,
+                tool_call_id=outcome.tool_call_id,
+                mcp_called=outcome.mcp_called,
+                terminal_status=progressed.execution_status
+                or StepStatus.SUCCEEDED.value,
+                reason=progressed.reason,
+            )
+        return None
+
+    async def _read_step_on_error(
+        self, *, execution_id: uuid.UUID, step_id: uuid.UUID
+    ) -> str:
+        async with self._session_factory() as session:
+            step = await ExecutionRepository(session).get_step(step_id)
+            if step is None or step.execution_id != execution_id:
+                return "FAIL_EXECUTION"
+            try:
+                return plan_step_for(step).on_error
+            except Exception:
+                return "FAIL_EXECUTION"
 
     async def _find_waiting_step_id(
         self, execution_id: uuid.UUID
@@ -514,19 +646,20 @@ class ExecutionOrchestrator:
                     return running[0].id
                 return None
 
-    async def _promote_after_success(
+    async def _progress_after_terminal_step(
         self,
         *,
         execution_id: uuid.UUID,
         completed_step_id: uuid.UUID,
         worker_id: str,
         lease_token: uuid.UUID,
+        allow_continuable_failure: bool,
     ) -> ProgressOutcome:
         """Promote the next PENDING TOOL or complete the Execution.
 
         Concurrent duplicate progression is serialized on the Execution row
-        (``FOR UPDATE``). The loser observes READY/terminal state and returns a
-        deterministic no-op reason without mutating lease or creating Steps.
+        (``FOR UPDATE``). Predecessor may be SUCCEEDED, or a known failure with
+        MARK_PARTIAL/CONTINUE when ``allow_continuable_failure`` is True.
         """
         async with self._session_factory() as session:
             async with session.begin():
@@ -542,21 +675,41 @@ class ExecutionOrchestrator:
                 if not self._has_running_lease(
                     execution, worker_id, lease_token, now
                 ):
-                    # Stale/duplicate loser — never clear the winner's lease.
+                    terminal = execution.status in {
+                        ExecutionStatus.SUCCEEDED.value,
+                        ExecutionStatus.PARTIALLY_SUCCEEDED.value,
+                        ExecutionStatus.FAILED.value,
+                        ExecutionStatus.TIMED_OUT.value,
+                    }
                     return ProgressOutcome(
-                        execution_complete=execution.status
-                        == ExecutionStatus.SUCCEEDED.value,
+                        execution_complete=terminal,
                         promoted=False,
                         reason="STALE_LEASE",
+                        execution_status=execution.status if terminal else None,
                     )
                 steps = await executions.list_steps(execution.id)
                 completed = next(
                     (s for s in steps if s.id == completed_step_id), None
                 )
-                if completed is None or completed.status != StepStatus.SUCCEEDED.value:
+                if completed is None:
                     raise AppError(
                         code="RESOURCE_CONFLICT",
-                        message="Completed Step is not SUCCEEDED during progression.",
+                        message="Completed Step missing during progression.",
+                        status_code=409,
+                    )
+                completed_ok = completed.status == StepStatus.SUCCEEDED.value
+                if allow_continuable_failure and not completed_ok:
+                    on_error = plan_step_for(completed).on_error
+                    completed_ok = is_continuable_known_failure(
+                        on_error=on_error, step_status=completed.status
+                    )
+                if not completed_ok:
+                    raise AppError(
+                        code="RESOURCE_CONFLICT",
+                        message=(
+                            "Completed Step is not eligible for sequential "
+                            "progression."
+                        ),
                         status_code=409,
                     )
 
@@ -564,7 +717,6 @@ class ExecutionOrchestrator:
                 chain = validate_sequential_tool_chain(plan, steps)
                 by_key = {s.step_key: s for s in steps}
 
-                # Idempotent: if a later READY already exists, do not re-ready.
                 already_ready = [
                     s
                     for s in steps
@@ -578,7 +730,6 @@ class ExecutionOrchestrator:
                         reason="ALREADY_READY",
                     )
 
-                # Find next PENDING whose single dependency is SUCCEEDED.
                 next_key: str | None = None
                 for index, key in enumerate(chain.ordered_step_keys):
                     if key != completed.step_key:
@@ -588,33 +739,26 @@ class ExecutionOrchestrator:
                     break
 
                 if next_key is None:
-                    # Last step — complete Execution (idempotent if already done).
-                    if not all(
-                        by_key[k].status == StepStatus.SUCCEEDED.value
-                        for k in chain.ordered_step_keys
-                    ):
-                        raise AppError(
-                            code="RESOURCE_CONFLICT",
-                            message="Cannot SUCCEEDED Execution with unfinished Steps.",
-                            status_code=409,
-                        )
-                    if execution.status == ExecutionStatus.SUCCEEDED.value:
+                    if execution.status != ExecutionStatus.RUNNING.value:
                         return ProgressOutcome(
                             execution_complete=True,
                             promoted=False,
                             reason="ALREADY_COMPLETE",
+                            execution_status=execution.status,
                         )
-                    self._complete_execution_succeeded(execution, steps, now)
+                    decision = aggregate_all_required(plan=plan, steps=steps)
+                    self._apply_execution_terminal(
+                        execution, steps, plan, decision, now
+                    )
                     await session.flush()
                     return ProgressOutcome(
                         execution_complete=True,
                         promoted=False,
-                        reason="EXECUTION_SUCCEEDED",
+                        reason=self._completion_reason(decision.status),
+                        execution_status=decision.status,
                     )
 
                 nxt = by_key[next_key]
-                # Re-lock the candidate Step so concurrent promoters serialize
-                # on both Execution and the next Step row.
                 locked_next = await executions.lock_step(nxt.id)
                 if locked_next is None or locked_next.execution_id != execution.id:
                     raise AppError(
@@ -628,23 +772,27 @@ class ExecutionOrchestrator:
                         promoted=False,
                         reason="ALREADY_READY",
                     )
-                if locked_next.status == StepStatus.SUCCEEDED.value:
-                    if all(
-                        by_key[k].status == StepStatus.SUCCEEDED.value
-                        for k in chain.ordered_step_keys
-                    ):
+                if locked_next.status in _STEP_TERMINAL:
+                    # Refresh steps and try natural end if chain finished.
+                    steps = await executions.list_steps(execution.id)
+                    if self._chain_naturally_ended(chain.ordered_step_keys, steps):
                         if execution.status == ExecutionStatus.RUNNING.value:
-                            self._complete_execution_succeeded(execution, steps, now)
+                            decision = aggregate_all_required(plan=plan, steps=steps)
+                            self._apply_execution_terminal(
+                                execution, steps, plan, decision, now
+                            )
                             await session.flush()
                             return ProgressOutcome(
                                 execution_complete=True,
                                 promoted=False,
-                                reason="EXECUTION_SUCCEEDED",
+                                reason=self._completion_reason(decision.status),
+                                execution_status=decision.status,
                             )
                         return ProgressOutcome(
                             execution_complete=True,
                             promoted=False,
                             reason="ALREADY_COMPLETE",
+                            execution_status=execution.status,
                         )
                     return ProgressOutcome(
                         execution_complete=False,
@@ -676,9 +824,11 @@ class ExecutionOrchestrator:
                 execution.lock_version += 1
                 await session.flush()
                 logger.info(
-                    "orchestrator promoted step execution_id=%s step_key=%s",
+                    "orchestrator promoted step execution_id=%s step_key=%s "
+                    "after=%s",
                     execution_id,
                     next_key,
+                    completed.status,
                 )
                 return ProgressOutcome(
                     execution_complete=False,
@@ -686,38 +836,173 @@ class ExecutionOrchestrator:
                     reason="PROMOTED",
                 )
 
-    async def _finalize_if_all_succeeded(
+    async def _stop_execution(
         self,
         *,
         execution_id: uuid.UUID,
+        completed_step_id: uuid.UUID,
         worker_id: str,
         lease_token: uuid.UUID,
-    ) -> bool:
+        mode: str,
+        step_terminal: str,
+    ) -> ProgressOutcome | None:
+        """Fail-fast / fatal stop: skip remaining PENDING, terminalize Execution."""
         async with self._session_factory() as session:
             async with session.begin():
                 executions = ExecutionRepository(session)
                 execution = await executions.lock_execution(execution_id)
                 if execution is None:
-                    return False
-                if execution.status == ExecutionStatus.SUCCEEDED.value:
-                    return True
+                    return ProgressOutcome(
+                        execution_complete=False,
+                        promoted=False,
+                        reason="MISSING",
+                    )
                 now = datetime.now(UTC)
-                if (
-                    execution.status != ExecutionStatus.RUNNING.value
-                    or execution.worker_id != worker_id
-                    or execution.lease_token != lease_token
+                steps = await executions.list_steps(execution.id)
+                completed = next(
+                    (s for s in steps if s.id == completed_step_id), None
+                )
+                # Idempotent: already terminal Execution — only fill SKIPPED gaps.
+                already_terminal = execution.status in {
+                    ExecutionStatus.FAILED.value,
+                    ExecutionStatus.TIMED_OUT.value,
+                    ExecutionStatus.SUCCEEDED.value,
+                    ExecutionStatus.PARTIALLY_SUCCEEDED.value,
+                    ExecutionStatus.CANCELLED.value,
+                }
+                if not already_terminal and not self._has_running_lease(
+                    execution, worker_id, lease_token, now
                 ):
-                    return False
+                    return ProgressOutcome(
+                        execution_complete=False,
+                        promoted=False,
+                        reason="STALE_LEASE",
+                    )
+
+                plan = assert_execution_plan_lineage(execution)
+                chain = validate_sequential_tool_chain(plan, steps)
+                by_key = {s.step_key: s for s in steps}
+                if completed is not None:
+                    skip_remaining_pending(
+                        ordered_step_keys=chain.ordered_step_keys,
+                        after_step_key=completed.step_key,
+                        by_key=by_key,
+                        now=now,
+                    )
+
+                if already_terminal:
+                    await session.flush()
+                    return ProgressOutcome(
+                        execution_complete=True,
+                        promoted=False,
+                        reason="ALREADY_COMPLETE",
+                        execution_status=execution.status,
+                    )
+
+                if mode == "FAIL_EXECUTION":
+                    exec_status = fail_fast_execution_status(step_terminal)
+                else:
+                    exec_status = ExecutionStatus.FAILED.value
+
+                execution.status = exec_status
+                if completed is not None:
+                    execution.error_code = completed.error_code
+                    execution.error_message = completed.error_message
+                execution.result_summary = build_result_summary(
+                    status=exec_status, steps=steps, plan=plan
+                )
+                execution.finished_at = now
+                execution.worker_id = None
+                execution.lease_token = None
+                execution.lease_expires_at = None
+                execution.heartbeat_at = None
+                execution.lock_version += 1
+                await session.flush()
+                reason = (
+                    _REASON_EXECUTION_TIMED_OUT
+                    if exec_status == ExecutionStatus.TIMED_OUT.value
+                    else _REASON_EXECUTION_FAILED
+                )
+                return ProgressOutcome(
+                    execution_complete=True,
+                    promoted=False,
+                    reason=reason,
+                    execution_status=exec_status,
+                )
+
+    async def _finalize_natural_end(
+        self,
+        *,
+        execution_id: uuid.UUID,
+        worker_id: str,
+        lease_token: uuid.UUID,
+    ) -> ProgressOutcome | None:
+        async with self._session_factory() as session:
+            async with session.begin():
+                executions = ExecutionRepository(session)
+                execution = await executions.lock_execution(execution_id)
+                if execution is None:
+                    return None
+                if execution.status in {
+                    ExecutionStatus.SUCCEEDED.value,
+                    ExecutionStatus.PARTIALLY_SUCCEEDED.value,
+                }:
+                    return ProgressOutcome(
+                        execution_complete=True,
+                        promoted=False,
+                        reason="ALREADY_COMPLETE",
+                        execution_status=execution.status,
+                    )
+                now = datetime.now(UTC)
+                if not self._has_running_lease(
+                    execution, worker_id, lease_token, now
+                ):
+                    return None
                 steps = await executions.list_steps(execution.id)
                 if not steps:
-                    return False
-                if not all(s.status == StepStatus.SUCCEEDED.value for s in steps):
-                    return False
+                    return None
                 plan = assert_execution_plan_lineage(execution)
-                validate_sequential_tool_chain(plan, steps)
-                self._complete_execution_succeeded(execution, steps, now)
+                chain = validate_sequential_tool_chain(plan, steps)
+                if not self._chain_naturally_ended(chain.ordered_step_keys, steps):
+                    return None
+                decision = aggregate_all_required(plan=plan, steps=steps)
+                self._apply_execution_terminal(
+                    execution, steps, plan, decision, now
+                )
                 await session.flush()
-                return True
+                return ProgressOutcome(
+                    execution_complete=True,
+                    promoted=False,
+                    reason=self._completion_reason(decision.status),
+                    execution_status=decision.status,
+                )
+
+    @staticmethod
+    def _chain_naturally_ended(
+        ordered_step_keys: tuple[str, ...], steps: list[ExecutionStep]
+    ) -> bool:
+        by_key = {s.step_key: s for s in steps}
+        for key in ordered_step_keys:
+            status = by_key[key].status
+            if status in {
+                StepStatus.PENDING.value,
+                StepStatus.READY.value,
+                StepStatus.RUNNING.value,
+                StepStatus.WAITING_INPUT.value,
+                StepStatus.WAITING_APPROVAL.value,
+            }:
+                return False
+        return True
+
+    @staticmethod
+    def _completion_reason(status: str) -> str:
+        if status == ExecutionStatus.SUCCEEDED.value:
+            return _REASON_EXECUTION_SUCCEEDED
+        if status == ExecutionStatus.PARTIALLY_SUCCEEDED.value:
+            return _REASON_EXECUTION_PARTIAL
+        if status == ExecutionStatus.TIMED_OUT.value:
+            return _REASON_EXECUTION_TIMED_OUT
+        return _REASON_EXECUTION_FAILED
 
     @staticmethod
     def _has_running_lease(
@@ -740,19 +1025,19 @@ class ExecutionOrchestrator:
         )
 
     @staticmethod
-    def _complete_execution_succeeded(
+    def _apply_execution_terminal(
         execution: Execution,
         steps: list[ExecutionStep],
+        plan: ExecutionPlanV1,
+        decision: Any,
         now: datetime,
     ) -> None:
-        execution.status = ExecutionStatus.SUCCEEDED.value
-        execution.error_code = None
-        execution.error_message = None
-        execution.result_summary = {
-            "status": ExecutionStatus.SUCCEEDED.value,
-            "step_keys": [s.step_key for s in steps],
-            "step_count": len(steps),
-        }
+        execution.status = decision.status
+        execution.error_code = decision.error_code
+        execution.error_message = decision.error_message
+        execution.result_summary = build_result_summary(
+            status=decision.status, steps=steps, plan=plan
+        )
         execution.finished_at = now
         execution.worker_id = None
         execution.lease_token = None
@@ -763,8 +1048,9 @@ class ExecutionOrchestrator:
 
 @dataclass(frozen=True, slots=True)
 class ProgressOutcome:
-    """Result of sequential progression after a TOOL Step SUCCEEDED."""
+    """Result of sequential progression / stop / natural completion."""
 
     execution_complete: bool
     promoted: bool
     reason: str
+    execution_status: str | None = None

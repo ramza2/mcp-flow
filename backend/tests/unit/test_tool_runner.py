@@ -391,7 +391,7 @@ def test_apply_terminal_transition_unknown_outcome_never_reaches_execution() -> 
     )
     exc = _tool_call_error(error_layer="TIMEOUT", outcome_unknown=True)
 
-    terminal = _apply_terminal_transition(
+    terminal, disposition = _apply_terminal_transition(
         execution=execution,
         step=step,
         attempt=attempt,
@@ -407,6 +407,7 @@ def test_apply_terminal_transition_unknown_outcome_never_reaches_execution() -> 
     )
 
     assert terminal == StepStatus.UNKNOWN_OUTCOME.value
+    assert disposition == "FATAL_EXECUTION_FAILURE"
     assert step.status == StepStatus.UNKNOWN_OUTCOME.value
     assert attempt.status == StepAttemptStatus.UNKNOWN_OUTCOME.value
     assert tool_call.normalized_status == ToolCallNormalizedStatus.UNKNOWN_OUTCOME.value
