@@ -527,3 +527,84 @@ def test_loop_context_reject() -> None:
 def test_missing_sentinel_identity() -> None:
     assert MISSING is not None
     assert not bool(MISSING)
+
+
+_LARGE_A = 9007199254740993
+_LARGE_B = 9007199254740992
+
+
+def test_numeric_equality_preserves_large_integer_precision() -> None:
+    assert not json_strict_equal(_LARGE_A, _LARGE_B)
+    assert not json_strict_equal(_LARGE_A, float(_LARGE_B))
+    assert json_strict_equal(1, 1.0)
+    assert not _eval(
+        {
+            "op": "eq",
+            "left": {"kind": "LITERAL", "value": _LARGE_A},
+            "right": {"kind": "LITERAL", "value": _LARGE_B},
+        }
+    )
+    assert _eval(
+        {
+            "op": "ne",
+            "left": {"kind": "LITERAL", "value": _LARGE_A},
+            "right": {"kind": "LITERAL", "value": _LARGE_B},
+        }
+    )
+    assert _eval(
+        {
+            "op": "eq",
+            "left": {"kind": "LITERAL", "value": 1},
+            "right": {"kind": "LITERAL", "value": 1.0},
+        }
+    )
+    # bool remains separated from number
+    assert not _eval(
+        {
+            "op": "eq",
+            "left": {"kind": "LITERAL", "value": True},
+            "right": {"kind": "LITERAL", "value": 1},
+        }
+    )
+
+
+def test_numeric_ordering_preserves_large_integer_precision() -> None:
+    assert _eval(
+        {
+            "op": "gt",
+            "left": {"kind": "LITERAL", "value": _LARGE_A},
+            "right": {"kind": "LITERAL", "value": _LARGE_B},
+        }
+    )
+    assert _eval(
+        {
+            "op": "lt",
+            "left": {"kind": "LITERAL", "value": _LARGE_B},
+            "right": {"kind": "LITERAL", "value": _LARGE_A},
+        }
+    )
+
+
+def test_non_finite_float_operands_fail_closed() -> None:
+    for value in (float("nan"), float("inf"), float("-inf")):
+        with pytest.raises(AppError) as exc:
+            _eval(
+                {
+                    "op": "eq",
+                    "left": {"kind": "LITERAL", "value": value},
+                    "right": {"kind": "LITERAL", "value": 1},
+                }
+            )
+        assert exc.value.code == "PREDICATE_TYPE_MISMATCH"
+        with pytest.raises(AppError) as exc2:
+            _eval(
+                {
+                    "op": "gt",
+                    "left": {"kind": "LITERAL", "value": value},
+                    "right": {"kind": "LITERAL", "value": 0},
+                }
+            )
+        assert exc2.value.code == "PREDICATE_TYPE_MISMATCH"
+        with pytest.raises(AppError) as exc3:
+            json_strict_equal(value, 1.0)
+        assert exc3.value.code == "PREDICATE_TYPE_MISMATCH"

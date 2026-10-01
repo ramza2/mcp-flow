@@ -349,6 +349,75 @@ def test_aggregate_all_required_fail_fast_skip_not_neutral() -> None:
 
 
 @pytest.mark.asyncio
+async def test_condition_large_integer_ordering_precision(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CONDITION with large ints must not lose precision via float()."""
+    _install_no_side_effects(monkeypatch)
+    async with db_session_factory() as session:
+        seeded = await _seed_executable(session)
+        await session.commit()
+
+    large_a = 9007199254740993
+    large_b = 9007199254740992
+    plan = _plan(
+        [
+            _condition_step(
+                "c",
+                {
+                    "op": "gt",
+                    "left": {"kind": "LITERAL", "value": large_a},
+                    "right": {"kind": "LITERAL", "value": large_b},
+                },
+            ),
+            _tool_step(
+                "pass",
+                depends_on=["c"],
+                when={
+                    "op": "eq",
+                    "left": {
+                        "kind": "STEP_OUTPUT",
+                        "step_id": "c",
+                        "path": "/condition_result",
+                    },
+                    "right": {"kind": "LITERAL", "value": True},
+                },
+            ),
+            _tool_step(
+                "fail",
+                depends_on=["c"],
+                when={
+                    "op": "eq",
+                    "left": {
+                        "kind": "STEP_OUTPUT",
+                        "step_id": "c",
+                        "path": "/condition_result",
+                    },
+                    "right": {"kind": "LITERAL", "value": False},
+                },
+            ),
+        ],
+        seeded["tool_version_id"],
+    )
+    client = _ScoreClient()
+    execution_id, outcome = await _claim_and_run(
+        db_session_factory, plan=plan, seeded=seeded, client=client
+    )
+    async with db_session_factory() as session:
+        steps = await ExecutionRepository(session).list_steps(execution_id)
+        by = {s.step_key: s for s in steps}
+        assert by["c"].status == StepStatus.SUCCEEDED.value
+        assert by["c"].condition_result is True
+        assert by["c"].result_inline == {"condition_result": True}
+        assert by["pass"].status == StepStatus.SUCCEEDED.value
+        assert by["fail"].status == StepStatus.SKIPPED.value
+        assert by["fail"].error_code == "STEP_WHEN_FALSE"
+        assert len(client.calls) == 1
+    assert outcome.reason == "EXECUTION_SUCCEEDED"
+
+
+@pytest.mark.asyncio
 async def test_root_condition_true_false_and_no_attempt(
     db_session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,

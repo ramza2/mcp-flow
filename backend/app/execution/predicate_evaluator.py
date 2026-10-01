@@ -5,6 +5,7 @@ Pure: no DB writes, MCP, LLM, SecretResolver, or expression/eval.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Sequence
 from typing import Any
 
@@ -54,15 +55,40 @@ def _json_type_name(value: Any) -> str:
     return type(value).__name__
 
 
+def _is_number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _reject_non_finite_number(value: Any) -> None:
+    """Fail closed: NaN / ±Infinity are not comparable JSON numbers."""
+    if isinstance(value, float) and not isinstance(value, bool) and not math.isfinite(
+        value
+    ):
+        raise _fail(
+            _CODE_TYPE_MISMATCH,
+            "Non-finite float (NaN / ±Infinity) is not a comparable JSON number.",
+        )
+
+
 def json_strict_equal(left: Any, right: Any) -> bool:
-    """Strict JSON-type-aware equality (``True != 1``, ``\"1\" != 1``)."""
+    """Strict JSON-type-aware equality (``True != 1``, ``\"1\" != 1``).
+
+    Numeric equality uses Python's exact-safe ``==`` after excluding bool.
+    Does not coerce through binary ``float()``. Non-finite floats fail closed.
+    """
     if left is None and right is None:
         return True
     if isinstance(left, bool) or isinstance(right, bool):
         return isinstance(left, bool) and isinstance(right, bool) and left is right
-    if isinstance(left, (int, float)) and isinstance(right, (int, float)):
-        # Numbers only (bool already excluded). Allow 1 == 1.0.
-        return float(left) == float(right)
+    if _is_number(left) or _is_number(right):
+        if _is_number(left):
+            _reject_non_finite_number(left)
+        if _is_number(right):
+            _reject_non_finite_number(right)
+        if _is_number(left) and _is_number(right):
+            # Exact-safe: 1 == 1.0; large ints remain distinct from neighbors.
+            return left == right
+        return False
     if isinstance(left, str) and isinstance(right, str):
         return left == right
     if isinstance(left, list) and isinstance(right, list):
@@ -74,10 +100,6 @@ def json_strict_equal(left: Any, right: Any) -> bool:
             return False
         return all(json_strict_equal(left[k], right[k]) for k in left)
     return False
-
-
-def _is_number(value: Any) -> bool:
-    return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
 class RuntimePredicateEvaluator:
@@ -312,6 +334,11 @@ class RuntimePredicateEvaluator:
                 _CODE_TYPE_MISMATCH,
                 "SECRET_REF values cannot be used in binary Predicate comparisons.",
             )
+        # Non-finite floats are never normal comparable JSON numbers.
+        if _is_number(left):
+            _reject_non_finite_number(left)
+        if _is_number(right):
+            _reject_non_finite_number(right)
 
         op = predicate.op
         if op == PredicateOperator.EQ:
@@ -348,7 +375,10 @@ class RuntimePredicateEvaluator:
 
     def _ordered_compare(self, op: PredicateOperator, left: Any, right: Any) -> bool:
         if _is_number(left) and _is_number(right):
-            lv, rv = float(left), float(right)
+            _reject_non_finite_number(left)
+            _reject_non_finite_number(right)
+            # Exact-safe ordering on original numeric values (no float()).
+            lv, rv = left, right
         elif isinstance(left, str) and isinstance(right, str):
             lv, rv = left, right
         else:
