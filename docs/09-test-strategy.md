@@ -405,6 +405,24 @@ Dataset은 평가 전 FROZEN하고 실행 중 정답을 변경하지 않는다.
 - PostgreSQL concurrent root promotion slots never exceed max_parallelism
 - parallel-wave recovery limitation documented (fail-closed; no re-invoke)
 
+추가 (CONDITION + Predicate AST + Step.when runtime):
+
+- Predicate evaluator: eq/ne strict equality; bool≠number; ordered number/string;
+  invalid mixed types; in/contains; exists/is_null MISSING vs null; binary MISSING
+  fail; and/or short-circuit; not; PLAN_INPUT / STEP_OUTPUT / EXECUTION_CONTEXT;
+  CONDITION STEP_OUTPUT; SECRET_REF exists + binary reject; LOOP_CONTEXT reject
+- root CONDITION; CONDITION true/false SUCCEEDED with `condition_result` +
+  `result_inline={"condition_result": bool}`; Attempt/ToolCall 0
+- `when=true` TOOL executes; `when=false` TOOL/JOIN SKIPPED MCP 0
+- conditional skip descendant propagation (`UPSTREAM_CONDITION_SKIPPED`)
+- ALL_REQUIRED ignores intentional branch skip; does not ignore fail-fast skip
+- immutable Predicate/step_snapshot tamper → Execution FAILED, lease clear, MCP 0
+- PostgreSQL true/false branch E2E (PASS/FAIL MCP inverse; JOIN ALL_COMPLETE)
+- PostgreSQL JOIN skipped-branch ALL_COMPLETE / ANY_SUCCESS
+- PostgreSQL duplicate CONDITION reconciliation race → one terminal CONDITION;
+  selected-branch MCP ≤ 1
+- LOOP / LOOP_CONTEXT / authorable APPROVAL Step still out of scope
+
 추가 (Runtime Binding resolution — sequential TOOL slice):
 
 - LITERAL / SECRET_REF / PLAN_INPUT / STEP_OUTPUT / EXECUTION_CONTEXT resolve

@@ -124,6 +124,9 @@ def canonicalize_secret_ref_value(value: Any) -> dict[str, Any]:
 class RuntimeBindingResolver:
     """Resolve Plan bindings into a secret-safe ``resolved_input`` map."""
 
+    def transitive_ancestors(self, plan: ExecutionPlanV1) -> dict[str, set[str]]:
+        return _transitive_ancestors(plan)
+
     def resolve(
         self,
         *,
@@ -150,17 +153,18 @@ class RuntimeBindingResolver:
 
         resolved: dict[str, Any] = {}
         for key, binding in bindings.items():
-            resolved[key] = self._resolve_one(
+            resolved[key] = self.resolve_binding(
                 binding=binding,
                 execution=execution,
                 owning_step=step,
                 by_key=by_key,
                 plan=plan,
                 ancestors=ancestors,
+                missing_ok=False,
             )
         return resolved
 
-    def _resolve_one(
+    def resolve_binding(
         self,
         *,
         binding: PlanBindingValue,
@@ -169,13 +173,22 @@ class RuntimeBindingResolver:
         by_key: dict[str, ExecutionStep],
         plan: ExecutionPlanV1,
         ancestors: dict[str, set[str]],
+        missing_ok: bool = False,
     ) -> Any:
+        """Resolve one Binding.
+
+        When ``missing_ok`` is True (Predicate evaluation), missing JSON Pointer
+        paths return the ``MISSING`` sentinel. TOOL Binding resolution keeps
+        ``missing_ok=False`` and still fails closed on MISSING.
+        """
         if isinstance(binding, PlanLiteralBinding):
             return binding.value
         if isinstance(binding, PlanSecretRefBinding):
             return secret_ref_resolved(binding.secret_id)
         if isinstance(binding, PlanInputBinding):
-            return self._resolve_plan_input(execution, plan, binding.path)
+            return self._resolve_plan_input(
+                execution, plan, binding.path, missing_ok=missing_ok
+            )
         if isinstance(binding, PlanStepOutputBinding):
             return self._resolve_step_output(
                 binding=binding,
@@ -183,11 +196,14 @@ class RuntimeBindingResolver:
                 by_key=by_key,
                 plan=plan,
                 ancestors=ancestors,
+                missing_ok=missing_ok,
             )
         if isinstance(binding, PlanExecutionContextBinding):
             root = build_execution_context_projection(execution)
             value = resolve_json_pointer(root, binding.path)
             if value is MISSING:
+                if missing_ok:
+                    return MISSING
                 raise AppError(
                     code="EXECUTION_PRECONDITION_FAILED",
                     message=(
@@ -210,7 +226,12 @@ class RuntimeBindingResolver:
         )
 
     def _resolve_plan_input(
-        self, execution: Execution, plan: ExecutionPlanV1, path: str
+        self,
+        execution: Execution,
+        plan: ExecutionPlanV1,
+        path: str,
+        *,
+        missing_ok: bool = False,
     ) -> Any:
         root = execution.input_snapshot
         if root is None:
@@ -227,6 +248,8 @@ class RuntimeBindingResolver:
             )
         value = resolve_json_pointer(root, path)
         if value is MISSING:
+            if missing_ok:
+                return MISSING
             raise AppError(
                 code="EXECUTION_PRECONDITION_FAILED",
                 message=f"PLAN_INPUT path {path!r} is MISSING (not JSON null).",
@@ -319,6 +342,7 @@ class RuntimeBindingResolver:
         by_key: dict[str, ExecutionStep],
         plan: ExecutionPlanV1,
         ancestors: dict[str, set[str]],
+        missing_ok: bool = False,
     ) -> Any:
         source = by_key.get(binding.step_id)
         if source is None:
@@ -366,6 +390,8 @@ class RuntimeBindingResolver:
             )
         value = resolve_json_pointer(source.result_inline, binding.path)
         if value is MISSING:
+            if missing_ok:
+                return MISSING
             raise AppError(
                 code="EXECUTION_PRECONDITION_FAILED",
                 message=(

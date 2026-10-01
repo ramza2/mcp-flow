@@ -1,8 +1,8 @@
 """Restricted Predicate AST for Execution Plan v1 (docs/04 §10).
 
 Recursive structure — not a flat left/op/right-only model.
-Static foundation validates structure/operators/bindings only;
-runtime evaluation is out of scope.
+Static foundation validates structure/operators/bindings;
+runtime evaluation is owned by ``RuntimePredicateEvaluator``.
 """
 
 from __future__ import annotations
