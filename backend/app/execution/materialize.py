@@ -1,10 +1,15 @@
 """Reusable Execution + ExecutionStep materialization (docs/05 §13).
 
-Persists Execution ``CREATED`` and N ``ExecutionStep`` ``PENDING`` rows from an
-already-validated immutable Plan snapshot.
+Persists Execution ``CREATED`` and top-level ``ExecutionStep`` ``PENDING`` rows
+from an already-validated immutable Plan snapshot.
+
+LOOP body templates remain in ``Execution.plan_snapshot`` only; they are not
+materialized as initial ExecutionStep rows. Per-iteration body instances are
+created later by the FOR_EACH runtime.
 
 Does **not** queue, dispatch Outbox, claim leases, ready Steps, resolve
-bindings, evaluate predicates, create Approvals, expand LOOPs, or call MCP.
+bindings, evaluate predicates, create Approvals, expand LOOP iterations, or
+call MCP.
 """
 
 from __future__ import annotations
@@ -19,6 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.agent.complex_plan_validator import StaticComplexPlanValidator
 from app.core.errors import AppError
 from app.domain.enums import AuthorableStepType, ExecutionStatus, StepStatus
+from app.execution.loop_runtime import top_level_plan_steps
 from app.models.execution import Execution, ExecutionStep
 from app.repositories.execution import ExecutionRepository
 from app.schemas.execution_plan import (
@@ -184,9 +190,12 @@ class ExecutionPlanMaterializer:
                 ],
             )
 
+        # Initial rows: Plan Steps not owned by any LOOP body. Body templates
+        # stay in plan_snapshot and are materialized per iteration at runtime.
+        top_level = top_level_plan_steps(plan)
         projections = [
             self._project_step(step, sequence_hint=index)
-            for index, step in enumerate(plan.steps)
+            for index, step in enumerate(top_level)
         ]
         return plan, projections
 

@@ -38,8 +38,17 @@ def _base_plan(
     lim = default_plan_limits().model_dump(mode="json")
     if limits:
         lim.update(limits)
-    response_ids = [s["id"] for s in steps if s.get("type") == "TOOL"] or (
-        [steps[-1]["id"]] if steps else []
+    body_ids: set[str] = set()
+    for s in steps:
+        if s.get("type") == AuthorableStepType.LOOP.value:
+            cfg = s.get("config") or {}
+            body_ids.update(cfg.get("body_step_ids") or [])
+    response_ids = [
+        s["id"]
+        for s in steps
+        if s.get("type") == "TOOL" and s["id"] not in body_ids
+    ] or (
+        [s["id"] for s in steps if s["id"] not in body_ids][-1:] if steps else []
     )
     return {
         "schema_version": EXECUTION_PLAN_SCHEMA_VERSION,
@@ -352,6 +361,298 @@ def test_valid_foreach_loop() -> None:
     )
     result = _validate(plan)
     assert result.ok, result.errors
+
+
+def test_top_level_depends_on_body_template_rejected() -> None:
+    plan = _base_plan(
+        steps=[
+            {
+                "id": "loop1",
+                "name": "loop1",
+                "type": AuthorableStepType.LOOP.value,
+                "required": True,
+                "depends_on": [],
+                "when": None,
+                "timeout_seconds": 30,
+                "on_error": "FAIL_EXECUTION",
+                "config": {
+                    "mode": LoopMode.FOR_EACH.value,
+                    "max_iterations": 5,
+                    "collection": {
+                        "kind": BindingKind.PLAN_INPUT.value,
+                        "path": "/items",
+                    },
+                    "body_step_ids": ["body"],
+                },
+            },
+            _tool("body", depends_on=["loop1"]),
+            _tool("after", depends_on=["body"]),
+        ]
+    )
+    # Force response away from body (helper already excludes body TOOL ids).
+    plan["completion"]["response_step_ids"] = ["loop1"]
+    result = _validate(plan)
+    assert not result.ok
+    assert "PLAN_SCHEMA_INVALID" in result.error_codes
+    assert any("body template" in e.message for e in result.errors)
+
+
+def test_top_level_step_output_body_template_rejected() -> None:
+    plan = _base_plan(
+        steps=[
+            {
+                "id": "loop1",
+                "name": "loop1",
+                "type": AuthorableStepType.LOOP.value,
+                "required": True,
+                "depends_on": [],
+                "when": None,
+                "timeout_seconds": 30,
+                "on_error": "FAIL_EXECUTION",
+                "config": {
+                    "mode": LoopMode.FOR_EACH.value,
+                    "max_iterations": 5,
+                    "collection": {
+                        "kind": BindingKind.PLAN_INPUT.value,
+                        "path": "/items",
+                    },
+                    "body_step_ids": ["body"],
+                },
+            },
+            _tool("body", depends_on=["loop1"]),
+            _tool(
+                "after",
+                depends_on=["loop1"],
+                bindings={
+                    "location": {
+                        "kind": BindingKind.STEP_OUTPUT.value,
+                        "step_id": "body",
+                        "path": "/structured_content/ok",
+                    }
+                },
+            ),
+        ]
+    )
+    plan["completion"]["response_step_ids"] = ["after"]
+    result = _validate(plan)
+    assert not result.ok
+    assert "PLAN_BINDING_INVALID" in result.error_codes
+
+
+def test_response_step_ids_must_not_name_body_template() -> None:
+    plan = _base_plan(
+        steps=[
+            {
+                "id": "loop1",
+                "name": "loop1",
+                "type": AuthorableStepType.LOOP.value,
+                "required": True,
+                "depends_on": [],
+                "when": None,
+                "timeout_seconds": 30,
+                "on_error": "FAIL_EXECUTION",
+                "config": {
+                    "mode": LoopMode.FOR_EACH.value,
+                    "max_iterations": 5,
+                    "collection": {
+                        "kind": BindingKind.PLAN_INPUT.value,
+                        "path": "/items",
+                    },
+                    "body_step_ids": ["body"],
+                },
+            },
+            _tool("body", depends_on=["loop1"]),
+        ]
+    )
+    plan["completion"]["response_step_ids"] = ["body"]
+    result = _validate(plan)
+    assert not result.ok
+    assert any("body template" in e.message for e in result.errors)
+
+
+def test_body_same_loop_ancestor_step_output_ok() -> None:
+    plan = _base_plan(
+        steps=[
+            {
+                "id": "loop1",
+                "name": "loop1",
+                "type": AuthorableStepType.LOOP.value,
+                "required": True,
+                "depends_on": [],
+                "when": None,
+                "timeout_seconds": 30,
+                "on_error": "FAIL_EXECUTION",
+                "config": {
+                    "mode": LoopMode.FOR_EACH.value,
+                    "max_iterations": 5,
+                    "collection": {
+                        "kind": BindingKind.PLAN_INPUT.value,
+                        "path": "/items",
+                    },
+                    "body_step_ids": ["a", "b"],
+                },
+            },
+            _tool("a", depends_on=["loop1"]),
+            _tool(
+                "b",
+                depends_on=["a"],
+                bindings={
+                    "location": {
+                        "kind": BindingKind.STEP_OUTPUT.value,
+                        "step_id": "a",
+                        "path": "/structured_content/ok",
+                    }
+                },
+            ),
+        ]
+    )
+    plan["completion"]["response_step_ids"] = ["loop1"]
+    result = _validate(plan)
+    assert result.ok, result.errors
+
+
+def test_body_forward_sibling_and_other_loop_step_output_rejected() -> None:
+    # Forward reference within body.
+    fwd = _base_plan(
+        steps=[
+            {
+                "id": "loop1",
+                "name": "loop1",
+                "type": AuthorableStepType.LOOP.value,
+                "required": True,
+                "depends_on": [],
+                "when": None,
+                "timeout_seconds": 30,
+                "on_error": "FAIL_EXECUTION",
+                "config": {
+                    "mode": LoopMode.FOR_EACH.value,
+                    "max_iterations": 5,
+                    "collection": {
+                        "kind": BindingKind.PLAN_INPUT.value,
+                        "path": "/items",
+                    },
+                    "body_step_ids": ["a", "b"],
+                },
+            },
+            _tool(
+                "a",
+                depends_on=["loop1"],
+                bindings={
+                    "location": {
+                        "kind": BindingKind.STEP_OUTPUT.value,
+                        "step_id": "b",
+                        "path": "/ok",
+                    }
+                },
+            ),
+            _tool("b", depends_on=["a"]),
+        ]
+    )
+    fwd["completion"]["response_step_ids"] = ["loop1"]
+    r1 = _validate(fwd)
+    assert not r1.ok
+    assert "PLAN_BINDING_INVALID" in r1.error_codes
+
+    # Sibling (no depends_on edge).
+    sib = _base_plan(
+        steps=[
+            {
+                "id": "loop1",
+                "name": "loop1",
+                "type": AuthorableStepType.LOOP.value,
+                "required": True,
+                "depends_on": [],
+                "when": None,
+                "timeout_seconds": 30,
+                "on_error": "FAIL_EXECUTION",
+                "config": {
+                    "mode": LoopMode.FOR_EACH.value,
+                    "max_iterations": 5,
+                    "collection": {
+                        "kind": BindingKind.PLAN_INPUT.value,
+                        "path": "/items",
+                    },
+                    "body_step_ids": ["a", "b"],
+                },
+            },
+            _tool("a", depends_on=["loop1"]),
+            _tool(
+                "b",
+                depends_on=["loop1"],
+                bindings={
+                    "location": {
+                        "kind": BindingKind.STEP_OUTPUT.value,
+                        "step_id": "a",
+                        "path": "/ok",
+                    }
+                },
+            ),
+        ]
+    )
+    sib["completion"]["response_step_ids"] = ["loop1"]
+    r2 = _validate(sib)
+    assert not r2.ok
+    assert "PLAN_BINDING_INVALID" in r2.error_codes
+
+    # Other LOOP body.
+    other = _base_plan(
+        steps=[
+            {
+                "id": "loop1",
+                "name": "loop1",
+                "type": AuthorableStepType.LOOP.value,
+                "required": True,
+                "depends_on": [],
+                "when": None,
+                "timeout_seconds": 30,
+                "on_error": "FAIL_EXECUTION",
+                "config": {
+                    "mode": LoopMode.FOR_EACH.value,
+                    "max_iterations": 5,
+                    "collection": {
+                        "kind": BindingKind.PLAN_INPUT.value,
+                        "path": "/items",
+                    },
+                    "body_step_ids": ["a1"],
+                },
+            },
+            _tool("a1", depends_on=["loop1"]),
+            {
+                "id": "loop2",
+                "name": "loop2",
+                "type": AuthorableStepType.LOOP.value,
+                "required": True,
+                "depends_on": ["loop1"],
+                "when": None,
+                "timeout_seconds": 30,
+                "on_error": "FAIL_EXECUTION",
+                "config": {
+                    "mode": LoopMode.FOR_EACH.value,
+                    "max_iterations": 5,
+                    "collection": {
+                        "kind": BindingKind.PLAN_INPUT.value,
+                        "path": "/items",
+                    },
+                    "body_step_ids": ["a2"],
+                },
+            },
+            _tool(
+                "a2",
+                depends_on=["loop2"],
+                bindings={
+                    "location": {
+                        "kind": BindingKind.STEP_OUTPUT.value,
+                        "step_id": "a1",
+                        "path": "/ok",
+                    }
+                },
+            ),
+        ]
+    )
+    other["completion"]["response_step_ids"] = ["loop2"]
+    r3 = _validate(other)
+    assert not r3.ok
+    assert "PLAN_BINDING_INVALID" in r3.error_codes
 
 
 # --- limits ---

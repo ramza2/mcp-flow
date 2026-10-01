@@ -9,7 +9,8 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from app.domain.enums import ExecutionStatus, StepStatus
+from app.domain.enums import AuthorableStepType, ExecutionStatus, StepStatus
+from app.execution.loop_runtime import top_level_plan_steps
 from app.models.execution import ExecutionStep
 from app.schemas.execution_plan import ExecutionPlanStep, ExecutionPlanV1
 
@@ -108,6 +109,14 @@ _INTENTIONAL_CONDITIONAL_SKIP_CODES = frozenset(
     }
 )
 
+_LOOP_STOPPED_CHILD_CODES = frozenset(
+    {
+        "UPSTREAM_LOOP_STOPPED",
+    }
+)
+
+_CONTINUABLE_LOOP_ON_ERROR = frozenset({"CONTINUE", "MARK_PARTIAL"})
+
 
 def is_intentional_conditional_skip_for_completion(step: ExecutionStep) -> bool:
     """True when SKIPPED is intentional control-flow (neutral for ALL_REQUIRED)."""
@@ -115,6 +124,48 @@ def is_intentional_conditional_skip_for_completion(step: ExecutionStep) -> bool:
         step.status == StepStatus.SKIPPED.value
         and step.error_code in _INTENTIONAL_CONDITIONAL_SKIP_CODES
     )
+
+
+def is_loop_stopped_child_neutral_for_completion(
+    *,
+    step: ExecutionStep,
+    steps: Sequence[ExecutionStep],
+) -> bool:
+    """Neutral when LOOP-aborted untouched child and parent LOOP is continuable.
+
+    Requires exact parent relationship + parent FAILED/TIMED_OUT with
+    on_error in {CONTINUE, MARK_PARTIAL}. Does NOT globally neutralize
+    ``UPSTREAM_LOOP_STOPPED``. ``UPSTREAM_EXECUTION_STOPPED`` remains
+    non-success.
+    """
+    parent_step_id = getattr(step, "parent_step_id", None)
+    if parent_step_id is None:
+        return False
+    if step.error_code not in _LOOP_STOPPED_CHILD_CODES:
+        return False
+    if step.status not in {
+        StepStatus.SKIPPED.value,
+        StepStatus.CANCELLED.value,
+    }:
+        return False
+    parent = next(
+        (s for s in steps if getattr(s, "id", None) == parent_step_id),
+        None,
+    )
+    if parent is None or getattr(parent, "step_type", None) != (
+        AuthorableStepType.LOOP.value
+    ):
+        return False
+    if parent.status not in {
+        StepStatus.FAILED.value,
+        StepStatus.TIMED_OUT.value,
+    }:
+        return False
+    try:
+        parent_ps = ExecutionPlanStep.model_validate(parent.step_snapshot)
+    except Exception:
+        return False
+    return parent_ps.on_error in _CONTINUABLE_LOOP_ON_ERROR
 
 
 def aggregate_all_required(
@@ -131,19 +182,26 @@ def aggregate_all_required(
     neutral/satisfied for required-completion. Fail-fast
     ``UPSTREAM_EXECUTION_STOPPED`` and other unexpected SKIPPED remain
     non-success.
-    """
-    by_key = {s.step_key: s for s in steps}
 
+    LOOP-aborted untouched children (``UPSTREAM_LOOP_STOPPED``) are neutral
+    only when their owning LOOP is FAILED/TIMED_OUT with CONTINUE/MARK_PARTIAL;
+    the parent LOOP's own terminal evidence carries the failure.
+
+    Top-level Plan Steps (not LOOP body templates) are matched by
+    ``step_key == plan id``. Dynamic LOOP body instances are evaluated from
+    their ``step_snapshot`` required/on_error — missing body-template rows
+    do not fail aggregation.
+    """
     any_succeeded = any(s.status == StepStatus.SUCCEEDED.value for s in steps)
     mark_partial_failure = False
     continue_required_failure = False
     required_all_succeeded = True
 
-    for ps in plan.steps:
-        step = by_key.get(ps.id)
-        if step is None:
-            required_all_succeeded = False
-            continue
+    def _apply(ps: ExecutionPlanStep, step: ExecutionStep) -> None:
+        nonlocal mark_partial_failure, continue_required_failure, required_all_succeeded
+        if is_loop_stopped_child_neutral_for_completion(step=step, steps=steps):
+            # Parent LOOP terminal + on_error is the failure evidence.
+            return
         failed = step.status in _FAILURE_LIKE
         if ps.required:
             if step.status == StepStatus.SUCCEEDED.value:
@@ -154,11 +212,35 @@ def aggregate_all_required(
             else:
                 required_all_succeeded = False
         if not failed:
-            continue
+            return
         if ps.on_error == "MARK_PARTIAL":
             mark_partial_failure = True
         if ps.required and ps.on_error == "CONTINUE":
             continue_required_failure = True
+
+    # 1) Top-level ExecutionSteps ↔ top-level Plan Steps (exclude body templates).
+    top_level_by_key = {
+        s.step_key: s
+        for s in steps
+        if getattr(s, "parent_step_id", None) is None
+    }
+    for ps in top_level_plan_steps(plan):
+        step = top_level_by_key.get(ps.id)
+        if step is None:
+            required_all_succeeded = False
+            continue
+        _apply(ps, step)
+
+    # 2) Dynamic LOOP body instances — use step_snapshot required/on_error.
+    for step in steps:
+        if getattr(step, "parent_step_id", None) is None:
+            continue
+        try:
+            ps = ExecutionPlanStep.model_validate(step.step_snapshot)
+        except Exception:
+            required_all_succeeded = False
+            continue
+        _apply(ps, step)
 
     if required_all_succeeded and not mark_partial_failure:
         return CompletionDecision(status=ExecutionStatus.SUCCEEDED.value)

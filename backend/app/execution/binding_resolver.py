@@ -11,10 +11,17 @@ from dataclasses import dataclass
 from typing import Any
 
 from app.core.errors import AppError
-from app.domain.enums import BindingKind, StepStatus
+from app.domain.enums import AuthorableStepType, BindingKind, StepStatus
 from app.execution.json_pointer import MISSING, resolve_json_pointer
+from app.execution.loop_runtime import (
+    LOOP_COLLECTION_TYPE_MISMATCH,
+    build_loop_body_ownership,
+    build_loop_context_projection,
+    hash_collection,
+    template_id_from_step_snapshot,
+)
 from app.models.execution import Execution, ExecutionStep
-from app.schemas.execution_plan import ExecutionPlanStep, ExecutionPlanV1
+from app.schemas.execution_plan import ExecutionPlanStep, ExecutionPlanV1, LoopStepConfigV1
 from app.schemas.plan_binding import (
     PlanBindingValue,
     PlanExecutionContextBinding,
@@ -214,10 +221,14 @@ class RuntimeBindingResolver:
                 )
             return value
         if isinstance(binding, PlanLoopContextBinding):
-            raise AppError(
-                code="EXECUTION_PRECONDITION_FAILED",
-                message="LOOP_CONTEXT is unsupported until LOOP runtime exists.",
-                status_code=409,
+            return self._resolve_loop_context(
+                binding=binding,
+                execution=execution,
+                owning_step=owning_step,
+                by_key=by_key,
+                plan=plan,
+                ancestors=ancestors,
+                missing_ok=missing_ok,
             )
         raise AppError(
             code="EXECUTION_PRECONDITION_FAILED",
@@ -334,6 +345,179 @@ class RuntimeBindingResolver:
                 projected[key] = value
         return projected
 
+    def _resolve_loop_context(
+        self,
+        *,
+        binding: PlanLoopContextBinding,
+        execution: Execution,
+        owning_step: ExecutionStep,
+        by_key: dict[str, ExecutionStep],
+        plan: ExecutionPlanV1,
+        ancestors: dict[str, set[str]],
+        missing_ok: bool = False,
+    ) -> Any:
+        """Resolve LOOP_CONTEXT for a flat FOR_EACH body instance."""
+        if getattr(owning_step, "parent_step_id", None) is None:
+            raise AppError(
+                code="EXECUTION_PRECONDITION_FAILED",
+                message=(
+                    "LOOP_CONTEXT is only valid inside a LOOP body instance "
+                    "(owning Step has no parent_step_id)."
+                ),
+                status_code=409,
+            )
+        parent = next(
+            (
+                s
+                for s in by_key.values()
+                if s.id == owning_step.parent_step_id
+            ),
+            None,
+        )
+        if parent is None:
+            raise AppError(
+                code="EXECUTION_PRECONDITION_FAILED",
+                message="LOOP_CONTEXT owning LOOP parent Step is missing.",
+                status_code=409,
+            )
+        if parent.execution_id != owning_step.execution_id:
+            raise AppError(
+                code="EXECUTION_PRECONDITION_FAILED",
+                message="LOOP_CONTEXT parent belongs to another Execution.",
+                status_code=409,
+            )
+        if parent.parent_step_id is not None:
+            raise AppError(
+                code="EXECUTION_PRECONDITION_FAILED",
+                message="LOOP_CONTEXT parent must be a top-level LOOP Step.",
+                status_code=409,
+            )
+        if parent.step_type != AuthorableStepType.LOOP.value:
+            raise AppError(
+                code="EXECUTION_PRECONDITION_FAILED",
+                message="LOOP_CONTEXT parent Step must be type LOOP.",
+                status_code=409,
+            )
+        if owning_step.iteration_no is None or owning_step.iteration_no < 1:
+            raise AppError(
+                code="EXECUTION_PRECONDITION_FAILED",
+                message="LOOP_CONTEXT requires owning Step iteration_no >= 1.",
+                status_code=409,
+            )
+
+        try:
+            parent_plan_step = ExecutionPlanStep.model_validate(parent.step_snapshot)
+            child_plan_step = ExecutionPlanStep.model_validate(
+                owning_step.step_snapshot
+            )
+            loop_cfg = LoopStepConfigV1.model_validate(parent_plan_step.config)
+        except Exception as exc:
+            raise AppError(
+                code="EXECUTION_PRECONDITION_FAILED",
+                message="LOOP_CONTEXT parent/child Plan snapshot is invalid.",
+                status_code=409,
+            ) from exc
+
+        if parent_plan_step.id != parent.step_key:
+            raise AppError(
+                code="EXECUTION_PRECONDITION_FAILED",
+                message="LOOP_CONTEXT parent step_key does not match Plan LOOP id.",
+                status_code=409,
+            )
+        if child_plan_step.id not in loop_cfg.body_step_ids:
+            raise AppError(
+                code="EXECUTION_PRECONDITION_FAILED",
+                message=(
+                    f"LOOP_CONTEXT child template {child_plan_step.id!r} is not "
+                    f"in LOOP {parent_plan_step.id!r} body_step_ids."
+                ),
+                status_code=409,
+            )
+
+        if loop_cfg.collection is None:
+            raise AppError(
+                code="EXECUTION_PRECONDITION_FAILED",
+                message="LOOP_CONTEXT requires FOR_EACH collection on parent LOOP.",
+                status_code=409,
+            )
+        if isinstance(loop_cfg.collection, PlanLoopContextBinding):
+            # Collection must not recursively depend on LOOP_CONTEXT.
+            raise AppError(
+                code="EXECUTION_PRECONDITION_FAILED",
+                message="LOOP collection binding must not use LOOP_CONTEXT.",
+                status_code=409,
+            )
+
+        collection = self.resolve_binding(
+            binding=loop_cfg.collection,
+            execution=execution,
+            owning_step=parent,
+            by_key=by_key,
+            plan=plan,
+            ancestors=ancestors,
+            missing_ok=False,
+        )
+        if not isinstance(collection, list):
+            raise AppError(
+                code=LOOP_COLLECTION_TYPE_MISMATCH,
+                message=(
+                    f"LOOP {parent_plan_step.id!r} collection must resolve to a "
+                    f"JSON array (got {type(collection).__name__})."
+                ),
+                status_code=409,
+            )
+
+        parent_ri = parent.resolved_input
+        if not isinstance(parent_ri, dict):
+            raise AppError(
+                code="EXECUTION_PRECONDITION_FAILED",
+                message="LOOP parent resolved_input is missing for LOOP_CONTEXT.",
+                status_code=409,
+            )
+        expected_hash = parent_ri.get("collection_hash")
+        expected_size = parent_ri.get("collection_size")
+        actual_hash = hash_collection(collection)
+        actual_size = len(collection)
+        if expected_hash != actual_hash or expected_size != actual_size:
+            raise AppError(
+                code="EXECUTION_PRECONDITION_FAILED",
+                message=(
+                    f"LOOP {parent_plan_step.id!r} collection hash/size drifted "
+                    "from pinned parent.resolved_input."
+                ),
+                status_code=409,
+            )
+        if owning_step.iteration_no > actual_size:
+            raise AppError(
+                code="EXECUTION_PRECONDITION_FAILED",
+                message=(
+                    f"LOOP_CONTEXT iteration_no={owning_step.iteration_no} exceeds "
+                    f"collection_size={actual_size}."
+                ),
+                status_code=409,
+            )
+
+        projection = build_loop_context_projection(
+            loop_plan_step_id=parent_plan_step.id,
+            mode=loop_cfg.mode.value,
+            iteration_no=owning_step.iteration_no,
+            item=collection[owning_step.iteration_no - 1],
+            collection_size=actual_size,
+        )
+        value = resolve_json_pointer(projection, binding.path)
+        if value is MISSING:
+            if missing_ok:
+                return MISSING
+            raise AppError(
+                code="EXECUTION_PRECONDITION_FAILED",
+                message=(
+                    f"LOOP_CONTEXT path {binding.path!r} is MISSING "
+                    "(not JSON null)."
+                ),
+                status_code=409,
+            )
+        return value
+
     def _resolve_step_output(
         self,
         *,
@@ -344,13 +528,57 @@ class RuntimeBindingResolver:
         ancestors: dict[str, set[str]],
         missing_ok: bool = False,
     ) -> Any:
-        source = by_key.get(binding.step_id)
-        if source is None:
-            raise AppError(
-                code="EXECUTION_PRECONDITION_FAILED",
-                message=f"STEP_OUTPUT source step {binding.step_id!r} is missing.",
-                status_code=409,
+        ownership = build_loop_body_ownership(plan)
+
+        if getattr(owning_step, "parent_step_id", None) is None:
+            # Top-level consumer: reject body-template targets explicitly.
+            if binding.step_id in ownership.body_to_loop:
+                raise AppError(
+                    code="EXECUTION_PRECONDITION_FAILED",
+                    message=(
+                        f"STEP_OUTPUT source {binding.step_id!r} is a LOOP body "
+                        "template and cannot be referenced from a top-level Step."
+                    ),
+                    status_code=409,
+                )
+            source = by_key.get(binding.step_id)
+            if source is None:
+                raise AppError(
+                    code="EXECUTION_PRECONDITION_FAILED",
+                    message=(
+                        f"STEP_OUTPUT source step {binding.step_id!r} is missing."
+                    ),
+                    status_code=409,
+                )
+            if getattr(source, "parent_step_id", None) is not None:
+                raise AppError(
+                    code="EXECUTION_PRECONDITION_FAILED",
+                    message=(
+                        f"STEP_OUTPUT source {binding.step_id!r} must be a "
+                        "top-level ExecutionStep."
+                    ),
+                    status_code=409,
+                )
+            if binding.step_id not in ancestors.get(owning_step.step_key, set()):
+                raise AppError(
+                    code="EXECUTION_PRECONDITION_FAILED",
+                    message=(
+                        f"STEP_OUTPUT source {binding.step_id!r} is not a "
+                        f"transitive dependency ancestor of "
+                        f"{owning_step.step_key!r}."
+                    ),
+                    status_code=409,
+                )
+        else:
+            source = self._resolve_body_instance_step_output_source(
+                binding=binding,
+                owning_step=owning_step,
+                by_key=by_key,
+                plan=plan,
+                ancestors=ancestors,
+                ownership_body_to_loop=ownership.body_to_loop,
             )
+
         self._assert_step_output_source_lineage(
             binding=binding,
             source=source,
@@ -360,15 +588,6 @@ class RuntimeBindingResolver:
             raise AppError(
                 code="EXECUTION_PRECONDITION_FAILED",
                 message="STEP_OUTPUT source belongs to another Execution.",
-                status_code=409,
-            )
-        if binding.step_id not in ancestors.get(owning_step.step_key, set()):
-            raise AppError(
-                code="EXECUTION_PRECONDITION_FAILED",
-                message=(
-                    f"STEP_OUTPUT source {binding.step_id!r} is not a transitive "
-                    f"dependency ancestor of {owning_step.step_key!r}."
-                ),
                 status_code=409,
             )
         if source.status != StepStatus.SUCCEEDED.value:
@@ -402,6 +621,99 @@ class RuntimeBindingResolver:
             )
         return value
 
+    def _resolve_body_instance_step_output_source(
+        self,
+        *,
+        binding: PlanStepOutputBinding,
+        owning_step: ExecutionStep,
+        by_key: dict[str, ExecutionStep],
+        plan: ExecutionPlanV1,
+        ancestors: dict[str, set[str]],
+        ownership_body_to_loop: Mapping[str, str],
+    ) -> ExecutionStep:
+        """Locate STEP_OUTPUT source for a LOOP body instance consumer."""
+        owning_template = template_id_from_step_snapshot(owning_step)
+        parent_loop_id = ownership_body_to_loop.get(owning_template)
+        if parent_loop_id is None:
+            raise AppError(
+                code="EXECUTION_PRECONDITION_FAILED",
+                message=(
+                    f"STEP_OUTPUT consumer template {owning_template!r} is not "
+                    "a LOOP body template."
+                ),
+                status_code=409,
+            )
+
+        source_loop_id = ownership_body_to_loop.get(binding.step_id)
+        if source_loop_id == parent_loop_id:
+            # Same-body source: match parent + iteration; never by_key[template].
+            if owning_step.iteration_no is None or owning_step.iteration_no < 1:
+                raise AppError(
+                    code="EXECUTION_PRECONDITION_FAILED",
+                    message=(
+                        "STEP_OUTPUT same-body resolve requires iteration_no >= 1."
+                    ),
+                    status_code=409,
+                )
+            if binding.step_id not in ancestors.get(owning_template, set()):
+                raise AppError(
+                    code="EXECUTION_PRECONDITION_FAILED",
+                    message=(
+                        f"STEP_OUTPUT source {binding.step_id!r} is not a "
+                        f"same-iteration dependency ancestor of "
+                        f"{owning_template!r}."
+                    ),
+                    status_code=409,
+                )
+            matches = [
+                s
+                for s in by_key.values()
+                if s.parent_step_id == owning_step.parent_step_id
+                and s.iteration_no == owning_step.iteration_no
+                and template_id_from_step_snapshot(s) == binding.step_id
+            ]
+            if not matches:
+                raise AppError(
+                    code="EXECUTION_PRECONDITION_FAILED",
+                    message=(
+                        f"STEP_OUTPUT same-body source {binding.step_id!r} is "
+                        f"missing for iteration_no={owning_step.iteration_no}."
+                    ),
+                    status_code=409,
+                )
+            if len(matches) > 1:
+                raise AppError(
+                    code="EXECUTION_PRECONDITION_FAILED",
+                    message=(
+                        f"STEP_OUTPUT same-body source {binding.step_id!r} is "
+                        "ambiguous within the iteration."
+                    ),
+                    status_code=409,
+                )
+            return matches[0]
+
+        # Outside-body: top-level Step that is a transitive ancestor of the LOOP.
+        source = by_key.get(binding.step_id)
+        if source is None or getattr(source, "parent_step_id", None) is not None:
+            raise AppError(
+                code="EXECUTION_PRECONDITION_FAILED",
+                message=(
+                    f"STEP_OUTPUT outside-body source step {binding.step_id!r} "
+                    "is missing."
+                ),
+                status_code=409,
+            )
+        if binding.step_id not in ancestors.get(parent_loop_id, set()):
+            raise AppError(
+                code="EXECUTION_PRECONDITION_FAILED",
+                message=(
+                    f"STEP_OUTPUT source {binding.step_id!r} is not a transitive "
+                    f"dependency ancestor of owning LOOP {parent_loop_id!r}."
+                ),
+                status_code=409,
+            )
+        return source
+
     def _assert_step_output_source_lineage(
         self,
         *,
@@ -410,15 +722,39 @@ class RuntimeBindingResolver:
         plan: ExecutionPlanV1,
     ) -> None:
         """Fail closed when STEP_OUTPUT source drifts from immutable Plan."""
-        if source.step_key != binding.step_id:
-            raise AppError(
-                code="EXECUTION_PRECONDITION_FAILED",
-                message=(
-                    f"STEP_OUTPUT source step_key {source.step_key!r} does not "
-                    f"match binding.step_id {binding.step_id!r}."
-                ),
-                status_code=409,
-            )
+        if getattr(source, "parent_step_id", None) is None:
+            if source.step_key != binding.step_id:
+                raise AppError(
+                    code="EXECUTION_PRECONDITION_FAILED",
+                    message=(
+                        f"STEP_OUTPUT source step_key {source.step_key!r} does not "
+                        f"match binding.step_id {binding.step_id!r}."
+                    ),
+                    status_code=409,
+                )
+        else:
+            # Body instance: identity is step_snapshot.id, not synthetic step_key.
+            try:
+                snapshot_id = template_id_from_step_snapshot(source)
+            except AppError as exc:
+                raise AppError(
+                    code="EXECUTION_PRECONDITION_FAILED",
+                    message=(
+                        f"STEP_OUTPUT source {binding.step_id!r} step_snapshot "
+                        "is invalid."
+                    ),
+                    status_code=409,
+                ) from exc
+            if snapshot_id != binding.step_id:
+                raise AppError(
+                    code="EXECUTION_PRECONDITION_FAILED",
+                    message=(
+                        f"STEP_OUTPUT source snapshot id {snapshot_id!r} does not "
+                        f"match binding.step_id {binding.step_id!r}."
+                    ),
+                    status_code=409,
+                )
+
         expected = next((ps for ps in plan.steps if ps.id == binding.step_id), None)
         if expected is None:
             raise AppError(

@@ -407,7 +407,7 @@ Resolver는 SecretResolver / MCP / LLM / DB write를 호출하지 않는다.
 | `PLAN_INPUT` | `Execution.input_snapshot` | immutable execution input; secret inputs stay reference-only; path `/` must not copy plaintext secrets |
 | `STEP_OUTPUT` | upstream `ExecutionStep.result_inline` | same Execution; immutable Plan/`step_snapshot` lineage; SUCCEEDED ancestor only; snake_case result root |
 | `EXECUTION_CONTEXT` | safe projection only | see below |
-| `LOOP_CONTEXT` | unsupported | fail closed until LOOP runtime |
+| `LOOP_CONTEXT` | LOOP body instance only | fail closed outside active FOR_EACH body |
 
 Persisted TOOL `result_inline` root (canonical snake_case — no camelCase alias):
 
@@ -728,10 +728,11 @@ requires ToolPolicy approval, existing single-TOOL rules still apply
 ### 9.7.1 TOOL/CONDITION/JOIN/APPROVAL DAG wave runtime orchestration
 
 Runtime multi-step slice는 deterministic **wave-based TOOL/CONDITION/JOIN/APPROVAL
-DAG**를 실행한다. LOOP / `LOOP_CONTEXT`는 fail-closed이다.
+DAG**와 flat `FOR_EACH` LOOP를 실행한다. `WHILE` / nested LOOP / body APPROVAL /
+`LOOP_CONTEXT` outside an active body instance는 fail-closed이다.
 
 ```text
-claim → validate TOOL/CONDITION/JOIN/APPROVAL DAG
+claim → validate TOOL/CONDITION/JOIN/APPROVAL/LOOP(FOR_EACH) DAG
 → promote root TOOLs up to max_parallelism
   (root CONDITION / APPROVAL stay PENDING)
 → local reconcile fixed point:
@@ -910,16 +911,22 @@ A TOOL → C CONDITION → PASS TOOL (when C.condition_result==true)
   Plan/input/upstream evidence and are not duplicated into TOOL `resolved_input`
 - dynamic Binding + ToolPolicy `requires_approval` / PLAN_CONFIRMATION combination
   remains fail-closed (single-TOOL LITERAL/SECRET_REF Approval path unchanged)
-- `LOOP_CONTEXT` remains unsupported (fail closed)
+- Flat `FOR_EACH` LOOP runtime is supported (body templates + iteration instances).
+  `WHILE` / nested LOOP / body APPROVAL remain fail-closed (`LOOP_RUNTIME_UNSUPPORTED`)
+  before any body MCP. See §9.5.
 
 ### 9.5 LOOP
 
-지원 mode:
+지원 mode (Plan schema):
 
 ```text
 FOR_EACH
 WHILE
 ```
+
+Runtime slice (this revision): **flat `FOR_EACH` only**. `WHILE` runtime,
+nested LOOP runtime, and authorable APPROVAL inside a LOOP body are deferred
+(fail closed with `LOOP_RUNTIME_UNSUPPORTED` before body MCP).
 
 LOOP Step persisted `config` (exact field set):
 
@@ -950,8 +957,104 @@ LOOP Step persisted `config` (exact field set):
 - body Step은 동일 Plan의 top-level `steps`에 존재하며 LOOP 자신일 수 없다.
 - body Step의 `depends_on`은 body 내부 Step 또는 해당 LOOP Step ID만 참조할 수 있다
   (LOOP가 body entry dependency).
-- Loop body는 typed DAG scope다. nested LOOP는 허용하되 nesting depth ≤ 3.
+- Loop body는 typed DAG scope다. nested LOOP는 Plan에서 허용하되 nesting depth ≤ 3;
+  runtime execution of nested LOOP is deferred.
 - unbounded LOOP는 금지한다.
+
+#### Body templates vs runtime instances
+
+A LOOP body Step in `plan.steps` is an **immutable template definition**, not an
+initial top-level `ExecutionStep`.
+
+Initial materialization creates ExecutionStep rows only for Plan Steps that are
+**not owned by any LOOP body**. Body definitions remain in
+`Execution.plan_snapshot` and are materialized into durable child rows per
+iteration.
+
+```text
+parent_step_id = LOOP ExecutionStep.id
+iteration_no   = 1..N
+step_snapshot  = exact body Plan Step JSON
+step_key       = loop:<parent_uuid_hex>:<iteration_no_6>:<sha256(template_id)>
+```
+
+Never reset/reuse one ExecutionStep row across iterations. Template identity is
+recovered from `step_snapshot.id`, not by parsing `step_key`.
+
+Non-LOOP plans still materialize exactly one ExecutionStep per Plan Step.
+
+#### FOR_EACH collection / pinning
+
+- Resolve collection via RuntimeBindingResolver on the LOOP parent (no
+  `LOOP_CONTEXT` on the collection binding in this slice).
+- Must be a JSON array/list; otherwise `LOOP_COLLECTION_TYPE_MISMATCH`
+  (mandatory-fatal, no body MCP).
+- Persist only safe control evidence on LOOP `resolved_input`:
+  `{mode, collection_hash, collection_size}` — never the raw collection.
+- Rebuild/verify hash+size whenever LOOP_CONTEXT is reconstructed; drift is
+  mandatory-fatal.
+- `collection_size > max_iterations` → known LOOP failure
+  `LOOP_MAX_ITERATIONS_EXCEEDED` (respects LOOP `on_error`).
+- Expanded runtime step budget:
+  `top_level_count + collection_size * len(body_step_ids) ≤ limits.max_steps`
+  else `PLAN_LIMIT_EXCEEDED` before body MCP.
+- Empty collection → LOOP `SUCCEEDED` with
+  `{mode, iterations_completed:0, collection_size:0}`; no children / MCP.
+
+#### LOOP_CONTEXT projection
+
+For a body runtime instance, expose exactly:
+
+```json
+{
+  "loop_step_id": "<loop plan id>",
+  "mode": "FOR_EACH",
+  "iteration_no": 1,
+  "index": 0,
+  "item": {},
+  "collection_size": 3
+}
+```
+
+`iteration_no` is 1-based; `index = iteration_no - 1`. Projection is rebuilt
+deterministically (not persisted as a whole). Outside an active body instance →
+`EXECUTION_PRECONDITION_FAILED`.
+
+Allowed in LOOP body TOOL bindings, CONDITION predicates, and Step.when.
+
+#### Same-iteration STEP_OUTPUT
+
+Inside a body instance, `STEP_OUTPUT(template_id)` resolves only the
+same-`parent_step_id` + same-`iteration_no` source whose `step_snapshot.id`
+matches. Cross-iteration STEP_OUTPUT is rejected. Outside-body sources must be
+top-level transitive ancestors of the owning LOOP.
+
+#### Sequential iterations / parallelism / ErrorPolicy
+
+- At most one active iteration per LOOP (no parallel iterations).
+- Body DAG supports TOOL fan-out, CONDITION, Step.when, JOIN
+  (`ALL_SUCCESS` / `ALL_COMPLETE` / `ANY_SUCCESS`); direct TOOL fan-in still
+  requires JOIN.
+- `Plan.limits.max_parallelism` is global per Execution (counts all TOOL
+  READY+RUNNING including body children). LOOP/CONDITION/JOIN consume no remote
+  slot.
+- LOOP `timeout_seconds` is the total parent budget from `started_at` (not reset
+  per iteration); exhaustion → `LOOP_TIMEOUT` + LOOP `on_error`.
+- Known LOOP failures (`LOOP_MAX_ITERATIONS_EXCEEDED`, `LOOP_TIMEOUT`) respect
+  LOOP `on_error` (`FAIL_EXECUTION` / `MARK_PARTIAL` / `CONTINUE`). Control-
+  integrity failures remain mandatory-fatal.
+- ALL_REQUIRED aggregates top-level materialized Steps plus every dynamic body
+  instance (template `required`/`on_error` from `step_snapshot`). Zero-iteration
+  FOR_EACH adds no body evidence.
+- LOOP parent result (no raw item aggregation):
+  `{mode, iterations_completed, collection_size}`.
+
+#### Recovery limitation
+
+Same-lease duplicate orchestration reconstructs the active iteration from
+durable rows. Robust resume of a partially completed LOOP after worker lease
+loss remains follow-up work (never overwrite completed children; never recreate
+an existing iteration; never re-invoke terminal Attempt/ToolCall).
 
 ### 9.6 CONDITION / TOOL config (complex Plan)
 
@@ -1105,7 +1208,7 @@ Type semantics (no implicit coercion):
 - `contains`: string⊃string or array⊃value (no object-key semantics)
 - `SECRET_REF`: `exists` → true, `is_null` → false; binary comparison rejected
   (`PREDICATE_TYPE_MISMATCH`); never resolve plaintext
-- `LOOP_CONTEXT`: fail closed
+- `LOOP_CONTEXT`: active FOR_EACH body instance only (else fail closed)
 
 Logical short-circuit (persisted child order):
 
@@ -1159,8 +1262,9 @@ SECRET_REF
 - TOOL bindings, Step `when`, CONDITION predicates 및 기타 top-level Predicate
   Binding에 동일 적용한다.
 - runtime 값 resolve는 하지 않는다.
-- LOOP body 내부 / `LOOP_CONTEXT` runtime 의미는 본 static foundation에서 확정하지 않는다
-  (존재·비자기참조만 적용; body-local ordering은 후속).
+- LOOP body STEP_OUTPUT / `LOOP_CONTEXT` static rules now include same-loop
+  ancestor ordering, top-level-ancestor-of-LOOP for outside-body sources, and
+  rejection of top-level references to body templates (see §9.5 runtime).
 
 ---
 

@@ -8,6 +8,7 @@ ApprovalRequest and no Attempt/ToolCall/MCP call.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -135,7 +136,8 @@ class ToolStepAttemptService:
             )
 
         assert execution.agent_version_id is not None
-        lineage = assert_tool_step_lineage(execution, step)
+        steps = await self._executions.list_steps(execution.id)
+        lineage = assert_tool_step_lineage(execution, step, steps=steps)
         authz = await assert_current_tool_executable(
             self._session,
             requester_id=execution.requester_id,
@@ -175,7 +177,9 @@ class ToolStepAttemptService:
                     ),
                     status_code=409,
                 )
-            tool_config = assert_agent_request_plan_step_lineage(execution, step)
+            tool_config = assert_agent_request_plan_step_lineage(
+                execution, step, steps=steps
+            )
             if authz.approval_policy is None:
                 raise AppError(
                     code="EXECUTION_PRECONDITION_FAILED",
@@ -210,7 +214,6 @@ class ToolStepAttemptService:
                 )
             # Approval satisfied for exact current context — continue to Attempt.
 
-        steps = await self._executions.list_steps(execution.id)
         resolved_input = RuntimeBindingResolver().resolve(
             execution=execution,
             step=step,
@@ -371,9 +374,12 @@ class ToolStepAttemptService:
             )
 
     def _validate_tool_lineage(
-        self, execution: Execution, step: ExecutionStep
+        self,
+        execution: Execution,
+        step: ExecutionStep,
+        steps: Sequence[ExecutionStep] | None = None,
     ) -> ToolStepLineage:
-        return assert_tool_step_lineage(execution, step)
+        return assert_tool_step_lineage(execution, step, steps=steps)
 
     def _plan_timeout_seconds(self, step: ExecutionStep) -> int | None:
         timeout = step.step_snapshot.get("timeout_seconds")
