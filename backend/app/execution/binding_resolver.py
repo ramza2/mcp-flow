@@ -73,13 +73,52 @@ def secret_ref_resolved(secret_id: uuid.UUID) -> dict[str, Any]:
     }
 
 
+def _parse_secret_id(value: Any) -> uuid.UUID | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        return uuid.UUID(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def is_secret_ref_value(value: Any) -> bool:
-    return (
-        isinstance(value, dict)
-        and value.get("kind") == BindingKind.SECRET_REF.value
-        and "secret_id" in value
-        and len(value) == 2
-    )
+    """True only for exact ``{"kind":"SECRET_REF","secret_id":"<uuid>"}``."""
+    if not isinstance(value, dict) or len(value) != 2:
+        return False
+    if value.get("kind") != BindingKind.SECRET_REF.value:
+        return False
+    return _parse_secret_id(value.get("secret_id")) is not None
+
+
+def canonicalize_secret_ref_value(value: Any) -> dict[str, Any]:
+    """Normalize a canonical SECRET_REF or fail closed on malformed shape."""
+    if not isinstance(value, dict):
+        raise AppError(
+            code="EXECUTION_PRECONDITION_FAILED",
+            message="SECRET_REF value must be an object.",
+            status_code=409,
+        )
+    if value.get("kind") != BindingKind.SECRET_REF.value:
+        raise AppError(
+            code="EXECUTION_PRECONDITION_FAILED",
+            message="SECRET_REF value kind must be SECRET_REF.",
+            status_code=409,
+        )
+    if set(value.keys()) != {"kind", "secret_id"}:
+        raise AppError(
+            code="EXECUTION_PRECONDITION_FAILED",
+            message="SECRET_REF value must contain exactly kind and secret_id.",
+            status_code=409,
+        )
+    secret_id = _parse_secret_id(value.get("secret_id"))
+    if secret_id is None:
+        raise AppError(
+            code="EXECUTION_PRECONDITION_FAILED",
+            message="SECRET_REF secret_id must be a valid UUID string.",
+            status_code=409,
+        )
+    return secret_ref_resolved(secret_id)
 
 
 class RuntimeBindingResolver:
@@ -142,6 +181,7 @@ class RuntimeBindingResolver:
                 binding=binding,
                 owning_step=owning_step,
                 by_key=by_key,
+                plan=plan,
                 ancestors=ancestors,
             )
         if isinstance(binding, PlanExecutionContextBinding):
@@ -192,25 +232,54 @@ class RuntimeBindingResolver:
                 message=f"PLAN_INPUT path {path!r} is MISSING (not JSON null).",
                 status_code=409,
             )
-        self._assert_plan_input_secret_safe(plan, path, value)
-        if is_secret_ref_value(value):
-            # Preserve canonical reference; never call SecretResolver here.
-            return {
-                "kind": BindingKind.SECRET_REF.value,
-                "secret_id": str(value["secret_id"]),
-            }
+        self._assert_plan_input_secret_safe(plan, path, root=root, value=value)
+        if path == "/":
+            # Project root: keep non-secrets; normalize declared secret refs.
+            return self._project_plan_input_root(plan, root)
+        if isinstance(value, dict) and value.get("kind") == BindingKind.SECRET_REF.value:
+            # Any SECRET_REF-shaped leaf must be canonical before persistence.
+            return canonicalize_secret_ref_value(value)
         return value
 
     def _assert_plan_input_secret_safe(
-        self, plan: ExecutionPlanV1, path: str, value: Any
+        self,
+        plan: ExecutionPlanV1,
+        path: str,
+        *,
+        root: dict[str, Any],
+        value: Any,
     ) -> None:
-        """Fail closed when a Plan input marked secret is plaintext."""
+        """Fail closed when a Plan input marked secret is not a SECRET_REF."""
+        inputs = plan.inputs or {}
         if path == "/":
+            for key, decl in inputs.items():
+                if not decl.secret:
+                    continue
+                if key not in root:
+                    if decl.required:
+                        raise AppError(
+                            code="EXECUTION_PRECONDITION_FAILED",
+                            message=(
+                                f"PLAN_INPUT '/' required secret input "
+                                f"{key!r} is MISSING."
+                            ),
+                            status_code=409,
+                        )
+                    continue
+                if not is_secret_ref_value(root[key]):
+                    raise AppError(
+                        code="EXECUTION_PRECONDITION_FAILED",
+                        message=(
+                            f"PLAN_INPUT '/' secret input {key!r} is not a "
+                            "canonical SECRET_REF reference."
+                        ),
+                        status_code=409,
+                    )
             return
         # First non-empty token after '/' is the top-level input key.
         first = path.split("/", 2)[1].replace("~1", "/").replace("~0", "~")
-        decl = plan.inputs.get(first) if plan.inputs else None
-        if decl is None or not getattr(decl, "secret", False):
+        decl = inputs.get(first)
+        if decl is None or not decl.secret:
             return
         if is_secret_ref_value(value):
             return
@@ -223,12 +292,32 @@ class RuntimeBindingResolver:
             status_code=409,
         )
 
+    def _project_plan_input_root(
+        self, plan: ExecutionPlanV1, root: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Copy root with declared-secret fields as normalized SECRET_REF."""
+        inputs = plan.inputs or {}
+        projected: dict[str, Any] = {}
+        for key, value in root.items():
+            decl = inputs.get(key)
+            if decl is not None and decl.secret:
+                projected[key] = canonicalize_secret_ref_value(value)
+            elif (
+                isinstance(value, dict)
+                and value.get("kind") == BindingKind.SECRET_REF.value
+            ):
+                projected[key] = canonicalize_secret_ref_value(value)
+            else:
+                projected[key] = value
+        return projected
+
     def _resolve_step_output(
         self,
         *,
         binding: PlanStepOutputBinding,
         owning_step: ExecutionStep,
         by_key: dict[str, ExecutionStep],
+        plan: ExecutionPlanV1,
         ancestors: dict[str, set[str]],
     ) -> Any:
         source = by_key.get(binding.step_id)
@@ -238,6 +327,11 @@ class RuntimeBindingResolver:
                 message=f"STEP_OUTPUT source step {binding.step_id!r} is missing.",
                 status_code=409,
             )
+        self._assert_step_output_source_lineage(
+            binding=binding,
+            source=source,
+            plan=plan,
+        )
         if source.execution_id != owning_step.execution_id:
             raise AppError(
                 code="EXECUTION_PRECONDITION_FAILED",
@@ -281,6 +375,72 @@ class RuntimeBindingResolver:
                 status_code=409,
             )
         return value
+
+    def _assert_step_output_source_lineage(
+        self,
+        *,
+        binding: PlanStepOutputBinding,
+        source: ExecutionStep,
+        plan: ExecutionPlanV1,
+    ) -> None:
+        """Fail closed when STEP_OUTPUT source drifts from immutable Plan."""
+        if source.step_key != binding.step_id:
+            raise AppError(
+                code="EXECUTION_PRECONDITION_FAILED",
+                message=(
+                    f"STEP_OUTPUT source step_key {source.step_key!r} does not "
+                    f"match binding.step_id {binding.step_id!r}."
+                ),
+                status_code=409,
+            )
+        expected = next((ps for ps in plan.steps if ps.id == binding.step_id), None)
+        if expected is None:
+            raise AppError(
+                code="EXECUTION_PRECONDITION_FAILED",
+                message=(
+                    f"STEP_OUTPUT source {binding.step_id!r} has no matching "
+                    "Plan Step."
+                ),
+                status_code=409,
+            )
+        try:
+            parsed = ExecutionPlanStep.model_validate(source.step_snapshot)
+        except Exception as exc:
+            raise AppError(
+                code="EXECUTION_PRECONDITION_FAILED",
+                message=(
+                    f"STEP_OUTPUT source {binding.step_id!r} step_snapshot "
+                    "is invalid."
+                ),
+                status_code=409,
+            ) from exc
+        if parsed.id != binding.step_id:
+            raise AppError(
+                code="EXECUTION_PRECONDITION_FAILED",
+                message=(
+                    f"STEP_OUTPUT source snapshot id {parsed.id!r} does not "
+                    f"match binding.step_id {binding.step_id!r}."
+                ),
+                status_code=409,
+            )
+        if expected.model_dump(mode="json") != source.step_snapshot:
+            raise AppError(
+                code="EXECUTION_PRECONDITION_FAILED",
+                message=(
+                    f"STEP_OUTPUT source {binding.step_id!r} step_snapshot "
+                    "does not match Execution.plan_snapshot."
+                ),
+                status_code=409,
+            )
+        if parsed.type != expected.type or parsed.id != expected.id:
+            raise AppError(
+                code="EXECUTION_PRECONDITION_FAILED",
+                message=(
+                    f"STEP_OUTPUT source {binding.step_id!r} identity is "
+                    "inconsistent with the Plan projection."
+                ),
+                status_code=409,
+            )
 
 
 def _transitive_ancestors(plan: ExecutionPlanV1) -> dict[str, set[str]]:

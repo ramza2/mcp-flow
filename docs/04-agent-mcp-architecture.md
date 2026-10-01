@@ -404,8 +404,8 @@ Resolver는 SecretResolver / MCP / LLM / DB write를 호출하지 않는다.
 |---|---|---|
 | `LITERAL` | `binding.value` | exact value |
 | `SECRET_REF` | `{"kind":"SECRET_REF","secret_id":"<uuid>"}` | reference-only; plaintext materializes later at MCP invocation |
-| `PLAN_INPUT` | `Execution.input_snapshot` | immutable execution input; secret inputs stay reference-only |
-| `STEP_OUTPUT` | upstream `ExecutionStep.result_inline` | same Execution; SUCCEEDED ancestor only; snake_case result root |
+| `PLAN_INPUT` | `Execution.input_snapshot` | immutable execution input; secret inputs stay reference-only; path `/` must not copy plaintext secrets |
+| `STEP_OUTPUT` | upstream `ExecutionStep.result_inline` | same Execution; immutable Plan/`step_snapshot` lineage; SUCCEEDED ancestor only; snake_case result root |
 | `EXECUTION_CONTEXT` | safe projection only | see below |
 | `LOOP_CONTEXT` | unsupported | fail closed until LOOP runtime |
 
@@ -444,6 +444,24 @@ JSON Pointer semantics (project subset):
 - JSON `null` is a valid resolved value
 - missing path → `MISSING` (fail closed; never coerced to null)
 - no attribute traversal, eval, template, or fuzzy key lookup
+
+`PLAN_INPUT` secret safety:
+
+- leaf paths under a Plan input declared `secret=true` must resolve to
+  exact `{"kind":"SECRET_REF","secret_id":"<uuid>"}` (canonical UUID string)
+- path `/` inspects every top-level Plan input with `secret=true`; plaintext /
+  object / array / null / malformed SECRET_REF fail closed; required secret
+  MISSING fail closed; projected root may contain only non-secret values plus
+  normalized SECRET_REF objects
+
+`STEP_OUTPUT` source lineage (before reading `result_inline`):
+
+- source `step_key` / parsed `step_snapshot.id` match `binding.step_id`
+- source `step_snapshot` parses and exactly equals the matching Plan Step in
+  `Execution.plan_snapshot`
+- then existing same-Execution / transitive ancestor / SUCCEEDED /
+  non-null `result_inline` / path-exists checks apply
+- Attempt/ToolCall response is never a fallback source
 
 ### 8.3 AgentRequest Parameter Builder path
 

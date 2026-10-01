@@ -12,6 +12,8 @@ from app.domain.enums import BindingKind, StepStatus
 from app.execution.binding_resolver import (
     RuntimeBindingResolver,
     build_execution_context_projection,
+    canonicalize_secret_ref_value,
+    is_secret_ref_value,
 )
 from app.execution.json_pointer import MISSING, resolve_json_pointer
 from app.execution.resolved_input_schema import validate_resolved_tool_arguments
@@ -99,26 +101,55 @@ def _exec(**kwargs: Any) -> Any:
     return SimpleNamespace(**base)
 
 
+def _step_snapshot(plan: ExecutionPlanV1, step_key: str) -> dict[str, Any]:
+    for plan_step in plan.steps:
+        if plan_step.id == step_key:
+            return plan_step.model_dump(mode="json")
+    raise AssertionError(f"plan step {step_key!r} missing")
+
+
 def _step(
     *,
     step_key: str,
+    plan: ExecutionPlanV1 | None = None,
     status: str = StepStatus.PENDING.value,
     result_inline: Any = None,
     execution_id: uuid.UUID | None = None,
+    step_snapshot: dict[str, Any] | None = None,
 ) -> Any:
+    snapshot = step_snapshot
+    if snapshot is None and plan is not None:
+        snapshot = _step_snapshot(plan, step_key)
+    if snapshot is None:
+        snapshot = {
+            "id": step_key,
+            "name": step_key,
+            "type": "TOOL",
+            "required": True,
+            "depends_on": [],
+            "when": None,
+            "timeout_seconds": 30,
+            "on_error": "FAIL_EXECUTION",
+            "config": {
+                "tool_version_id": str(uuid.uuid4()),
+                "bindings": {},
+            },
+        }
     return SimpleNamespace(
         id=uuid.uuid4(),
         execution_id=execution_id or uuid.uuid4(),
         step_key=step_key,
         status=status,
         result_inline=result_inline,
+        step_snapshot=snapshot,
     )
 
 
 def test_literal_and_secret_ref() -> None:
     plan = _plan()
     execution = _exec()
-    step = _step(step_key="a", execution_id=execution.id)
+    step = _step(step_key="a", plan=plan, execution_id=execution.id)
+    secret_id = uuid.uuid4()
     bindings = {
         "x": parse_plan_binding_value(
             {"kind": BindingKind.LITERAL.value, "value": 7}
@@ -126,7 +157,7 @@ def test_literal_and_secret_ref() -> None:
         "y": parse_plan_binding_value(
             {
                 "kind": BindingKind.SECRET_REF.value,
-                "secret_id": str(uuid.uuid4()),
+                "secret_id": str(secret_id),
             }
         ),
     }
@@ -138,8 +169,68 @@ def test_literal_and_secret_ref() -> None:
         plan=plan,
     )
     assert resolved["x"] == 7
-    assert resolved["y"]["kind"] == BindingKind.SECRET_REF.value
-    assert "secret_id" in resolved["y"]
+    assert resolved["y"] == {
+        "kind": BindingKind.SECRET_REF.value,
+        "secret_id": str(secret_id),
+    }
+
+
+def test_canonical_secret_ref_validation() -> None:
+    assert not is_secret_ref_value({"kind": "SECRET_REF", "secret_id": "not-a-uuid"})
+    assert not is_secret_ref_value({"kind": "SECRET_REF"})
+    assert not is_secret_ref_value(
+        {
+            "kind": "SECRET_REF",
+            "secret_id": str(uuid.uuid4()),
+            "extra": True,
+        }
+    )
+    raw_id = "A0EEBC99-9C0B-4EF8-BB6D-6BB9BD380A11"
+    normalized = canonicalize_secret_ref_value(
+        {"kind": "SECRET_REF", "secret_id": raw_id}
+    )
+    assert normalized == {
+        "kind": BindingKind.SECRET_REF.value,
+        "secret_id": str(uuid.UUID(raw_id)),
+    }
+    with pytest.raises(AppError) as exc:
+        canonicalize_secret_ref_value(
+            {"kind": "SECRET_REF", "secret_id": "not-a-uuid"}
+        )
+    assert "UUID" in exc.value.message
+    with pytest.raises(AppError):
+        canonicalize_secret_ref_value({"kind": "SECRET_REF"})
+    with pytest.raises(AppError):
+        canonicalize_secret_ref_value(
+            {
+                "kind": "SECRET_REF",
+                "secret_id": str(uuid.uuid4()),
+                "extra": 1,
+            }
+        )
+
+    plan = _plan(
+        inputs={"token": {"type": "string", "required": True, "secret": True}}
+    )
+    execution = _exec(
+        input_snapshot={
+            "token": {"kind": "SECRET_REF", "secret_id": "bad", "extra": True}
+        }
+    )
+    step = _step(step_key="a", plan=plan, execution_id=execution.id)
+    with pytest.raises(AppError) as leaf_exc:
+        RuntimeBindingResolver().resolve(
+            execution=execution,
+            step=step,
+            steps=[step],
+            bindings={
+                "token": parse_plan_binding_value(
+                    {"kind": BindingKind.PLAN_INPUT.value, "path": "/token"}
+                )
+            },
+            plan=plan,
+        )
+    assert "SECRET_REF" in leaf_exc.value.message
 
 
 def test_plan_input_paths() -> None:
@@ -155,7 +246,7 @@ def test_plan_input_paths() -> None:
             "meta": {"tags": ["a", "b"], "flag": None},
         }
     )
-    step = _step(step_key="a", execution_id=execution.id)
+    step = _step(step_key="a", plan=plan, execution_id=execution.id)
     bindings = {
         "location": parse_plan_binding_value(
             {"kind": BindingKind.PLAN_INPUT.value, "path": "/location"}
@@ -182,7 +273,7 @@ def test_plan_input_missing_and_secret_plaintext() -> None:
         inputs={"token": {"type": "string", "required": True, "secret": True}}
     )
     execution = _exec(input_snapshot={"token": "plaintext-secret"})
-    step = _step(step_key="a", execution_id=execution.id)
+    step = _step(step_key="a", plan=plan, execution_id=execution.id)
     with pytest.raises(AppError) as exc:
         RuntimeBindingResolver().resolve(
             execution=execution,
@@ -198,7 +289,7 @@ def test_plan_input_missing_and_secret_plaintext() -> None:
     assert "secret" in exc.value.message
 
     execution2 = _exec(input_snapshot={})
-    step2 = _step(step_key="a", execution_id=execution2.id)
+    step2 = _step(step_key="a", plan=_plan(), execution_id=execution2.id)
     with pytest.raises(AppError) as exc2:
         RuntimeBindingResolver().resolve(
             execution=execution2,
@@ -212,6 +303,104 @@ def test_plan_input_missing_and_secret_plaintext() -> None:
             plan=_plan(),
         )
     assert "MISSING" in exc2.value.message
+
+
+def test_plan_input_root_secret_safety() -> None:
+    secret_id = uuid.uuid4()
+    raw_id = "A0EEBC99-9C0B-4EF8-BB6D-6BB9BD380A11"
+    plan = _plan(
+        inputs={
+            "location": {"type": "string", "required": True, "secret": False},
+            "token": {"type": "string", "required": True, "secret": True},
+        }
+    )
+    step_bindings = {
+        "payload": parse_plan_binding_value(
+            {"kind": BindingKind.PLAN_INPUT.value, "path": "/"}
+        )
+    }
+
+    # Root with secret plaintext → fail closed.
+    execution_plain = _exec(
+        input_snapshot={"location": "Seoul", "token": "plaintext-secret"}
+    )
+    step_plain = _step(step_key="a", plan=plan, execution_id=execution_plain.id)
+    with pytest.raises(AppError) as plain_exc:
+        RuntimeBindingResolver().resolve(
+            execution=execution_plain,
+            step=step_plain,
+            steps=[step_plain],
+            bindings=step_bindings,
+            plan=plan,
+        )
+    assert "secret" in plain_exc.value.message.lower()
+
+    # Root with canonical SECRET_REF only → valid + normalized.
+    plan_secret_only = _plan(
+        inputs={"token": {"type": "string", "required": True, "secret": True}}
+    )
+    execution_ref = _exec(
+        input_snapshot={
+            "token": {"kind": "SECRET_REF", "secret_id": raw_id},
+        }
+    )
+    step_ref = _step(
+        step_key="a", plan=plan_secret_only, execution_id=execution_ref.id
+    )
+    resolved_ref = RuntimeBindingResolver().resolve(
+        execution=execution_ref,
+        step=step_ref,
+        steps=[step_ref],
+        bindings=step_bindings,
+        plan=plan_secret_only,
+    )
+    assert resolved_ref["payload"] == {
+        "token": {
+            "kind": BindingKind.SECRET_REF.value,
+            "secret_id": str(uuid.UUID(raw_id)),
+        }
+    }
+
+    # Mixed public + canonical secret → valid.
+    execution_mixed = _exec(
+        input_snapshot={
+            "location": "Seoul",
+            "token": {
+                "kind": "SECRET_REF",
+                "secret_id": str(secret_id),
+            },
+        }
+    )
+    step_mixed = _step(step_key="a", plan=plan, execution_id=execution_mixed.id)
+    resolved_mixed = RuntimeBindingResolver().resolve(
+        execution=execution_mixed,
+        step=step_mixed,
+        steps=[step_mixed],
+        bindings=step_bindings,
+        plan=plan,
+    )
+    assert resolved_mixed["payload"] == {
+        "location": "Seoul",
+        "token": {
+            "kind": BindingKind.SECRET_REF.value,
+            "secret_id": str(secret_id),
+        },
+    }
+
+    # Required secret missing on root → fail closed.
+    execution_missing = _exec(input_snapshot={"location": "Seoul"})
+    step_missing = _step(
+        step_key="a", plan=plan, execution_id=execution_missing.id
+    )
+    with pytest.raises(AppError) as missing_exc:
+        RuntimeBindingResolver().resolve(
+            execution=execution_missing,
+            step=step_missing,
+            steps=[step_missing],
+            bindings=step_bindings,
+            plan=plan,
+        )
+    assert "MISSING" in missing_exc.value.message
 
 
 def test_step_output_direct_and_transitive() -> None:
@@ -240,6 +429,7 @@ def test_step_output_direct_and_transitive() -> None:
     execution = _exec()
     a = _step(
         step_key="a",
+        plan=plan,
         status=StepStatus.SUCCEEDED.value,
         execution_id=execution.id,
         result_inline={
@@ -248,11 +438,17 @@ def test_step_output_direct_and_transitive() -> None:
     )
     b = _step(
         step_key="b",
+        plan=plan,
         status=StepStatus.SUCCEEDED.value,
         execution_id=execution.id,
         result_inline={"structured_content": {"ok": True}},
     )
-    c = _step(step_key="c", status=StepStatus.READY.value, execution_id=execution.id)
+    c = _step(
+        step_key="c",
+        plan=plan,
+        status=StepStatus.READY.value,
+        execution_id=execution.id,
+    )
 
     direct = RuntimeBindingResolver().resolve(
         execution=execution,
@@ -294,11 +490,12 @@ def test_step_output_fail_closed_cases() -> None:
     execution = _exec()
     a = _step(
         step_key="a",
+        plan=plan,
         status=StepStatus.FAILED.value,
         execution_id=execution.id,
         result_inline={"structured_content": {"customer_id": "C-100"}},
     )
-    b = _step(step_key="b", execution_id=execution.id)
+    b = _step(step_key="b", plan=plan, execution_id=execution.id)
     binding = {
         "customer_id": parse_plan_binding_value(
             {
@@ -332,9 +529,15 @@ def test_step_output_fail_closed_cases() -> None:
     # Sibling / forward: c depends on nothing related — use b reading non-ancestor.
     # Make a step that doesn't depend on a — can't with our plan. Use step a
     # reading b (forward).
-    a_ready = _step(step_key="a", status=StepStatus.READY.value, execution_id=execution.id)
+    a_ready = _step(
+        step_key="a",
+        plan=plan,
+        status=StepStatus.READY.value,
+        execution_id=execution.id,
+    )
     b_succ = _step(
         step_key="b",
+        plan=plan,
         status=StepStatus.SUCCEEDED.value,
         execution_id=execution.id,
         result_inline={"structured_content": {"x": 1}},
@@ -358,10 +561,58 @@ def test_step_output_fail_closed_cases() -> None:
     assert "ancestor" in exc4.value.message
 
 
+def test_step_output_source_immutable_lineage() -> None:
+    plan = _plan()
+    execution = _exec()
+    a = _step(
+        step_key="a",
+        plan=plan,
+        status=StepStatus.SUCCEEDED.value,
+        execution_id=execution.id,
+        result_inline={"structured_content": {"customer_id": "C-100"}},
+    )
+    b = _step(step_key="b", plan=plan, execution_id=execution.id)
+    binding = {
+        "customer_id": parse_plan_binding_value(
+            {
+                "kind": BindingKind.STEP_OUTPUT.value,
+                "step_id": "a",
+                "path": "/structured_content/customer_id",
+            }
+        )
+    }
+
+    # Tampered step_snapshot → fail closed.
+    a.step_snapshot = dict(a.step_snapshot)
+    a.step_snapshot["name"] = "tampered"
+    with pytest.raises(AppError) as tampered_exc:
+        RuntimeBindingResolver().resolve(
+            execution=execution, step=b, steps=[a, b], bindings=binding, plan=plan
+        )
+    assert "step_snapshot" in tampered_exc.value.message
+
+    # Restore exact snapshot, then mismatch snapshot id → fail.
+    a.step_snapshot = _step_snapshot(plan, "a")
+    a.step_snapshot = dict(a.step_snapshot)
+    a.step_snapshot["id"] = "b"
+    with pytest.raises(AppError) as id_exc:
+        RuntimeBindingResolver().resolve(
+            execution=execution, step=b, steps=[a, b], bindings=binding, plan=plan
+        )
+    assert "snapshot id" in id_exc.value.message or "step_snapshot" in id_exc.value.message
+
+    # Valid source remains resolvable.
+    a.step_snapshot = _step_snapshot(plan, "a")
+    resolved = RuntimeBindingResolver().resolve(
+        execution=execution, step=b, steps=[a, b], bindings=binding, plan=plan
+    )
+    assert resolved["customer_id"] == "C-100"
+
+
 def test_execution_context_allowlist_and_loop_context() -> None:
     plan = _plan()
     execution = _exec()
-    step = _step(step_key="a", execution_id=execution.id)
+    step = _step(step_key="a", plan=plan, execution_id=execution.id)
     proj = build_execution_context_projection(execution)
     assert set(proj) == {"execution_id", "source_type", "trigger_type", "trace_id"}
 

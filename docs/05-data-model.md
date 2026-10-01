@@ -1329,15 +1329,20 @@ lock_version
 
 ```text
 LITERAL → value
-SECRET_REF / secret PLAN_INPUT → {"kind":"SECRET_REF","secret_id":"..."}
+SECRET_REF / secret PLAN_INPUT → {"kind":"SECRET_REF","secret_id":"<canonical-uuid>"}
+PLAN_INPUT `/` → root projection (secret fields must already be SECRET_REF; never plaintext)
 PLAN_INPUT / STEP_OUTPUT / EXECUTION_CONTEXT → JSON Pointer result (null allowed; MISSING fail-closed)
 LOOP_CONTEXT → unsupported (fail closed)
 ```
 
+Canonical SECRET_REF shape is exact `{kind, secret_id}` with a UUID `secret_id`
+(no extra fields). Malformed SECRET_REF fail-closed before SecretResolver/MCP.
+
 `result_inline`은 TOOL SUCCEEDED의 canonical snake_case projection이며
 `STEP_OUTPUT` runtime root다 (`structured_content` 등; camelCase alias 없음).
-Attempt 생성 전 resolve하며, retry/replay는 pinned `resolved_input`과
-deterministic recompute equality를 요구한다.
+`STEP_OUTPUT` resolve는 source `step_snapshot` ↔ Plan Step exact lineage를
+먼저 검증한다. Attempt 생성 전 resolve하며, retry/replay는 pinned
+`resolved_input`과 deterministic recompute equality를 요구한다.
 
 ### 13.5 Step 상태전이
 

@@ -336,6 +336,87 @@ async def test_plan_input_handoff_to_tool(
 
 
 @pytest.mark.asyncio
+async def test_plan_input_root_secret_plaintext_no_attempt_no_mcp(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_no_side_effects(monkeypatch)
+    async with db_session_factory() as session:
+        seeded = await _seed_with_customer_schema(session)
+        tv = seeded["tool_version_id"]
+        plan = _plan(
+            tool_version_id=tv,
+            inputs={
+                "location": {"type": "string", "required": True, "secret": False},
+                "token": {"type": "string", "required": True, "secret": True},
+            },
+            steps=[
+                {
+                    "id": "a",
+                    "name": "a",
+                    "type": AuthorableStepType.TOOL.value,
+                    "required": True,
+                    "depends_on": [],
+                    "when": None,
+                    "timeout_seconds": 30,
+                    "on_error": "FAIL_EXECUTION",
+                    "config": {
+                        "tool_version_id": str(tv),
+                        "bindings": {
+                            "location": {
+                                "kind": BindingKind.PLAN_INPUT.value,
+                                "path": "/",
+                            }
+                        },
+                    },
+                }
+            ],
+        )
+        # Tool schema expects string location; root binding would fail schema
+        # after secret check — seed plaintext secret and ensure fail is pre-MCP.
+        execution_id = await _materialize_queued(
+            session,
+            plan_snapshot=plan,
+            seeded=seeded,
+            input_snapshot={
+                "location": "Seoul",
+                "token": "plaintext-secret",
+            },
+        )
+        claim = await ExecutionClaimService(session, lease_seconds=60).claim(
+            execution_id=execution_id, worker_id="worker-a"
+        )
+        await session.commit()
+        assert claim.lease_token is not None
+        lease_token = claim.lease_token
+
+    client = _SequencedMCPClient()
+    runner = McpToolRunner(
+        session_factory=db_session_factory,
+        mcp_client=client,
+        secret_resolver_factory=_resolver_factory,
+        lease_seconds=60,
+        result_inline_max_bytes=256_000,
+    )
+    outcome = await runner.run_claimed_execution(
+        execution_id=execution_id,
+        worker_id="worker-a",
+        lease_token=lease_token,
+    )
+    assert outcome.mcp_called is False
+    assert outcome.terminal_status == StepStatus.FAILED.value
+    assert outcome.reason == "EXECUTION_PRECONDITION_FAILED"
+    assert len(client.calls) == 0
+
+    async with db_session_factory() as session:
+        steps = await ExecutionRepository(session).list_steps(execution_id)
+        assert steps[0].status == StepStatus.FAILED.value
+        assert steps[0].resolved_input is None
+        attempts = await ExecutionRepository(session).list_attempts(steps[0].id)
+        assert len(attempts) == 0
+
+
+@pytest.mark.asyncio
 async def test_step_output_missing_path_no_mcp_for_b(
     db_session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
