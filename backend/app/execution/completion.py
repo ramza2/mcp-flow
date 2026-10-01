@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 from app.domain.enums import ExecutionStatus, StepStatus
+from app.execution.loop_runtime import top_level_plan_steps
 from app.models.execution import ExecutionStep
 from app.schemas.execution_plan import ExecutionPlanStep, ExecutionPlanV1
 
@@ -131,19 +132,19 @@ def aggregate_all_required(
     neutral/satisfied for required-completion. Fail-fast
     ``UPSTREAM_EXECUTION_STOPPED`` and other unexpected SKIPPED remain
     non-success.
-    """
-    by_key = {s.step_key: s for s in steps}
 
+    Top-level Plan Steps (not LOOP body templates) are matched by
+    ``step_key == plan id``. Dynamic LOOP body instances are evaluated from
+    their ``step_snapshot`` required/on_error — missing body-template rows
+    do not fail aggregation.
+    """
     any_succeeded = any(s.status == StepStatus.SUCCEEDED.value for s in steps)
     mark_partial_failure = False
     continue_required_failure = False
     required_all_succeeded = True
 
-    for ps in plan.steps:
-        step = by_key.get(ps.id)
-        if step is None:
-            required_all_succeeded = False
-            continue
+    def _apply(ps: ExecutionPlanStep, step: ExecutionStep) -> None:
+        nonlocal mark_partial_failure, continue_required_failure, required_all_succeeded
         failed = step.status in _FAILURE_LIKE
         if ps.required:
             if step.status == StepStatus.SUCCEEDED.value:
@@ -154,11 +155,35 @@ def aggregate_all_required(
             else:
                 required_all_succeeded = False
         if not failed:
-            continue
+            return
         if ps.on_error == "MARK_PARTIAL":
             mark_partial_failure = True
         if ps.required and ps.on_error == "CONTINUE":
             continue_required_failure = True
+
+    # 1) Top-level ExecutionSteps ↔ top-level Plan Steps (exclude body templates).
+    top_level_by_key = {
+        s.step_key: s
+        for s in steps
+        if getattr(s, "parent_step_id", None) is None
+    }
+    for ps in top_level_plan_steps(plan):
+        step = top_level_by_key.get(ps.id)
+        if step is None:
+            required_all_succeeded = False
+            continue
+        _apply(ps, step)
+
+    # 2) Dynamic LOOP body instances — use step_snapshot required/on_error.
+    for step in steps:
+        if getattr(step, "parent_step_id", None) is None:
+            continue
+        try:
+            ps = ExecutionPlanStep.model_validate(step.step_snapshot)
+        except Exception:
+            required_all_succeeded = False
+            continue
+        _apply(ps, step)
 
     if required_all_succeeded and not mark_partial_failure:
         return CompletionDecision(status=ExecutionStatus.SUCCEEDED.value)

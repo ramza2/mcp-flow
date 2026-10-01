@@ -1215,9 +1215,9 @@ plan_schema_version / plan_snapshot / plan_hash / input_snapshot / policy_snapsh
   are caller-pinned; plan_hash is recomputed and must match before insert
 StaticComplexPlanValidator (docs/04 §9.7) is re-run before first DB insert —
   caller "already validated" claims are not trusted
-step_key = Plan Step id
+step_key = Plan Step id (top-level only)
 step_type = canonical AuthorableStepType
-sequence_hint = Plan array index (stable)
+sequence_hint = top-level Plan array index (stable among initial rows)
 step_snapshot = exact Plan Step JSON projection
 TOOL → mcp_tool_version_id = config.tool_version_id
 CONDITION/JOIN/APPROVAL/LOOP → mcp_tool_version_id = null
@@ -1225,13 +1225,16 @@ parent_step_id = null  (DAG dependency remains in step_snapshot.depends_on)
 iteration_no / ready_at / started_at / finished_at = null
 attempt_count = 0
 all Steps remain PENDING (roots are not READY'd)
+LOOP body templates are NOT materialized as initial rows — they remain in
+plan_snapshot and expand into durable child rows per FOR_EACH iteration
+(`parent_step_id` / `iteration_no` / deterministic child `step_key`)
 ```
 
-Atomicity: Execution + all Steps succeed or the transaction rolls back with zero
-rows. Static complex-plan rejection and hash mismatch fail before any insert.
-No Outbox / queue / MCP / ApprovalRequest / binding resolve / Predicate
-eval / LOOP expand. AgentRequest creation preflight remains single-TOOL and
-reuses this materializer for Step persistence.
+Atomicity: Execution + all top-level Steps succeed or the transaction rolls back
+with zero rows. Static complex-plan rejection and hash mismatch fail before any
+insert. No Outbox / queue / MCP / ApprovalRequest / binding resolve / Predicate
+eval / LOOP iteration expand. AgentRequest creation preflight remains
+single-TOOL and reuses this materializer for Step persistence.
 
 #### Queue / Claim Foundation
 
@@ -1257,12 +1260,15 @@ RUNNING → worker_id, lease_token, lease_expires_at 필수
 QUEUED  → worker/lease/heartbeat 모두 null
 claim-time READY count ≤ `Plan.limits.max_parallelism` (root TOOL Steps in
 immutable Plan order; remaining eligible roots stay PENDING)
-direct TOOL fan-in / LOOP → claim fail-closed (MCP 0)
-root CONDITION / APPROVAL stay PENDING at claim (local reconcile later;
-no ApprovalRequest at claim)
-TOOL fan-out + explicit JOIN fan-in + CONDITION + APPROVAL + Step.when are
-valid for TOOL/CONDITION/JOIN/APPROVAL DAG runtime (root may be CONDITION or
-APPROVAL; JOIN cannot be root)
+direct TOOL fan-in → claim fail-closed (MCP 0)
+flat FOR_EACH LOOP is claim-valid: root LOOP stays PENDING; body templates are
+absent from initial rows; WHILE / nested LOOP / body APPROVAL fail closed before
+MCP (`LOOP_RUNTIME_UNSUPPORTED`)
+root CONDITION / APPROVAL / LOOP stay PENDING at claim (local reconcile later;
+no ApprovalRequest at claim; no iteration materialization at claim)
+TOOL fan-out + explicit JOIN fan-in + CONDITION + APPROVAL + Step.when + flat
+FOR_EACH are valid for the runtime DAG (root may be CONDITION, APPROVAL, or
+LOOP; JOIN cannot be root)
 ```
 
 중복 broker delivery는 `RUNNING`/terminal 상태를 되돌리지 않고 no-op 처리한다. `queued_at`, `started_at`, `ready_at`은 최초 transition에서만 설정한다.
@@ -1405,7 +1411,10 @@ LITERAL → value
 SECRET_REF / secret PLAN_INPUT → {"kind":"SECRET_REF","secret_id":"<canonical-uuid>"}
 PLAN_INPUT `/` → root projection (secret fields must already be SECRET_REF; never plaintext)
 PLAN_INPUT / STEP_OUTPUT / EXECUTION_CONTEXT → JSON Pointer result (null allowed; MISSING fail-closed)
-LOOP_CONTEXT → unsupported (fail closed)
+LOOP_CONTEXT → active FOR_EACH body instance only (canonical projection + pointer;
+outside body / hash drift → fail closed)
+LOOP body STEP_OUTPUT → same parent_step_id + same iteration_no template instance
+(cross-iteration STEP_OUTPUT rejected)
 ```
 
 Canonical SECRET_REF shape is exact `{kind, secret_id}` with a UUID `secret_id`

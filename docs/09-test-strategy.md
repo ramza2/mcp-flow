@@ -410,7 +410,8 @@ Dataset은 평가 전 FROZEN하고 실행 중 정답을 변경하지 않는다.
 - Predicate evaluator: eq/ne strict equality; bool≠number; ordered number/string;
   invalid mixed types; in/contains; exists/is_null MISSING vs null; binary MISSING
   fail; and/or short-circuit; not; PLAN_INPUT / STEP_OUTPUT / EXECUTION_CONTEXT;
-  CONDITION STEP_OUTPUT; SECRET_REF exists + binary reject; LOOP_CONTEXT reject
+  CONDITION STEP_OUTPUT; SECRET_REF exists + binary reject; LOOP_CONTEXT outside
+  body reject (body LOOP_CONTEXT covered in FOR_EACH suite)
 - root CONDITION; CONDITION true/false SUCCEEDED with `condition_result` +
   `result_inline={"condition_result": bool}`; Attempt/ToolCall 0
 - `when=true` TOOL executes; `when=false` TOOL/JOIN SKIPPED MCP 0
@@ -421,7 +422,27 @@ Dataset은 평가 전 FROZEN하고 실행 중 정답을 변경하지 않는다.
 - PostgreSQL JOIN skipped-branch ALL_COMPLETE / ANY_SUCCESS
 - PostgreSQL duplicate CONDITION reconciliation race → one terminal CONDITION;
   selected-branch MCP ≤ 1
-- LOOP / LOOP_CONTEXT still out of scope
+
+추가 (flat FOR_EACH LOOP runtime):
+
+- initial materialization excludes LOOP body templates; non-LOOP unchanged
+- deterministic child `step_key` + `parent_step_id` / `iteration_no`
+- static: top-level depends_on / STEP_OUTPUT / response_step_ids must not name
+  body templates; body same-loop ancestor STEP_OUTPUT ok; forward/sibling /
+  other-loop rejected
+- LOOP_CONTEXT item/index/iteration_no/collection_size + nested pointer;
+  outside body / hash drift fail closed
+- empty collection / 1 item / 3 sequential iterations; body TOOL item binding
+- body CONDITION / Step.when / JOIN; CONTINUE next-iter; MARK_PARTIAL;
+  FAIL_EXECUTION stops future iters
+- collection type mismatch; max_iterations; expanded max_steps; LOOP timeout
+- WHILE / nested LOOP / body APPROVAL → `LOOP_RUNTIME_UNSUPPORTED` before MCP
+- child TOOL lineage + step_key/iteration/parent tamper fail closed
+- same-iteration STEP_OUTPUT success; cross-iteration reject
+- PostgreSQL A–J: happy path, empty, body DAG, LOOP_CONTEXT+STEP_OUTPUT,
+  conditional body, CONTINUE partial, max_iterations, duplicate iteration race,
+  duplicate child dispatch, lineage tamper
+- recovery limitation: partial LOOP after lease loss remains follow-up
 
 추가 (authorable APPROVAL Step runtime):
 
@@ -448,7 +469,8 @@ Dataset은 평가 전 FROZEN하고 실행 중 정답을 변경하지 않는다.
 추가 (Runtime Binding resolution — sequential TOOL slice):
 
 - LITERAL / SECRET_REF / PLAN_INPUT / STEP_OUTPUT / EXECUTION_CONTEXT resolve
-- LOOP_CONTEXT fail-closed; JSON Pointer `/`, `~0`/`~1`, null vs MISSING
+- LOOP_CONTEXT outside active FOR_EACH body fail-closed; JSON Pointer `/`,
+  `~0`/`~1`, null vs MISSING (body LOOP_CONTEXT in FOR_EACH suite)
 - STEP_OUTPUT from `result_inline` snake_case only; non-ancestor / non-SUCCEEDED fail-closed
 - STEP_OUTPUT source `step_snapshot` ↔ Plan exact lineage before `result_inline`
 - secret PLAN_INPUT plaintext rejected; SECRET_REF never via SecretResolver in resolver

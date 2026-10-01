@@ -145,10 +145,12 @@ class ExecutionClaimService:
             )
 
         # All Steps must still be initial PENDING before first claim.
+        # Flat FOR_EACH: initial rows are top-level only (no body templates).
         for step in steps:
             if (
                 step.status != StepStatus.PENDING.value
                 or step.parent_step_id is not None
+                or step.iteration_no is not None
                 or step.ready_at is not None
                 or step.started_at is not None
                 or step.attempt_count != 0
@@ -159,13 +161,14 @@ class ExecutionClaimService:
                     AuthorableStepType.CONDITION.value,
                     AuthorableStepType.JOIN.value,
                     AuthorableStepType.APPROVAL.value,
+                    AuthorableStepType.LOOP.value,
                 }
             ):
                 raise AppError(
                     code="RESOURCE_CONFLICT",
                     message=(
                         "ExecutionStep is inconsistent with initial PENDING "
-                        "TOOL/CONDITION/JOIN/APPROVAL DAG state."
+                        "TOOL/CONDITION/JOIN/APPROVAL/LOOP DAG state."
                     ),
                     status_code=409,
                 )
@@ -175,6 +178,7 @@ class ExecutionClaimService:
                     AuthorableStepType.JOIN.value,
                     AuthorableStepType.CONDITION.value,
                     AuthorableStepType.APPROVAL.value,
+                    AuthorableStepType.LOOP.value,
                 }
                 and step.mcp_tool_version_id is not None
             ):
@@ -188,6 +192,7 @@ class ExecutionClaimService:
                 )
 
         plan = assert_execution_plan_lineage(execution)
+        # Fail closed for WHILE / nested LOOP / body APPROVAL before any MCP.
         dag = validate_tool_join_dag(plan, steps)
         by_key = {s.step_key: s for s in steps}
 

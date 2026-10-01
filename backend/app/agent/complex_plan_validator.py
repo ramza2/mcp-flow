@@ -152,26 +152,6 @@ class StaticComplexPlanValidator:
                 )
             )
 
-        # Completion response_step_ids
-        response_ids = plan.completion.response_step_ids
-        if not response_ids:
-            errors.append(
-                _issue("PLAN_SCHEMA_INVALID", "response_step_ids must be non-empty")
-            )
-        elif len(set(response_ids)) != len(response_ids):
-            errors.append(
-                _issue("PLAN_SCHEMA_INVALID", "response_step_ids contains duplicates")
-            )
-        else:
-            for rid in response_ids:
-                if rid not in id_set:
-                    errors.append(
-                        _issue(
-                            "PLAN_SCHEMA_INVALID",
-                            f"response_step_id={rid!r} does not exist",
-                        )
-                    )
-
         # First pass: collect LOOP body ownership (needed before binding ancestry rules)
         loop_body_owner: dict[str, str] = {}
         loop_configs: dict[str, LoopStepConfigV1] = {}
@@ -215,14 +195,59 @@ class StaticComplexPlanValidator:
                 else:
                     loop_body_owner[body_id] = step.id
 
+        body_templates = set(loop_body_owner)
+
+        # Completion response_step_ids — reject direct LOOP body templates.
+        response_ids = plan.completion.response_step_ids
+        if not response_ids:
+            errors.append(
+                _issue("PLAN_SCHEMA_INVALID", "response_step_ids must be non-empty")
+            )
+        elif len(set(response_ids)) != len(response_ids):
+            errors.append(
+                _issue("PLAN_SCHEMA_INVALID", "response_step_ids contains duplicates")
+            )
+        else:
+            for rid in response_ids:
+                if rid not in id_set:
+                    errors.append(
+                        _issue(
+                            "PLAN_SCHEMA_INVALID",
+                            f"response_step_id={rid!r} does not exist",
+                        )
+                    )
+                elif rid in body_templates:
+                    errors.append(
+                        _issue(
+                            "PLAN_SCHEMA_INVALID",
+                            f"response_step_id={rid!r} must not name a LOOP "
+                            "body template",
+                        )
+                    )
+
+        # Top-level Steps must not depend directly on LOOP body templates.
+        for step in plan.steps:
+            if step.id in body_templates:
+                continue
+            for dep in step.depends_on:
+                if dep in body_templates:
+                    errors.append(
+                        _issue(
+                            "PLAN_SCHEMA_INVALID",
+                            f"top-level step depends_on={dep!r} must not "
+                            "reference a LOOP body template; depend on the "
+                            "owning LOOP instead",
+                            step_id=step.id,
+                        )
+                    )
+
         # Per-step typed config + when + bindings
         for step in plan.steps:
-            require_ancestry = step.id not in loop_body_owner
             self._validate_when(
                 step,
                 id_set=id_set,
                 ancestors=ancestors,
-                require_ancestry=require_ancestry,
+                loop_body_owner=loop_body_owner,
                 errors=errors,
             )
             self._validate_step_config(
@@ -230,7 +255,7 @@ class StaticComplexPlanValidator:
                 id_set=id_set,
                 plan=plan,
                 ancestors=ancestors,
-                require_ancestry=require_ancestry,
+                loop_body_owner=loop_body_owner,
                 errors=errors,
             )
 
@@ -274,7 +299,7 @@ class StaticComplexPlanValidator:
         *,
         id_set: set[str],
         ancestors: dict[str, set[str]],
-        require_ancestry: bool,
+        loop_body_owner: dict[str, str],
         errors: list[ComplexPlanIssue],
     ) -> None:
         if step.when is None:
@@ -304,7 +329,7 @@ class StaticComplexPlanValidator:
             owner_step_id=step.id,
             id_set=id_set,
             ancestors=ancestors,
-            require_ancestry=require_ancestry,
+            loop_body_owner=loop_body_owner,
             errors=errors,
             code="PLAN_BINDING_INVALID",
         )
@@ -316,7 +341,7 @@ class StaticComplexPlanValidator:
         id_set: set[str],
         plan: ExecutionPlanV1,
         ancestors: dict[str, set[str]],
-        require_ancestry: bool,
+        loop_body_owner: dict[str, str],
         errors: list[ComplexPlanIssue],
     ) -> Any:
         if not isinstance(step.config, dict):
@@ -337,7 +362,7 @@ class StaticComplexPlanValidator:
                     owner_step_id=step.id,
                     id_set=id_set,
                     ancestors=ancestors,
-                    require_ancestry=require_ancestry,
+                    loop_body_owner=loop_body_owner,
                     errors=errors,
                     code="PLAN_BINDING_INVALID",
                 )
@@ -353,7 +378,7 @@ class StaticComplexPlanValidator:
                     owner_step_id=step.id,
                     id_set=id_set,
                     ancestors=ancestors,
-                    require_ancestry=require_ancestry,
+                    loop_body_owner=loop_body_owner,
                     errors=errors,
                     code="PLAN_BINDING_INVALID",
                 )
@@ -380,7 +405,7 @@ class StaticComplexPlanValidator:
                     owner_step_id=step.id,
                     id_set=id_set,
                     ancestors=ancestors,
-                    require_ancestry=require_ancestry,
+                    loop_body_owner=loop_body_owner,
                     errors=errors,
                     code="PLAN_BINDING_INVALID",
                 )
@@ -420,11 +445,13 @@ class StaticComplexPlanValidator:
         owner_step_id: str,
         id_set: set[str],
         ancestors: dict[str, set[str]],
-        require_ancestry: bool,
+        loop_body_owner: dict[str, str],
         errors: list[ComplexPlanIssue],
         code: str,
     ) -> None:
         owner_ancestors = ancestors.get(owner_step_id, set())
+        owner_loop = loop_body_owner.get(owner_step_id)
+        body_templates = set(loop_body_owner)
         for binding in bindings:
             if isinstance(binding, PlanStepOutputBinding):
                 if binding.step_id == owner_step_id:
@@ -443,16 +470,68 @@ class StaticComplexPlanValidator:
                             step_id=owner_step_id,
                         )
                     )
-                elif require_ancestry and binding.step_id not in owner_ancestors:
-                    errors.append(
-                        _issue(
-                            code,
-                            f"STEP_OUTPUT step_id={binding.step_id!r} is not in "
-                            f"the transitive dependency ancestry of "
-                            f"{owner_step_id!r}",
-                            step_id=owner_step_id,
+                elif owner_loop is None:
+                    # Top-level / non-body owner.
+                    if binding.step_id in body_templates:
+                        errors.append(
+                            _issue(
+                                code,
+                                f"STEP_OUTPUT step_id={binding.step_id!r} must "
+                                "not reference a LOOP body template from a "
+                                "non-body Step",
+                                step_id=owner_step_id,
+                            )
                         )
-                    )
+                    elif binding.step_id not in owner_ancestors:
+                        errors.append(
+                            _issue(
+                                code,
+                                f"STEP_OUTPUT step_id={binding.step_id!r} is not "
+                                f"in the transitive dependency ancestry of "
+                                f"{owner_step_id!r}",
+                                step_id=owner_step_id,
+                            )
+                        )
+                else:
+                    # Body template owner — same-loop ancestor or top-level
+                    # transitive ancestor of the owning LOOP.
+                    source_loop = loop_body_owner.get(binding.step_id)
+                    if source_loop is not None and source_loop != owner_loop:
+                        errors.append(
+                            _issue(
+                                code,
+                                f"STEP_OUTPUT step_id={binding.step_id!r} belongs "
+                                "to a different LOOP body",
+                                step_id=owner_step_id,
+                            )
+                        )
+                    elif source_loop == owner_loop:
+                        if binding.step_id not in owner_ancestors:
+                            errors.append(
+                                _issue(
+                                    code,
+                                    f"STEP_OUTPUT step_id={binding.step_id!r} is "
+                                    "not a same-iteration body dependency "
+                                    f"ancestor of {owner_step_id!r}",
+                                    step_id=owner_step_id,
+                                )
+                            )
+                    else:
+                        # Outside-body source must be a transitive ancestor of
+                        # the owning LOOP (not an arbitrary top-level Step).
+                        loop_ancestors = ancestors.get(owner_loop, set())
+                        if binding.step_id != owner_loop and (
+                            binding.step_id not in loop_ancestors
+                        ):
+                            errors.append(
+                                _issue(
+                                    code,
+                                    f"STEP_OUTPUT step_id={binding.step_id!r} is "
+                                    "not a transitive top-level ancestor of "
+                                    f"owning LOOP {owner_loop!r}",
+                                    step_id=owner_step_id,
+                                )
+                            )
             # path syntax already enforced by PlanBindingValue parsers;
             # LITERAL / SECRET_REF / PLAN_INPUT / EXECUTION_CONTEXT / LOOP_CONTEXT
             # need no additional graph checks here.

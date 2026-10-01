@@ -1,12 +1,12 @@
-"""TOOL/CONDITION/JOIN/APPROVAL DAG wave orchestration (docs/04 §9).
+"""TOOL/CONDITION/JOIN/APPROVAL/LOOP DAG wave orchestration (docs/04 §9).
 
 ``McpToolRunner`` owns one TOOL Step invocation (ToolCall/Attempt/Step).
 ``ExecutionOrchestrator`` owns wave scheduling, local CONDITION/when/JOIN/
-authorable APPROVAL reconciliation, ErrorPolicy, ALL_REQUIRED aggregation,
-and final Execution terminalization / lease release.
+authorable APPROVAL / flat FOR_EACH LOOP reconciliation, ErrorPolicy,
+ALL_REQUIRED aggregation, and final Execution terminalization / lease release.
 
-Supported runtime Steps: TOOL + CONDITION + JOIN + APPROVAL.
-LOOP remains out of scope.
+Supported runtime Steps: TOOL + CONDITION + JOIN + APPROVAL + LOOP(FOR_EACH).
+WHILE / nested LOOP / body APPROVAL fail closed before MCP.
 
 Authorable APPROVAL is an Execution-level Plan checkpoint: entering wait
 clears the lease and may freeze unrelated READY sibling branches until
@@ -63,10 +63,28 @@ from app.execution.dag import (
     has_intentional_skip_dependency,
     is_single_tool_execution,
     join_barrier_ready,
+    loop_structurally_eligible,
     pick_stop_cause,
     skip_all_pending,
     tool_structurally_eligible,
     validate_tool_join_dag,
+)
+from app.execution.loop_reconcile import (
+    active_iteration_no,
+    assert_collection_pin_stable,
+    assert_expanded_max_steps,
+    fail_loop_known,
+    iteration_complete,
+    loop_timeout_exceeded,
+    materialize_iteration,
+    pin_collection_evidence,
+    resolve_foreach_collection,
+    runtime_plan_step,
+    succeed_loop,
+)
+from app.execution.loop_runtime import (
+    LOOP_MAX_ITERATIONS_EXCEEDED,
+    LOOP_TIMEOUT,
 )
 from app.execution.predicate_evaluator import RuntimePredicateEvaluator
 from app.models.execution import Execution, ExecutionStep
@@ -80,6 +98,7 @@ from app.schemas.execution_plan import (
     ExecutionPlanStep,
     ExecutionPlanV1,
     JoinStepConfigV1,
+    LoopStepConfigV1,
     compute_plan_hash,
 )
 
@@ -696,9 +715,20 @@ class ExecutionOrchestrator:
                     await session.flush()
                     return local_stop
 
-                # Refresh after local mutations.
+                # Refresh after local mutations (LOOP may have materialised
+                # iteration body instances — rebuild the scheduling DAG).
                 steps = await executions.list_steps(execution.id)
                 by_key = {s.step_key: s for s in steps}
+                try:
+                    dag = validate_tool_join_dag(plan, steps)
+                except AppError as exc:
+                    return self._fail_closed_lineage_locked(
+                        execution=execution,
+                        by_key=by_key,
+                        now=now,
+                        error_code=exc.code,
+                        error_message=exc.message,
+                    )
 
                 ready_ids, newly_promoted = await self._reserve_tool_wave_locked(
                     executions=executions,
@@ -789,9 +819,9 @@ class ExecutionOrchestrator:
         now: datetime,
         session: AsyncSession,
     ) -> ProgressOutcome | None:
-        """Fixed-point local reconcile: prune → CONDITION/APPROVAL/when/JOIN.
+        """Fixed-point local reconcile: prune → LOOP → CONDITION/APPROVAL/when/JOIN.
 
-        Local CONDITION/JOIN/APPROVAL/when work does not consume
+        Local CONDITION/JOIN/APPROVAL/LOOP/when work does not consume
         ``max_parallelism``. Predicate evaluation failures are mandatory-fatal.
         Authorable APPROVAL may return WAITING_APPROVAL (Execution-level
         suspension) after creating at most one PENDING ApprovalRequest.
@@ -799,13 +829,16 @@ class ExecutionOrchestrator:
         evaluator = RuntimePredicateEvaluator()
         plan_by_id = {p.id: p for p in plan.steps}
         # Bound iterations by Step count (each Step terminalizes at most once).
-        for _ in range(max(1, len(dag.ordered_step_keys) * 4)):
+        # Allow growth when LOOP materialises body instances mid-reconcile.
+        for _ in range(max(1, max(len(dag.ordered_step_keys), len(steps)) * 8 + 8)):
             changed = False
 
             # 1) Conditionally prune non-JOIN descendants of intentional skips.
-            for key in dag.ordered_step_keys:
-                step = by_key[key]
-                if step.status != StepStatus.PENDING.value:
+            # Iteration-local: body deps are instance keys, so skip in iter N
+            # does not prune iter N+1.
+            for key in list(dag.ordered_step_keys):
+                step = by_key.get(key)
+                if step is None or step.status != StepStatus.PENDING.value:
                     continue
                 if step.step_type == AuthorableStepType.JOIN.value:
                     continue
@@ -813,6 +846,7 @@ class ExecutionOrchestrator:
                     AuthorableStepType.TOOL.value,
                     AuthorableStepType.CONDITION.value,
                     AuthorableStepType.APPROVAL.value,
+                    AuthorableStepType.LOOP.value,
                 }:
                     continue
                 if not has_intentional_skip_dependency(
@@ -839,17 +873,57 @@ class ExecutionOrchestrator:
                     locked.step_key,
                 )
 
+            # 1b) Flat FOR_EACH LOOP start / advance / complete.
+            loop_stop = await self._reconcile_loop_steps_locked(
+                executions=executions,
+                execution=execution,
+                plan=plan,
+                dag=dag,
+                by_key=by_key,
+                plan_by_id=plan_by_id,
+                evaluator=evaluator,
+                now=now,
+            )
+            if loop_stop is not None:
+                if loop_stop.reason == "LOOP_CHANGED":
+                    # Refresh DAG after materialization.
+                    steps_ref = await executions.list_steps(execution.id)
+                    by_key.clear()
+                    by_key.update({s.step_key: s for s in steps_ref})
+                    try:
+                        dag = validate_tool_join_dag(plan, steps_ref)
+                    except AppError as exc:
+                        return self._fail_closed_lineage_locked(
+                            execution=execution,
+                            by_key=by_key,
+                            now=now,
+                            error_code=exc.code,
+                            error_message=exc.message,
+                        )
+                    changed = True
+                else:
+                    return loop_stop
+
             # 2) Evaluate eligible CONDITION Steps (after dependency barrier).
-            for key in dag.ordered_step_keys:
-                step = by_key[key]
-                if not condition_structurally_eligible(
+            for key in list(dag.ordered_step_keys):
+                step = by_key.get(key)
+                if step is None or not condition_structurally_eligible(
                     step=step, dag=dag, by_key=by_key
                 ):
                     continue
                 locked = await executions.lock_step(step.id)
                 if locked is None or locked.status != StepStatus.PENDING.value:
                     continue
-                plan_step = plan_by_id[locked.step_key]
+                try:
+                    plan_step = runtime_plan_step(locked, plan_by_id)
+                except AppError as exc:
+                    return self._fail_closed_lineage_locked(
+                        execution=execution,
+                        by_key=by_key,
+                        now=now,
+                        error_code=exc.code,
+                        error_message=exc.message,
+                    )
                 # Re-validate exact immutable snapshot before Predicate eval.
                 if plan_step.model_dump(mode="json") != locked.step_snapshot:
                     return self._fail_closed_lineage_locked(
@@ -957,9 +1031,9 @@ class ExecutionOrchestrator:
                     return approval_stop
 
             # 3) Evaluate Step.when for PENDING TOOL with barrier satisfied.
-            for key in dag.ordered_step_keys:
-                step = by_key[key]
-                if step.status != StepStatus.PENDING.value:
+            for key in list(dag.ordered_step_keys):
+                step = by_key.get(key)
+                if step is None or step.status != StepStatus.PENDING.value:
                     continue
                 if step.step_type != AuthorableStepType.TOOL.value:
                     continue
@@ -967,7 +1041,16 @@ class ExecutionOrchestrator:
                     step=step, dag=dag, by_key=by_key
                 ):
                     continue
-                plan_step = plan_by_id[step.step_key]
+                try:
+                    plan_step = runtime_plan_step(step, plan_by_id)
+                except AppError as exc:
+                    return self._fail_closed_lineage_locked(
+                        execution=execution,
+                        by_key=by_key,
+                        now=now,
+                        error_code=exc.code,
+                        error_message=exc.message,
+                    )
                 if plan_step.when is None:
                     continue
                 locked = await executions.lock_step(step.id)
@@ -1015,14 +1098,25 @@ class ExecutionOrchestrator:
                     by_key[locked.step_key] = locked
 
             # 4) JOIN barrier: when gate then policy.
-            for key in dag.ordered_step_keys:
-                step = by_key[key]
-                if not join_barrier_ready(step=step, dag=dag, by_key=by_key):
+            for key in list(dag.ordered_step_keys):
+                step = by_key.get(key)
+                if step is None or not join_barrier_ready(
+                    step=step, dag=dag, by_key=by_key
+                ):
                     continue
                 locked = await executions.lock_step(step.id)
                 if locked is None or locked.status != StepStatus.PENDING.value:
                     continue
-                plan_step = plan_by_id[locked.step_key]
+                try:
+                    plan_step = runtime_plan_step(locked, plan_by_id)
+                except AppError as exc:
+                    return self._fail_closed_lineage_locked(
+                        execution=execution,
+                        by_key=by_key,
+                        now=now,
+                        error_code=exc.code,
+                        error_message=exc.message,
+                    )
                 if plan_step.model_dump(mode="json") != locked.step_snapshot:
                     return self._fail_closed_lineage_locked(
                         execution=execution,
@@ -1124,6 +1218,430 @@ class ExecutionOrchestrator:
 
             if not changed:
                 return None
+        return None
+
+    async def _reconcile_loop_steps_locked(
+        self,
+        *,
+        executions: ExecutionRepository,
+        execution: Execution,
+        plan: ExecutionPlanV1,
+        dag: ToolJoinDag,
+        by_key: dict[str, ExecutionStep],
+        plan_by_id: dict[str, ExecutionPlanStep],
+        evaluator: RuntimePredicateEvaluator,
+        now: datetime,
+    ) -> ProgressOutcome | None:
+        """Start / advance / complete flat FOR_EACH LOOP Steps.
+
+        Returns:
+        - ProgressOutcome reason=LOOP_CHANGED when local state advanced
+        - ProgressOutcome fail-closed / ErrorPolicy stop
+        - None when no LOOP work this pass
+        """
+        changed = False
+
+        for key in list(dag.ordered_step_keys):
+            step = by_key.get(key)
+            if step is None:
+                continue
+            if step.step_type != AuthorableStepType.LOOP.value:
+                continue
+            if step.parent_step_id is not None:
+                return self._fail_closed_lineage_locked(
+                    execution=execution,
+                    by_key=by_key,
+                    now=now,
+                    error_code="RESOURCE_CONFLICT",
+                    error_message="Nested LOOP runtime row is unsupported.",
+                )
+
+            # PENDING → start
+            if step.status == StepStatus.PENDING.value:
+                if not loop_structurally_eligible(
+                    step=step, dag=dag, by_key=by_key
+                ):
+                    continue
+                locked = await executions.lock_step(step.id)
+                if locked is None or locked.status != StepStatus.PENDING.value:
+                    continue
+                try:
+                    plan_step = runtime_plan_step(locked, plan_by_id)
+                    cfg = LoopStepConfigV1.model_validate(plan_step.config)
+                except AppError as exc:
+                    return self._fail_closed_lineage_locked(
+                        execution=execution,
+                        by_key=by_key,
+                        now=now,
+                        error_code=exc.code,
+                        error_message=exc.message,
+                    )
+                except Exception as exc:
+                    return self._fail_closed_lineage_locked(
+                        execution=execution,
+                        by_key=by_key,
+                        now=now,
+                        error_code="RESOURCE_CONFLICT",
+                        error_message=f"Invalid LOOP config: {exc}",
+                    )
+                try:
+                    when_false = self._evaluate_when_gate(
+                        evaluator=evaluator,
+                        plan_step=plan_step,
+                        execution=execution,
+                        owning_step=locked,
+                        steps=list(by_key.values()),
+                        plan=plan,
+                    )
+                except AppError as exc:
+                    return self._fail_closed_predicate(
+                        execution=execution,
+                        by_key=by_key,
+                        step=locked,
+                        now=now,
+                        plan=plan,
+                        error_code=exc.code,
+                        error_message=exc.message,
+                    )
+                if when_false:
+                    self._apply_when_false(locked, now=now)
+                    by_key[locked.step_key] = locked
+                    changed = True
+                    continue
+
+                locked.status = StepStatus.READY.value
+                locked.ready_at = now
+                locked.status = StepStatus.RUNNING.value
+                if locked.started_at is None:
+                    locked.started_at = now
+                locked.lock_version += 1
+
+                try:
+                    collection = resolve_foreach_collection(
+                        execution=execution,
+                        loop_step=locked,
+                        plan=plan,
+                        steps=list(by_key.values()),
+                        cfg=cfg,
+                    )
+                    pin_collection_evidence(
+                        loop_step=locked, collection=collection
+                    )
+                    if len(collection) > cfg.max_iterations:
+                        fail_loop_known(
+                            locked,
+                            status=StepStatus.FAILED.value,
+                            error_code=LOOP_MAX_ITERATIONS_EXCEEDED,
+                            error_message=(
+                                f"collection_size={len(collection)} exceeds "
+                                f"max_iterations={cfg.max_iterations}."
+                            ),
+                            now=now,
+                        )
+                        by_key[locked.step_key] = locked
+                        stop = self._apply_loop_error_policy(
+                            execution=execution,
+                            by_key=by_key,
+                            loop_step=locked,
+                            plan_step=plan_step,
+                            plan=plan,
+                            now=now,
+                        )
+                        if stop is not None:
+                            return stop
+                        changed = True
+                        continue
+                    assert_expanded_max_steps(
+                        plan=plan,
+                        collection_size=len(collection),
+                        body_step_count=len(cfg.body_step_ids),
+                    )
+                except AppError as exc:
+                    # Mandatory-fatal for collection type / pin / max_steps /
+                    # binding integrity. Known max_iterations already handled.
+                    if exc.code == LOOP_MAX_ITERATIONS_EXCEEDED:
+                        fail_loop_known(
+                            locked,
+                            status=StepStatus.FAILED.value,
+                            error_code=exc.code,
+                            error_message=exc.message,
+                            now=now,
+                        )
+                        by_key[locked.step_key] = locked
+                        stop = self._apply_loop_error_policy(
+                            execution=execution,
+                            by_key=by_key,
+                            loop_step=locked,
+                            plan_step=plan_step,
+                            plan=plan,
+                            now=now,
+                        )
+                        if stop is not None:
+                            return stop
+                        changed = True
+                        continue
+                    if locked.status == StepStatus.RUNNING.value:
+                        locked.status = StepStatus.FAILED.value
+                        locked.error_code = exc.code
+                        locked.error_message = exc.message
+                        locked.finished_at = now
+                        locked.lock_version += 1
+                        by_key[locked.step_key] = locked
+                    return self._fail_closed_lineage_locked(
+                        execution=execution,
+                        by_key=by_key,
+                        now=now,
+                        error_code=exc.code,
+                        error_message=exc.message,
+                    )
+
+                by_key[locked.step_key] = locked
+                size = int((locked.resolved_input or {}).get("collection_size", 0))
+                if size == 0:
+                    succeed_loop(
+                        locked,
+                        collection_size=0,
+                        iterations_completed=0,
+                        now=now,
+                    )
+                    by_key[locked.step_key] = locked
+                    changed = True
+                    continue
+
+                created = await materialize_iteration(
+                    executions=executions,
+                    execution=execution,
+                    loop_step=locked,
+                    plan=plan,
+                    cfg=cfg,
+                    iteration_no=1,
+                    existing_steps=list(by_key.values()),
+                )
+                for row in created:
+                    by_key[row.step_key] = row
+                changed = True
+                logger.info(
+                    "orchestrator LOOP start execution_id=%s step_key=%s size=%s",
+                    execution.id,
+                    locked.step_key,
+                    size,
+                )
+                continue
+
+            # RUNNING → timeout / advance / complete
+            if step.status != StepStatus.RUNNING.value:
+                continue
+            locked = await executions.lock_step(step.id)
+            if locked is None or locked.status != StepStatus.RUNNING.value:
+                continue
+            try:
+                plan_step = runtime_plan_step(locked, plan_by_id)
+                cfg = LoopStepConfigV1.model_validate(plan_step.config)
+            except AppError as exc:
+                return self._fail_closed_lineage_locked(
+                    execution=execution,
+                    by_key=by_key,
+                    now=now,
+                    error_code=exc.code,
+                    error_message=exc.message,
+                )
+            except Exception as exc:
+                return self._fail_closed_lineage_locked(
+                    execution=execution,
+                    by_key=by_key,
+                    now=now,
+                    error_code="RESOURCE_CONFLICT",
+                    error_message=f"Invalid LOOP config: {exc}",
+                )
+
+            if loop_timeout_exceeded(locked, now=now):
+                fail_loop_known(
+                    locked,
+                    status=StepStatus.TIMED_OUT.value,
+                    error_code=LOOP_TIMEOUT,
+                    error_message="LOOP.timeout_seconds budget exhausted.",
+                    now=now,
+                )
+                by_key[locked.step_key] = locked
+                stop = self._apply_loop_error_policy(
+                    execution=execution,
+                    by_key=by_key,
+                    loop_step=locked,
+                    plan_step=plan_step,
+                    plan=plan,
+                    now=now,
+                )
+                if stop is not None:
+                    return stop
+                changed = True
+                continue
+
+            try:
+                collection = resolve_foreach_collection(
+                    execution=execution,
+                    loop_step=locked,
+                    plan=plan,
+                    steps=list(by_key.values()),
+                    cfg=cfg,
+                )
+                assert_collection_pin_stable(
+                    loop_step=locked, collection=collection
+                )
+            except AppError as exc:
+                locked.status = StepStatus.FAILED.value
+                locked.error_code = exc.code
+                locked.error_message = exc.message
+                locked.finished_at = now
+                locked.lock_version += 1
+                by_key[locked.step_key] = locked
+                return self._fail_closed_lineage_locked(
+                    execution=execution,
+                    by_key=by_key,
+                    now=now,
+                    error_code=exc.code,
+                    error_message=exc.message,
+                )
+
+            collection_size = len(collection)
+            current = active_iteration_no(
+                steps=list(by_key.values()), parent_step_id=locked.id
+            )
+            if current < 1:
+                # Should have been materialised at start; recover by creating 1.
+                created = await materialize_iteration(
+                    executions=executions,
+                    execution=execution,
+                    loop_step=locked,
+                    plan=plan,
+                    cfg=cfg,
+                    iteration_no=1,
+                    existing_steps=list(by_key.values()),
+                )
+                for row in created:
+                    by_key[row.step_key] = row
+                changed = True
+                continue
+
+            if not iteration_complete(
+                steps=list(by_key.values()),
+                parent_step_id=locked.id,
+                iteration_no=current,
+                body_step_count=len(cfg.body_step_ids),
+            ):
+                continue
+
+            # Iteration settled — check timeout before next / finalize.
+            if loop_timeout_exceeded(locked, now=now):
+                fail_loop_known(
+                    locked,
+                    status=StepStatus.TIMED_OUT.value,
+                    error_code=LOOP_TIMEOUT,
+                    error_message="LOOP.timeout_seconds budget exhausted.",
+                    now=now,
+                )
+                by_key[locked.step_key] = locked
+                stop = self._apply_loop_error_policy(
+                    execution=execution,
+                    by_key=by_key,
+                    loop_step=locked,
+                    plan_step=plan_step,
+                    plan=plan,
+                    now=now,
+                )
+                if stop is not None:
+                    return stop
+                changed = True
+                continue
+
+            if current < collection_size:
+                nxt = current + 1
+                created = await materialize_iteration(
+                    executions=executions,
+                    execution=execution,
+                    loop_step=locked,
+                    plan=plan,
+                    cfg=cfg,
+                    iteration_no=nxt,
+                    existing_steps=list(by_key.values()),
+                )
+                for row in created:
+                    by_key[row.step_key] = row
+                by_key[locked.step_key] = locked
+                changed = True
+                logger.info(
+                    "orchestrator LOOP next iter execution_id=%s step_key=%s "
+                    "iter=%s",
+                    execution.id,
+                    locked.step_key,
+                    nxt,
+                )
+                continue
+
+            succeed_loop(
+                locked,
+                collection_size=collection_size,
+                iterations_completed=collection_size,
+                now=now,
+            )
+            by_key[locked.step_key] = locked
+            changed = True
+            logger.info(
+                "orchestrator LOOP complete execution_id=%s step_key=%s "
+                "iters=%s",
+                execution.id,
+                locked.step_key,
+                collection_size,
+            )
+
+        if changed:
+            return ProgressOutcome(
+                execution_complete=False,
+                promoted=False,
+                reason="LOOP_CHANGED",
+            )
+        return None
+
+    def _apply_loop_error_policy(
+        self,
+        *,
+        execution: Execution,
+        by_key: dict[str, ExecutionStep],
+        loop_step: ExecutionStep,
+        plan_step: ExecutionPlanStep,
+        plan: ExecutionPlanV1,
+        now: datetime,
+    ) -> ProgressOutcome | None:
+        """Apply LOOP on_error for known failures (max_iterations / timeout)."""
+        on_error = plan_step.on_error
+        terminal = loop_step.status
+        if on_error == "FAIL_EXECUTION" or not is_continuable_known_failure(
+            on_error=on_error, step_status=terminal
+        ):
+            skip_all_pending(by_key=by_key, now=now)
+            cancel_unused_ready_tools(by_key=by_key, now=now)
+            exec_status = fail_fast_execution_status(terminal)
+            execution.status = exec_status
+            execution.error_code = loop_step.error_code
+            execution.error_message = loop_step.error_message
+            execution.result_summary = build_result_summary(
+                status=exec_status, steps=list(by_key.values()), plan=plan
+            )
+            execution.finished_at = now
+            execution.worker_id = None
+            execution.lease_token = None
+            execution.lease_expires_at = None
+            execution.heartbeat_at = None
+            execution.lock_version += 1
+            return ProgressOutcome(
+                execution_complete=True,
+                promoted=False,
+                reason=_REASON_EXECUTION_FAILED
+                if exec_status == ExecutionStatus.FAILED.value
+                else _REASON_EXECUTION_TIMED_OUT,
+                execution_status=exec_status,
+                step_terminal_status=terminal,
+            )
+        # CONTINUE / MARK_PARTIAL — leave LOOP terminal; downstream may proceed.
         return None
 
     async def _reconcile_approval_steps_locked(
@@ -1530,10 +2048,13 @@ class ExecutionOrchestrator:
                         continue
                     if disposition != DISPOSITION_KNOWN_STEP_FAILURE:
                         continue
-                    plan_step = plan_by_id.get(step.step_key)
-                    on_error = (
-                        plan_step.on_error if plan_step is not None else "FAIL_EXECUTION"
-                    )
+                    # Body instances use synthetic step_keys — resolve via
+                    # step_snapshot / Plan template (not by_key == plan id).
+                    try:
+                        plan_step = runtime_plan_step(step, plan_by_id)
+                        on_error = plan_step.on_error
+                    except AppError:
+                        on_error = "FAIL_EXECUTION"
                     term = outcome.terminal_status or step.status
                     if on_error == "FAIL_EXECUTION" or not is_continuable_known_failure(
                         on_error=on_error, step_status=term

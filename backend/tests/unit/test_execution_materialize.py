@@ -62,9 +62,16 @@ def _base_plan(
             cfg["tool_version_id"] = str(tool_version_id)
             s["config"] = cfg
         rewritten.append(s)
-    response_ids = [s["id"] for s in rewritten if s.get("type") == "TOOL"] or [
-        rewritten[-1]["id"]
-    ]
+    body_ids: set[str] = set()
+    for s in rewritten:
+        if s.get("type") == AuthorableStepType.LOOP.value:
+            cfg = s.get("config") or {}
+            body_ids.update(cfg.get("body_step_ids") or [])
+    response_ids = [
+        s["id"]
+        for s in rewritten
+        if s.get("type") == "TOOL" and s["id"] not in body_ids
+    ] or [s["id"] for s in rewritten if s["id"] not in body_ids][-1:]
     lim = default_plan_limits().model_dump(mode="json")
     if limits:
         lim.update(limits)
@@ -386,8 +393,10 @@ async def test_non_tool_types_project_null_tool_version(
     )
     await db_session.commit()
     by_key = {s.step_key: s for s in result.steps}
+    # Body templates are not initial ExecutionSteps (FOR_EACH runtime expands).
+    assert "body" not in by_key
+    assert set(by_key) == {"t1", "c1", "apr1", "j1", "loop1"}
     assert by_key["t1"].mcp_tool_version_id == seeded["tool_version_id"]
-    assert by_key["body"].mcp_tool_version_id == seeded["tool_version_id"]
     for key in ("c1", "apr1", "j1", "loop1"):
         assert by_key[key].mcp_tool_version_id is None
         assert by_key[key].status == StepStatus.PENDING.value

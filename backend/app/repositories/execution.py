@@ -85,6 +85,7 @@ class ExecutionRepository:
         status: str,
         step_snapshot: dict[str, Any],
         lock_version: int = 1,
+        iteration_no: int | None = None,
     ) -> ExecutionStep:
         row = ExecutionStep(
             id=uuid.uuid4(),
@@ -99,7 +100,7 @@ class ExecutionRepository:
             # Omit resolved_input / result_inline — SQL NULL, not JSON null.
             result_blob_id=None,
             condition_result=None,
-            iteration_no=None,
+            iteration_no=iteration_no,
             attempt_count=0,
             ready_at=None,
             started_at=None,
