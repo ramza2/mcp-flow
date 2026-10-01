@@ -3,9 +3,9 @@
 Wave scheduling lives in ``ExecutionOrchestrator``; this module is pure graph
 logic (no DB writes except callers applying returned decisions).
 
-Flat FOR_EACH LOOP is supported: body templates are not initial ExecutionSteps;
-iteration instances use deterministic child step_keys. WHILE / nested LOOP /
-body APPROVAL fail closed via ``assert_flat_foreach_runtime_compatible``.
+Flat FOR_EACH / WHILE LOOP is supported: body templates are not initial
+ExecutionSteps; iteration instances use deterministic child step_keys. Nested
+LOOP / body APPROVAL fail closed via ``assert_flat_foreach_runtime_compatible``.
 Authorable APPROVAL is a Plan checkpoint (distinct from ToolPolicy approval).
 """
 
@@ -16,15 +16,17 @@ from dataclasses import dataclass
 from typing import Any
 
 from app.core.errors import AppError
-from app.domain.enums import AuthorableStepType, JoinPolicy, StepStatus
+from app.domain.enums import AuthorableStepType, JoinPolicy, LoopMode, StepStatus
 from app.execution.completion import is_continuable_known_failure, plan_step_for
 from app.execution.loop_runtime import (
     LoopBodyOwnership,
     assert_flat_foreach_runtime_compatible,
     build_loop_body_ownership,
+    history_entry_for,
     iteration_step_key,
     max_materialized_iteration,
     parse_foreach_collection_pin,
+    parse_while_predicate_history,
     template_id_from_step_snapshot,
     tool_version_for_template,
     top_level_plan_steps,
@@ -655,9 +657,6 @@ def _validate_loop_iteration_shapes(
                 message="LOOP children reference a missing parent LOOP Step.",
                 status_code=409,
             )
-        # Parent pin required whenever children exist.
-        pin = parse_foreach_collection_pin(parent.resolved_input)
-        collection_size = pin["collection_size"]
         body_ids = ownership.loop_to_body.get(parent.step_key, ())
         if not body_ids:
             raise AppError(
@@ -665,13 +664,29 @@ def _validate_loop_iteration_shapes(
                 message=f"LOOP {parent.step_key!r} has no body_step_ids.",
                 status_code=409,
             )
-        # Confirm body_ids match immutable Plan LOOP config.
         loop_ps = plan_by_id[parent.step_key]
         cfg = LoopStepConfigV1.model_validate(loop_ps.config)
         if tuple(cfg.body_step_ids) != body_ids:
             raise AppError(
                 code="RESOURCE_CONFLICT",
                 message=f"LOOP {parent.step_key!r} body ownership drift.",
+                status_code=409,
+            )
+
+        if cfg.mode == LoopMode.FOR_EACH:
+            pin = parse_foreach_collection_pin(parent.resolved_input)
+            max_bound = pin["collection_size"]
+            while_history = None
+        elif cfg.mode == LoopMode.WHILE:
+            while_history = parse_while_predicate_history(parent.resolved_input)
+            max_bound = cfg.max_iterations
+        else:
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message=(
+                    f"LOOP {parent.step_key!r} mode {cfg.mode.value!r} "
+                    "unsupported for iteration shape validation."
+                ),
                 status_code=409,
             )
 
@@ -682,12 +697,12 @@ def _validate_loop_iteration_shapes(
                     message="LOOP body instance missing iteration_no.",
                     status_code=409,
                 )
-            if child.iteration_no < 1 or child.iteration_no > collection_size:
+            if child.iteration_no < 1 or child.iteration_no > max_bound:
                 raise AppError(
                     code="RESOURCE_CONFLICT",
                     message=(
                         f"LOOP body iteration_no={child.iteration_no} outside "
-                        f"pinned collection_size={collection_size}."
+                        f"bound={max_bound}."
                     ),
                     status_code=409,
                 )
@@ -709,6 +724,21 @@ def _validate_loop_iteration_shapes(
                 ),
                 status_code=409,
             )
+
+        # WHILE: every materialized iteration must have a true history gate.
+        if while_history is not None:
+            history = while_history["predicate_history"]
+            for n in range(1, max_iter + 1):
+                entry = history_entry_for(history, next_iteration_no=n)
+                if entry is None or entry["result"] is not True:
+                    raise AppError(
+                        code="RESOURCE_CONFLICT",
+                        message=(
+                            f"WHILE {parent.step_key!r} iteration {n} lacks a "
+                            "true predicate_history gate."
+                        ),
+                        status_code=409,
+                    )
 
         active_nonterminal: int | None = None
         for n in range(1, max_iter + 1):
@@ -748,6 +778,23 @@ def _validate_loop_iteration_shapes(
                     ),
                     status_code=409,
                 )
+            # Deterministic keys
+            for c in iter_children:
+                tid = template_id_from_step_snapshot(c)
+                expected_key = iteration_step_key(
+                    parent_step_id=parent.id,
+                    iteration_no=n,
+                    template_step_id=tid,
+                )
+                if c.step_key != expected_key:
+                    raise AppError(
+                        code="RESOURCE_CONFLICT",
+                        message=(
+                            f"LOOP {parent.step_key!r} iteration {n} child key "
+                            f"drift for template {tid!r}."
+                        ),
+                        status_code=409,
+                    )
             nonterminal = [
                 c for c in iter_children if c.status not in _CHILD_TERMINAL
             ]

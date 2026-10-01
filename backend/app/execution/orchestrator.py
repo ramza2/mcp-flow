@@ -2,11 +2,11 @@
 
 ``McpToolRunner`` owns one TOOL Step invocation (ToolCall/Attempt/Step).
 ``ExecutionOrchestrator`` owns wave scheduling, local CONDITION/when/JOIN/
-authorable APPROVAL / flat FOR_EACH LOOP reconciliation, ErrorPolicy,
+authorable APPROVAL / flat FOR_EACH/WHILE LOOP reconciliation, ErrorPolicy,
 ALL_REQUIRED aggregation, and final Execution terminalization / lease release.
 
-Supported runtime Steps: TOOL + CONDITION + JOIN + APPROVAL + LOOP(FOR_EACH).
-WHILE / nested LOOP / body APPROVAL fail closed before MCP.
+Supported runtime Steps: TOOL + CONDITION + JOIN + APPROVAL + LOOP(FOR_EACH/WHILE).
+Nested LOOP / body APPROVAL fail closed before MCP.
 
 Authorable APPROVAL is an Execution-level Plan checkpoint: entering wait
 clears the lease and may freeze unrelated READY sibling branches until
@@ -36,6 +36,7 @@ from app.domain.enums import (
     ApprovalStatus,
     AuthorableStepType,
     ExecutionStatus,
+    LoopMode,
     StepAttemptStatus,
     StepStatus,
     ToolCallNormalizedStatus,
@@ -73,15 +74,19 @@ from app.execution.loop_reconcile import (
     active_iteration_no,
     assert_collection_pin_stable,
     assert_expanded_max_steps,
+    assert_while_next_iteration_max_steps,
+    evaluate_while_gate,
     fail_loop_known,
     iteration_complete,
     loop_timeout_exceeded,
     materialize_iteration,
     pin_collection_evidence,
+    pin_while_control_evidence,
     resolve_foreach_collection,
     runtime_plan_step,
     stop_loop_owned_untouched_children,
     succeed_loop,
+    succeed_while_loop,
 )
 from app.execution.loop_runtime import (
     LOOP_MAX_ITERATIONS_EXCEEDED,
@@ -1233,7 +1238,7 @@ class ExecutionOrchestrator:
         evaluator: RuntimePredicateEvaluator,
         now: datetime,
     ) -> ProgressOutcome | None:
-        """Start / advance / complete flat FOR_EACH LOOP Steps.
+        """Start / advance / complete flat FOR_EACH / WHILE LOOP Steps.
 
         Returns:
         - ProgressOutcome reason=LOOP_CHANGED when local state advanced
@@ -1316,6 +1321,130 @@ class ExecutionOrchestrator:
                 if locked.started_at is None:
                     locked.started_at = now
                 locked.lock_version += 1
+
+                if cfg.mode == LoopMode.WHILE:
+                    try:
+                        pin_while_control_evidence(loop_step=locked)
+                        by_key[locked.step_key] = locked
+                        if loop_timeout_exceeded(locked, now=now):
+                            fail_loop_known(
+                                locked,
+                                status=StepStatus.TIMED_OUT.value,
+                                error_code=LOOP_TIMEOUT,
+                                error_message="LOOP.timeout_seconds budget exhausted.",
+                                now=now,
+                            )
+                            by_key[locked.step_key] = locked
+                            stop = self._apply_loop_error_policy(
+                                execution=execution,
+                                by_key=by_key,
+                                loop_step=locked,
+                                plan_step=plan_step,
+                                plan=plan,
+                                now=now,
+                            )
+                            if stop is not None:
+                                return stop
+                            changed = True
+                            continue
+                        gate = evaluate_while_gate(
+                            evaluator=evaluator,
+                            execution=execution,
+                            loop_step=locked,
+                            plan=plan,
+                            cfg=cfg,
+                            steps=list(by_key.values()),
+                            candidate_iteration_no=1,
+                        )
+                        by_key[locked.step_key] = locked
+                        if not gate:
+                            succeed_while_loop(
+                                locked, iterations_completed=0, now=now
+                            )
+                            by_key[locked.step_key] = locked
+                            changed = True
+                            continue
+                        if 1 > cfg.max_iterations:
+                            fail_loop_known(
+                                locked,
+                                status=StepStatus.FAILED.value,
+                                error_code=LOOP_MAX_ITERATIONS_EXCEEDED,
+                                error_message=(
+                                    f"WHILE candidate 1 exceeds "
+                                    f"max_iterations={cfg.max_iterations}."
+                                ),
+                                now=now,
+                            )
+                            by_key[locked.step_key] = locked
+                            stop = self._apply_loop_error_policy(
+                                execution=execution,
+                                by_key=by_key,
+                                loop_step=locked,
+                                plan_step=plan_step,
+                                plan=plan,
+                                now=now,
+                            )
+                            if stop is not None:
+                                return stop
+                            changed = True
+                            continue
+                        assert_while_next_iteration_max_steps(
+                            plan=plan,
+                            steps=list(by_key.values()),
+                            body_step_count=len(cfg.body_step_ids),
+                        )
+                        created = await materialize_iteration(
+                            executions=executions,
+                            execution=execution,
+                            loop_step=locked,
+                            plan=plan,
+                            cfg=cfg,
+                            iteration_no=1,
+                            existing_steps=list(by_key.values()),
+                        )
+                        for row in created:
+                            by_key[row.step_key] = row
+                        by_key[locked.step_key] = locked
+                        changed = True
+                        logger.info(
+                            "orchestrator WHILE start execution_id=%s "
+                            "step_key=%s",
+                            execution.id,
+                            locked.step_key,
+                        )
+                        continue
+                    except AppError as exc:
+                        if exc.code.startswith("PREDICATE_"):
+                            if locked.status == StepStatus.RUNNING.value:
+                                locked.status = StepStatus.FAILED.value
+                                locked.error_code = exc.code
+                                locked.error_message = exc.message
+                                locked.finished_at = now
+                                locked.lock_version += 1
+                                by_key[locked.step_key] = locked
+                            return self._fail_closed_predicate(
+                                execution=execution,
+                                by_key=by_key,
+                                step=locked,
+                                now=now,
+                                plan=plan,
+                                error_code=exc.code,
+                                error_message=exc.message,
+                            )
+                        if locked.status == StepStatus.RUNNING.value:
+                            locked.status = StepStatus.FAILED.value
+                            locked.error_code = exc.code
+                            locked.error_message = exc.message
+                            locked.finished_at = now
+                            locked.lock_version += 1
+                            by_key[locked.step_key] = locked
+                        return self._fail_closed_lineage_locked(
+                            execution=execution,
+                            by_key=by_key,
+                            now=now,
+                            error_code=exc.code,
+                            error_message=exc.message,
+                        )
 
                 try:
                     collection = resolve_foreach_collection(
@@ -1478,6 +1607,221 @@ class ExecutionOrchestrator:
                     return stop
                 changed = True
                 continue
+
+            if cfg.mode == LoopMode.WHILE:
+                try:
+                    current = active_iteration_no(
+                        steps=list(by_key.values()), parent_step_id=locked.id
+                    )
+                    # Zero-iteration SUCCEEDED already handled at start.
+                    # If RUNNING with no children yet, re-evaluate candidate 1
+                    # (duplicate delivery after pin but before materialize).
+                    if current < 1:
+                        gate = evaluate_while_gate(
+                            evaluator=evaluator,
+                            execution=execution,
+                            loop_step=locked,
+                            plan=plan,
+                            cfg=cfg,
+                            steps=list(by_key.values()),
+                            candidate_iteration_no=1,
+                        )
+                        by_key[locked.step_key] = locked
+                        if not gate:
+                            succeed_while_loop(
+                                locked, iterations_completed=0, now=now
+                            )
+                            by_key[locked.step_key] = locked
+                            changed = True
+                            continue
+                        if 1 > cfg.max_iterations:
+                            fail_loop_known(
+                                locked,
+                                status=StepStatus.FAILED.value,
+                                error_code=LOOP_MAX_ITERATIONS_EXCEEDED,
+                                error_message=(
+                                    f"WHILE candidate 1 exceeds "
+                                    f"max_iterations={cfg.max_iterations}."
+                                ),
+                                now=now,
+                            )
+                            by_key[locked.step_key] = locked
+                            stop = self._apply_loop_error_policy(
+                                execution=execution,
+                                by_key=by_key,
+                                loop_step=locked,
+                                plan_step=plan_step,
+                                plan=plan,
+                                now=now,
+                            )
+                            if stop is not None:
+                                return stop
+                            changed = True
+                            continue
+                        assert_while_next_iteration_max_steps(
+                            plan=plan,
+                            steps=list(by_key.values()),
+                            body_step_count=len(cfg.body_step_ids),
+                        )
+                        created = await materialize_iteration(
+                            executions=executions,
+                            execution=execution,
+                            loop_step=locked,
+                            plan=plan,
+                            cfg=cfg,
+                            iteration_no=1,
+                            existing_steps=list(by_key.values()),
+                        )
+                        for row in created:
+                            by_key[row.step_key] = row
+                        by_key[locked.step_key] = locked
+                        changed = True
+                        continue
+
+                    if not iteration_complete(
+                        steps=list(by_key.values()),
+                        parent_step_id=locked.id,
+                        iteration_no=current,
+                        body_step_count=len(cfg.body_step_ids),
+                    ):
+                        continue
+
+                    # Iteration settled — timeout before next Predicate.
+                    if loop_timeout_exceeded(locked, now=now):
+                        fail_loop_known(
+                            locked,
+                            status=StepStatus.TIMED_OUT.value,
+                            error_code=LOOP_TIMEOUT,
+                            error_message=(
+                                "LOOP.timeout_seconds budget exhausted."
+                            ),
+                            now=now,
+                        )
+                        by_key[locked.step_key] = locked
+                        stop = self._apply_loop_error_policy(
+                            execution=execution,
+                            by_key=by_key,
+                            loop_step=locked,
+                            plan_step=plan_step,
+                            plan=plan,
+                            now=now,
+                        )
+                        if stop is not None:
+                            return stop
+                        changed = True
+                        continue
+
+                    nxt = current + 1
+                    gate = evaluate_while_gate(
+                        evaluator=evaluator,
+                        execution=execution,
+                        loop_step=locked,
+                        plan=plan,
+                        cfg=cfg,
+                        steps=list(by_key.values()),
+                        candidate_iteration_no=nxt,
+                    )
+                    by_key[locked.step_key] = locked
+                    if not gate:
+                        succeed_while_loop(
+                            locked,
+                            iterations_completed=current,
+                            now=now,
+                        )
+                        by_key[locked.step_key] = locked
+                        changed = True
+                        logger.info(
+                            "orchestrator WHILE complete execution_id=%s "
+                            "step_key=%s iters=%s",
+                            execution.id,
+                            locked.step_key,
+                            current,
+                        )
+                        continue
+                    # Predicate true — enforce max_iterations after eval.
+                    if nxt > cfg.max_iterations:
+                        fail_loop_known(
+                            locked,
+                            status=StepStatus.FAILED.value,
+                            error_code=LOOP_MAX_ITERATIONS_EXCEEDED,
+                            error_message=(
+                                f"WHILE candidate {nxt} exceeds "
+                                f"max_iterations={cfg.max_iterations}."
+                            ),
+                            now=now,
+                        )
+                        by_key[locked.step_key] = locked
+                        stop = self._apply_loop_error_policy(
+                            execution=execution,
+                            by_key=by_key,
+                            loop_step=locked,
+                            plan_step=plan_step,
+                            plan=plan,
+                            now=now,
+                        )
+                        if stop is not None:
+                            return stop
+                        changed = True
+                        continue
+                    assert_while_next_iteration_max_steps(
+                        plan=plan,
+                        steps=list(by_key.values()),
+                        body_step_count=len(cfg.body_step_ids),
+                    )
+                    created = await materialize_iteration(
+                        executions=executions,
+                        execution=execution,
+                        loop_step=locked,
+                        plan=plan,
+                        cfg=cfg,
+                        iteration_no=nxt,
+                        existing_steps=list(by_key.values()),
+                    )
+                    for row in created:
+                        by_key[row.step_key] = row
+                    by_key[locked.step_key] = locked
+                    changed = True
+                    logger.info(
+                        "orchestrator WHILE next iter execution_id=%s "
+                        "step_key=%s iter=%s",
+                        execution.id,
+                        locked.step_key,
+                        nxt,
+                    )
+                    continue
+                except AppError as exc:
+                    # Known LOOP failures already handled; integrity → fatal.
+                    if exc.code.startswith("PREDICATE_"):
+                        if locked.status == StepStatus.RUNNING.value:
+                            locked.status = StepStatus.FAILED.value
+                            locked.error_code = exc.code
+                            locked.error_message = exc.message
+                            locked.finished_at = now
+                            locked.lock_version += 1
+                            by_key[locked.step_key] = locked
+                        return self._fail_closed_predicate(
+                            execution=execution,
+                            by_key=by_key,
+                            step=locked,
+                            now=now,
+                            plan=plan,
+                            error_code=exc.code,
+                            error_message=exc.message,
+                        )
+                    if locked.status == StepStatus.RUNNING.value:
+                        locked.status = StepStatus.FAILED.value
+                        locked.error_code = exc.code
+                        locked.error_message = exc.message
+                        locked.finished_at = now
+                        locked.lock_version += 1
+                        by_key[locked.step_key] = locked
+                    return self._fail_closed_lineage_locked(
+                        execution=execution,
+                        by_key=by_key,
+                        now=now,
+                        error_code=exc.code,
+                        error_message=exc.message,
+                    )
 
             try:
                 collection = resolve_foreach_collection(

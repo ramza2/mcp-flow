@@ -11,7 +11,7 @@ from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from typing import Any
 
-from app.domain.enums import AuthorableStepType, BindingKind
+from app.domain.enums import AuthorableStepType, BindingKind, LoopMode
 from app.schemas.execution_plan import (
     MAX_LOOP_NESTING_DEPTH,
     SYSTEM_HARD_MAX_DURATION_SECONDS,
@@ -26,7 +26,11 @@ from app.schemas.execution_plan import (
     JoinStepConfigV1,
     LoopStepConfigV1,
 )
-from app.schemas.plan_binding import PlanBindingValue, PlanStepOutputBinding
+from app.schemas.plan_binding import (
+    PlanBindingValue,
+    PlanLoopContextBinding,
+    PlanStepOutputBinding,
+)
 from app.schemas.predicate import (
     iter_plan_bindings_in_predicate,
     parse_predicate,
@@ -324,8 +328,21 @@ class StaticComplexPlanValidator:
                 )
             )
             return
+        when_bindings = list(iter_plan_bindings_in_predicate(pred))
+        # LOOP Step.when must not use LOOP_CONTEXT (no active iteration yet).
+        if step.type == AuthorableStepType.LOOP:
+            for binding in when_bindings:
+                if isinstance(binding, PlanLoopContextBinding):
+                    errors.append(
+                        _issue(
+                            "PLAN_BINDING_INVALID",
+                            "LOOP Step.when must not contain LOOP_CONTEXT",
+                            step_id=step.id,
+                        )
+                    )
+                    break
         self._validate_bindings(
-            iter_plan_bindings_in_predicate(pred),
+            when_bindings,
             owner_step_id=step.id,
             id_set=id_set,
             ancestors=ancestors,
@@ -397,9 +414,35 @@ class StaticComplexPlanValidator:
                     )
                 bindings: list[PlanBindingValue] = []
                 if cfg.collection is not None:
-                    bindings.append(cfg.collection)
+                    # FOR_EACH collection must not use LOOP_CONTEXT.
+                    if isinstance(cfg.collection, PlanLoopContextBinding):
+                        errors.append(
+                            _issue(
+                                "PLAN_BINDING_INVALID",
+                                "FOR_EACH collection must not use LOOP_CONTEXT",
+                                step_id=step.id,
+                            )
+                        )
+                    else:
+                        bindings.append(cfg.collection)
                 if cfg.predicate is not None:
+                    # WHILE predicate may use LOOP_CONTEXT; STEP_OUTPUT body
+                    # templates remain rejected by top-level owner rules.
                     bindings.extend(iter_plan_bindings_in_predicate(cfg.predicate))
+                    if cfg.mode != LoopMode.WHILE:
+                        for binding in iter_plan_bindings_in_predicate(
+                            cfg.predicate
+                        ):
+                            if isinstance(binding, PlanLoopContextBinding):
+                                errors.append(
+                                    _issue(
+                                        "PLAN_BINDING_INVALID",
+                                        "LOOP_CONTEXT in non-WHILE LOOP "
+                                        "predicate is invalid",
+                                        step_id=step.id,
+                                    )
+                                )
+                                break
                 self._validate_bindings(
                     bindings,
                     owner_step_id=step.id,
