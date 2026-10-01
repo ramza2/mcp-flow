@@ -8,8 +8,11 @@ from datetime import UTC, datetime
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.approval.evidence import is_authorable_step_context
 from app.core.errors import AppError
 from app.domain.enums import ApprovalStatus, ExecutionStatus, StepStatus
+from app.execution.completion import build_result_summary
+from app.execution.dag import cancel_unused_ready_tools, skip_all_pending
 from app.models.execution import Execution, ExecutionStep
 from app.repositories.approval_request import ApprovalRequestRepository
 
@@ -96,8 +99,36 @@ class ApprovalExpiryService:
             step.error_code = _ERROR_APPROVAL_EXPIRED
             step.finished_at = ts
             step.lock_version += 1
+
+            all_steps = list(
+                (
+                    await self._session.execute(
+                        select(ExecutionStep)
+                        .where(ExecutionStep.execution_id == execution.id)
+                        .order_by(
+                            ExecutionStep.sequence_hint.asc(),
+                            ExecutionStep.step_key.asc(),
+                        )
+                    )
+                ).scalars().all()
+            )
+            by_key = {s.step_key: s for s in all_steps}
+            by_key[step.step_key] = step
+            authorable = is_authorable_step_context(request.context_snapshot)
+            # Authorable expiry is mandatory-fatal (ignore on_error).
+            if authorable and len(all_steps) > 1:
+                skip_all_pending(by_key=by_key, now=ts)
+                cancel_unused_ready_tools(by_key=by_key, now=ts)
+
             execution.status = ExecutionStatus.FAILED.value
             execution.error_code = _ERROR_APPROVAL_EXPIRED
+            if authorable:
+                execution.error_message = "Authorable APPROVAL Step expired."
+            execution.result_summary = build_result_summary(
+                status=ExecutionStatus.FAILED.value,
+                steps=list(by_key.values()),
+                plan=None,
+            )
             execution.finished_at = ts
             execution.worker_id = None
             execution.lease_token = None

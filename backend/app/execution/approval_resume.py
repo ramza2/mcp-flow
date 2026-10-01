@@ -1,6 +1,7 @@
 """Same-Execution approval resume claim (FNC-APR-004).
 
 WAITING_APPROVAL + APPROVED evidence → RUNNING + READY with a fresh lease.
+Supports ToolPolicy (single-TOOL) and authorable APPROVAL Step contexts.
 Does not create Attempt/ToolCall. Duplicate delivery after claim is a DB no-op.
 """
 
@@ -13,7 +14,10 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.approval.evidence import assert_current_context_matches_request
+from app.approval.evidence import (
+    assert_current_context_matches_request,
+    is_authorable_step_context,
+)
 from app.core.errors import AppError
 from app.domain.enums import (
     ApprovalStatus,
@@ -23,6 +27,8 @@ from app.domain.enums import (
     StepStatus,
 )
 from app.execution.claim import _normalize_worker_id
+from app.execution.completion import build_result_summary
+from app.execution.dag import cancel_unused_ready_tools, skip_all_pending
 from app.execution.runtime_preflight import (
     assert_answered_plan_confirmation,
     assert_current_tool_executable,
@@ -33,6 +39,7 @@ from app.repositories.approval_request import ApprovalRequestRepository
 from app.repositories.plan_validation import PlanValidationRepository
 from app.schemas.execution_plan import (
     DETERMINISTIC_TOOL_STEP_ID,
+    ApprovalStepConfigV1,
     ExecutionPlanStep,
     ExecutionPlanV1,
     ToolStepConfigV1,
@@ -112,13 +119,6 @@ class ApprovalResumeClaimService:
             .with_for_update()
         )
         steps = list((await self._session.execute(step_stmt)).scalars().all())
-        if len(steps) != 1:
-            raise AppError(
-                code="RESOURCE_CONFLICT",
-                message="AgentRequest foundation Execution must contain exactly one Step.",
-                status_code=409,
-            )
-        step = steps[0]
 
         request = await self._requests.lock_for_update(approval_request_id)
         if request is None:
@@ -128,7 +128,39 @@ class ApprovalResumeClaimService:
                 status_code=409,
             )
 
-        # Structural / lineage checks — fail closed without mutating WAITING_APPROVAL.
+        step = next(
+            (s for s in steps if s.id == request.step_execution_id),
+            None,
+        )
+        if step is None:
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message="ApprovalRequest Step not found on Execution.",
+                status_code=409,
+            )
+
+        authorable = (
+            is_authorable_step_context(request.context_snapshot)
+            or step.step_type == AuthorableStepType.APPROVAL.value
+        )
+        if authorable:
+            return await self._claim_authorable(
+                execution=execution,
+                step=step,
+                steps=steps,
+                request=request,
+                worker=worker,
+                now=ts,
+            )
+
+        # Existing ToolPolicy path — AgentRequest foundation single TOOL only.
+        if len(steps) != 1:
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message="AgentRequest foundation Execution must contain exactly one Step.",
+                status_code=409,
+            )
+
         tool_config = self._assert_structural_resume_preconditions(
             execution=execution, step=step, request=request
         )
@@ -142,9 +174,6 @@ class ApprovalResumeClaimService:
                 status_code=409,
             )
 
-        # Mutable runtime preflight for the exact APPROVED request. On failure,
-        # terminalize Execution/Step FAILED so WAITING_APPROVAL is not stranded
-        # after Outbox publish (ApprovalRequest remains APPROVED).
         try:
             await self._assert_mutable_resume_preflight(
                 execution=execution,
@@ -154,7 +183,7 @@ class ApprovalResumeClaimService:
             )
         except AppError:
             self._terminalize_resume_precondition_failed(
-                execution=execution, step=step, now=ts
+                execution=execution, step=step, steps=steps, now=ts, authorable=False
             )
             await self._session.flush()
             return ApprovalResumeClaimOutcome(
@@ -168,19 +197,108 @@ class ApprovalResumeClaimService:
                 reason="PRECONDITION_FAILED",
             )
 
+        return await self._apply_fresh_claim(
+            execution=execution,
+            step=step,
+            request=request,
+            worker=worker,
+            now=ts,
+        )
+
+    async def _claim_authorable(
+        self,
+        *,
+        execution: Execution,
+        step: ExecutionStep,
+        steps: list[ExecutionStep],
+        request: ApprovalRequest,
+        worker: str,
+        now: datetime,
+    ) -> ApprovalResumeClaimOutcome:
+        try:
+            self._assert_authorable_structural_preconditions(
+                execution=execution, step=step, request=request
+            )
+        except AppError:
+            self._terminalize_resume_precondition_failed(
+                execution=execution, step=step, steps=steps, now=now, authorable=True
+            )
+            await self._session.flush()
+            return ApprovalResumeClaimOutcome(
+                execution_id=execution.id,
+                approval_request_id=request.id,
+                claimed=False,
+                status=execution.status,
+                worker_id=None,
+                lease_token=None,
+                lease_expires_at=None,
+                reason="PRECONDITION_FAILED",
+            )
+
+        pending = await self._requests.find_pending_for_step(
+            execution_id=execution.id, step_execution_id=step.id
+        )
+        if pending is not None:
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message="PENDING ApprovalRequest still exists; cannot resume.",
+                status_code=409,
+            )
+
+        try:
+            await assert_current_context_matches_request(
+                self._session,
+                request=request,
+                execution=execution,
+                step=step,
+                steps=steps,
+            )
+        except AppError:
+            self._terminalize_resume_precondition_failed(
+                execution=execution, step=step, steps=steps, now=now, authorable=True
+            )
+            await self._session.flush()
+            return ApprovalResumeClaimOutcome(
+                execution_id=execution.id,
+                approval_request_id=request.id,
+                claimed=False,
+                status=execution.status,
+                worker_id=None,
+                lease_token=None,
+                lease_expires_at=None,
+                reason="PRECONDITION_FAILED",
+            )
+
+        return await self._apply_fresh_claim(
+            execution=execution,
+            step=step,
+            request=request,
+            worker=worker,
+            now=now,
+        )
+
+    async def _apply_fresh_claim(
+        self,
+        *,
+        execution: Execution,
+        step: ExecutionStep,
+        request: ApprovalRequest,
+        worker: str,
+        now: datetime,
+    ) -> ApprovalResumeClaimOutcome:
         token = uuid.uuid4()
-        expires_at = ts + timedelta(seconds=self._lease_seconds)
+        expires_at = now + timedelta(seconds=self._lease_seconds)
         execution.status = ExecutionStatus.RUNNING.value
         execution.worker_id = worker
         execution.lease_token = token
         execution.lease_expires_at = expires_at
-        execution.heartbeat_at = ts
+        execution.heartbeat_at = now
         # Preserve started_at / requested_at / queued_at / snapshots / attempt_count.
         execution.lock_version += 1
 
         step.status = StepStatus.READY.value
         if step.ready_at is None:
-            step.ready_at = ts
+            step.ready_at = now
         step.lock_version += 1
         await self._session.flush()
 
@@ -194,6 +312,118 @@ class ApprovalResumeClaimService:
             lease_expires_at=expires_at,
             ready_step_id=step.id,
         )
+
+    def _assert_authorable_structural_preconditions(
+        self,
+        *,
+        execution: Execution,
+        step: ExecutionStep,
+        request: ApprovalRequest,
+    ) -> None:
+        if execution.source_type not in {
+            ExecutionSourceType.AGENT_REQUEST.value,
+            ExecutionSourceType.MANUAL_TOOL_TEST.value,
+        }:
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message=(
+                    "Authorable approval resume supports AGENT_REQUEST / "
+                    "MANUAL_TOOL_TEST Executions only."
+                ),
+                status_code=409,
+            )
+        if (
+            request.execution_id != execution.id
+            or request.step_execution_id != step.id
+        ):
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message="ApprovalRequest does not belong to this Execution/Step.",
+                status_code=409,
+            )
+        if request.status != ApprovalStatus.APPROVED.value or request.resolved_at is None:
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message="Approval resume requires APPROVED request with resolved_at.",
+                status_code=409,
+            )
+        if step.status != StepStatus.WAITING_APPROVAL.value:
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message=(
+                    "Approval resume requires Step WAITING_APPROVAL "
+                    f"(got {step.status})."
+                ),
+                status_code=409,
+            )
+        if step.step_type != AuthorableStepType.APPROVAL.value:
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message="Authorable approval resume requires APPROVAL Step type.",
+                status_code=409,
+            )
+        if not is_authorable_step_context(request.context_snapshot):
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message="Authorable approval resume requires approval_step_context.v1.",
+                status_code=409,
+            )
+        if any(
+            value is not None
+            for value in (
+                execution.worker_id,
+                execution.lease_token,
+                execution.lease_expires_at,
+                execution.heartbeat_at,
+            )
+        ):
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message="WAITING_APPROVAL Execution unexpectedly owns a lease.",
+                status_code=409,
+            )
+        try:
+            plan = ExecutionPlanV1.model_validate(execution.plan_snapshot)
+            plan_step = ExecutionPlanStep.model_validate(step.step_snapshot)
+            cfg = ApprovalStepConfigV1.model_validate(plan_step.config)
+        except Exception as exc:
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message="Execution plan/step snapshot is invalid for authorable resume.",
+                status_code=409,
+            ) from exc
+        if (
+            execution.plan_schema_version != plan.schema_version
+            or compute_plan_hash(execution.plan_snapshot) != execution.plan_hash
+        ):
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message="Execution plan snapshot/hash lineage is inconsistent.",
+                status_code=409,
+            )
+        expected = next((p for p in plan.steps if p.id == step.step_key), None)
+        if (
+            expected is None
+            or expected.model_dump(mode="json") != step.step_snapshot
+            or plan_step.type != AuthorableStepType.APPROVAL
+        ):
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message="APPROVAL Step is not an exact immutable Plan projection.",
+                status_code=409,
+            )
+        if step.mcp_tool_version_id is not None:
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message="APPROVAL Step must have null mcp_tool_version_id.",
+                status_code=409,
+            )
+        if request.approval_policy_id != cfg.approval_policy_id:
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message="ApprovalRequest policy id does not match APPROVAL Step config.",
+                status_code=409,
+            )
 
     def _assert_structural_resume_preconditions(
         self,
@@ -328,15 +558,27 @@ class ApprovalResumeClaimService:
         *,
         execution: Execution,
         step: ExecutionStep,
+        steps: list[ExecutionStep],
         now: datetime,
+        authorable: bool,
     ) -> None:
         error_code = "APPROVAL_RESUME_PRECONDITION_FAILED"
         step.status = StepStatus.FAILED.value
         step.error_code = error_code
         step.finished_at = now
         step.lock_version += 1
+        by_key = {s.step_key: s for s in steps}
+        by_key[step.step_key] = step
+        if authorable and len(steps) > 1:
+            skip_all_pending(by_key=by_key, now=now)
+            cancel_unused_ready_tools(by_key=by_key, now=now)
         execution.status = ExecutionStatus.FAILED.value
         execution.error_code = error_code
+        execution.result_summary = build_result_summary(
+            status=ExecutionStatus.FAILED.value,
+            steps=list(by_key.values()),
+            plan=None,
+        )
         execution.finished_at = now
         execution.worker_id = None
         execution.lease_token = None

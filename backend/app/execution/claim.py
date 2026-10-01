@@ -158,13 +158,14 @@ class ExecutionClaimService:
                     AuthorableStepType.TOOL.value,
                     AuthorableStepType.CONDITION.value,
                     AuthorableStepType.JOIN.value,
+                    AuthorableStepType.APPROVAL.value,
                 }
             ):
                 raise AppError(
                     code="RESOURCE_CONFLICT",
                     message=(
                         "ExecutionStep is inconsistent with initial PENDING "
-                        "TOOL/CONDITION/JOIN DAG state."
+                        "TOOL/CONDITION/JOIN/APPROVAL DAG state."
                     ),
                     status_code=409,
                 )
@@ -173,6 +174,7 @@ class ExecutionClaimService:
                 in {
                     AuthorableStepType.JOIN.value,
                     AuthorableStepType.CONDITION.value,
+                    AuthorableStepType.APPROVAL.value,
                 }
                 and step.mcp_tool_version_id is not None
             ):

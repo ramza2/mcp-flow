@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.approval.evidence import (
     assert_current_context_matches_request,
+    is_authorable_step_context,
     snapshotted_allow_self_approval,
     snapshotted_reject_comment_required,
 )
@@ -25,6 +26,8 @@ from app.domain.enums import (
     StepStatus,
     UserStatus,
 )
+from app.execution.completion import build_result_summary
+from app.execution.dag import cancel_unused_ready_tools, skip_all_pending
 from app.models.approval import ApprovalDecision, ApprovalRequest
 from app.models.execution import Execution, ExecutionStep
 from app.repositories.approval_decision import ApprovalDecisionRepository
@@ -256,11 +259,25 @@ class ApprovalDecisionService:
         if role_codes is not None:
             await self._assert_role_scope(actor_user_id, role_codes)
 
+        # Load full Step set for authorable context rebuild / multi-Step cleanup.
+        all_steps = list(
+            (
+                await self._session.execute(
+                    select(ExecutionStep)
+                    .where(ExecutionStep.execution_id == execution.id)
+                    .order_by(
+                        ExecutionStep.sequence_hint.asc(),
+                        ExecutionStep.step_key.asc(),
+                    )
+                )
+            ).scalars().all()
+        )
         snapshot = await assert_current_context_matches_request(
             self._session,
             request=request,
             execution=execution,
             step=step,
+            steps=all_steps,
         )
 
         allow_self = snapshotted_allow_self_approval(snapshot)
@@ -334,7 +351,11 @@ class ApprovalDecisionService:
             request.resolved_at = ts
             request.lock_version += 1
             self._terminalize_rejected(
-                execution=execution, step=step, now=ts
+                execution=execution,
+                step=step,
+                steps=all_steps,
+                now=ts,
+                authorable=is_authorable_step_context(snapshot),
             )
         # else: intermediate — remain PENDING / WAITING_APPROVAL, no Outbox
 
@@ -394,14 +415,33 @@ class ApprovalDecisionService:
 
     @staticmethod
     def _terminalize_rejected(
-        *, execution: Execution, step: ExecutionStep, now: datetime
+        *,
+        execution: Execution,
+        step: ExecutionStep,
+        steps: list[ExecutionStep],
+        now: datetime,
+        authorable: bool,
     ) -> None:
+        # Authorable APPROVAL rejection is mandatory-fatal (ignore on_error).
         step.status = StepStatus.FAILED.value
         step.error_code = _ERROR_APPROVAL_REJECTED
         step.finished_at = now
         step.lock_version += 1
+        by_key = {s.step_key: s for s in steps}
+        by_key[step.step_key] = step
+        if authorable and len(steps) > 1:
+            skip_all_pending(by_key=by_key, now=now)
+            cancel_unused_ready_tools(by_key=by_key, now=now)
         execution.status = ExecutionStatus.FAILED.value
         execution.error_code = _ERROR_APPROVAL_REJECTED
+        execution.error_message = "Authorable APPROVAL Step was rejected."
+        if not authorable:
+            execution.error_message = None
+        execution.result_summary = build_result_summary(
+            status=ExecutionStatus.FAILED.value,
+            steps=list(by_key.values()),
+            plan=None,
+        )
         execution.finished_at = now
         execution.worker_id = None
         execution.lease_token = None
@@ -424,8 +464,28 @@ class ApprovalDecisionService:
         step.error_code = _ERROR_APPROVAL_EXPIRED
         step.finished_at = now
         step.lock_version += 1
+        authorable = is_authorable_step_context(request.context_snapshot)
+        all_steps = list(
+            (
+                await self._session.execute(
+                    select(ExecutionStep).where(
+                        ExecutionStep.execution_id == execution.id
+                    )
+                )
+            ).scalars().all()
+        )
+        by_key = {s.step_key: s for s in all_steps}
+        by_key[step.step_key] = step
+        if authorable and len(all_steps) > 1:
+            skip_all_pending(by_key=by_key, now=now)
+            cancel_unused_ready_tools(by_key=by_key, now=now)
         execution.status = ExecutionStatus.FAILED.value
         execution.error_code = _ERROR_APPROVAL_EXPIRED
+        execution.result_summary = build_result_summary(
+            status=ExecutionStatus.FAILED.value,
+            steps=list(by_key.values()),
+            plan=None,
+        )
         execution.finished_at = now
         execution.worker_id = None
         execution.lease_token = None

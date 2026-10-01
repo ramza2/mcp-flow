@@ -137,6 +137,16 @@ def mask_resolved_input(resolved_input: Any) -> dict[str, Any]:
 
 def project_safe_context(snapshot: dict[str, Any]) -> dict[str, Any]:
     """Explicit historical context projection — never raw snapshot/hash/secrets."""
+    from app.approval.step_context import (
+        APPROVAL_STEP_CONTEXT_SCHEMA_VERSION,
+        project_safe_approval_step_context,
+    )
+
+    if (
+        isinstance(snapshot, dict)
+        and snapshot.get("schema_version") == APPROVAL_STEP_CONTEXT_SCHEMA_VERSION
+    ):
+        return project_safe_approval_step_context(snapshot)
     try:
         tool_version = snapshot["mcp_tool_version_id"]
         step_key = snapshot["step_key"]
