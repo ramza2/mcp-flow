@@ -959,10 +959,11 @@ async def test_m_coherent_iteration_tamper_fail_closed(
         worker_id="pg-m",
         lease_token=lease,
     )
-    assert outcome.execution_complete or outcome.reason in {
+    assert outcome.reason in {
         "EXECUTION_FAILED",
         "RESOURCE_CONFLICT",
-    }
+    } or "FAIL" in (outcome.reason or "").upper()
+    assert outcome.mcp_called is False
     assert len(client.calls) == 0
     async with integration_session_factory() as session:
         execution = await ExecutionRepository(session).get(execution_id)

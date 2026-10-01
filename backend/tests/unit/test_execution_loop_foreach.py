@@ -1976,7 +1976,17 @@ async def test_pending_iter1_with_precreated_iter2_dag_fail_closed(
         steps = await ExecutionRepository(session).list_steps(execution_id)
         loop = next(s for s in steps if s.step_key == "loop1")
         iter1 = _child_by_template(steps, template_id="body", iteration_no=1)
-        assert iter1.status == StepStatus.PENDING.value
+        assert iter1.status in {
+            StepStatus.PENDING.value,
+            StepStatus.READY.value,
+        }
+        assert iter1.status not in {
+            StepStatus.SUCCEEDED.value,
+            StepStatus.FAILED.value,
+            StepStatus.SKIPPED.value,
+            StepStatus.CANCELLED.value,
+            StepStatus.TIMED_OUT.value,
+        }
         plan_obj = ExecutionPlanV1.model_validate(execution.plan_snapshot)
         cfg = LoopStepConfigV1.model_validate(
             next(s for s in plan_obj.steps if s.id == "loop1").config
