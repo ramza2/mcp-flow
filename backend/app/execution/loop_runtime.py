@@ -216,7 +216,63 @@ def projected_expanded_step_count(
     collection_size: int,
     body_step_count: int,
 ) -> int:
+    """Legacy single-LOOP projection (kept for unit helpers / docs examples)."""
     return top_level_count + (collection_size * body_step_count)
+
+
+def parse_foreach_collection_pin(resolved_input: Any) -> dict[str, Any]:
+    """Validate LOOP.resolved_input safe control evidence shape.
+
+    Exact keys: mode / collection_hash / collection_size. Rejects bool-as-int
+    and unexpected fields.
+    """
+    if not isinstance(resolved_input, dict):
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message="LOOP resolved_input must be a FOR_EACH control object.",
+            status_code=409,
+        )
+    if set(resolved_input.keys()) != {
+        "mode",
+        "collection_hash",
+        "collection_size",
+    }:
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message="LOOP resolved_input has unexpected FOR_EACH control fields.",
+            status_code=409,
+        )
+    mode = resolved_input.get("mode")
+    if mode != LoopMode.FOR_EACH.value:
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message=f"LOOP resolved_input mode must be FOR_EACH (got {mode!r}).",
+            status_code=409,
+        )
+    digest = resolved_input.get("collection_hash")
+    if (
+        not isinstance(digest, str)
+        or len(digest) != 64
+        or any(c not in "0123456789abcdef" for c in digest)
+    ):
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message="LOOP collection_hash must be a 64-char lowercase sha256 hex.",
+            status_code=409,
+        )
+    size = resolved_input.get("collection_size")
+    # bool is a subclass of int — reject explicitly.
+    if isinstance(size, bool) or not isinstance(size, int) or size < 0:
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message="LOOP collection_size must be an int >= 0 (bool rejected).",
+            status_code=409,
+        )
+    return {
+        "mode": mode,
+        "collection_hash": digest,
+        "collection_size": size,
+    }
 
 
 def tool_version_for_template(plan_step: ExecutionPlanStep) -> uuid.UUID | None:

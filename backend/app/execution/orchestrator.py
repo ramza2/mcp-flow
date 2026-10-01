@@ -80,6 +80,7 @@ from app.execution.loop_reconcile import (
     pin_collection_evidence,
     resolve_foreach_collection,
     runtime_plan_step,
+    stop_loop_owned_untouched_children,
     succeed_loop,
 )
 from app.execution.loop_runtime import (
@@ -1327,6 +1328,8 @@ class ExecutionOrchestrator:
                     pin_collection_evidence(
                         loop_step=locked, collection=collection
                     )
+                    # Include pinned RUNNING LOOP in by_key before global budget.
+                    by_key[locked.step_key] = locked
                     if len(collection) > cfg.max_iterations:
                         fail_loop_known(
                             locked,
@@ -1351,10 +1354,10 @@ class ExecutionOrchestrator:
                             return stop
                         changed = True
                         continue
+                    # Global expanded max_steps: after pin, before iter-1 MCP.
                     assert_expanded_max_steps(
                         plan=plan,
-                        collection_size=len(collection),
-                        body_step_count=len(cfg.body_step_ids),
+                        steps=list(by_key.values()),
                     )
                 except AppError as exc:
                     # Mandatory-fatal for collection type / pin / max_steps /
@@ -1611,7 +1614,24 @@ class ExecutionOrchestrator:
         plan: ExecutionPlanV1,
         now: datetime,
     ) -> ProgressOutcome | None:
-        """Apply LOOP on_error for known failures (max_iterations / timeout)."""
+        """Apply LOOP on_error for known failures (max_iterations / timeout).
+
+        Always terminalize untouched children of this LOOP first so CONTINUE /
+        MARK_PARTIAL cannot strand PENDING body rows while the parent is
+        terminal (``_dag_naturally_ended`` deadlock).
+        """
+        try:
+            stop_loop_owned_untouched_children(
+                by_key=by_key, loop_step=loop_step, now=now
+            )
+        except AppError as exc:
+            return self._fail_closed_lineage_locked(
+                execution=execution,
+                by_key=by_key,
+                now=now,
+                error_code=exc.code,
+                error_message=exc.message,
+            )
         on_error = plan_step.on_error
         terminal = loop_step.status
         if on_error == "FAIL_EXECUTION" or not is_continuable_known_failure(
@@ -1641,7 +1661,8 @@ class ExecutionOrchestrator:
                 execution_status=exec_status,
                 step_terminal_status=terminal,
             )
-        # CONTINUE / MARK_PARTIAL — leave LOOP terminal; downstream may proceed.
+        # CONTINUE / MARK_PARTIAL — LOOP terminal + children cleaned; downstream
+        # may proceed. Parent LOOP terminal status is the failure evidence.
         return None
 
     async def _reconcile_approval_steps_locked(

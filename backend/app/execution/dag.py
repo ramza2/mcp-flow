@@ -19,9 +19,12 @@ from app.core.errors import AppError
 from app.domain.enums import AuthorableStepType, JoinPolicy, StepStatus
 from app.execution.completion import is_continuable_known_failure, plan_step_for
 from app.execution.loop_runtime import (
+    LoopBodyOwnership,
     assert_flat_foreach_runtime_compatible,
     build_loop_body_ownership,
     iteration_step_key,
+    max_materialized_iteration,
+    parse_foreach_collection_pin,
     template_id_from_step_snapshot,
     tool_version_for_template,
     top_level_plan_steps,
@@ -535,6 +538,17 @@ def validate_tool_join_dag(
         for dep_key in runtime_deps:
             dependents.setdefault(dep_key, []).append(child.step_key)
 
+    # Durable per-LOOP iteration shape (pin, bounds, completeness, contiguity,
+    # at most one active nonterminal iteration — the highest).
+    if child_rows:
+        _validate_loop_iteration_shapes(
+            plan=plan,
+            ownership=ownership,
+            top_rows=top_rows,
+            child_rows=child_rows,
+            plan_by_id=plan_by_id,
+        )
+
     # Acyclic + full coverage via Kahn on the scheduling keys.
     for k in deps:
         dependents.setdefault(k, [])
@@ -604,6 +618,162 @@ def validate_tool_join_dag(
         dependents={k: tuple(v) for k, v in dependents.items()},
         dependencies=deps,
     )
+
+
+_CHILD_TERMINAL = frozenset(
+    {
+        StepStatus.SUCCEEDED.value,
+        StepStatus.FAILED.value,
+        StepStatus.TIMED_OUT.value,
+        StepStatus.SKIPPED.value,
+        StepStatus.CANCELLED.value,
+        StepStatus.UNKNOWN_OUTCOME.value,
+    }
+)
+
+
+def _validate_loop_iteration_shapes(
+    *,
+    plan: ExecutionPlanV1,
+    ownership: LoopBodyOwnership,
+    top_rows: Sequence[ExecutionStep],
+    child_rows: Sequence[ExecutionStep],
+    plan_by_id: Mapping[str, ExecutionPlanStep],
+) -> None:
+    """Fail closed on coherent iteration tamper / incomplete iteration sets."""
+    del plan  # Plan identity already validated via plan_by_id projections.
+    children_by_parent: dict[Any, list[ExecutionStep]] = {}
+    for child in child_rows:
+        children_by_parent.setdefault(child.parent_step_id, []).append(child)
+
+    parent_by_id = {s.id: s for s in top_rows}
+    for parent_id, children in children_by_parent.items():
+        parent = parent_by_id.get(parent_id)
+        if parent is None:
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message="LOOP children reference a missing parent LOOP Step.",
+                status_code=409,
+            )
+        # Parent pin required whenever children exist.
+        pin = parse_foreach_collection_pin(parent.resolved_input)
+        collection_size = pin["collection_size"]
+        body_ids = ownership.loop_to_body.get(parent.step_key, ())
+        if not body_ids:
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message=f"LOOP {parent.step_key!r} has no body_step_ids.",
+                status_code=409,
+            )
+        # Confirm body_ids match immutable Plan LOOP config.
+        loop_ps = plan_by_id[parent.step_key]
+        cfg = LoopStepConfigV1.model_validate(loop_ps.config)
+        if tuple(cfg.body_step_ids) != body_ids:
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message=f"LOOP {parent.step_key!r} body ownership drift.",
+                status_code=409,
+            )
+
+        for child in children:
+            if child.iteration_no is None:
+                raise AppError(
+                    code="RESOURCE_CONFLICT",
+                    message="LOOP body instance missing iteration_no.",
+                    status_code=409,
+                )
+            if child.iteration_no < 1 or child.iteration_no > collection_size:
+                raise AppError(
+                    code="RESOURCE_CONFLICT",
+                    message=(
+                        f"LOOP body iteration_no={child.iteration_no} outside "
+                        f"pinned collection_size={collection_size}."
+                    ),
+                    status_code=409,
+                )
+
+        max_iter = max_materialized_iteration(
+            steps=children, parent_step_id=parent.id
+        )
+        if max_iter < 1:
+            continue
+        # Contiguous 1..max_iter
+        present_iters = {c.iteration_no for c in children if c.iteration_no}
+        expected_iters = set(range(1, max_iter + 1))
+        if present_iters != expected_iters:
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message=(
+                    f"LOOP {parent.step_key!r} materialized iterations "
+                    f"{sorted(present_iters)} are not contiguous 1..{max_iter}."
+                ),
+                status_code=409,
+            )
+
+        active_nonterminal: int | None = None
+        for n in range(1, max_iter + 1):
+            iter_children = [
+                c for c in children if c.iteration_no == n
+            ]
+            templates = []
+            for c in iter_children:
+                try:
+                    templates.append(template_id_from_step_snapshot(c))
+                except AppError:
+                    raise
+            if len(templates) != len(set(templates)):
+                raise AppError(
+                    code="RESOURCE_CONFLICT",
+                    message=(
+                        f"LOOP {parent.step_key!r} iteration {n} has duplicate "
+                        "body templates."
+                    ),
+                    status_code=409,
+                )
+            if set(templates) != set(body_ids):
+                raise AppError(
+                    code="RESOURCE_CONFLICT",
+                    message=(
+                        f"LOOP {parent.step_key!r} iteration {n} template set "
+                        f"{sorted(templates)} != body_step_ids "
+                        f"{list(body_ids)}."
+                    ),
+                    status_code=409,
+                )
+            if len(iter_children) != len(body_ids):
+                raise AppError(
+                    code="RESOURCE_CONFLICT",
+                    message=(
+                        f"LOOP {parent.step_key!r} iteration {n} is incomplete."
+                    ),
+                    status_code=409,
+                )
+            nonterminal = [
+                c for c in iter_children if c.status not in _CHILD_TERMINAL
+            ]
+            if nonterminal:
+                if active_nonterminal is not None:
+                    raise AppError(
+                        code="RESOURCE_CONFLICT",
+                        message=(
+                            f"LOOP {parent.step_key!r} has multiple active "
+                            "iterations; only one nonterminal iteration is "
+                            "allowed."
+                        ),
+                        status_code=409,
+                    )
+                active_nonterminal = n
+
+        if active_nonterminal is not None and active_nonterminal != max_iter:
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message=(
+                    f"LOOP {parent.step_key!r} active iteration "
+                    f"{active_nonterminal} is not the highest materialized "
+                    f"iteration {max_iter}."
+                ),
+                status_code=409,
+            )
 
 
 def is_intentional_conditional_skip(step: ExecutionStep) -> bool:

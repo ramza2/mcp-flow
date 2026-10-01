@@ -27,6 +27,7 @@ from app.execution.binding_resolver import (
 from app.execution.loop_runtime import (
     build_loop_body_ownership,
     iteration_step_key,
+    parse_foreach_collection_pin,
     template_id_from_step_snapshot,
 )
 from app.models.execution import Execution, ExecutionStep, StepAttempt
@@ -450,6 +451,20 @@ def _assert_loop_child_tool_step_lineage(
             message="TOOL Step foundation lineage is inconsistent.",
             status_code=409,
         )
+
+    # Pre-MCP: revalidate FOR_EACH collection pin even for LITERAL-only body TOOLs.
+    # Lazy import avoids import cycles with loop_reconcile → binding_resolver.
+    parse_foreach_collection_pin(parent.resolved_input)
+    from app.execution.loop_reconcile import revalidate_foreach_collection_pin
+
+    revalidate_foreach_collection_pin(
+        execution=execution,
+        loop_step=parent,
+        plan=plan,
+        steps=steps,
+        child_iteration_no=step.iteration_no,
+    )
+
     # LOOP body TOOL always uses complex Plan bindings (even under AGENT_REQUEST).
     return ToolStepLineage(
         tool_version_id=complex_cfg.tool_version_id,
