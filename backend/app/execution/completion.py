@@ -138,7 +138,8 @@ def is_loop_stopped_child_neutral_for_completion(
     ``UPSTREAM_LOOP_STOPPED``. ``UPSTREAM_EXECUTION_STOPPED`` remains
     non-success.
     """
-    if step.parent_step_id is None:
+    parent_step_id = getattr(step, "parent_step_id", None)
+    if parent_step_id is None:
         return False
     if step.error_code not in _LOOP_STOPPED_CHILD_CODES:
         return False
@@ -147,8 +148,13 @@ def is_loop_stopped_child_neutral_for_completion(
         StepStatus.CANCELLED.value,
     }:
         return False
-    parent = next((s for s in steps if s.id == step.parent_step_id), None)
-    if parent is None or parent.step_type != AuthorableStepType.LOOP.value:
+    parent = next(
+        (s for s in steps if getattr(s, "id", None) == parent_step_id),
+        None,
+    )
+    if parent is None or getattr(parent, "step_type", None) != (
+        AuthorableStepType.LOOP.value
+    ):
         return False
     if parent.status not in {
         StepStatus.FAILED.value,
