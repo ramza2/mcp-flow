@@ -1,7 +1,10 @@
-"""TOOL/CONDITION/JOIN DAG runtime validation and local evaluation (docs/04 §9).
+"""TOOL/CONDITION/JOIN/APPROVAL DAG runtime validation and local evaluation.
 
 Wave scheduling lives in ``ExecutionOrchestrator``; this module is pure graph
 logic (no DB writes except callers applying returned decisions).
+
+LOOP remains unsupported. Authorable APPROVAL is a Plan checkpoint (distinct
+from ToolPolicy approval).
 """
 
 from __future__ import annotations
@@ -15,6 +18,7 @@ from app.domain.enums import AuthorableStepType, JoinPolicy, StepStatus
 from app.execution.completion import is_continuable_known_failure, plan_step_for
 from app.models.execution import ExecutionStep
 from app.schemas.execution_plan import (
+    ApprovalStepConfigV1,
     ComplexToolStepConfigV1,
     ConditionStepConfigV1,
     ExecutionPlanStep,
@@ -35,7 +39,6 @@ _JOIN_BARRIER_TERMINAL = frozenset(
 
 _UNSUPPORTED_RUNTIME_TYPES = frozenset(
     {
-        AuthorableStepType.APPROVAL.value,
         AuthorableStepType.LOOP.value,
     }
 )
@@ -45,6 +48,7 @@ _RUNTIME_STEP_TYPES = frozenset(
         AuthorableStepType.TOOL.value,
         AuthorableStepType.CONDITION.value,
         AuthorableStepType.JOIN.value,
+        AuthorableStepType.APPROVAL.value,
     }
 )
 
@@ -59,7 +63,7 @@ INTENTIONAL_CONDITIONAL_SKIP_CODES = frozenset(
 
 @dataclass(frozen=True, slots=True)
 class ToolJoinDag:
-    """Validated TOOL/CONDITION/JOIN runtime DAG."""
+    """Validated TOOL/CONDITION/JOIN/APPROVAL runtime DAG."""
 
     ordered_step_keys: tuple[str, ...]  # immutable Plan order
     root_tool_keys: tuple[str, ...]
@@ -72,7 +76,7 @@ def validate_tool_join_dag(
     plan: ExecutionPlanV1,
     steps: Sequence[ExecutionStep],
 ) -> ToolJoinDag:
-    """Fail closed unless Steps form a TOOL/CONDITION/JOIN DAG for wave runtime."""
+    """Fail closed unless Steps form a TOOL/CONDITION/JOIN/APPROVAL DAG."""
     if not steps:
         raise AppError(
             code="RESOURCE_CONFLICT",
@@ -135,7 +139,7 @@ def validate_tool_join_dag(
                 code="RESOURCE_CONFLICT",
                 message=(
                     f"Step type {step.step_type!r} unsupported by "
-                    "TOOL/CONDITION/JOIN DAG runtime."
+                    "TOOL/CONDITION/JOIN/APPROVAL DAG runtime."
                 ),
                 status_code=409,
             )
@@ -266,6 +270,24 @@ def validate_tool_join_dag(
                     message=f"JOIN {ps.id!r} requires one or more dependencies.",
                     status_code=409,
                 )
+        elif ps.type == AuthorableStepType.APPROVAL:
+            if step.mcp_tool_version_id is not None:
+                raise AppError(
+                    code="RESOURCE_CONFLICT",
+                    message=(
+                        f"APPROVAL Step {ps.id!r} must have null "
+                        "mcp_tool_version_id."
+                    ),
+                    status_code=409,
+                )
+            try:
+                ApprovalStepConfigV1.model_validate(ps.config)
+            except Exception as exc:
+                raise AppError(
+                    code="RESOURCE_CONFLICT",
+                    message=f"Invalid APPROVAL config for {ps.id!r}.",
+                    status_code=409,
+                ) from exc
         else:
             raise AppError(
                 code="RESOURCE_CONFLICT",
@@ -292,14 +314,17 @@ def validate_tool_join_dag(
                 queue.append(nxt)
                 queue.sort(key=lambda k: order_index[k])
     if len(seen) != len(deps):
-        raise AppError(
-            code="RESOURCE_CONFLICT",
-            message="TOOL/CONDITION/JOIN DAG contains a cycle or unreachable Steps.",
-            status_code=409,
-        )
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message=(
+                    "TOOL/CONDITION/JOIN/APPROVAL DAG contains a cycle or "
+                    "unreachable Steps."
+                ),
+                status_code=409,
+            )
 
-    # Root TOOLs only — root CONDITION stays PENDING for local reconciliation.
-    # A valid graph may begin with CONDITION (no root TOOL required).
+    # Root TOOLs only — root CONDITION/APPROVAL stay PENDING for local reconcile.
+    # A valid graph may begin with CONDITION or APPROVAL (no root TOOL required).
     root_tools = tuple(
         ps.id
         for ps in plan.steps
@@ -389,6 +414,26 @@ def condition_structurally_eligible(
     if step.status != StepStatus.PENDING.value:
         return False
     if step.step_type != AuthorableStepType.CONDITION.value:
+        return False
+    if has_intentional_skip_dependency(step=step, dag=dag, by_key=by_key):
+        return False
+    for dep_id in dag.dependencies.get(step.step_key, ()):
+        dep = by_key[dep_id]
+        if not dependency_progression_complete(dep_step=dep):
+            return False
+    return True
+
+
+def approval_structurally_eligible(
+    *,
+    step: ExecutionStep,
+    dag: ToolJoinDag,
+    by_key: Mapping[str, ExecutionStep],
+) -> bool:
+    """PENDING APPROVAL whose direct deps are progression-complete."""
+    if step.status != StepStatus.PENDING.value:
+        return False
+    if step.step_type != AuthorableStepType.APPROVAL.value:
         return False
     if has_intentional_skip_dependency(step=step, dag=dag, by_key=by_key):
         return False
@@ -532,9 +577,13 @@ def is_single_tool_execution(steps: Sequence[ExecutionStep]) -> bool:
     conditions = [
         s for s in steps if s.step_type == AuthorableStepType.CONDITION.value
     ]
+    approvals = [
+        s for s in steps if s.step_type == AuthorableStepType.APPROVAL.value
+    ]
     return (
         len(tools) == 1
         and len(joins) == 0
         and len(conditions) == 0
+        and len(approvals) == 0
         and len(steps) == 1
     )

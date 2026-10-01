@@ -142,6 +142,22 @@ class ApprovalRequestRepository:
         result = await self._session.execute(stmt)
         return result.scalar_one_or_none()
 
+    async def find_pending_for_execution(
+        self, *, execution_id: uuid.UUID
+    ) -> ApprovalRequest | None:
+        """At most one PENDING authorable/ToolPolicy request per Execution."""
+        stmt = (
+            select(ApprovalRequest)
+            .where(
+                ApprovalRequest.execution_id == execution_id,
+                ApprovalRequest.status == ApprovalStatus.PENDING.value,
+            )
+            .order_by(ApprovalRequest.requested_at.asc(), ApprovalRequest.id.asc())
+            .limit(1)
+        )
+        result = await self._session.execute(stmt)
+        return result.scalar_one_or_none()
+
     async def find_approved_for_step(
         self, *, execution_id: uuid.UUID, step_execution_id: uuid.UUID
     ) -> list[ApprovalRequest]:

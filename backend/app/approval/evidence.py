@@ -7,6 +7,7 @@ and B2 final pre-send gate. Does not create replacement ApprovalRequests.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -17,8 +18,15 @@ from app.approval.context import (
     build_approval_context_snapshot,
     compute_approval_context_hash,
 )
+from app.approval.step_context import (
+    APPROVAL_STEP_CONTEXT_SCHEMA_VERSION,
+    assert_approval_step_lineage_matches,
+    build_approval_step_context_snapshot,
+    compute_approval_step_context_hash,
+    validate_stored_approval_step_context,
+)
 from app.core.errors import AppError
-from app.domain.enums import ApprovalStatus
+from app.domain.enums import ApprovalStatus, AuthorableStepType
 from app.execution.lineage import materialize_secret_safe_resolved_input
 from app.models.approval import ApprovalPolicy, ApprovalRequest
 from app.models.execution import Execution, ExecutionStep
@@ -26,7 +34,13 @@ from app.models.mcp import MCPToolPolicy
 from app.repositories.approval_policy import ApprovalPolicyRepository
 from app.repositories.approval_request import ApprovalRequestRepository
 from app.repositories.mcp_tool_policy import MCPToolPolicyRepository
-from app.schemas.execution_plan import ExecutionPlanStep, ToolStepConfigV1
+from app.schemas.execution_plan import (
+    ApprovalStepConfigV1,
+    ExecutionPlanStep,
+    ExecutionPlanV1,
+    ToolStepConfigV1,
+    compute_plan_hash,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,15 +49,28 @@ class ApprovedEvidence:
     context_hash: str
 
 
+def is_authorable_step_context(snapshot: Any) -> bool:
+    return (
+        isinstance(snapshot, dict)
+        and snapshot.get("schema_version") == APPROVAL_STEP_CONTEXT_SCHEMA_VERSION
+    )
+
+
 def validate_stored_context_snapshot(snapshot: Any) -> dict[str, Any]:
-    """Fail closed if stored context_snapshot is corrupt."""
+    """Fail closed if stored context_snapshot is corrupt.
+
+    Dispatches on ``schema_version`` — unknown schemas fail closed.
+    """
     if not isinstance(snapshot, dict):
         raise AppError(
             code="RESOURCE_CONFLICT",
             message="ApprovalRequest context_snapshot is corrupted.",
             status_code=409,
         )
-    if snapshot.get("schema_version") != APPROVAL_CONTEXT_SCHEMA_VERSION:
+    schema = snapshot.get("schema_version")
+    if schema == APPROVAL_STEP_CONTEXT_SCHEMA_VERSION:
+        return validate_stored_approval_step_context(snapshot)
+    if schema != APPROVAL_CONTEXT_SCHEMA_VERSION:
         raise AppError(
             code="RESOURCE_CONFLICT",
             message="ApprovalRequest context_snapshot schema is invalid.",
@@ -95,7 +122,10 @@ def validate_stored_context_snapshot(snapshot: Any) -> dict[str, Any]:
 def assert_request_context_hash_intact(request: ApprovalRequest) -> dict[str, Any]:
     """Recompute hash from stored snapshot and require equality with request.context_hash."""
     snapshot = validate_stored_context_snapshot(request.context_snapshot)
-    recomputed = compute_approval_context_hash(snapshot)
+    if is_authorable_step_context(snapshot):
+        recomputed = compute_approval_step_context_hash(snapshot)
+    else:
+        recomputed = compute_approval_context_hash(snapshot)
     if recomputed != request.context_hash:
         raise AppError(
             code="RESOURCE_CONFLICT",
@@ -111,6 +141,11 @@ def assert_lineage_matches_snapshot(
     step: ExecutionStep,
     snapshot: dict[str, Any],
 ) -> None:
+    if is_authorable_step_context(snapshot):
+        assert_approval_step_lineage_matches(
+            execution=execution, step=step, snapshot=snapshot
+        )
+        return
     try:
         snap_exec = uuid.UUID(str(snapshot["execution_id"]))
         snap_step = uuid.UUID(str(snapshot["step_execution_id"]))
@@ -218,6 +253,74 @@ async def rebuild_current_approval_context(
     return snapshot, compute_approval_context_hash(snapshot), policy, ap
 
 
+async def rebuild_current_approval_step_context(
+    session: AsyncSession,
+    *,
+    execution: Execution,
+    step: ExecutionStep,
+    steps: Sequence[ExecutionStep],
+    plan: ExecutionPlanV1 | None = None,
+    approval_policy: ApprovalPolicy | None = None,
+) -> tuple[dict[str, Any], str, ApprovalPolicy]:
+    """Rebuild authorable APPROVAL checkpoint context from live evidence."""
+    if step.step_type != AuthorableStepType.APPROVAL.value:
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message="Authorable approval context rebuild requires APPROVAL Step.",
+            status_code=409,
+        )
+    try:
+        plan_step = ExecutionPlanStep.model_validate(step.step_snapshot)
+        cfg = ApprovalStepConfigV1.model_validate(plan_step.config)
+    except Exception as exc:
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message="APPROVAL Step snapshot is invalid for context rebuild.",
+            status_code=409,
+        ) from exc
+
+    if plan is None:
+        try:
+            plan = ExecutionPlanV1.model_validate(execution.plan_snapshot)
+        except Exception as exc:
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message="Execution plan_snapshot is invalid for approval context.",
+                status_code=409,
+            ) from exc
+    if compute_plan_hash(execution.plan_snapshot) != execution.plan_hash:
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message="Execution plan_hash does not match plan_snapshot.",
+            status_code=409,
+        )
+
+    ap = approval_policy
+    if ap is None:
+        ap = await ApprovalPolicyRepository(session).get(cfg.approval_policy_id)
+        if ap is None:
+            raise AppError(
+                code="EXECUTION_PRECONDITION_FAILED",
+                message="ApprovalPolicy not found for APPROVAL Step.",
+                status_code=409,
+            )
+    if ap.id != cfg.approval_policy_id:
+        raise AppError(
+            code="EXECUTION_PRECONDITION_FAILED",
+            message="ApprovalPolicy id does not match APPROVAL Step config.",
+            status_code=409,
+        )
+
+    snapshot = build_approval_step_context_snapshot(
+        execution=execution,
+        step=step,
+        plan=plan,
+        approval_policy=ap,
+        steps=steps,
+    )
+    return snapshot, compute_approval_step_context_hash(snapshot), ap
+
+
 async def assert_current_context_matches_request(
     session: AsyncSession,
     *,
@@ -226,6 +329,8 @@ async def assert_current_context_matches_request(
     step: ExecutionStep,
     tool_policy: MCPToolPolicy | None = None,
     approval_policy: ApprovalPolicy | None = None,
+    steps: Sequence[ExecutionStep] | None = None,
+    plan: ExecutionPlanV1 | None = None,
 ) -> dict[str, Any]:
     """Stored + current context must both equal request.context_hash."""
     stored = assert_request_context_hash_intact(request)
@@ -242,13 +347,29 @@ async def assert_current_context_matches_request(
             status_code=409,
         )
 
-    _current_snapshot, current_hash, _, _ = await rebuild_current_approval_context(
-        session,
-        execution=execution,
-        step=step,
-        tool_policy=tool_policy,
-        approval_policy=approval_policy,
-    )
+    if is_authorable_step_context(stored):
+        if steps is None:
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message="Authorable approval context revalidation requires Step set.",
+                status_code=409,
+            )
+        _current, current_hash, _ = await rebuild_current_approval_step_context(
+            session,
+            execution=execution,
+            step=step,
+            steps=steps,
+            plan=plan,
+            approval_policy=approval_policy,
+        )
+    else:
+        _current_snapshot, current_hash, _, _ = await rebuild_current_approval_context(
+            session,
+            execution=execution,
+            step=step,
+            tool_policy=tool_policy,
+            approval_policy=approval_policy,
+        )
     if current_hash != request.context_hash:
         raise AppError(
             code="RESOURCE_CONFLICT",

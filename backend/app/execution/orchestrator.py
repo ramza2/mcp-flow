@@ -1,12 +1,17 @@
-"""TOOL/CONDITION/JOIN DAG wave orchestration (docs/04 §9).
+"""TOOL/CONDITION/JOIN/APPROVAL DAG wave orchestration (docs/04 §9).
 
 ``McpToolRunner`` owns one TOOL Step invocation (ToolCall/Attempt/Step).
-``ExecutionOrchestrator`` owns wave scheduling, local CONDITION/when/JOIN
-reconciliation, ErrorPolicy, ALL_REQUIRED aggregation, and final Execution
-terminalization / lease release.
+``ExecutionOrchestrator`` owns wave scheduling, local CONDITION/when/JOIN/
+authorable APPROVAL reconciliation, ErrorPolicy, ALL_REQUIRED aggregation,
+and final Execution terminalization / lease release.
 
-Supported runtime Steps: TOOL + CONDITION + JOIN. LOOP / authorable APPROVAL
-Step remain out of scope.
+Supported runtime Steps: TOOL + CONDITION + JOIN + APPROVAL.
+LOOP remains out of scope.
+
+Authorable APPROVAL is an Execution-level Plan checkpoint: entering wait
+clears the lease and may freeze unrelated READY sibling branches until
+``EXECUTION_APPROVAL_RESUME``. Multi-Step ToolPolicy approval and MRTR
+remain ``DAG_WAIT_UNSUPPORTED``.
 """
 
 from __future__ import annotations
@@ -20,8 +25,15 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.approval.evidence import (
+    assert_current_context_matches_request,
+    is_authorable_step_context,
+)
+from app.approval.wait import ApprovalWaitService
 from app.core.errors import AppError
 from app.domain.enums import (
+    ApprovalPolicyStatus,
+    ApprovalStatus,
     AuthorableStepType,
     ExecutionStatus,
     StepAttemptStatus,
@@ -43,6 +55,7 @@ from app.execution.completion import (
 from app.execution.dag import (
     StopCause,
     ToolJoinDag,
+    approval_structurally_eligible,
     cancel_unused_ready_tools,
     condition_structurally_eligible,
     count_tool_slots,
@@ -57,8 +70,11 @@ from app.execution.dag import (
 )
 from app.execution.predicate_evaluator import RuntimePredicateEvaluator
 from app.models.execution import Execution, ExecutionStep
+from app.repositories.approval_policy import ApprovalPolicyRepository
+from app.repositories.approval_request import ApprovalRequestRepository
 from app.repositories.execution import ExecutionRepository
 from app.schemas.execution_plan import (
+    ApprovalStepConfigV1,
     ComplexToolStepConfigV1,
     ConditionStepConfigV1,
     ExecutionPlanStep,
@@ -375,8 +391,24 @@ class ExecutionOrchestrator:
                     ),
                     reason=prepared.reason,
                 )
+            if prepared.reason == "WAITING_APPROVAL":
+                # Authorable APPROVAL wait — durable, lease-free; no ToolRunner.
+                return ToolRunOutcome(
+                    execution_id=execution_id,
+                    step_execution_id=(
+                        prepared.ready_step_ids[0]
+                        if prepared.ready_step_ids
+                        else None
+                    ),
+                    attempt_id=None,
+                    tool_call_id=None,
+                    mcp_called=False,
+                    terminal_status=StepStatus.WAITING_APPROVAL.value,
+                    reason="WAITING_APPROVAL",
+                    disposition=DISPOSITION_WAIT,
+                )
             if prepared.reason == "WAITING_HANDOFF" and prepared.ready_step_ids:
-                # Single-TOOL wait path — preserve existing runner wait semantics.
+                # Single-TOOL ToolPolicy wait path — existing runner semantics.
                 return await self._runner.run_claimed_tool_step(
                     execution_id=execution_id,
                     step_execution_id=prepared.ready_step_ids[0],
@@ -533,8 +565,9 @@ class ExecutionOrchestrator:
                         StepStatus.WAITING_INPUT.value,
                     }
                 ]
-                # Durable wait or one-sided wait corruption — ToolRunner owns
-                # classification (including RESOURCE_CONFLICT). Do not require a
+                # Durable wait or one-sided wait corruption. Authorable APPROVAL
+                # wait is lease-free and must not invoke McpToolRunner.
+                # ToolPolicy wait still handoffs to the runner. Do not require a
                 # live Execution lease here; WAITING_* clears the lease.
                 if waiting or execution.status in {
                     ExecutionStatus.WAITING_APPROVAL.value,
@@ -544,11 +577,23 @@ class ExecutionOrchestrator:
                         (
                             s
                             for s in steps
-                            if s.step_type == AuthorableStepType.TOOL.value
+                            if s.step_type
+                            in {
+                                AuthorableStepType.TOOL.value,
+                                AuthorableStepType.APPROVAL.value,
+                            }
                         ),
                         None,
                     )
                     if target is not None:
+                        if target.step_type == AuthorableStepType.APPROVAL.value:
+                            return ProgressOutcome(
+                                execution_complete=False,
+                                promoted=False,
+                                reason="WAITING_APPROVAL",
+                                ready_step_ids=(target.id,),
+                                execution_status=execution.status,
+                            )
                         return ProgressOutcome(
                             execution_complete=False,
                             promoted=False,
@@ -635,7 +680,8 @@ class ExecutionOrchestrator:
                         single_tool=single_tool,
                     )
 
-                # Local CONDITION / when / JOIN fixed point before TOOL wave.
+                # Local CONDITION / APPROVAL / when / JOIN fixed point before
+                # TOOL wave. Authorable APPROVAL may suspend at this boundary.
                 local_stop = await self._local_reconcile_locked(
                     executions=executions,
                     execution=execution,
@@ -644,6 +690,7 @@ class ExecutionOrchestrator:
                     steps=steps,
                     by_key=by_key,
                     now=now,
+                    session=session,
                 )
                 if local_stop is not None:
                     await session.flush()
@@ -740,16 +787,19 @@ class ExecutionOrchestrator:
         steps: list[ExecutionStep],
         by_key: dict[str, ExecutionStep],
         now: datetime,
+        session: AsyncSession,
     ) -> ProgressOutcome | None:
-        """Fixed-point local reconcile: prune → when/CONDITION/JOIN → repeat.
+        """Fixed-point local reconcile: prune → CONDITION/APPROVAL/when/JOIN.
 
-        Local CONDITION/JOIN/when work does not consume ``max_parallelism``.
-        Predicate evaluation failures are mandatory-fatal.
+        Local CONDITION/JOIN/APPROVAL/when work does not consume
+        ``max_parallelism``. Predicate evaluation failures are mandatory-fatal.
+        Authorable APPROVAL may return WAITING_APPROVAL (Execution-level
+        suspension) after creating at most one PENDING ApprovalRequest.
         """
         evaluator = RuntimePredicateEvaluator()
         plan_by_id = {p.id: p for p in plan.steps}
         # Bound iterations by Step count (each Step terminalizes at most once).
-        for _ in range(max(1, len(dag.ordered_step_keys) * 3)):
+        for _ in range(max(1, len(dag.ordered_step_keys) * 4)):
             changed = False
 
             # 1) Conditionally prune non-JOIN descendants of intentional skips.
@@ -762,6 +812,7 @@ class ExecutionOrchestrator:
                 if step.step_type not in {
                     AuthorableStepType.TOOL.value,
                     AuthorableStepType.CONDITION.value,
+                    AuthorableStepType.APPROVAL.value,
                 }:
                     continue
                 if not has_intentional_skip_dependency(
@@ -886,6 +937,24 @@ class ExecutionOrchestrator:
                     locked.step_key,
                     result,
                 )
+
+            # 2b) Authorable APPROVAL: complete approved READY, else enter wait.
+            approval_stop = await self._reconcile_approval_steps_locked(
+                executions=executions,
+                execution=execution,
+                plan=plan,
+                dag=dag,
+                by_key=by_key,
+                plan_by_id=plan_by_id,
+                evaluator=evaluator,
+                now=now,
+                session=session,
+            )
+            if approval_stop is not None:
+                if approval_stop.reason == "APPROVAL_CHANGED":
+                    changed = True
+                else:
+                    return approval_stop
 
             # 3) Evaluate Step.when for PENDING TOOL with barrier satisfied.
             for key in dag.ordered_step_keys:
@@ -1055,6 +1124,268 @@ class ExecutionOrchestrator:
 
             if not changed:
                 return None
+        return None
+
+    async def _reconcile_approval_steps_locked(
+        self,
+        *,
+        executions: ExecutionRepository,
+        execution: Execution,
+        plan: ExecutionPlanV1,
+        dag: ToolJoinDag,
+        by_key: dict[str, ExecutionStep],
+        plan_by_id: dict[str, ExecutionPlanStep],
+        evaluator: RuntimePredicateEvaluator,
+        now: datetime,
+        session: AsyncSession,
+    ) -> ProgressOutcome | None:
+        """Complete approved READY APPROVAL or enter one authorable wait.
+
+        Returns:
+        - ProgressOutcome WAITING_APPROVAL when entering durable wait
+        - ProgressOutcome reason=APPROVAL_CHANGED when local SUCCEEDED/SKIPPED
+        - ProgressOutcome fail-closed on lineage/policy errors
+        - None when no APPROVAL work this iteration
+        """
+        requests = ApprovalRequestRepository(session)
+        policies = ApprovalPolicyRepository(session)
+        wait_service = ApprovalWaitService(session)
+        changed = False
+
+        # Complete READY APPROVAL Steps that already hold APPROVED evidence
+        # (post-resume). Never create a new request for an already-approved Step.
+        for key in dag.ordered_step_keys:
+            step = by_key[key]
+            if (
+                step.step_type != AuthorableStepType.APPROVAL.value
+                or step.status != StepStatus.READY.value
+            ):
+                continue
+            locked = await executions.lock_step(step.id)
+            if locked is None or locked.status != StepStatus.READY.value:
+                continue
+            plan_step = plan_by_id[locked.step_key]
+            if plan_step.model_dump(mode="json") != locked.step_snapshot:
+                return self._fail_closed_lineage_locked(
+                    execution=execution,
+                    by_key=by_key,
+                    now=now,
+                    error_code="RESOURCE_CONFLICT",
+                    error_message=(
+                        f"APPROVAL step_snapshot drift for {locked.step_key!r}."
+                    ),
+                )
+            approved_rows = await requests.find_approved_for_step(
+                execution_id=execution.id, step_execution_id=locked.id
+            )
+            approved = next(
+                (
+                    r
+                    for r in approved_rows
+                    if r.resolved_at is not None
+                    and is_authorable_step_context(r.context_snapshot)
+                ),
+                None,
+            )
+            if approved is None:
+                # READY without APPROVED evidence is unexpected for authorable
+                # APPROVAL (resume always pairs them). Fail closed.
+                return self._fail_closed_lineage_locked(
+                    execution=execution,
+                    by_key=by_key,
+                    now=now,
+                    error_code="APPROVAL_RESUME_PRECONDITION_FAILED",
+                    error_message=(
+                        f"APPROVAL Step {locked.step_key!r} is READY without "
+                        "valid APPROVED ApprovalRequest evidence."
+                    ),
+                )
+            try:
+                await assert_current_context_matches_request(
+                    session,
+                    request=approved,
+                    execution=execution,
+                    step=locked,
+                    steps=list(by_key.values()),
+                    plan=plan,
+                )
+            except AppError as exc:
+                locked.status = StepStatus.FAILED.value
+                locked.error_code = "APPROVAL_RESUME_PRECONDITION_FAILED"
+                locked.error_message = exc.message
+                locked.finished_at = now
+                locked.lock_version += 1
+                by_key[locked.step_key] = locked
+                skip_all_pending(by_key=by_key, now=now)
+                cancel_unused_ready_tools(by_key=by_key, now=now)
+                execution.status = ExecutionStatus.FAILED.value
+                execution.error_code = "APPROVAL_RESUME_PRECONDITION_FAILED"
+                execution.error_message = exc.message
+                execution.result_summary = build_result_summary(
+                    status=ExecutionStatus.FAILED.value,
+                    steps=list(by_key.values()),
+                    plan=plan,
+                )
+                execution.finished_at = now
+                execution.worker_id = None
+                execution.lease_token = None
+                execution.lease_expires_at = None
+                execution.heartbeat_at = None
+                execution.lock_version += 1
+                return ProgressOutcome(
+                    execution_complete=True,
+                    promoted=False,
+                    reason=_REASON_EXECUTION_FAILED,
+                    execution_status=ExecutionStatus.FAILED.value,
+                    step_terminal_status=StepStatus.FAILED.value,
+                )
+
+            locked.status = StepStatus.RUNNING.value
+            if locked.started_at is None:
+                locked.started_at = now
+            locked.status = StepStatus.SUCCEEDED.value
+            locked.result_inline = {
+                "approval_status": ApprovalStatus.APPROVED.value,
+                "approval_request_id": str(approved.id),
+            }
+            # Preserve prior when-gate evidence (true) or leave null when absent.
+            locked.error_code = None
+            locked.error_message = None
+            locked.finished_at = now
+            locked.lock_version += 1
+            by_key[locked.step_key] = locked
+            changed = True
+            logger.info(
+                "orchestrator APPROVAL succeeded execution_id=%s step_key=%s "
+                "approval_request_id=%s",
+                execution.id,
+                locked.step_key,
+                approved.id,
+            )
+
+        # Serialize: at most one PENDING ApprovalRequest per Execution.
+        existing_pending = await requests.find_pending_for_execution(
+            execution_id=execution.id
+        )
+        if existing_pending is not None:
+            if changed:
+                return ProgressOutcome(
+                    execution_complete=False,
+                    promoted=False,
+                    reason="APPROVAL_CHANGED",
+                )
+            return None
+
+        # Enter wait for the first eligible PENDING APPROVAL in Plan order.
+        for key in dag.ordered_step_keys:
+            step = by_key[key]
+            if not approval_structurally_eligible(
+                step=step, dag=dag, by_key=by_key
+            ):
+                continue
+            locked = await executions.lock_step(step.id)
+            if locked is None or locked.status != StepStatus.PENDING.value:
+                continue
+            plan_step = plan_by_id[locked.step_key]
+            if plan_step.model_dump(mode="json") != locked.step_snapshot:
+                return self._fail_closed_lineage_locked(
+                    execution=execution,
+                    by_key=by_key,
+                    now=now,
+                    error_code="RESOURCE_CONFLICT",
+                    error_message=(
+                        f"APPROVAL step_snapshot drift for {locked.step_key!r}."
+                    ),
+                )
+            try:
+                when_false = self._evaluate_when_gate(
+                    evaluator=evaluator,
+                    plan_step=plan_step,
+                    execution=execution,
+                    owning_step=locked,
+                    steps=list(by_key.values()),
+                    plan=plan,
+                )
+            except AppError as exc:
+                return self._fail_closed_predicate(
+                    execution=execution,
+                    by_key=by_key,
+                    step=locked,
+                    now=now,
+                    plan=plan,
+                    error_code=exc.code,
+                    error_message=exc.message,
+                )
+            if when_false:
+                self._apply_when_false(locked, now=now)
+                by_key[locked.step_key] = locked
+                changed = True
+                continue
+            if plan_step.when is not None:
+                locked.condition_result = True
+
+            try:
+                cfg = ApprovalStepConfigV1.model_validate(plan_step.config)
+            except Exception as exc:
+                return self._fail_closed_lineage_locked(
+                    execution=execution,
+                    by_key=by_key,
+                    now=now,
+                    error_code="RESOURCE_CONFLICT",
+                    error_message=(
+                        f"Invalid APPROVAL config for {locked.step_key!r}: {exc}"
+                    ),
+                )
+            policy = await policies.get(cfg.approval_policy_id)
+            if policy is None or policy.status != ApprovalPolicyStatus.ACTIVE.value:
+                return self._fail_closed_lineage_locked(
+                    execution=execution,
+                    by_key=by_key,
+                    now=now,
+                    error_code="EXECUTION_PRECONDITION_FAILED",
+                    error_message=(
+                        f"APPROVAL Step {locked.step_key!r} requires an ACTIVE "
+                        "ApprovalPolicy."
+                    ),
+                )
+            # Re-check serialization under Execution row lock (caller holds it).
+            race_pending = await requests.find_pending_for_execution(
+                execution_id=execution.id
+            )
+            if race_pending is not None:
+                break
+
+            outcome = await wait_service.enter_for_approval_step(
+                execution=execution,
+                step=locked,
+                plan=plan,
+                steps=list(by_key.values()),
+                approval_policy=policy,
+                now=now,
+            )
+            by_key[locked.step_key] = locked
+            logger.info(
+                "orchestrator APPROVAL wait execution_id=%s step_key=%s "
+                "approval_request_id=%s reused=%s",
+                execution.id,
+                locked.step_key,
+                outcome.approval_request_id,
+                outcome.reused_existing,
+            )
+            return ProgressOutcome(
+                execution_complete=False,
+                promoted=False,
+                reason="WAITING_APPROVAL",
+                ready_step_ids=(locked.id,),
+                execution_status=ExecutionStatus.WAITING_APPROVAL.value,
+            )
+
+        if changed:
+            return ProgressOutcome(
+                execution_complete=False,
+                promoted=False,
+                reason="APPROVAL_CHANGED",
+            )
         return None
 
     @staticmethod
@@ -1269,7 +1600,7 @@ class ExecutionOrchestrator:
                         reason="STALE_LEASE",
                     )
 
-                # Continuable wave — local CONDITION/when/JOIN then maybe complete.
+                # Continuable wave — local CONDITION/APPROVAL/when/JOIN then maybe complete.
                 local_stop = await self._local_reconcile_locked(
                     executions=executions,
                     execution=execution,
@@ -1278,6 +1609,7 @@ class ExecutionOrchestrator:
                     steps=steps,
                     by_key=by_key,
                     now=now,
+                    session=session,
                 )
                 if local_stop is not None:
                     await session.flush()
@@ -1357,6 +1689,7 @@ class ExecutionOrchestrator:
                     steps=steps,
                     by_key=by_key,
                     now=now,
+                    session=session,
                 )
                 if local_stop is not None:
                     await session.flush()
