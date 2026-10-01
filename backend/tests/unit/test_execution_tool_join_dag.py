@@ -15,8 +15,12 @@ from app.domain.enums import (
     ExecutionSourceType,
     ExecutionStatus,
     JoinPolicy,
+    MCPProtocolEra,
+    MCPTransportType,
     RiskClass,
+    StepAttemptStatus,
     StepStatus,
+    ToolCallNormalizedStatus,
 )
 from app.execution.claim import ExecutionClaimService
 from app.execution.dag import (
@@ -32,11 +36,13 @@ from app.execution.materialize import (
 from app.execution.orchestrator import ExecutionOrchestrator, assert_execution_plan_lineage
 from app.execution.tool_runner import McpToolRunner
 from app.mcp.contracts import NormalizedInputRequired, NormalizedToolResult
+from app.mcp.current import CURRENT_MCP_PROTOCOL_VERSION
 from app.mcp.errors import MCPClientError
 from app.models.mcp import MCPToolVersion
 from app.repositories.approval_policy import ApprovalPolicyRepository
 from app.repositories.execution import ExecutionRepository
 from app.repositories.mcp_input_request import MCPInputRequestRepository
+from app.repositories.mcp_tool import MCPToolRepository
 from app.repositories.mcp_tool_policy import MCPToolPolicyRepository
 from app.schemas.execution_plan import (
     EXECUTION_PLAN_SCHEMA_VERSION,
@@ -1216,6 +1222,7 @@ async def test_duplicate_orchestrator_wave_in_progress(
     db_session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """RUNNING + STARTED ToolCall → WAVE_IN_PROGRESS (no competing wave)."""
     _install_no_side_effects(monkeypatch)
     async with db_session_factory() as session:
         seeded = await _seed_executable(session)
@@ -1233,12 +1240,40 @@ async def test_duplicate_orchestrator_wave_in_progress(
         await session.commit()
         assert claim.lease_token is not None
         lease = claim.lease_token
-        steps = await ExecutionRepository(session).list_steps(execution_id)
+        executions = ExecutionRepository(session)
+        tool = await MCPToolRepository(session).get(seeded["tool_id"])
+        assert tool is not None
+        steps = await executions.list_steps(execution_id)
+        now = datetime.now(UTC)
         for s in steps:
-            if s.status == StepStatus.READY.value:
-                s.status = StepStatus.RUNNING.value
-                s.started_at = datetime.now(UTC)
-                s.lock_version += 1
+            if s.status != StepStatus.READY.value:
+                continue
+            s.status = StepStatus.RUNNING.value
+            s.started_at = now
+            s.attempt_count = 1
+            s.lock_version += 1
+            attempt = await executions.create_attempt(
+                step_execution_id=s.id,
+                attempt_no=1,
+                status=StepAttemptStatus.STARTED.value,
+                worker_id="w1",
+                lease_expires_at=now,
+                idempotency_key=f"dup-{s.step_key}-{uuid.uuid4().hex[:8]}",
+                request_snapshot={"tool_version_id": str(seeded["tool_version_id"])},
+                started_at=now,
+            )
+            await executions.create_tool_call(
+                step_attempt_id=attempt.id,
+                mcp_server_id=tool.mcp_server_id,
+                mcp_tool_version_id=seeded["tool_version_id"],
+                protocol_era=MCPProtocolEra.CURRENT.value,
+                protocol_version=CURRENT_MCP_PROTOCOL_VERSION,
+                transport_type=MCPTransportType.STREAMABLE_HTTP.value,
+                remote_request_id=str(uuid.uuid4()),
+                request_meta={"method": "tools/call"},
+                normalized_status=ToolCallNormalizedStatus.STARTED.value,
+                started_at=now,
+            )
         await session.commit()
 
     orch = ExecutionOrchestrator(

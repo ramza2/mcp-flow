@@ -20,7 +20,13 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.errors import AppError
-from app.domain.enums import AuthorableStepType, ExecutionStatus, StepStatus
+from app.domain.enums import (
+    AuthorableStepType,
+    ExecutionStatus,
+    StepAttemptStatus,
+    StepStatus,
+    ToolCallNormalizedStatus,
+)
 from app.execution.completion import (
     DISPOSITION_FATAL_EXECUTION_FAILURE,
     DISPOSITION_KNOWN_STEP_FAILURE,
@@ -560,7 +566,10 @@ class ExecutionOrchestrator:
                 by_key = {s.step_key: s for s in steps}
                 single_tool = is_single_tool_execution(steps)
 
-                # Duplicate delivery: another wave already RUNNING under lease.
+                # Duplicate mid-wave delivery: TOOL RUNNING with STARTED ToolCall
+                # means a remote call is already owned/in-flight — do not start a
+                # competing wave. RUNNING + STARTED Attempt without ToolCall is
+                # recovery/resume and must be re-invoked by this orchestrator.
                 running_tools = [
                     s
                     for s in steps
@@ -568,11 +577,46 @@ class ExecutionOrchestrator:
                     and s.status == StepStatus.RUNNING.value
                 ]
                 if running_tools:
+                    in_flight = False
+                    for rt in running_tools:
+                        attempts = await executions.list_attempts(rt.id)
+                        for attempt in attempts:
+                            if attempt.status != StepAttemptStatus.STARTED.value:
+                                continue
+                            tool_calls = await executions.list_tool_calls(attempt.id)
+                            if any(
+                                tc.normalized_status
+                                == ToolCallNormalizedStatus.STARTED.value
+                                for tc in tool_calls
+                            ):
+                                in_flight = True
+                                break
+                        if in_flight:
+                            break
+                    if in_flight:
+                        return ProgressOutcome(
+                            execution_complete=False,
+                            promoted=False,
+                            reason=_REASON_WAVE_IN_PROGRESS,
+                            plan_order=dag.ordered_step_keys,
+                        )
+                    # Resume RUNNING TOOLs (no STARTED ToolCall) as this wave.
+                    resume_ids = [
+                        by_key[k].id
+                        for k in dag.ordered_step_keys
+                        if by_key[k].status == StepStatus.RUNNING.value
+                        and by_key[k].step_type == AuthorableStepType.TOOL.value
+                    ]
+                    execution.heartbeat_at = now
+                    execution.lock_version += 1
+                    await session.flush()
                     return ProgressOutcome(
                         execution_complete=False,
                         promoted=False,
-                        reason=_REASON_WAVE_IN_PROGRESS,
+                        reason="WAVE_READY",
+                        ready_step_ids=tuple(resume_ids),
                         plan_order=dag.ordered_step_keys,
+                        single_tool=single_tool,
                     )
 
                 # Reconcile JOINs before reserving TOOL slots.
