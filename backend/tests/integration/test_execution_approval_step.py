@@ -26,6 +26,7 @@ from app.execution.materialize import (
     ExecutionMaterializeParams,
     ExecutionPlanMaterializer,
 )
+from app.execution.orchestrator import ExecutionOrchestrator
 from app.execution.tool_runner import McpToolRunner
 from app.mcp.contracts import NormalizedToolResult
 from app.models.approval import ApprovalRequest
@@ -464,52 +465,144 @@ async def test_pg_expiry(
 async def test_pg_duplicate_wait_race(
     integration_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """Second run after wait reuses PENDING — exactly one ApprovalRequest."""
+    """Two PG sessions race authorable APPROVAL enter — one PENDING request."""
     async with integration_session_factory() as session:
         policy = await _create_policy(session)
         await session.flush()
-        execution_id, lease, seeded = await _materialize_claim(
+        execution_id, lease, _seeded = await _materialize_claim(
             session,
             step_specs=[_approval("p", policy.id)],
             worker_id="pg-appr-race",
         )
-    client = _ScoreClient()
-    outcome = await _run(
-        integration_session_factory,
-        execution_id=execution_id,
-        lease=lease,
-        client=client,
-        worker_id="pg-appr-race",
-    )
-    assert outcome.reason == "WAITING_APPROVAL"
+        execution = await ExecutionRepository(session).get(execution_id)
+        assert execution is not None
+        assert execution.status == ExecutionStatus.RUNNING.value
+        assert execution.lease_token == lease
+        steps = await ExecutionRepository(session).list_steps(execution_id)
+        assert len(steps) == 1
+        approval_step = steps[0]
+        assert approval_step.step_key == "p"
+        assert approval_step.status == StepStatus.PENDING.value
+        assert await _list_requests(session, execution_id) == []
 
-    # Approximate race: re-claim after wait is not possible (lease cleared).
-    # Re-run via a fresh claim attempt should not create a second PENDING —
-    # Execution is WAITING_APPROVAL without a lease. Instead, call enter reuse
-    # by racing two decide-free duplicate wait inspections via a second
-    # orchestrator-style run after manually reclaiming with expired state.
+    client = _ScoreClient()
+    runner = McpToolRunner(
+        session_factory=integration_session_factory,
+        mcp_client=client,
+        secret_resolver_factory=_resolver_factory,
+        lease_seconds=120,
+        result_inline_max_bytes=256_000,
+    )
+    orch = ExecutionOrchestrator(
+        session_factory=integration_session_factory,
+        tool_runner=runner,
+    )
+    barrier = asyncio.Barrier(2)
+
+    async def _reconcile_once() -> Any:
+        await barrier.wait()
+        return await orch._prepare_wave(
+            execution_id=execution_id,
+            worker_id="pg-appr-race",
+            lease_token=lease,
+        )
+
+    r1, r2 = await asyncio.gather(_reconcile_once(), _reconcile_once())
+    reasons = {r1.reason, r2.reason}
+    assert "WAITING_APPROVAL" in reasons
+    # Loser may also observe durable wait after winner commits.
+    assert reasons <= {"WAITING_APPROVAL", "STALE_LEASE", "NO_READY", "WAVE_READY"}
+
     async with integration_session_factory() as session:
         requests = await _list_requests(session, execution_id)
         assert len(requests) == 1
+        pending = requests[0]
+        assert pending.status == ApprovalStatus.PENDING.value
+        steps = await ExecutionRepository(session).list_steps(execution_id)
+        by = {s.step_key: s for s in steps}
+        assert pending.step_execution_id == by["p"].id
+        execution = await ExecutionRepository(session).get(execution_id)
+        assert execution is not None
+        assert execution.status == ExecutionStatus.WAITING_APPROVAL.value
+        assert execution.worker_id is None
+        assert execution.lease_token is None
+        assert by["p"].status == StepStatus.WAITING_APPROVAL.value
+        assert (await ExecutionRepository(session).list_attempts(by["p"].id)) == []
+        assert len(client.calls) == 0
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_pg_simultaneous_eligible_approval_race(
+    integration_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Two sessions race when P1 and P2 are both eligible — Plan-order P1 wins."""
+    async with integration_session_factory() as session:
+        p1_policy = await _create_policy(session)
+        p2_policy = await _create_policy(session)
+        await session.flush()
+        execution_id, lease, _seeded = await _materialize_claim(
+            session,
+            step_specs=[
+                _approval("p1", p1_policy.id),
+                _approval("p2", p2_policy.id),
+            ],
+            worker_id="pg-appr-p12-race",
+        )
+        execution = await ExecutionRepository(session).get(execution_id)
+        assert execution is not None
+        assert execution.status == ExecutionStatus.RUNNING.value
+        assert execution.lease_token == lease
+        by = {
+            s.step_key: s
+            for s in await ExecutionRepository(session).list_steps(execution_id)
+        }
+        assert by["p1"].status == StepStatus.PENDING.value
+        assert by["p2"].status == StepStatus.PENDING.value
+        assert await _list_requests(session, execution_id) == []
+        p1_id = by["p1"].id
+
+    client = _ScoreClient()
+    runner = McpToolRunner(
+        session_factory=integration_session_factory,
+        mcp_client=client,
+        secret_resolver_factory=_resolver_factory,
+        lease_seconds=120,
+        result_inline_max_bytes=256_000,
+    )
+    orch = ExecutionOrchestrator(
+        session_factory=integration_session_factory,
+        tool_runner=runner,
+    )
+    barrier = asyncio.Barrier(2)
+
+    async def _reconcile_once() -> Any:
+        await barrier.wait()
+        return await orch._prepare_wave(
+            execution_id=execution_id,
+            worker_id="pg-appr-p12-race",
+            lease_token=lease,
+        )
+
+    await asyncio.gather(_reconcile_once(), _reconcile_once())
+
+    async with integration_session_factory() as session:
+        by = {
+            s.step_key: s
+            for s in await ExecutionRepository(session).list_steps(execution_id)
+        }
+        assert by["p1"].status == StepStatus.WAITING_APPROVAL.value
+        assert by["p2"].status == StepStatus.PENDING.value
+        requests = await _list_requests(session, execution_id)
+        assert len(requests) == 1
         assert requests[0].status == ApprovalStatus.PENDING.value
-        first_id = requests[0].id
-
-        # Force QUEUED + claim again is wrong; instead simulate duplicate
-        # delivery by running claim+run on a second execution is out of scope.
-        # Approximate: re-invoke runner is NO_OP without lease. Persist second
-        # enter via ApprovalWaitService.reuse by claiming with forged lease is
-        # unsafe. Verify idempotent pending count under concurrent read.
-        async def _count() -> int:
-            async with integration_session_factory() as s2:
-                return len(await _list_requests(s2, execution_id))
-
-        counts = await asyncio.gather(*[_count() for _ in range(8)])
-        assert counts == [1] * 8
-        assert first_id == (
-            await ApprovalRequestRepository(session).find_pending_for_execution(
-                execution_id=execution_id
-            )
-        ).id
+        assert requests[0].step_execution_id == p1_id
+        assert requests[0].step_execution_id != by["p2"].id
+        execution = await ExecutionRepository(session).get(execution_id)
+        assert execution is not None
+        assert execution.status == ExecutionStatus.WAITING_APPROVAL.value
+        assert execution.lease_token is None
+        assert len(client.calls) == 0
 
 
 @pytest.mark.integration

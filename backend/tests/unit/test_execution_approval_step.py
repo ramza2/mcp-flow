@@ -15,9 +15,11 @@ from app.approval.query import ApprovalQueryService, project_safe_context
 from app.approval.step_context import (
     APPROVAL_KIND_AUTHORABLE_STEP,
     APPROVAL_STEP_CONTEXT_SCHEMA_VERSION,
+    assert_approval_step_lineage_matches,
     build_approval_step_context_snapshot,
     compute_approval_step_context_hash,
     hash_result_inline,
+    validate_stored_approval_step_context,
 )
 from app.core.errors import AppError
 from app.domain.enums import (
@@ -40,11 +42,11 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from tests.unit.test_approval_decision_resume import _grant_decide
 from tests.unit.test_execution_condition_when import (
-    _ScoreClient,
     _claim_and_run,
     _condition_step,
     _plan,
     _resolver_factory,
+    _ScoreClient,
     _seed_executable,
     _tool_step,
 )
@@ -713,6 +715,125 @@ def test_tool_context_validation_unchanged() -> None:
     assert validated["schema_version"] == APPROVAL_CONTEXT_SCHEMA_VERSION
 
 
+def _valid_authorable_snapshot(**overrides: Any) -> dict[str, Any]:
+    snap: dict[str, Any] = {
+        "schema_version": APPROVAL_STEP_CONTEXT_SCHEMA_VERSION,
+        "approval_kind": APPROVAL_KIND_AUTHORABLE_STEP,
+        "execution_id": str(uuid.uuid4()),
+        "step_execution_id": str(uuid.uuid4()),
+        "step_key": "approve_release",
+        "requester_id": str(uuid.uuid4()),
+        "source_type": "MANUAL_TOOL_TEST",
+        "trigger_type": "TEST",
+        "agent_version_id": str(uuid.uuid4()),
+        "workflow_version_id": None,
+        "plan_hash": "a" * 64,
+        "approval_policy": {
+            "id": str(uuid.uuid4()),
+            "status": "ACTIVE",
+            "decision_mode": "ANY",
+            "required_approvals": 1,
+            "approver_scope": {},
+            "default_expiry_seconds": 3600,
+            "allow_self_approval": True,
+            "reject_comment_required": False,
+        },
+        "upstream_evidence": [
+            {
+                "step_key": "build",
+                "step_type": "TOOL",
+                "status": "SUCCEEDED",
+                "condition_result": None,
+                "error_code": None,
+                "result_inline_hash": "b" * 64,
+            }
+        ],
+    }
+    snap.update(overrides)
+    return snap
+
+
+def test_malformed_agent_version_uuid_fail_closed() -> None:
+    snap = _valid_authorable_snapshot(agent_version_id="bad")
+    with pytest.raises(AppError) as exc:
+        validate_stored_approval_step_context(snap)
+    assert exc.value.code == "RESOURCE_CONFLICT"
+    assert exc.value.status_code == 409
+
+
+def test_malformed_workflow_version_uuid_fail_closed() -> None:
+    snap = _valid_authorable_snapshot(workflow_version_id="bad")
+    with pytest.raises(AppError) as exc:
+        validate_stored_approval_step_context(snap)
+    assert exc.value.code == "RESOURCE_CONFLICT"
+    assert exc.value.status_code == 409
+
+
+def test_malformed_policy_uuid_fail_closed() -> None:
+    snap = _valid_authorable_snapshot()
+    snap["approval_policy"] = dict(snap["approval_policy"])
+    snap["approval_policy"]["id"] = "bad"
+    with pytest.raises(AppError) as exc:
+        validate_stored_approval_step_context(snap)
+    assert exc.value.code == "RESOURCE_CONFLICT"
+    assert exc.value.status_code == 409
+
+
+@pytest.mark.parametrize(
+    "mutator",
+    [
+        lambda item: item.pop("step_key"),
+        lambda item: item.__setitem__("step_type", "SCRIPT"),
+        lambda item: item.__setitem__("status", "DONE"),
+        lambda item: item.__setitem__("condition_result", "true"),
+        lambda item: item.__setitem__("result_inline_hash", "not-sha256"),
+        lambda item: item.__setitem__("extra", "nope"),
+    ],
+)
+def test_malformed_upstream_evidence_fail_closed(mutator) -> None:
+    snap = _valid_authorable_snapshot()
+    item = dict(snap["upstream_evidence"][0])
+    mutator(item)
+    snap["upstream_evidence"] = [item]
+    with pytest.raises(AppError) as exc:
+        validate_stored_approval_step_context(snap)
+    assert exc.value.code == "RESOURCE_CONFLICT"
+    assert exc.value.status_code == 409
+
+
+def test_lineage_malformed_nullable_uuid_no_raw_valueerror() -> None:
+    """Corrupt agent_version_id must raise AppError, never raw ValueError."""
+    snap = _valid_authorable_snapshot(agent_version_id="not-a-uuid")
+    execution = type(
+        "E",
+        (),
+        {
+            "id": uuid.UUID(snap["execution_id"]),
+            "requester_id": uuid.UUID(snap["requester_id"]),
+            "agent_version_id": uuid.uuid4(),
+            "workflow_version_id": None,
+            "plan_hash": snap["plan_hash"],
+            "source_type": snap["source_type"],
+            "trigger_type": snap["trigger_type"],
+        },
+    )()
+    step = type(
+        "S",
+        (),
+        {
+            "id": uuid.UUID(snap["step_execution_id"]),
+            "step_key": snap["step_key"],
+            "step_type": AuthorableStepType.APPROVAL.value,
+        },
+    )()
+    with pytest.raises(AppError) as exc:
+        assert_approval_step_lineage_matches(
+            execution=execution, step=step, snapshot=snap
+        )
+    assert exc.value.code == "RESOURCE_CONFLICT"
+    assert exc.value.status_code == 409
+
+
 # ---------------------------------------------------------------------------
 # resume
 # ---------------------------------------------------------------------------
@@ -839,6 +960,101 @@ async def test_duplicate_resume_stale_delivery(
         assert execution is not None
         assert execution.lease_token == first_token
         assert execution.worker_id == "resume-1"
+
+
+@pytest.mark.asyncio
+async def test_authorable_context_corruption_resume_fail_closed(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Mutated durable context must not leak ValueError; no downstream MCP."""
+    execution_id, approval_id, requester_id, _seeded, client = (
+        await _enter_authorable_wait(
+            db_session_factory,
+            monkeypatch,
+            steps_factory=lambda pid: [
+                _approval_step("p", pid),
+                _tool_step("b", depends_on=["p"]),
+            ],
+        )
+    )
+    async with db_session_factory() as session:
+        await _grant_decide(session, user_id=requester_id)
+        await session.commit()
+        await _decide_approve(
+            session, approval_id=approval_id, actor_user_id=requester_id
+        )
+        await session.commit()
+        request = await ApprovalRequestRepository(session).get(approval_id)
+        assert request is not None
+        corrupted = dict(request.context_snapshot)
+        corrupted["agent_version_id"] = "not-a-uuid"
+        request.context_snapshot = corrupted
+        request.context_hash = compute_approval_step_context_hash(corrupted)
+        await session.commit()
+
+        claim = await ApprovalResumeClaimService(session, lease_seconds=60).claim(
+            execution_id=execution_id,
+            approval_request_id=approval_id,
+            worker_id="resume-corrupt",
+        )
+        await session.commit()
+        assert claim.claimed is False
+        assert claim.reason == "PRECONDITION_FAILED"
+        execution = await ExecutionRepository(session).get(execution_id)
+        assert execution is not None
+        assert execution.status == ExecutionStatus.FAILED.value
+        assert execution.error_code == "APPROVAL_RESUME_PRECONDITION_FAILED"
+        by = {
+            s.step_key: s
+            for s in await ExecutionRepository(session).list_steps(execution_id)
+        }
+        assert by["p"].status == StepStatus.FAILED.value
+        assert by["p"].error_code == "APPROVAL_RESUME_PRECONDITION_FAILED"
+        assert by["b"].status == StepStatus.SKIPPED.value
+        assert (await ExecutionRepository(session).list_attempts(by["b"].id)) == []
+    assert len(client.calls) == 0
+
+    # Decide path with malformed upstream evidence: AppError, no MCP for B.
+    execution_id2, approval_id2, requester_id2, _seeded2, client2 = (
+        await _enter_authorable_wait(
+            db_session_factory,
+            monkeypatch,
+            steps_factory=lambda pid: [
+                _tool_step("a"),
+                _approval_step("p", pid, depends_on=["a"]),
+                _tool_step("b", depends_on=["p"]),
+            ],
+        )
+    )
+    async with db_session_factory() as session:
+        request = await ApprovalRequestRepository(session).get(approval_id2)
+        assert request is not None
+        corrupted = dict(request.context_snapshot)
+        upstream = [dict(corrupted["upstream_evidence"][0])]
+        upstream[0]["result_inline_hash"] = "not-sha256"
+        corrupted["upstream_evidence"] = upstream
+        request.context_snapshot = corrupted
+        request.context_hash = compute_approval_step_context_hash(corrupted)
+        await session.commit()
+        await _grant_decide(session, user_id=requester_id2)
+        await session.commit()
+        with pytest.raises(AppError) as exc:
+            await ApprovalDecisionService(session).decide(
+                approval_id=approval_id2,
+                actor_user_id=requester_id2,
+                decision="APPROVE",
+            )
+        assert exc.value.code == "RESOURCE_CONFLICT"
+        assert exc.value.status_code == 409
+        await session.rollback()
+        by = {
+            s.step_key: s
+            for s in await ExecutionRepository(session).list_steps(execution_id2)
+        }
+        assert by["b"].status == StepStatus.PENDING.value
+        assert (await ExecutionRepository(session).list_attempts(by["b"].id)) == []
+    assert len(client2.calls) == 1  # upstream A only from enter wait
 
 
 # ---------------------------------------------------------------------------
