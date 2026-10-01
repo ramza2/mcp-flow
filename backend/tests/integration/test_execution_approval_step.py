@@ -407,12 +407,17 @@ async def test_pg_reject_continue_ignored(
 async def test_pg_expiry(
     integration_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
+    """Authorable expiry is mandatory-fatal; ignores MARK_PARTIAL; cleans DAG."""
     async with integration_session_factory() as session:
         policy = await _create_policy(session)
         await session.flush()
         execution_id, lease, _seeded = await _materialize_claim(
             session,
-            step_specs=[_approval("p", policy.id, on_error="MARK_PARTIAL")],
+            step_specs=[
+                _tool("a"),
+                _approval("p", policy.id, depends_on=["a"], on_error="MARK_PARTIAL"),
+                _tool("b", depends_on=["p"]),
+            ],
             worker_id="pg-appr-exp",
         )
     client = _ScoreClient()
@@ -424,6 +429,7 @@ async def test_pg_expiry(
         worker_id="pg-appr-exp",
     )
     assert outcome.reason == "WAITING_APPROVAL"
+    assert len(client.calls) == 1
     async with integration_session_factory() as session:
         pending = await ApprovalRequestRepository(session).find_pending_for_execution(
             execution_id=execution_id
@@ -438,6 +444,19 @@ async def test_pg_expiry(
         assert execution is not None
         assert execution.status == ExecutionStatus.FAILED.value
         assert execution.error_code == "APPROVAL_EXPIRED"
+        assert execution.worker_id is None
+        assert execution.lease_token is None
+        by = {
+            s.step_key: s
+            for s in await ExecutionRepository(session).list_steps(execution_id)
+        }
+        assert by["a"].status == StepStatus.SUCCEEDED.value
+        assert by["p"].status == StepStatus.FAILED.value
+        assert by["p"].error_code == "APPROVAL_EXPIRED"
+        assert by["b"].status == StepStatus.SKIPPED.value
+        assert by["b"].error_code == "UPSTREAM_EXECUTION_STOPPED"
+        assert (await ExecutionRepository(session).list_attempts(by["b"].id)) == []
+    assert len(client.calls) == 1  # no downstream B MCP after expiry
 
 
 @pytest.mark.integration

@@ -488,7 +488,7 @@ async def test_expiry_ignores_mark_partial(
     db_session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    execution_id, approval_id, _req, _seeded, _client = await _enter_authorable_wait(
+    execution_id, approval_id, _req, _seeded, client = await _enter_authorable_wait(
         db_session_factory,
         monkeypatch,
         steps_factory=lambda pid: [
@@ -510,15 +510,21 @@ async def test_expiry_ignores_mark_partial(
         assert execution is not None
         assert execution.status == ExecutionStatus.FAILED.value
         assert execution.error_code == "APPROVAL_EXPIRED"
+        assert execution.worker_id is None
+        assert execution.lease_token is None
         by = {
             s.step_key: s
             for s in await ExecutionRepository(session).list_steps(execution_id)
         }
         assert by["p"].status == StepStatus.FAILED.value
         assert by["p"].error_code == "APPROVAL_EXPIRED"
+        assert by["b"].status == StepStatus.SKIPPED.value
+        assert by["b"].error_code == "UPSTREAM_EXECUTION_STOPPED"
+        assert (await ExecutionRepository(session).list_attempts(by["b"].id)) == []
         request = await ApprovalRequestRepository(session).get(approval_id)
         assert request is not None
         assert request.status == ApprovalStatus.EXPIRED.value
+    assert len(client.calls) == 0
 
 
 @pytest.mark.asyncio
