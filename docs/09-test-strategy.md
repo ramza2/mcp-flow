@@ -421,7 +421,29 @@ Dataset은 평가 전 FROZEN하고 실행 중 정답을 변경하지 않는다.
 - PostgreSQL JOIN skipped-branch ALL_COMPLETE / ANY_SUCCESS
 - PostgreSQL duplicate CONDITION reconciliation race → one terminal CONDITION;
   selected-branch MCP ≤ 1
-- LOOP / LOOP_CONTEXT / authorable APPROVAL Step still out of scope
+- LOOP / LOOP_CONTEXT still out of scope
+
+추가 (authorable APPROVAL Step runtime):
+
+- ToolPolicy approval (`approval_context.v1`) vs authorable Plan checkpoint
+  (`approval_step_context.v1` / `AUTHORABLE_STEP`) remain distinct
+- root APPROVAL enters WAITING_APPROVAL; dependency APPROVAL waits after barrier
+- `when=false` / upstream conditional skip → SKIPPED, no ApprovalRequest
+- APPROVED READY → SUCCEEDED with canonical
+  `result_inline={approval_status, approval_request_id}`; Attempt/ToolCall 0
+- two eligible APPROVALs serialize by Plan order (≤1 PENDING request / Execution)
+- reject/expiry mandatory-fatal (ignore CONTINUE / MARK_PARTIAL); multi-Step
+  PENDING→SKIPPED, unused READY TOOL→CANCELLED; downstream MCP 0
+- multi-Step ToolPolicy approval remains `DAG_WAIT_UNSUPPORTED`
+- context: deterministic build; upstream evidence Plan order; raw result not
+  persisted (hash only); unknown schema fail closed; TOOL context unchanged
+- resume: fresh lease + READY; policy/context/upstream drift → FAILED; duplicate
+  resume STALE_DELIVERY; single-TOOL ToolPolicy resume regression green
+- query safe projection for AUTHORABLE_STEP; TOOL projection unchanged
+- PostgreSQL A→P→B happy path / reject / expiry / duplicate wait / duplicate
+  resume / multi-approval serialization / context drift
+- recovery limitation: post-resume worker death before local APPROVAL SUCCEEDED
+  may remain fail-closed; never recreate ApprovalRequest from historical APPROVED
 
 추가 (Runtime Binding resolution — sequential TOOL slice):
 

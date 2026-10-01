@@ -588,7 +588,8 @@ class ApprovalResumeClaimService:
 
 
 def _plan_timeout_seconds(step: ExecutionStep) -> int | None:
-    timeout = step.step_snapshot.get("timeout_seconds") if isinstance(step.step_snapshot, dict) else None
+    snapshot = step.step_snapshot if isinstance(step.step_snapshot, dict) else None
+    timeout = snapshot.get("timeout_seconds") if snapshot is not None else None
     if timeout is None:
         return None
     if not isinstance(timeout, int) or isinstance(timeout, bool):

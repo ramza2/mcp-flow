@@ -706,20 +706,38 @@ APPROVAL Step persisted `config` (exact field set):
 ```
 
 `approval_policy_id`는 `05-data-model.md`의 ApprovalPolicy를 참조한다.
-실행 시점의 보호대상 Tool·입력·정책을 snapshot하고 승인 이후 실제 호출 직전에 hash를 재검증한다
-(authorable APPROVAL Step runtime orchestration은 본 절의 static contract 범위 밖이다).
 
-### 9.7.1 TOOL/CONDITION/JOIN DAG wave runtime orchestration
-
-Runtime multi-step slice는 deterministic **wave-based TOOL/CONDITION/JOIN DAG**를
-실행한다. LOOP / authorable APPROVAL Step / `LOOP_CONTEXT`는 fail-closed이다.
+Authorable APPROVAL is a **Plan checkpoint**, distinct from ToolPolicy approval:
 
 ```text
-claim → validate TOOL/CONDITION/JOIN DAG
-→ promote root TOOLs up to max_parallelism (root CONDITION stays PENDING)
+ToolPolicy.requires_approval
+→ pre-Attempt ApprovalRequest (approval_context.v1)
+→ exact Tool + resolved input + ToolPolicy context
+
+Plan APPROVAL Step
+→ config.approval_policy_id
+→ human checkpoint (approval_step_context.v1)
+```
+
+An authorable APPROVAL Step does **not** authorize downstream TOOL invocation,
+ToolPolicy, confirmation, secret usage, or mutable runtime policy. Every
+downstream TOOL must still pass normal invocation-time checks. If that TOOL
+requires ToolPolicy approval, existing single-TOOL rules still apply
+(multi-Step ToolPolicy wait remains `DAG_WAIT_UNSUPPORTED`).
+
+### 9.7.1 TOOL/CONDITION/JOIN/APPROVAL DAG wave runtime orchestration
+
+Runtime multi-step slice는 deterministic **wave-based TOOL/CONDITION/JOIN/APPROVAL
+DAG**를 실행한다. LOOP / `LOOP_CONTEXT`는 fail-closed이다.
+
+```text
+claim → validate TOOL/CONDITION/JOIN/APPROVAL DAG
+→ promote root TOOLs up to max_parallelism
+  (root CONDITION / APPROVAL stay PENDING)
 → local reconcile fixed point:
     prune intentional conditional SKIPPED descendants
-    → evaluate eligible CONDITION / Step.when / JOIN
+    → evaluate eligible CONDITION / APPROVAL / Step.when / JOIN
+    → authorable APPROVAL may enter Execution-level WAITING_APPROVAL
     → repeat until no local state changes
 → reserve eligible TOOL wave (Plan order, READY+RUNNING slot cap)
 → asyncio gather concurrent MCP for the reserved wave
@@ -734,6 +752,7 @@ Supported runtime Step types:
 TOOL
 CONDITION
 JOIN
+APPROVAL
 ```
 
 TOOL rules (this slice):
@@ -756,21 +775,61 @@ CONDITION rules:
 - Predicate `false` is still CONDITION SUCCEEDED (`condition_result=false`)
 - Attempt count 0
 
-Step `when` (optional Predicate AST) is runtime-supported for TOOL / CONDITION / JOIN:
+APPROVAL rules (authorable Plan checkpoint):
+
+- local orchestration only until wait; zero Attempt / ToolCall / MCP
+- `mcp_tool_version_id` null; valid `ApprovalStepConfigV1.approval_policy_id`
+  referencing a current ACTIVE ApprovalPolicy
+- root APPROVAL allowed; fan-in from zero or more dependencies allowed
+- dependency barrier uses existing progression-complete semantics
+  (SUCCEEDED, or FAILED/TIMED_OUT with `on_error ∈ {MARK_PARTIAL, CONTINUE}`;
+  never through UNKNOWN_OUTCOME / fatal / FAIL_EXECUTION stop)
+- after barrier + `when` true/absent:
+  `PENDING → READY → WAITING_APPROVAL` + Execution `WAITING_APPROVAL` +
+  lease clear + exactly one PENDING ApprovalRequest
+- durable context schema: `approval_step_context.v1` with
+  `approval_kind=AUTHORABLE_STEP`, plan_hash, ApprovalPolicy snapshot,
+  and `upstream_evidence` (transitive Plan ancestors in Plan order:
+  `step_key` / `step_type` / `status` / `condition_result` / `error_code` /
+  `result_inline_hash` — raw TOOL results are never copied into context)
+- at most one PENDING ApprovalRequest per Execution; simultaneously eligible
+  APPROVAL Steps serialize by immutable Plan order
+- authorable wait is an **Execution-level** checkpoint: it may freeze unrelated
+  READY sibling branches; branch-local suspension is out of scope
+- enter wait only at the orchestrator local-reconcile / wave-settled boundary
+  (never while a remote TOOL wave is in flight)
+- APPROVED → `EXECUTION_APPROVAL_RESUME` Outbox (same TX as decision);
+  resume claim → fresh lease + APPROVAL `WAITING_APPROVAL → READY`;
+  local reconcile then `READY → RUNNING → SUCCEEDED` with
+  `result_inline={"approval_status":"APPROVED","approval_request_id":"<uuid>"}`
+- REJECTED / EXPIRED are **mandatory-fatal** (ignore Step `on_error`):
+  APPROVAL Step FAILED (`APPROVAL_REJECTED` / `APPROVAL_EXPIRED`),
+  Execution FAILED; untouched PENDING → SKIPPED; unused READY TOOL → CANCELLED
+- policy/context/upstream-evidence drift on decide or resume → fail closed
+  (`APPROVAL_RESUME_PRECONDITION_FAILED`); no downstream MCP
+- recovery limitation: WAITING_APPROVAL is durable and lease-free; APPROVED
+  resume is Outbox-driven and idempotent; if the worker dies after resume
+  before local APPROVAL SUCCEEDED, existing multi-Step recovery may remain
+  fail-closed — never recreate an ApprovalRequest from historical APPROVED alone
+
+Step `when` (optional Predicate AST) is runtime-supported for
+TOOL / CONDITION / JOIN / APPROVAL:
 
 - evaluate only after the Step dependency barrier is satisfied
 - absent → proceed
 - `true` → proceed (`condition_result=true` may be retained as gate evidence on
   non-CONDITION Steps; CONDITION then overwrites with its config Predicate result)
 - `false` → `PENDING → SKIPPED`, `error_code=STEP_WHEN_FALSE`,
-  `condition_result=false`, no Attempt/ToolCall/MCP; `on_error` does not apply
+  `condition_result=false`, no Attempt/ToolCall/MCP/ApprovalRequest;
+  `on_error` does not apply
 - if CONDITION `when=false`, config Predicate is not evaluated
+- if APPROVAL `when=false`, no ApprovalRequest is created
 
 Conditional branch pruning (non-JOIN only):
 
-- PENDING TOOL/CONDITION whose any direct dependency has intentional conditional
-  skip (`STEP_WHEN_FALSE` / `UPSTREAM_CONDITION_SKIPPED`) →
-  `SKIPPED` + `UPSTREAM_CONDITION_SKIPPED`
+- PENDING TOOL/CONDITION/APPROVAL whose any direct dependency has intentional
+  conditional skip (`STEP_WHEN_FALSE` / `UPSTREAM_CONDITION_SKIPPED`) →
+  `SKIPPED` + `UPSTREAM_CONDITION_SKIPPED` (no ApprovalRequest)
 - apply recursively until the local graph stabilizes
 - JOIN is not pruned this way; JOIN observes SKIPPED deps as terminal and applies
   its JOIN policy
@@ -787,7 +846,7 @@ JOIN rules:
 
 `Plan.limits.max_parallelism` is a **per-Execution runtime concurrency cap**:
 `count(TOOL READY + TOOL RUNNING)` consumes slots under the Execution row lock.
-CONDITION / JOIN / `when` local work does not consume a remote slot.
+CONDITION / JOIN / APPROVAL / `when` local work does not consume a remote slot.
 Cross-Execution / `MCPServer.max_concurrency` global admission control is out of scope.
 
 Wave fatal / fail-fast:
@@ -805,9 +864,12 @@ Wave fatal / fail-fast:
 
 Multi-Step wait boundary:
 
-- single-TOOL Approval / MRTR WAITING_* behavior unchanged
-- multi-Step DAG must not enter Execution-level WAITING_INPUT / WAITING_APPROVAL
-  while siblings may be in flight (`DAG_WAIT_UNSUPPORTED` / conservative
+- single-TOOL ToolPolicy Approval / MRTR WAITING_* behavior unchanged
+- authorable APPROVAL Step may enter Execution-level WAITING_APPROVAL after the
+  current remote wave has fully settled (local reconcile boundary)
+- multi-Step TOOL + ToolPolicy.requires_approval remains fail-closed
+  (`DAG_WAIT_UNSUPPORTED`) until branch-local Tool suspension is designed
+- multi-Step MRTR remains fail-closed (`DAG_WAIT_UNSUPPORTED` / conservative
   UNKNOWN_OUTCOME for post-MCP MRTR). Branch-local suspension is deferred.
 
 `completion.success_policy` (현재 유일한 값):

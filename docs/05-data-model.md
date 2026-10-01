@@ -1070,6 +1070,24 @@ ToolPolicy pre-Attempt approval foundation:
 - PENDING row는 `(execution_id, step_execution_id)` partial unique (`WHERE status='PENDING'`)로 중복 active request를 차단한다. 이력(비-PENDING)은 보존한다.
 - `context_snapshot` / `context_hash`는 secret-safe canonical hash 규칙을 따른다.
 - ApprovalRequest 생성과 Execution/Step `WAITING_APPROVAL` + lease clear는 동일 transaction이다.
+- ToolPolicy context schema: `approval_context.v1` (Tool + resolved input + ToolPolicy).
+
+Authorable APPROVAL Step checkpoint:
+
+- Distinct durable schema: `approval_step_context.v1` with
+  `approval_kind=AUTHORABLE_STEP` (do not overload ToolPolicy context).
+- Context binds `execution_id` / `step_execution_id` / `step_key` / requester /
+  source/trigger / version ids / `plan_hash` / ApprovalPolicy snapshot /
+  `upstream_evidence` (transitive Plan ancestors; `result_inline_hash` only —
+  never raw TOOL results solely for checkpointing).
+- Evidence validation and query safe projection dispatch on
+  `context_snapshot.schema_version`; unknown schemas fail closed.
+- At most one PENDING ApprovalRequest per Execution for authorable checkpoints
+  (orchestrator serializes by Plan order under the Execution row lock; no new
+  column required).
+- Authorable REJECTED/EXPIRED are mandatory-fatal for the APPROVAL Step and
+  Execution (`APPROVAL_REJECTED` / `APPROVAL_EXPIRED`); ignore Step `on_error`;
+  multi-Step cleanup skips untouched PENDING and cancels unused READY TOOLs.
 
 ### 12.3 `approval_decisions`
 
@@ -1294,13 +1312,23 @@ JOIN is local-only (`PENDING→READY→RUNNING→SUCCEEDED|FAILED|SKIPPED` in on
 barrier evaluation (`ALL_SUCCESS` / `ALL_COMPLETE` / `ANY_SUCCESS`). JOIN
 `when` is evaluated after the dependency barrier and before policy evaluation.
 
-Multi-Step DAG must not enter Execution-level `WAITING_INPUT` /
-`WAITING_APPROVAL` (fail closed: `DAG_WAIT_UNSUPPORTED`). Single-TOOL wait
-paths remain unchanged.
+Authorable APPROVAL Steps may enter Execution-level `WAITING_APPROVAL` at the
+orchestrator local-reconcile boundary after the current remote TOOL wave has
+settled. This is an Execution-level checkpoint and may freeze unrelated READY
+sibling branches; branch-local suspension is out of scope.
+
+Multi-Step TOOL + ToolPolicy.requires_approval and multi-Step MRTR must not
+enter Execution-level wait while siblings may be in flight (fail closed:
+`DAG_WAIT_UNSUPPORTED`). Single-TOOL ToolPolicy / MRTR wait paths remain
+unchanged.
 
 Multi-Step parallel-wave recovery remains fail-closed: never re-invoke a
 terminal Attempt/ToolCall; ambiguous in-flight parallel evidence must not cause
-duplicate external calls; complex parallel recovery is unsupported.
+duplicate external calls; complex parallel recovery is unsupported. Authorable
+APPROVAL WAITING_APPROVAL is durable and lease-free; APPROVED resume is
+Outbox-driven and idempotent. If the worker dies after resume before local
+APPROVAL SUCCEEDED, recovery may remain fail-closed — never recreate an
+ApprovalRequest merely because recovery sees historical APPROVED evidence.
 
 Lease heartbeat는 `RUNNING` + 동일 worker_id + 동일 lease_token + 미만료 lease에서만 연장한다. 만료된 lease를 heartbeat로 되살리지 않는다.
 
@@ -1393,7 +1421,15 @@ WAITING_INPUT → READY | FAILED | CANCELLED
 WAITING_APPROVAL → READY | FAILED | SKIPPED | CANCELLED
 ```
 
-`READY → WAITING_APPROVAL`은 ToolPolicy pre-Attempt approval wait다. 이 경로에서는 StepAttempt / ToolCall / MCP 호출을 만들지 않으며 `attempt_count`와 `started_at`을 변경하지 않는다. `RUNNING → WAITING_APPROVAL`은 Attempt 시작 이후 mid-execution Approval(authorable APPROVAL Step 등)용이며 현재 single-TOOL foundation 범위 밖이다.
+`READY → WAITING_APPROVAL` covers:
+
+- ToolPolicy pre-Attempt approval (TOOL Step READY → WAITING_APPROVAL)
+- authorable APPROVAL Plan checkpoint (`PENDING → READY → WAITING_APPROVAL`)
+
+Neither path creates StepAttempt / ToolCall / MCP, and neither mutates
+`attempt_count` / Attempt `started_at` as remote work. Authorable APPROVAL may
+set Step `ready_at` when entering the local wait. `RUNNING → WAITING_APPROVAL`
+(mid-Attempt approval) remains out of scope.
 
 `UNKNOWN_OUTCOME`은 terminal이며 자동 retry하지 않는다.
 
