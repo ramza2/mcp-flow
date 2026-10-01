@@ -709,25 +709,30 @@ APPROVAL Step persisted `config` (exact field set):
 실행 시점의 보호대상 Tool·입력·정책을 snapshot하고 승인 이후 실제 호출 직전에 hash를 재검증한다
 (authorable APPROVAL Step runtime orchestration은 본 절의 static contract 범위 밖이다).
 
-### 9.7.1 TOOL/JOIN DAG wave runtime orchestration
+### 9.7.1 TOOL/CONDITION/JOIN DAG wave runtime orchestration
 
-Runtime multi-step slice는 deterministic **wave-based TOOL/JOIN DAG**를 실행한다.
-CONDITION / Step `when` / LOOP / authorable APPROVAL Step은 fail-closed이다.
+Runtime multi-step slice는 deterministic **wave-based TOOL/CONDITION/JOIN DAG**를
+실행한다. LOOP / authorable APPROVAL Step / `LOOP_CONTEXT`는 fail-closed이다.
 
 ```text
-claim → validate TOOL/JOIN DAG → promote root TOOLs up to max_parallelism
-→ reconcile local JOINs
-→ reserve eligible TOOL Steps (Plan order, READY+RUNNING slot cap)
+claim → validate TOOL/CONDITION/JOIN DAG
+→ promote root TOOLs up to max_parallelism (root CONDITION stays PENDING)
+→ local reconcile fixed point:
+    prune intentional conditional SKIPPED descendants
+    → evaluate eligible CONDITION / Step.when / JOIN
+    → repeat until no local state changes
+→ reserve eligible TOOL wave (Plan order, READY+RUNNING slot cap)
 → asyncio gather concurrent MCP for the reserved wave
 → wait for whole wave to settle (no mid-wave successor dispatch)
 → ErrorPolicy / fatal stop / FAIL_EXECUTION after barrier
-→ reconcile JOINs → next wave → ALL_REQUIRED aggregation
+→ local reconcile → next wave → ALL_REQUIRED aggregation
 ```
 
 Supported runtime Step types:
 
 ```text
 TOOL
+CONDITION
 JOIN
 ```
 
@@ -738,18 +743,52 @@ TOOL rules (this slice):
 - direct TOOL fan-in (`depends_on > 1`) unsupported — require explicit JOIN
 - fail closed before MCP if violated
 
+CONDITION rules:
+
+- local orchestration only (no Attempt / ToolCall / MCP)
+- `mcp_tool_version_id` null; valid `ConditionStepConfigV1.predicate`
+- may be a root Step; may have zero or more dependencies
+- when structurally eligible and `when` did not skip:
+  `PENDING → READY → RUNNING → SUCCEEDED` in one TX
+- evaluate config Predicate; persist
+  `condition_result=<bool>` and
+  `result_inline={"condition_result": <bool>}` (canonical STEP_OUTPUT projection)
+- Predicate `false` is still CONDITION SUCCEEDED (`condition_result=false`)
+- Attempt count 0
+
+Step `when` (optional Predicate AST) is runtime-supported for TOOL / CONDITION / JOIN:
+
+- evaluate only after the Step dependency barrier is satisfied
+- absent → proceed
+- `true` → proceed (`condition_result=true` may be retained as gate evidence on
+  non-CONDITION Steps; CONDITION then overwrites with its config Predicate result)
+- `false` → `PENDING → SKIPPED`, `error_code=STEP_WHEN_FALSE`,
+  `condition_result=false`, no Attempt/ToolCall/MCP; `on_error` does not apply
+- if CONDITION `when=false`, config Predicate is not evaluated
+
+Conditional branch pruning (non-JOIN only):
+
+- PENDING TOOL/CONDITION whose any direct dependency has intentional conditional
+  skip (`STEP_WHEN_FALSE` / `UPSTREAM_CONDITION_SKIPPED`) →
+  `SKIPPED` + `UPSTREAM_CONDITION_SKIPPED`
+- apply recursively until the local graph stabilizes
+- JOIN is not pruned this way; JOIN observes SKIPPED deps as terminal and applies
+  its JOIN policy
+
 JOIN rules:
 
 - local orchestration only (no Attempt / ToolCall / MCP)
 - barrier evaluation: evaluate only after all direct dependencies are terminal
+  (SKIPPED is terminal)
+- after barrier: evaluate JOIN `when` first; false → JOIN SKIPPED (no policy eval)
 - policies: `ALL_SUCCESS` / `ALL_COMPLETE` / `ANY_SUCCESS`
 - unsatisfied policy → Step FAILED `JOIN_POLICY_UNSATISFIED` + JOIN `on_error`
 - early-release `ANY_SUCCESS` is out of scope
 
 `Plan.limits.max_parallelism` is a **per-Execution runtime concurrency cap**:
 `count(TOOL READY + TOOL RUNNING)` consumes slots under the Execution row lock.
-JOIN does not consume a remote slot. Cross-Execution / `MCPServer.max_concurrency`
-global admission control is out of scope.
+CONDITION / JOIN / `when` local work does not consume a remote slot.
+Cross-Execution / `MCPServer.max_concurrency` global admission control is out of scope.
 
 Wave fatal / fail-fast:
 
@@ -757,7 +796,12 @@ Wave fatal / fail-fast:
   siblings can finish Phase C before Execution terminalization
 - stop precedence: mandatory fatal / UNKNOWN_OUTCOME >
   FAIL_EXECUTION TIMED_OUT > FAIL_EXECUTION FAILED (Plan order tie-break)
-- untouched PENDING → SKIPPED; unused READY TOOL (never started) → CANCELLED
+- Predicate evaluation failures are mandatory-fatal (`PREDICATE_OPERAND_MISSING` /
+  `PREDICATE_TYPE_MISMATCH` / `PREDICATE_EVALUATION_FAILED`); `on_error` does not
+  override; untouched PENDING → SKIPPED (`UPSTREAM_EXECUTION_STOPPED`);
+  unused READY TOOL → CANCELLED; lease clear
+- fail-fast cleanup SKIPPED (`UPSTREAM_EXECUTION_STOPPED`) is distinct from
+  intentional conditional SKIPPED
 
 Multi-Step wait boundary:
 
@@ -772,11 +816,24 @@ Multi-Step wait boundary:
 ALL_REQUIRED
 ```
 
-- every `required=true` Step SUCCEEDED and no MARK_PARTIAL failure → `SUCCEEDED`
+- every `required=true` Step SUCCEEDED (or intentionally conditionally SKIPPED
+  with `STEP_WHEN_FALSE` / `UPSTREAM_CONDITION_SKIPPED`) and no MARK_PARTIAL
+  failure → `SUCCEEDED`
+- intentional conditional SKIPPED is neutral for required completion; fail-fast
+  `UPSTREAM_EXECUTION_STOPPED` / unexpected SKIPPED / CANCELLED / FAILED /
+  TIMED_OUT / UNKNOWN_OUTCOME remain non-success
 - ≥1 SUCCEEDED and (MARK_PARTIAL failure or required CONTINUE failure) → `PARTIALLY_SUCCEEDED`
 - ALL_REQUIRED unsatisfied with zero SUCCEEDED → `FAILED`
 - `response_step_ids` are response-selection metadata only (not success criteria)
 - JOIN policy does not replace Plan completion policy
+
+Canonical branch pattern (no LLM):
+
+```text
+A TOOL → C CONDITION → PASS TOOL (when C.condition_result==true)
+                     → FAIL TOOL (when C.condition_result==false)
+                     → J JOIN(ALL_COMPLETE)
+```
 
 경계:
 
@@ -784,9 +841,14 @@ ALL_REQUIRED
 - duplicate orchestrator delivery seeing RUNNING TOOL under lease → `WAVE_IN_PROGRESS` NOOP
 - Multi-Step expired-lease / parallel-wave recovery remains fail-closed: never
   re-invoke terminal Attempt/ToolCall; complex parallel recovery unsupported
-- runtime Binding resolve unchanged; STEP_OUTPUT still requires SUCCEEDED source
+- runtime Binding resolve unchanged for TOOL args; STEP_OUTPUT still requires
+  SUCCEEDED source + exact Plan↔Step lineage; CONDITION `result_inline` is a
+  valid STEP_OUTPUT source
+- Predicate operand values for TOOL `when` are deterministic from pinned
+  Plan/input/upstream evidence and are not duplicated into TOOL `resolved_input`
 - dynamic Binding + ToolPolicy `requires_approval` / PLAN_CONFIRMATION combination
   remains fail-closed (single-TOOL LITERAL/SECRET_REF Approval path unchanged)
+- `LOOP_CONTEXT` remains unsupported (fail closed)
 
 ### 9.5 LOOP
 
@@ -955,6 +1017,44 @@ Persisted recursive shape (flat `left/op/right` only 금지):
 - operand type 사전검증은 runtime 평가 단계에서 수행한다(static foundation는 구조/연산자/Binding 참조만)
 - 존재하지 않는 path는 null과 구분되는 `MISSING` 처리(runtime)
 - 평가 입력·결과를 Step 이력에 저장(runtime)
+
+#### 10.0 Runtime Predicate evaluation
+
+`RuntimePredicateEvaluator`는 immutable Execution/Plan/Step evidence만 사용한다
+(DB write / MCP / LLM / SecretResolver / expression eval 금지).
+
+MISSING vs null:
+
+| op | MISSING | JSON null | other |
+|---|---|---|---|
+| `exists` | false | true | true |
+| `is_null` | false | true | false |
+
+Binary operators (`eq` `ne` `gt` `gte` `lt` `lte` `in` `contains`) with any
+MISSING operand → fail closed `PREDICATE_OPERAND_MISSING` (never coerce MISSING
+to null).
+
+Type semantics (no implicit coercion):
+
+- `eq` / `ne`: strict JSON-type-aware equality (`true != 1`, `"1" != 1`)
+- `gt` / `gte` / `lt` / `lte`: number↔number or string↔string only
+  (boolean is not a number)
+- `in`: right operand must be an array; membership uses strict equality
+- `contains`: string⊃string or array⊃value (no object-key semantics)
+- `SECRET_REF`: `exists` → true, `is_null` → false; binary comparison rejected
+  (`PREDICATE_TYPE_MISMATCH`); never resolve plaintext
+- `LOOP_CONTEXT`: fail closed
+
+Logical short-circuit (persisted child order):
+
+- `and` → first false stops (unevaluated operands are not resolved)
+- `or` → first true stops
+- `not` → negate child
+
+Binding resolution for Predicates reuses Plan Binding kinds and immutable
+lineage rules. Missing JSON Pointer → `MISSING` sentinel to the evaluator;
+invalid STEP_OUTPUT lineage / non-SUCCEEDED source → fail closed (not MISSING).
+TOOL Binding resolve still fails on missing path.
 
 ### 10.1 Plan BindingValue + JSON Pointer subset
 

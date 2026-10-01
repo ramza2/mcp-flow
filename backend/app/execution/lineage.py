@@ -175,7 +175,6 @@ def assert_tool_step_lineage(execution: Execution, step: ExecutionStep) -> ToolS
         plan_step.id != step.step_key
         or plan_step.id != expected.id
         or plan_step.type != AuthorableStepType.TOOL
-        or plan_step.when is not None
     ):
         raise AppError(
             code="RESOURCE_CONFLICT",

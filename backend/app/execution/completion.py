@@ -101,6 +101,22 @@ def skip_remaining_pending(
     return skipped
 
 
+_INTENTIONAL_CONDITIONAL_SKIP_CODES = frozenset(
+    {
+        "STEP_WHEN_FALSE",
+        "UPSTREAM_CONDITION_SKIPPED",
+    }
+)
+
+
+def is_intentional_conditional_skip_for_completion(step: ExecutionStep) -> bool:
+    """True when SKIPPED is intentional control-flow (neutral for ALL_REQUIRED)."""
+    return (
+        step.status == StepStatus.SKIPPED.value
+        and step.error_code in _INTENTIONAL_CONDITIONAL_SKIP_CODES
+    )
+
+
 def aggregate_all_required(
     *,
     plan: ExecutionPlanV1,
@@ -109,6 +125,12 @@ def aggregate_all_required(
     """Natural end-of-chain aggregation under ``success_policy=ALL_REQUIRED``.
 
     ``response_step_ids`` are ignored for success criteria.
+
+    Required Steps intentionally skipped by conditional control flow
+    (``STEP_WHEN_FALSE`` / ``UPSTREAM_CONDITION_SKIPPED``) are treated as
+    neutral/satisfied for required-completion. Fail-fast
+    ``UPSTREAM_EXECUTION_STOPPED`` and other unexpected SKIPPED remain
+    non-success.
     """
     by_key = {s.step_key: s for s in steps}
 
@@ -123,8 +145,14 @@ def aggregate_all_required(
             required_all_succeeded = False
             continue
         failed = step.status in _FAILURE_LIKE
-        if ps.required and step.status != StepStatus.SUCCEEDED.value:
-            required_all_succeeded = False
+        if ps.required:
+            if step.status == StepStatus.SUCCEEDED.value:
+                pass
+            elif is_intentional_conditional_skip_for_completion(step):
+                # Intentional branch not selected — do not fail ALL_REQUIRED.
+                pass
+            else:
+                required_all_succeeded = False
         if not failed:
             continue
         if ps.on_error == "MARK_PARTIAL":

@@ -156,6 +156,7 @@ class ExecutionClaimService:
                 or step.step_type
                 not in {
                     AuthorableStepType.TOOL.value,
+                    AuthorableStepType.CONDITION.value,
                     AuthorableStepType.JOIN.value,
                 }
             ):
@@ -163,17 +164,24 @@ class ExecutionClaimService:
                     code="RESOURCE_CONFLICT",
                     message=(
                         "ExecutionStep is inconsistent with initial PENDING "
-                        "TOOL/JOIN DAG state."
+                        "TOOL/CONDITION/JOIN DAG state."
                     ),
                     status_code=409,
                 )
             if (
-                step.step_type == AuthorableStepType.JOIN.value
+                step.step_type
+                in {
+                    AuthorableStepType.JOIN.value,
+                    AuthorableStepType.CONDITION.value,
+                }
                 and step.mcp_tool_version_id is not None
             ):
                 raise AppError(
                     code="RESOURCE_CONFLICT",
-                    message="JOIN Step must have null mcp_tool_version_id at claim.",
+                    message=(
+                        f"{step.step_type} Step must have null "
+                        "mcp_tool_version_id at claim."
+                    ),
                     status_code=409,
                 )
 

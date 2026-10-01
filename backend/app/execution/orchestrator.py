@@ -1,11 +1,12 @@
-"""TOOL/JOIN DAG wave orchestration (docs/04 §9).
+"""TOOL/CONDITION/JOIN DAG wave orchestration (docs/04 §9).
 
 ``McpToolRunner`` owns one TOOL Step invocation (ToolCall/Attempt/Step).
-``ExecutionOrchestrator`` owns wave scheduling, JOIN reconciliation, ErrorPolicy,
-ALL_REQUIRED aggregation, and final Execution terminalization / lease release.
+``ExecutionOrchestrator`` owns wave scheduling, local CONDITION/when/JOIN
+reconciliation, ErrorPolicy, ALL_REQUIRED aggregation, and final Execution
+terminalization / lease release.
 
-Supported runtime Steps: TOOL + JOIN. CONDITION / LOOP / authorable APPROVAL
-Step / Step.when are out of scope.
+Supported runtime Steps: TOOL + CONDITION + JOIN. LOOP / authorable APPROVAL
+Step remain out of scope.
 """
 
 from __future__ import annotations
@@ -43,8 +44,10 @@ from app.execution.dag import (
     StopCause,
     ToolJoinDag,
     cancel_unused_ready_tools,
+    condition_structurally_eligible,
     count_tool_slots,
     evaluate_join_policy,
+    has_intentional_skip_dependency,
     is_single_tool_execution,
     join_barrier_ready,
     pick_stop_cause,
@@ -52,10 +55,12 @@ from app.execution.dag import (
     tool_structurally_eligible,
     validate_tool_join_dag,
 )
+from app.execution.predicate_evaluator import RuntimePredicateEvaluator
 from app.models.execution import Execution, ExecutionStep
 from app.repositories.execution import ExecutionRepository
 from app.schemas.execution_plan import (
     ComplexToolStepConfigV1,
+    ConditionStepConfigV1,
     ExecutionPlanStep,
     ExecutionPlanV1,
     JoinStepConfigV1,
@@ -630,8 +635,8 @@ class ExecutionOrchestrator:
                         single_tool=single_tool,
                     )
 
-                # Reconcile JOINs before reserving TOOL slots.
-                join_stop = await self._reconcile_joins_locked(
+                # Local CONDITION / when / JOIN fixed point before TOOL wave.
+                local_stop = await self._local_reconcile_locked(
                     executions=executions,
                     execution=execution,
                     plan=plan,
@@ -640,11 +645,11 @@ class ExecutionOrchestrator:
                     by_key=by_key,
                     now=now,
                 )
-                if join_stop is not None:
+                if local_stop is not None:
                     await session.flush()
-                    return join_stop
+                    return local_stop
 
-                # Refresh after JOIN mutations.
+                # Refresh after local mutations.
                 steps = await executions.list_steps(execution.id)
                 by_key = {s.step_key: s for s in steps}
 
@@ -725,7 +730,7 @@ class ExecutionOrchestrator:
         ]
         return ready_ids, [s.id for s in promoted]
 
-    async def _reconcile_joins_locked(
+    async def _local_reconcile_locked(
         self,
         *,
         executions: ExecutionRepository,
@@ -736,80 +741,398 @@ class ExecutionOrchestrator:
         by_key: dict[str, ExecutionStep],
         now: datetime,
     ) -> ProgressOutcome | None:
-        """Evaluate barrier-ready JOINs. May terminalize Execution on FAIL_EXECUTION."""
-        for key in dag.ordered_step_keys:
-            step = by_key[key]
-            if not join_barrier_ready(step=step, dag=dag, by_key=by_key):
-                continue
-            locked = await executions.lock_step(step.id)
-            if locked is None or locked.status != StepStatus.PENDING.value:
-                continue
-            # Immutable Plan Step is authoritative after lineage equality.
-            plan_step = next(p for p in plan.steps if p.id == locked.step_key)
-            cfg = JoinStepConfigV1.model_validate(plan_step.config)
-            dep_statuses = [
-                by_key[d].status for d in dag.dependencies[locked.step_key]
-            ]
-            terminal, error_code = evaluate_join_policy(
-                policy=cfg.policy, dependency_statuses=dep_statuses
-            )
-            # Local PENDING→READY→RUNNING→terminal in one TX.
-            locked.status = StepStatus.READY.value
-            locked.ready_at = now
-            locked.status = StepStatus.RUNNING.value
-            if locked.started_at is None:
-                locked.started_at = now
-            locked.status = terminal
-            locked.error_code = error_code
-            locked.error_message = (
-                "JOIN policy was not satisfied."
-                if error_code is not None
-                else None
-            )
-            locked.finished_at = now
-            locked.lock_version += 1
-            by_key[locked.step_key] = locked
-            logger.info(
-                "orchestrator JOIN terminal execution_id=%s step_key=%s status=%s",
-                execution.id,
-                locked.step_key,
-                terminal,
-            )
+        """Fixed-point local reconcile: prune → when/CONDITION/JOIN → repeat.
 
-            if terminal == StepStatus.SUCCEEDED.value:
-                continue
-            on_error = plan_step.on_error
-            if on_error == "FAIL_EXECUTION" or not is_continuable_known_failure(
-                on_error=on_error, step_status=terminal
-            ):
-                # Fail-fast stop from JOIN.
-                skip_all_pending(by_key=by_key, now=now)
-                cancel_unused_ready_tools(by_key=by_key, now=now)
-                exec_status = fail_fast_execution_status(terminal)
-                execution.status = exec_status
-                execution.error_code = locked.error_code
-                execution.error_message = locked.error_message
-                refreshed = list(by_key.values())
-                execution.result_summary = build_result_summary(
-                    status=exec_status, steps=refreshed, plan=plan
+        Local CONDITION/JOIN/when work does not consume ``max_parallelism``.
+        Predicate evaluation failures are mandatory-fatal.
+        """
+        evaluator = RuntimePredicateEvaluator()
+        plan_by_id = {p.id: p for p in plan.steps}
+        # Bound iterations by Step count (each Step terminalizes at most once).
+        for _ in range(max(1, len(dag.ordered_step_keys) * 3)):
+            changed = False
+
+            # 1) Conditionally prune non-JOIN descendants of intentional skips.
+            for key in dag.ordered_step_keys:
+                step = by_key[key]
+                if step.status != StepStatus.PENDING.value:
+                    continue
+                if step.step_type == AuthorableStepType.JOIN.value:
+                    continue
+                if step.step_type not in {
+                    AuthorableStepType.TOOL.value,
+                    AuthorableStepType.CONDITION.value,
+                }:
+                    continue
+                if not has_intentional_skip_dependency(
+                    step=step, dag=dag, by_key=by_key
+                ):
+                    continue
+                locked = await executions.lock_step(step.id)
+                if locked is None or locked.status != StepStatus.PENDING.value:
+                    continue
+                locked.status = StepStatus.SKIPPED.value
+                locked.error_code = "UPSTREAM_CONDITION_SKIPPED"
+                locked.error_message = (
+                    "Upstream Step was intentionally skipped by conditional "
+                    "control flow."
                 )
-                execution.finished_at = now
-                execution.worker_id = None
-                execution.lease_token = None
-                execution.lease_expires_at = None
-                execution.heartbeat_at = None
-                execution.lock_version += 1
-                return ProgressOutcome(
-                    execution_complete=True,
-                    promoted=False,
-                    reason=_REASON_EXECUTION_FAILED
-                    if exec_status == ExecutionStatus.FAILED.value
-                    else _REASON_EXECUTION_TIMED_OUT,
-                    execution_status=exec_status,
-                    step_terminal_status=terminal,
+                locked.condition_result = False
+                locked.finished_at = now
+                locked.lock_version += 1
+                by_key[locked.step_key] = locked
+                changed = True
+                logger.info(
+                    "orchestrator prune skip execution_id=%s step_key=%s",
+                    execution.id,
+                    locked.step_key,
                 )
-            # Continuable JOIN failure — continue reconciling.
+
+            # 2) Evaluate eligible CONDITION Steps (after dependency barrier).
+            for key in dag.ordered_step_keys:
+                step = by_key[key]
+                if not condition_structurally_eligible(
+                    step=step, dag=dag, by_key=by_key
+                ):
+                    continue
+                locked = await executions.lock_step(step.id)
+                if locked is None or locked.status != StepStatus.PENDING.value:
+                    continue
+                plan_step = plan_by_id[locked.step_key]
+                # Re-validate exact immutable snapshot before Predicate eval.
+                if plan_step.model_dump(mode="json") != locked.step_snapshot:
+                    return self._fail_closed_lineage_locked(
+                        execution=execution,
+                        by_key=by_key,
+                        now=now,
+                        error_code="RESOURCE_CONFLICT",
+                        error_message=(
+                            f"CONDITION step_snapshot drift for "
+                            f"{locked.step_key!r}."
+                        ),
+                    )
+                try:
+                    when_false = self._evaluate_when_gate(
+                        evaluator=evaluator,
+                        plan_step=plan_step,
+                        execution=execution,
+                        owning_step=locked,
+                        steps=list(by_key.values()),
+                        plan=plan,
+                    )
+                except AppError as exc:
+                    return self._fail_closed_predicate(
+                        execution=execution,
+                        by_key=by_key,
+                        step=locked,
+                        now=now,
+                        plan=plan,
+                        error_code=exc.code,
+                        error_message=exc.message,
+                    )
+                if when_false:
+                    self._apply_when_false(locked, now=now)
+                    by_key[locked.step_key] = locked
+                    changed = True
+                    continue
+
+                try:
+                    cfg = ConditionStepConfigV1.model_validate(plan_step.config)
+                    result = evaluator.evaluate(
+                        cfg.predicate,
+                        execution=execution,
+                        owning_step=locked,
+                        steps=list(by_key.values()),
+                        plan=plan,
+                    )
+                except AppError as exc:
+                    return self._fail_closed_predicate(
+                        execution=execution,
+                        by_key=by_key,
+                        step=locked,
+                        now=now,
+                        plan=plan,
+                        error_code=exc.code,
+                        error_message=exc.message,
+                    )
+                except Exception as exc:
+                    return self._fail_closed_predicate(
+                        execution=execution,
+                        by_key=by_key,
+                        step=locked,
+                        now=now,
+                        plan=plan,
+                        error_code="PREDICATE_EVALUATION_FAILED",
+                        error_message=str(exc),
+                    )
+
+                locked.status = StepStatus.READY.value
+                locked.ready_at = now
+                locked.status = StepStatus.RUNNING.value
+                if locked.started_at is None:
+                    locked.started_at = now
+                locked.status = StepStatus.SUCCEEDED.value
+                locked.condition_result = bool(result)
+                locked.result_inline = {"condition_result": bool(result)}
+                locked.error_code = None
+                locked.error_message = None
+                locked.finished_at = now
+                locked.lock_version += 1
+                by_key[locked.step_key] = locked
+                changed = True
+                logger.info(
+                    "orchestrator CONDITION execution_id=%s step_key=%s result=%s",
+                    execution.id,
+                    locked.step_key,
+                    result,
+                )
+
+            # 3) Evaluate Step.when for PENDING TOOL with barrier satisfied.
+            for key in dag.ordered_step_keys:
+                step = by_key[key]
+                if step.status != StepStatus.PENDING.value:
+                    continue
+                if step.step_type != AuthorableStepType.TOOL.value:
+                    continue
+                if not tool_structurally_eligible(
+                    step=step, dag=dag, by_key=by_key
+                ):
+                    continue
+                plan_step = plan_by_id[step.step_key]
+                if plan_step.when is None:
+                    continue
+                locked = await executions.lock_step(step.id)
+                if locked is None or locked.status != StepStatus.PENDING.value:
+                    continue
+                if plan_step.model_dump(mode="json") != locked.step_snapshot:
+                    return self._fail_closed_lineage_locked(
+                        execution=execution,
+                        by_key=by_key,
+                        now=now,
+                        error_code="RESOURCE_CONFLICT",
+                        error_message=(
+                            f"TOOL when step_snapshot drift for "
+                            f"{locked.step_key!r}."
+                        ),
+                    )
+                try:
+                    when_false = self._evaluate_when_gate(
+                        evaluator=evaluator,
+                        plan_step=plan_step,
+                        execution=execution,
+                        owning_step=locked,
+                        steps=list(by_key.values()),
+                        plan=plan,
+                    )
+                except AppError as exc:
+                    return self._fail_closed_predicate(
+                        execution=execution,
+                        by_key=by_key,
+                        step=locked,
+                        now=now,
+                        plan=plan,
+                        error_code=exc.code,
+                        error_message=exc.message,
+                    )
+                if when_false:
+                    self._apply_when_false(locked, now=now)
+                    by_key[locked.step_key] = locked
+                    changed = True
+                elif locked.condition_result is not True:
+                    # Gate evidence for non-CONDITION Steps (TOOL stays PENDING
+                    # for wave reservation; do not force another reconcile loop).
+                    locked.condition_result = True
+                    locked.lock_version += 1
+                    by_key[locked.step_key] = locked
+
+            # 4) JOIN barrier: when gate then policy.
+            for key in dag.ordered_step_keys:
+                step = by_key[key]
+                if not join_barrier_ready(step=step, dag=dag, by_key=by_key):
+                    continue
+                locked = await executions.lock_step(step.id)
+                if locked is None or locked.status != StepStatus.PENDING.value:
+                    continue
+                plan_step = plan_by_id[locked.step_key]
+                if plan_step.model_dump(mode="json") != locked.step_snapshot:
+                    return self._fail_closed_lineage_locked(
+                        execution=execution,
+                        by_key=by_key,
+                        now=now,
+                        error_code="RESOURCE_CONFLICT",
+                        error_message=(
+                            f"JOIN step_snapshot drift for {locked.step_key!r}."
+                        ),
+                    )
+                try:
+                    when_false = self._evaluate_when_gate(
+                        evaluator=evaluator,
+                        plan_step=plan_step,
+                        execution=execution,
+                        owning_step=locked,
+                        steps=list(by_key.values()),
+                        plan=plan,
+                    )
+                except AppError as exc:
+                    return self._fail_closed_predicate(
+                        execution=execution,
+                        by_key=by_key,
+                        step=locked,
+                        now=now,
+                        plan=plan,
+                        error_code=exc.code,
+                        error_message=exc.message,
+                    )
+                if when_false:
+                    self._apply_when_false(locked, now=now)
+                    by_key[locked.step_key] = locked
+                    changed = True
+                    continue
+                if plan_step.when is not None:
+                    locked.condition_result = True
+
+                cfg = JoinStepConfigV1.model_validate(plan_step.config)
+                dep_statuses = [
+                    by_key[d].status for d in dag.dependencies[locked.step_key]
+                ]
+                terminal, error_code = evaluate_join_policy(
+                    policy=cfg.policy, dependency_statuses=dep_statuses
+                )
+                locked.status = StepStatus.READY.value
+                locked.ready_at = now
+                locked.status = StepStatus.RUNNING.value
+                if locked.started_at is None:
+                    locked.started_at = now
+                locked.status = terminal
+                locked.error_code = error_code
+                locked.error_message = (
+                    "JOIN policy was not satisfied."
+                    if error_code is not None
+                    else None
+                )
+                locked.finished_at = now
+                locked.lock_version += 1
+                by_key[locked.step_key] = locked
+                changed = True
+                logger.info(
+                    "orchestrator JOIN terminal execution_id=%s step_key=%s status=%s",
+                    execution.id,
+                    locked.step_key,
+                    terminal,
+                )
+
+                if terminal == StepStatus.SUCCEEDED.value:
+                    continue
+                on_error = plan_step.on_error
+                if on_error == "FAIL_EXECUTION" or not is_continuable_known_failure(
+                    on_error=on_error, step_status=terminal
+                ):
+                    skip_all_pending(by_key=by_key, now=now)
+                    cancel_unused_ready_tools(by_key=by_key, now=now)
+                    exec_status = fail_fast_execution_status(terminal)
+                    execution.status = exec_status
+                    execution.error_code = locked.error_code
+                    execution.error_message = locked.error_message
+                    refreshed = list(by_key.values())
+                    execution.result_summary = build_result_summary(
+                        status=exec_status, steps=refreshed, plan=plan
+                    )
+                    execution.finished_at = now
+                    execution.worker_id = None
+                    execution.lease_token = None
+                    execution.lease_expires_at = None
+                    execution.heartbeat_at = None
+                    execution.lock_version += 1
+                    return ProgressOutcome(
+                        execution_complete=True,
+                        promoted=False,
+                        reason=_REASON_EXECUTION_FAILED
+                        if exec_status == ExecutionStatus.FAILED.value
+                        else _REASON_EXECUTION_TIMED_OUT,
+                        execution_status=exec_status,
+                        step_terminal_status=terminal,
+                    )
+
+            if not changed:
+                return None
         return None
+
+    @staticmethod
+    def _evaluate_when_gate(
+        *,
+        evaluator: RuntimePredicateEvaluator,
+        plan_step: ExecutionPlanStep,
+        execution: Execution,
+        owning_step: ExecutionStep,
+        steps: list[ExecutionStep],
+        plan: ExecutionPlanV1,
+    ) -> bool:
+        """Return True when ``when`` evaluates false (intentional skip).
+
+        Absent ``when`` → False (proceed). Evaluation errors raise AppError.
+        """
+        if plan_step.when is None:
+            return False
+        result = evaluator.evaluate(
+            plan_step.when,
+            execution=execution,
+            owning_step=owning_step,
+            steps=steps,
+            plan=plan,
+        )
+        return not bool(result)
+
+    @staticmethod
+    def _apply_when_false(step: ExecutionStep, *, now: datetime) -> None:
+        step.status = StepStatus.SKIPPED.value
+        step.error_code = "STEP_WHEN_FALSE"
+        step.error_message = "Step.when evaluated to false; Step intentionally skipped."
+        step.condition_result = False
+        step.finished_at = now
+        step.lock_version += 1
+
+    def _fail_closed_predicate(
+        self,
+        *,
+        execution: Execution,
+        by_key: dict[str, ExecutionStep],
+        step: ExecutionStep,
+        now: datetime,
+        plan: ExecutionPlanV1,
+        error_code: str,
+        error_message: str,
+    ) -> ProgressOutcome:
+        """Mandatory-fatal Predicate failure: active Step FAILED, Execution FAILED."""
+        if step.status == StepStatus.PENDING.value:
+            step.status = StepStatus.FAILED.value
+            step.error_code = error_code
+            step.error_message = error_message
+            step.finished_at = now
+            step.lock_version += 1
+            by_key[step.step_key] = step
+        skip_all_pending(by_key=by_key, now=now)
+        cancel_unused_ready_tools(by_key=by_key, now=now)
+        execution.status = ExecutionStatus.FAILED.value
+        execution.error_code = error_code
+        execution.error_message = error_message
+        execution.result_summary = build_result_summary(
+            status=ExecutionStatus.FAILED.value,
+            steps=list(by_key.values()),
+            plan=plan,
+        )
+        execution.finished_at = now
+        execution.worker_id = None
+        execution.lease_token = None
+        execution.lease_expires_at = None
+        execution.heartbeat_at = None
+        execution.lock_version += 1
+        return ProgressOutcome(
+            execution_complete=True,
+            promoted=False,
+            reason=_REASON_EXECUTION_FAILED,
+            execution_status=ExecutionStatus.FAILED.value,
+            step_terminal_status=StepStatus.FAILED.value,
+        )
 
     async def _settle_wave(
         self,
@@ -946,9 +1269,8 @@ class ExecutionOrchestrator:
                         reason="STALE_LEASE",
                     )
 
-                # Continuable wave — reconcile JOINs then maybe complete.
-
-                join_stop = await self._reconcile_joins_locked(
+                # Continuable wave — local CONDITION/when/JOIN then maybe complete.
+                local_stop = await self._local_reconcile_locked(
                     executions=executions,
                     execution=execution,
                     plan=plan,
@@ -957,9 +1279,9 @@ class ExecutionOrchestrator:
                     by_key=by_key,
                     now=now,
                 )
-                if join_stop is not None:
+                if local_stop is not None:
                     await session.flush()
-                    return join_stop
+                    return local_stop
 
                 steps = await executions.list_steps(execution.id)
                 if self._dag_naturally_ended(steps):
@@ -1027,7 +1349,7 @@ class ExecutionOrchestrator:
                         error_code=exc.code,
                         error_message=exc.message,
                     )
-                join_stop = await self._reconcile_joins_locked(
+                local_stop = await self._local_reconcile_locked(
                     executions=executions,
                     execution=execution,
                     plan=plan,
@@ -1036,9 +1358,9 @@ class ExecutionOrchestrator:
                     by_key=by_key,
                     now=now,
                 )
-                if join_stop is not None:
+                if local_stop is not None:
                     await session.flush()
-                    return join_stop
+                    return local_stop
                 steps = await executions.list_steps(execution.id)
                 if not self._dag_naturally_ended(steps):
                     return None

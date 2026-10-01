@@ -1,4 +1,4 @@
-"""TOOL/JOIN DAG runtime validation and local JOIN evaluation (docs/04 §9).
+"""TOOL/CONDITION/JOIN DAG runtime validation and local evaluation (docs/04 §9).
 
 Wave scheduling lives in ``ExecutionOrchestrator``; this module is pure graph
 logic (no DB writes except callers applying returned decisions).
@@ -16,6 +16,7 @@ from app.execution.completion import is_continuable_known_failure, plan_step_for
 from app.models.execution import ExecutionStep
 from app.schemas.execution_plan import (
     ComplexToolStepConfigV1,
+    ConditionStepConfigV1,
     ExecutionPlanStep,
     ExecutionPlanV1,
     JoinStepConfigV1,
@@ -34,16 +35,31 @@ _JOIN_BARRIER_TERMINAL = frozenset(
 
 _UNSUPPORTED_RUNTIME_TYPES = frozenset(
     {
-        AuthorableStepType.CONDITION.value,
         AuthorableStepType.APPROVAL.value,
         AuthorableStepType.LOOP.value,
+    }
+)
+
+_RUNTIME_STEP_TYPES = frozenset(
+    {
+        AuthorableStepType.TOOL.value,
+        AuthorableStepType.CONDITION.value,
+        AuthorableStepType.JOIN.value,
+    }
+)
+
+# Intentional conditional control-flow skips (not fail-fast cleanup).
+INTENTIONAL_CONDITIONAL_SKIP_CODES = frozenset(
+    {
+        "STEP_WHEN_FALSE",
+        "UPSTREAM_CONDITION_SKIPPED",
     }
 )
 
 
 @dataclass(frozen=True, slots=True)
 class ToolJoinDag:
-    """Validated TOOL/JOIN runtime DAG."""
+    """Validated TOOL/CONDITION/JOIN runtime DAG."""
 
     ordered_step_keys: tuple[str, ...]  # immutable Plan order
     root_tool_keys: tuple[str, ...]
@@ -56,7 +72,7 @@ def validate_tool_join_dag(
     plan: ExecutionPlanV1,
     steps: Sequence[ExecutionStep],
 ) -> ToolJoinDag:
-    """Fail closed unless Steps form a TOOL/JOIN DAG for wave runtime."""
+    """Fail closed unless Steps form a TOOL/CONDITION/JOIN DAG for wave runtime."""
     if not steps:
         raise AppError(
             code="RESOURCE_CONFLICT",
@@ -111,23 +127,19 @@ def validate_tool_join_dag(
                 message="Runtime DAG Steps must have parent_step_id null.",
                 status_code=409,
             )
-        if step.step_type in _UNSUPPORTED_RUNTIME_TYPES or ps.type.value in (
-            AuthorableStepType.CONDITION.value,
-            AuthorableStepType.APPROVAL.value,
-            AuthorableStepType.LOOP.value,
+        if (
+            step.step_type in _UNSUPPORTED_RUNTIME_TYPES
+            or ps.type.value in _UNSUPPORTED_RUNTIME_TYPES
         ):
             raise AppError(
                 code="RESOURCE_CONFLICT",
                 message=(
-                    f"Step type {step.step_type!r} unsupported by TOOL/JOIN "
-                    "DAG runtime."
+                    f"Step type {step.step_type!r} unsupported by "
+                    "TOOL/CONDITION/JOIN DAG runtime."
                 ),
                 status_code=409,
             )
-        if step.step_type not in {
-            AuthorableStepType.TOOL.value,
-            AuthorableStepType.JOIN.value,
-        }:
+        if step.step_type not in _RUNTIME_STEP_TYPES:
             raise AppError(
                 code="RESOURCE_CONFLICT",
                 message=f"Unsupported runtime step_type {step.step_type!r}.",
@@ -162,12 +174,6 @@ def validate_tool_join_dag(
                     f"step_snapshot is not an exact projection of immutable "
                     f"Plan Step {ps.id!r}."
                 ),
-                status_code=409,
-            )
-        if parsed.when is not None or ps.when is not None:
-            raise AppError(
-                code="RESOURCE_CONFLICT",
-                message="Step.when is unsupported in TOOL/JOIN DAG runtime.",
                 status_code=409,
             )
         # Prefer immutable Plan semantics after exact equality (same as snapshot).
@@ -221,8 +227,25 @@ def validate_tool_join_dag(
                     ),
                     status_code=409,
                 )
-        else:
-            # JOIN
+        elif ps.type == AuthorableStepType.CONDITION:
+            if step.mcp_tool_version_id is not None:
+                raise AppError(
+                    code="RESOURCE_CONFLICT",
+                    message=(
+                        f"CONDITION Step {ps.id!r} must have null "
+                        "mcp_tool_version_id."
+                    ),
+                    status_code=409,
+                )
+            try:
+                ConditionStepConfigV1.model_validate(ps.config)
+            except Exception as exc:
+                raise AppError(
+                    code="RESOURCE_CONFLICT",
+                    message=f"Invalid CONDITION config for {ps.id!r}.",
+                    status_code=409,
+                ) from exc
+        elif ps.type == AuthorableStepType.JOIN:
             if step.mcp_tool_version_id is not None:
                 raise AppError(
                     code="RESOURCE_CONFLICT",
@@ -243,6 +266,12 @@ def validate_tool_join_dag(
                     message=f"JOIN {ps.id!r} requires one or more dependencies.",
                     status_code=409,
                 )
+        else:
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message=f"Unsupported Plan Step type {ps.type!r}.",
+                status_code=409,
+            )
 
         deps[ps.id] = tuple(depends_on)
 
@@ -265,21 +294,17 @@ def validate_tool_join_dag(
     if len(seen) != len(deps):
         raise AppError(
             code="RESOURCE_CONFLICT",
-            message="TOOL/JOIN DAG contains a cycle or unreachable Steps.",
+            message="TOOL/CONDITION/JOIN DAG contains a cycle or unreachable Steps.",
             status_code=409,
         )
 
+    # Root TOOLs only — root CONDITION stays PENDING for local reconciliation.
+    # A valid graph may begin with CONDITION (no root TOOL required).
     root_tools = tuple(
         ps.id
         for ps in plan.steps
         if not deps[ps.id] and by_key[ps.id].step_type == AuthorableStepType.TOOL.value
     )
-    if not root_tools:
-        raise AppError(
-            code="RESOURCE_CONFLICT",
-            message="TOOL/JOIN DAG requires at least one root TOOL Step.",
-            status_code=409,
-        )
 
     max_parallelism = int(plan.limits.max_parallelism)
     if max_parallelism < 1:
@@ -298,13 +323,23 @@ def validate_tool_join_dag(
     )
 
 
+def is_intentional_conditional_skip(step: ExecutionStep) -> bool:
+    return (
+        step.status == StepStatus.SKIPPED.value
+        and step.error_code in INTENTIONAL_CONDITIONAL_SKIP_CODES
+    )
+
+
 def dependency_progression_complete(
     *,
     dep_step: ExecutionStep,
 ) -> bool:
-    """Whether a dependency unblocks downstream scheduling."""
+    """Whether a dependency unblocks downstream TOOL/CONDITION scheduling."""
     if dep_step.status == StepStatus.SUCCEEDED.value:
         return True
+    # Intentional conditional skips do not unblock non-JOIN descendants.
+    if is_intentional_conditional_skip(dep_step):
+        return False
     try:
         on_error = plan_step_for(dep_step).on_error
     except Exception:
@@ -312,6 +347,18 @@ def dependency_progression_complete(
     return is_continuable_known_failure(
         on_error=on_error, step_status=dep_step.status
     )
+
+
+def has_intentional_skip_dependency(
+    *,
+    step: ExecutionStep,
+    dag: ToolJoinDag,
+    by_key: Mapping[str, ExecutionStep],
+) -> bool:
+    for dep_id in dag.dependencies.get(step.step_key, ()):
+        if is_intentional_conditional_skip(by_key[dep_id]):
+            return True
+    return False
 
 
 def tool_structurally_eligible(
@@ -323,6 +370,27 @@ def tool_structurally_eligible(
     if step.status != StepStatus.PENDING.value:
         return False
     if step.step_type != AuthorableStepType.TOOL.value:
+        return False
+    if has_intentional_skip_dependency(step=step, dag=dag, by_key=by_key):
+        return False
+    for dep_id in dag.dependencies.get(step.step_key, ()):
+        dep = by_key[dep_id]
+        if not dependency_progression_complete(dep_step=dep):
+            return False
+    return True
+
+
+def condition_structurally_eligible(
+    *,
+    step: ExecutionStep,
+    dag: ToolJoinDag,
+    by_key: Mapping[str, ExecutionStep],
+) -> bool:
+    if step.status != StepStatus.PENDING.value:
+        return False
+    if step.step_type != AuthorableStepType.CONDITION.value:
+        return False
+    if has_intentional_skip_dependency(step=step, dag=dag, by_key=by_key):
         return False
     for dep_id in dag.dependencies.get(step.step_key, ()):
         dep = by_key[dep_id]
@@ -461,4 +529,12 @@ def pick_stop_cause(causes: Sequence[StopCause]) -> StopCause | None:
 def is_single_tool_execution(steps: Sequence[ExecutionStep]) -> bool:
     tools = [s for s in steps if s.step_type == AuthorableStepType.TOOL.value]
     joins = [s for s in steps if s.step_type == AuthorableStepType.JOIN.value]
-    return len(tools) == 1 and len(joins) == 0 and len(steps) == 1
+    conditions = [
+        s for s in steps if s.step_type == AuthorableStepType.CONDITION.value
+    ]
+    return (
+        len(tools) == 1
+        and len(joins) == 0
+        and len(conditions) == 0
+        and len(steps) == 1
+    )
