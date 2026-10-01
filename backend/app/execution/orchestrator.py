@@ -38,7 +38,6 @@ from app.execution.completion import (
     build_result_summary,
     fail_fast_execution_status,
     is_continuable_known_failure,
-    plan_step_for,
 )
 from app.execution.dag import (
     StopCause,
@@ -561,15 +560,11 @@ class ExecutionOrchestrator:
                         execution_status=execution.status,
                     )
 
-                plan = assert_execution_plan_lineage(execution)
-                dag = validate_tool_join_dag(plan, steps)
                 by_key = {s.step_key: s for s in steps}
-                single_tool = is_single_tool_execution(steps)
 
                 # Duplicate mid-wave delivery: TOOL RUNNING with STARTED ToolCall
                 # means a remote call is already owned/in-flight — do not start a
-                # competing wave. RUNNING + STARTED Attempt without ToolCall is
-                # recovery/resume and must be re-invoked by this orchestrator.
+                # competing wave (and do not fail-closed while Phase C may run).
                 running_tools = [
                     s
                     for s in steps
@@ -598,8 +593,24 @@ class ExecutionOrchestrator:
                             execution_complete=False,
                             promoted=False,
                             reason=_REASON_WAVE_IN_PROGRESS,
-                            plan_order=dag.ordered_step_keys,
                         )
+
+                # Immutable Plan ↔ Step lineage. Post-claim corruption must not
+                # strand RUNNING + lease via an escaped AppError.
+                try:
+                    plan = assert_execution_plan_lineage(execution)
+                    dag = validate_tool_join_dag(plan, steps)
+                except AppError as exc:
+                    return self._fail_closed_lineage_locked(
+                        execution=execution,
+                        by_key=by_key,
+                        now=now,
+                        error_code=exc.code,
+                        error_message=exc.message,
+                    )
+
+                single_tool = is_single_tool_execution(steps)
+                if running_tools:
                     # Resume RUNNING TOOLs (no STARTED ToolCall) as this wave.
                     resume_ids = [
                         by_key[k].id
@@ -733,9 +744,9 @@ class ExecutionOrchestrator:
             locked = await executions.lock_step(step.id)
             if locked is None or locked.status != StepStatus.PENDING.value:
                 continue
-            cfg = JoinStepConfigV1.model_validate(
-                ExecutionPlanStep.model_validate(locked.step_snapshot).config
-            )
+            # Immutable Plan Step is authoritative after lineage equality.
+            plan_step = next(p for p in plan.steps if p.id == locked.step_key)
+            cfg = JoinStepConfigV1.model_validate(plan_step.config)
             dep_statuses = [
                 by_key[d].status for d in dag.dependencies[locked.step_key]
             ]
@@ -767,7 +778,7 @@ class ExecutionOrchestrator:
 
             if terminal == StepStatus.SUCCEEDED.value:
                 continue
-            on_error = plan_step_for(locked).on_error
+            on_error = plan_step.on_error
             if on_error == "FAIL_EXECUTION" or not is_continuable_known_failure(
                 on_error=on_error, step_status=terminal
             ):
@@ -824,6 +835,24 @@ class ExecutionOrchestrator:
                 by_id = {s.id: s for s in steps}
                 plan_index = {sid: i for i, sid in enumerate(plan_order)}
 
+                # Immutable Plan on_error / DAG lineage before ErrorPolicy.
+                plan: ExecutionPlanV1 | None
+                dag: ToolJoinDag | None
+                try:
+                    plan = assert_execution_plan_lineage(execution)
+                    dag = validate_tool_join_dag(plan, steps)
+                    plan_by_id = {p.id: p for p in plan.steps}
+                except AppError as exc:
+                    return self._fail_closed_lineage_locked(
+                        execution=execution,
+                        by_key=by_key,
+                        now=now,
+                        error_code=exc.code,
+                        error_message=(
+                            "Execution plan lineage corrupt after wave settlement."
+                        ),
+                    )
+
                 causes: list[StopCause] = []
                 for step_id, outcome in zip(wave_step_ids, outcomes, strict=False):
                     step = by_id.get(step_id)
@@ -847,10 +876,10 @@ class ExecutionOrchestrator:
                         continue
                     if disposition != DISPOSITION_KNOWN_STEP_FAILURE:
                         continue
-                    try:
-                        on_error = plan_step_for(step).on_error
-                    except Exception:
-                        on_error = "FAIL_EXECUTION"
+                    plan_step = plan_by_id.get(step.step_key)
+                    on_error = (
+                        plan_step.on_error if plan_step is not None else "FAIL_EXECUTION"
+                    )
                     term = outcome.terminal_status or step.status
                     if on_error == "FAIL_EXECUTION" or not is_continuable_known_failure(
                         on_error=on_error, step_status=term
@@ -883,10 +912,6 @@ class ExecutionOrchestrator:
                     execution.status = exec_status
                     execution.error_code = stop.error_code
                     execution.error_message = stop.error_message
-                    try:
-                        plan = assert_execution_plan_lineage(execution)
-                    except AppError:
-                        plan = None
                     execution.result_summary = build_result_summary(
                         status=exec_status,
                         steps=list(by_key.values()),
@@ -922,31 +947,6 @@ class ExecutionOrchestrator:
                     )
 
                 # Continuable wave — reconcile JOINs then maybe complete.
-                try:
-                    plan = assert_execution_plan_lineage(execution)
-                    dag = validate_tool_join_dag(plan, steps)
-                except AppError:
-                    # Corrupt lineage after known success path — fail closed.
-                    execution.status = ExecutionStatus.FAILED.value
-                    execution.error_code = "RESOURCE_CONFLICT"
-                    execution.error_message = (
-                        "Execution plan lineage corrupt after wave settlement."
-                    )
-                    skip_all_pending(by_key=by_key, now=now)
-                    cancel_unused_ready_tools(by_key=by_key, now=now)
-                    execution.finished_at = now
-                    execution.worker_id = None
-                    execution.lease_token = None
-                    execution.lease_expires_at = None
-                    execution.heartbeat_at = None
-                    execution.lock_version += 1
-                    await session.flush()
-                    return ProgressOutcome(
-                        execution_complete=True,
-                        promoted=False,
-                        reason=_REASON_EXECUTION_FAILED,
-                        execution_status=ExecutionStatus.FAILED.value,
-                    )
 
                 join_stop = await self._reconcile_joins_locked(
                     executions=executions,
@@ -1015,9 +1015,18 @@ class ExecutionOrchestrator:
                 steps = await executions.list_steps(execution.id)
                 if not steps:
                     return None
-                plan = assert_execution_plan_lineage(execution)
-                dag = validate_tool_join_dag(plan, steps)
                 by_key = {s.step_key: s for s in steps}
+                try:
+                    plan = assert_execution_plan_lineage(execution)
+                    dag = validate_tool_join_dag(plan, steps)
+                except AppError as exc:
+                    return self._fail_closed_lineage_locked(
+                        execution=execution,
+                        by_key=by_key,
+                        now=now,
+                        error_code=exc.code,
+                        error_message=exc.message,
+                    )
                 join_stop = await self._reconcile_joins_locked(
                     executions=executions,
                     execution=execution,
@@ -1107,6 +1116,45 @@ class ExecutionOrchestrator:
             execution_complete=False,
             promoted=False,
             reason=prepared.reason,
+        )
+
+    @staticmethod
+    def _fail_closed_lineage_locked(
+        *,
+        execution: Execution,
+        by_key: dict[str, ExecutionStep],
+        now: datetime,
+        error_code: str,
+        error_message: str,
+    ) -> ProgressOutcome:
+        """Terminalize Execution on Plan/DAG lineage corruption without Plan parse.
+
+        Does not overwrite terminal Step/Attempt/ToolCall evidence. Does not
+        schedule new MCP work. Clears worker/lease/heartbeat even when Plan
+        re-parse would fail.
+        """
+        skip_all_pending(by_key=by_key, now=now)
+        cancel_unused_ready_tools(by_key=by_key, now=now)
+        execution.status = ExecutionStatus.FAILED.value
+        execution.error_code = error_code or "RESOURCE_CONFLICT"
+        execution.error_message = error_message
+        # Plan may be corrupt — summary without requiring Plan parse.
+        execution.result_summary = build_result_summary(
+            status=ExecutionStatus.FAILED.value,
+            steps=list(by_key.values()),
+            plan=None,
+        )
+        execution.finished_at = now
+        execution.worker_id = None
+        execution.lease_token = None
+        execution.lease_expires_at = None
+        execution.heartbeat_at = None
+        execution.lock_version += 1
+        return ProgressOutcome(
+            execution_complete=True,
+            promoted=False,
+            reason=_REASON_EXECUTION_FAILED,
+            execution_status=ExecutionStatus.FAILED.value,
         )
 
     @staticmethod

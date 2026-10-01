@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 import pytest
+from app.core.errors import AppError
 from app.core.secrets import UnimplementedSecretResolver
 from app.domain.enums import (
     AuthorableStepType,
@@ -46,6 +47,7 @@ from app.repositories.mcp_tool import MCPToolRepository
 from app.repositories.mcp_tool_policy import MCPToolPolicyRepository
 from app.schemas.execution_plan import (
     EXECUTION_PLAN_SCHEMA_VERSION,
+    ExecutionPlanV1,
     compute_plan_hash,
     default_plan_limits,
 )
@@ -1290,3 +1292,255 @@ async def test_duplicate_orchestrator_wave_in_progress(
         execution_id=execution_id, worker_id="w1", lease_token=lease
     )
     assert outcome.reason == "WAVE_IN_PROGRESS"
+
+
+# ---------------------------------------------------------------------------
+# Immutable Plan ↔ step_snapshot lineage tamper
+# ---------------------------------------------------------------------------
+
+
+async def _materialize_claimed_dag(
+    session: AsyncSession,
+    *,
+    seeded: dict[str, Any],
+    steps: list[dict[str, Any]],
+    max_parallelism: int = 4,
+    worker_id: str = "worker-tamper",
+) -> tuple[uuid.UUID, uuid.UUID, ExecutionPlanV1]:
+    plan_dict = _plan(steps, seeded["tool_version_id"], max_parallelism=max_parallelism)
+    execution_id = await _materialize_queued(
+        session, plan_snapshot=plan_dict, seeded=seeded
+    )
+    claim = await ExecutionClaimService(session, lease_seconds=120).claim(
+        execution_id=execution_id, worker_id=worker_id
+    )
+    await session.commit()
+    assert claim.claimed and claim.lease_token is not None
+    execution = await ExecutionRepository(session).get(execution_id)
+    assert execution is not None
+    plan = assert_execution_plan_lineage(execution)
+    return execution_id, claim.lease_token, plan
+
+
+@pytest.mark.asyncio
+async def test_tamper_depends_on_fails_validate_tool_join_dag(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Plan A→B but B.step_snapshot.depends_on=[] must fail; B cannot be a root."""
+    _install_no_side_effects(monkeypatch)
+    async with db_session_factory() as session:
+        seeded = await _seed_executable(session)
+        execution_id, _lease, plan = await _materialize_claimed_dag(
+            session,
+            seeded=seeded,
+            steps=[_tool("a"), _tool("b", depends_on=["a"])],
+        )
+        steps = await ExecutionRepository(session).list_steps(execution_id)
+        by_key = {s.step_key: s for s in steps}
+        snap = dict(by_key["b"].step_snapshot)
+        snap["depends_on"] = []
+        by_key["b"].step_snapshot = snap
+        await session.commit()
+
+        with pytest.raises(AppError) as exc:
+            validate_tool_join_dag(
+                plan, await ExecutionRepository(session).list_steps(execution_id)
+            )
+        assert exc.value.code == "RESOURCE_CONFLICT"
+        assert "exact projection" in exc.value.message or "step_snapshot" in exc.value.message
+
+
+@pytest.mark.asyncio
+async def test_tamper_join_policy_fails_before_evaluation(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_no_side_effects(monkeypatch)
+    async with db_session_factory() as session:
+        seeded = await _seed_executable(session)
+        execution_id, _lease, plan = await _materialize_claimed_dag(
+            session,
+            seeded=seeded,
+            steps=[
+                _tool("a"),
+                _tool("b"),
+                _join("j", depends_on=["a", "b"], policy=JoinPolicy.ALL_SUCCESS.value),
+            ],
+            max_parallelism=2,
+        )
+        steps = await ExecutionRepository(session).list_steps(execution_id)
+        by_key = {s.step_key: s for s in steps}
+        snap = dict(by_key["j"].step_snapshot)
+        cfg = dict(snap["config"])
+        cfg["policy"] = JoinPolicy.ALL_COMPLETE.value
+        snap["config"] = cfg
+        by_key["j"].step_snapshot = snap
+        await session.commit()
+
+        with pytest.raises(AppError) as exc:
+            validate_tool_join_dag(
+                plan, await ExecutionRepository(session).list_steps(execution_id)
+            )
+        assert exc.value.code == "RESOURCE_CONFLICT"
+
+
+@pytest.mark.asyncio
+async def test_tamper_on_error_fails_validate(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_no_side_effects(monkeypatch)
+    async with db_session_factory() as session:
+        seeded = await _seed_executable(session)
+        execution_id, _lease, plan = await _materialize_claimed_dag(
+            session,
+            seeded=seeded,
+            steps=[
+                _tool("a", on_error="FAIL_EXECUTION"),
+                _tool("b", depends_on=["a"]),
+            ],
+        )
+        steps = await ExecutionRepository(session).list_steps(execution_id)
+        by_key = {s.step_key: s for s in steps}
+        snap = dict(by_key["a"].step_snapshot)
+        snap["on_error"] = "CONTINUE"
+        by_key["a"].step_snapshot = snap
+        await session.commit()
+
+        with pytest.raises(AppError) as exc:
+            validate_tool_join_dag(
+                plan, await ExecutionRepository(session).list_steps(execution_id)
+            )
+        assert exc.value.code == "RESOURCE_CONFLICT"
+
+
+@pytest.mark.asyncio
+async def test_tamper_required_fails_validate(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_no_side_effects(monkeypatch)
+    async with db_session_factory() as session:
+        seeded = await _seed_executable(session)
+        execution_id, _lease, plan = await _materialize_claimed_dag(
+            session,
+            seeded=seeded,
+            steps=[_tool("a", required=True)],
+        )
+        steps = await ExecutionRepository(session).list_steps(execution_id)
+        by_key = {s.step_key: s for s in steps}
+        snap = dict(by_key["a"].step_snapshot)
+        snap["required"] = False
+        by_key["a"].step_snapshot = snap
+        await session.commit()
+
+        with pytest.raises(AppError) as exc:
+            validate_tool_join_dag(
+                plan, await ExecutionRepository(session).list_steps(execution_id)
+            )
+        assert exc.value.code == "RESOURCE_CONFLICT"
+
+
+@pytest.mark.asyncio
+async def test_tamper_step_type_projection_drift_fails(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_no_side_effects(monkeypatch)
+    async with db_session_factory() as session:
+        seeded = await _seed_executable(session)
+        execution_id, _lease, plan = await _materialize_claimed_dag(
+            session,
+            seeded=seeded,
+            steps=[
+                _tool("a"),
+                _tool("b"),
+                _join("j", depends_on=["a", "b"]),
+            ],
+            max_parallelism=2,
+        )
+        steps = await ExecutionRepository(session).list_steps(execution_id)
+        by_key = {s.step_key: s for s in steps}
+        # Plan TOOL a, but ExecutionStep.step_type flipped to JOIN.
+        by_key["a"].step_type = AuthorableStepType.JOIN.value
+        by_key["a"].mcp_tool_version_id = None
+        await session.commit()
+
+        with pytest.raises(AppError) as exc:
+            validate_tool_join_dag(
+                plan, await ExecutionRepository(session).list_steps(execution_id)
+            )
+        assert exc.value.code == "RESOURCE_CONFLICT"
+        assert "step_type" in exc.value.message or "type" in exc.value.message.lower()
+
+
+@pytest.mark.asyncio
+async def test_post_claim_snapshot_tamper_fail_closed_no_mcp(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Orchestrator must FAILED+clear lease on post-claim snapshot tamper (MCP 0)."""
+    _install_no_side_effects(monkeypatch)
+    async with db_session_factory() as session:
+        seeded = await _seed_executable(session)
+        execution_id, lease, _plan = await _materialize_claimed_dag(
+            session,
+            seeded=seeded,
+            steps=[
+                _tool("a"),
+                _tool("b", depends_on=["a"]),
+                _tool("c", depends_on=["a"]),
+                _join("j", depends_on=["b", "c"]),
+            ],
+            max_parallelism=2,
+        )
+        steps = await ExecutionRepository(session).list_steps(execution_id)
+        by_key = {s.step_key: s for s in steps}
+        snap = dict(by_key["b"].step_snapshot)
+        snap["depends_on"] = []
+        by_key["b"].step_snapshot = snap
+        await session.commit()
+        plan_hash_before = (await ExecutionRepository(session).get(execution_id)).plan_hash
+
+    client = _OkClient()
+    runner = McpToolRunner(
+        session_factory=db_session_factory,
+        mcp_client=client,
+        secret_resolver_factory=_resolver_factory,
+        lease_seconds=120,
+        result_inline_max_bytes=256_000,
+    )
+    outcome = await runner.run_claimed_execution(
+        execution_id=execution_id,
+        worker_id="worker-tamper",
+        lease_token=lease,
+    )
+    assert len(client.calls) == 0
+    assert outcome.reason == "EXECUTION_FAILED"
+    assert outcome.terminal_status == ExecutionStatus.FAILED.value
+
+    async with db_session_factory() as session:
+        execution = await ExecutionRepository(session).get(execution_id)
+        assert execution is not None
+        assert execution.status == ExecutionStatus.FAILED.value
+        assert execution.error_code == "RESOURCE_CONFLICT"
+        assert execution.lease_token is None
+        assert execution.worker_id is None
+        assert execution.heartbeat_at is None
+        assert execution.plan_hash == plan_hash_before
+        steps = await ExecutionRepository(session).list_steps(execution_id)
+        by_key = {s.step_key: s for s in steps}
+        # Root may have been READY at claim — unused READY TOOL → CANCELLED.
+        assert by_key["a"].status in {
+            StepStatus.CANCELLED.value,
+            StepStatus.READY.value,
+            StepStatus.SKIPPED.value,
+        }
+        if by_key["a"].status == StepStatus.READY.value:
+            # If cancel didn't apply (attempt_count/started), still no MCP.
+            assert by_key["a"].attempt_count == 0
+        else:
+            assert by_key["a"].status == StepStatus.CANCELLED.value
+        for key in ("b", "c", "j"):
+            assert by_key[key].status == StepStatus.SKIPPED.value

@@ -691,3 +691,75 @@ async def test_pg_fatal_sibling_wave(
         assert StepStatus.SUCCEEDED.value in {by_key["a"].status, by_key["b"].status}
         assert by_key["d"].status == StepStatus.SKIPPED.value
         assert client.calls == 2
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_pg_post_claim_step_snapshot_tamper_fail_closed(
+    integration_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """After claim, mutate step_snapshot only; orchestrator fail-closed, MCP 0."""
+    async with integration_session_factory() as session:
+        execution_id, lease_token, _ = await _materialize_claim(
+            session,
+            step_specs=[
+                _tool("a"),
+                _tool("b", depends_on=["a"]),
+                _tool("c", depends_on=["a"]),
+                _join(
+                    "j",
+                    depends_on=["b", "c"],
+                    policy=JoinPolicy.ALL_SUCCESS.value,
+                ),
+                _tool("d", depends_on=["j"]),
+            ],
+            max_parallelism=2,
+        )
+        steps = await ExecutionRepository(session).list_steps(execution_id)
+        by_key = {s.step_key: s for s in steps}
+        # Tamper JOIN policy in persisted snapshot only.
+        snap = dict(by_key["j"].step_snapshot)
+        cfg = dict(snap["config"])
+        cfg["policy"] = JoinPolicy.ALL_COMPLETE.value
+        snap["config"] = cfg
+        by_key["j"].step_snapshot = snap
+        execution = await ExecutionRepository(session).get(execution_id)
+        assert execution is not None
+        plan_hash = execution.plan_hash
+        plan_snapshot = dict(execution.plan_snapshot)
+        await session.commit()
+
+    client = _BarrierOverlapClient(parties=2)
+    runner = McpToolRunner(
+        session_factory=integration_session_factory,
+        mcp_client=client,
+        secret_resolver_factory=_resolver_factory,
+        lease_seconds=120,
+        result_inline_max_bytes=256_000,
+    )
+    result = await runner.run_claimed_execution(
+        execution_id=execution_id,
+        worker_id="pg-dag",
+        lease_token=lease_token,
+    )
+    assert len(client.calls) == 0
+    assert result.terminal_status == ExecutionStatus.FAILED.value
+    assert result.reason == "EXECUTION_FAILED"
+
+    async with integration_session_factory() as session:
+        execution = await ExecutionRepository(session).get(execution_id)
+        assert execution is not None
+        assert execution.status == ExecutionStatus.FAILED.value
+        assert execution.error_code == "RESOURCE_CONFLICT"
+        assert execution.lease_token is None
+        assert execution.worker_id is None
+        assert execution.plan_hash == plan_hash
+        assert execution.plan_snapshot == plan_snapshot
+        steps = await ExecutionRepository(session).list_steps(execution_id)
+        by_key = {s.step_key: s for s in steps}
+        assert by_key["a"].status == StepStatus.CANCELLED.value
+        assert by_key["a"].attempt_count == 0
+        for key in ("b", "c", "j", "d"):
+            assert by_key[key].status == StepStatus.SKIPPED.value
+            attempts = await ExecutionRepository(session).list_attempts(by_key[key].id)
+            assert attempts == []

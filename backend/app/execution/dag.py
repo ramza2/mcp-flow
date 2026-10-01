@@ -90,6 +90,21 @@ def validate_tool_join_dag(
 
     for ps in plan.steps:
         step = by_key[ps.id]
+        if step.step_key != ps.id:
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message=f"Step key mismatch for Plan Step {ps.id!r}.",
+                status_code=409,
+            )
+        if step.step_type != ps.type.value:
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message=(
+                    f"ExecutionStep.step_type {step.step_type!r} does not match "
+                    f"immutable Plan Step type {ps.type.value!r} for {ps.id!r}."
+                ),
+                status_code=409,
+            )
         if step.parent_step_id is not None:
             raise AppError(
                 code="RESOURCE_CONFLICT",
@@ -127,16 +142,26 @@ def validate_tool_join_dag(
                 message=f"step_snapshot invalid for {ps.id!r}.",
                 status_code=409,
             ) from exc
+        if parsed.id != ps.id or parsed.type != ps.type:
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message=f"Step identity/type mismatch for {ps.id!r}.",
+                status_code=409,
+            )
+        # Persisted snapshot must round-trip and equal the immutable Plan Step.
         if parsed.model_dump(mode="json") != step.step_snapshot:
             raise AppError(
                 code="RESOURCE_CONFLICT",
                 message=f"step_snapshot drift for {ps.id!r}.",
                 status_code=409,
             )
-        if parsed.id != step.step_key or parsed.id != ps.id:
+        if ps.model_dump(mode="json") != step.step_snapshot:
             raise AppError(
                 code="RESOURCE_CONFLICT",
-                message=f"Step identity mismatch for {ps.id!r}.",
+                message=(
+                    f"step_snapshot is not an exact projection of immutable "
+                    f"Plan Step {ps.id!r}."
+                ),
                 status_code=409,
             )
         if parsed.when is not None or ps.when is not None:
@@ -145,13 +170,15 @@ def validate_tool_join_dag(
                 message="Step.when is unsupported in TOOL/JOIN DAG runtime.",
                 status_code=409,
             )
-        if len(parsed.depends_on) != len(set(parsed.depends_on)):
+        # Prefer immutable Plan semantics after exact equality (same as snapshot).
+        depends_on = list(ps.depends_on)
+        if len(depends_on) != len(set(depends_on)):
             raise AppError(
                 code="RESOURCE_CONFLICT",
                 message=f"Duplicate depends_on on Step {ps.id!r}.",
                 status_code=409,
             )
-        for dep in parsed.depends_on:
+        for dep in depends_on:
             if dep not in plan_ids:
                 raise AppError(
                     code="RESOURCE_CONFLICT",
@@ -160,7 +187,7 @@ def validate_tool_join_dag(
                 )
             dependents[dep].append(ps.id)
 
-        if step.step_type == AuthorableStepType.TOOL.value:
+        if ps.type == AuthorableStepType.TOOL:
             if step.mcp_tool_version_id is None:
                 raise AppError(
                     code="RESOURCE_CONFLICT",
@@ -168,7 +195,7 @@ def validate_tool_join_dag(
                     status_code=409,
                 )
             try:
-                cfg = ComplexToolStepConfigV1.model_validate(parsed.config)
+                cfg = ComplexToolStepConfigV1.model_validate(ps.config)
             except Exception as exc:
                 raise AppError(
                     code="RESOURCE_CONFLICT",
@@ -185,7 +212,7 @@ def validate_tool_join_dag(
                     status_code=409,
                 )
             # Direct TOOL fan-in unsupported — require explicit JOIN.
-            if len(parsed.depends_on) > 1:
+            if len(depends_on) > 1:
                 raise AppError(
                     code="RESOURCE_CONFLICT",
                     message=(
@@ -203,21 +230,21 @@ def validate_tool_join_dag(
                     status_code=409,
                 )
             try:
-                JoinStepConfigV1.model_validate(parsed.config)
+                JoinStepConfigV1.model_validate(ps.config)
             except Exception as exc:
                 raise AppError(
                     code="RESOURCE_CONFLICT",
                     message=f"Invalid JOIN config for {ps.id!r}.",
                     status_code=409,
                 ) from exc
-            if not parsed.depends_on:
+            if not depends_on:
                 raise AppError(
                     code="RESOURCE_CONFLICT",
                     message=f"JOIN {ps.id!r} requires one or more dependencies.",
                     status_code=409,
                 )
 
-        deps[ps.id] = tuple(parsed.depends_on)
+        deps[ps.id] = tuple(depends_on)
 
     # Acyclic + full coverage via Kahn.
     indeg = {k: len(deps[k]) for k in deps}
