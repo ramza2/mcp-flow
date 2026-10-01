@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -21,8 +21,11 @@ from app.domain.enums import (
 )
 from app.execution.claim import ExecutionClaimService
 from app.execution.lineage import assert_tool_step_lineage
+from app.execution.loop_reconcile import UPSTREAM_LOOP_STOPPED
 from app.execution.loop_runtime import (
     LOOP_MAX_ITERATIONS_EXCEEDED,
+    LOOP_TIMEOUT,
+    PLAN_LIMIT_EXCEEDED,
     iteration_step_key,
 )
 from app.execution.materialize import (
@@ -185,22 +188,26 @@ def _loop(
     *,
     body_step_ids: list[str],
     max_iterations: int = 10,
+    on_error: str = "FAIL_EXECUTION",
+    timeout_seconds: int = 30,
+    depends_on: list[str] | None = None,
+    collection_path: str = "/items",
 ) -> dict[str, Any]:
     return {
         "id": sid,
         "name": sid,
         "type": AuthorableStepType.LOOP.value,
         "required": True,
-        "depends_on": [],
+        "depends_on": depends_on or [],
         "when": None,
-        "timeout_seconds": 30,
-        "on_error": "FAIL_EXECUTION",
+        "timeout_seconds": timeout_seconds,
+        "on_error": on_error,
         "config": {
             "mode": LoopMode.FOR_EACH.value,
             "max_iterations": max_iterations,
             "collection": {
                 "kind": BindingKind.PLAN_INPUT.value,
-                "path": "/items",
+                "path": collection_path,
             },
             "body_step_ids": body_step_ids,
         },
@@ -212,6 +219,8 @@ def _plan(
     steps: list[dict[str, Any]],
     *,
     max_parallelism: int = 4,
+    max_steps: int | None = None,
+    response_step_ids: list[str] | None = None,
 ) -> dict[str, Any]:
     body_ids: set[str] = set()
     for s in steps:
@@ -223,13 +232,26 @@ def _plan(
         if s["type"] == AuthorableStepType.TOOL.value:
             cfg = dict(s.get("config") or {})
             cfg["tool_version_id"] = str(tool_version_id)
+            # Top-level TOOL: rewrite LOOP_CONTEXT default → LITERAL.
+            if s["id"] not in body_ids and "item" in (cfg.get("bindings") or {}):
+                binding = (cfg.get("bindings") or {}).get("item") or {}
+                if binding.get("kind") == BindingKind.LOOP_CONTEXT.value:
+                    cfg["bindings"] = {
+                        "item": {
+                            "kind": BindingKind.LITERAL.value,
+                            "value": {"id": "top"},
+                        }
+                    }
             s["config"] = cfg
         rewritten.append(s)
     limits = default_plan_limits().model_dump(mode="json")
     limits["max_parallelism"] = max_parallelism
-    response_ids = [
-        s["id"] for s in rewritten if s["id"] not in body_ids
-    ][-1:]
+    if max_steps is not None:
+        limits["max_steps"] = max_steps
+    if response_step_ids is None:
+        response_step_ids = [
+            s["id"] for s in rewritten if s["id"] not in body_ids
+        ][-1:]
     return {
         "schema_version": EXECUTION_PLAN_SCHEMA_VERSION,
         "goal": "pg foreach loop",
@@ -239,17 +261,21 @@ def _plan(
         "steps": rewritten,
         "completion": {
             "success_policy": "ALL_REQUIRED",
-            "response_step_ids": response_ids,
+            "response_step_ids": response_step_ids,
         },
     }
 
 
-async def _seed_loop(session: AsyncSession) -> dict[str, Any]:
+async def _seed_loop(
+    session: AsyncSession,
+    *,
+    input_schema: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     seeded = await _seed_ready(session)
     await session.execute(
         update(MCPToolVersion)
         .where(MCPToolVersion.id == seeded["tool_version_id"])
-        .values(input_schema=_ITEM_SCHEMA)
+        .values(input_schema=input_schema or _ITEM_SCHEMA)
     )
     policy = await MCPToolPolicyRepository(session).get_by_tool_id(seeded["tool_id"])
     assert policy is not None
@@ -269,11 +295,30 @@ async def _materialize_claim(
     items: list[Any],
     worker_id: str = "pg-loop",
     max_parallelism: int = 4,
+    max_steps: int | None = None,
+    response_step_ids: list[str] | None = None,
+    input_schema: dict[str, Any] | None = None,
+    plan_override: dict[str, Any] | None = None,
 ) -> tuple[uuid.UUID, uuid.UUID, dict[str, Any]]:
-    seeded = await _seed_loop(session)
-    plan = _plan(
-        seeded["tool_version_id"], step_specs, max_parallelism=max_parallelism
+    seeded = await _seed_loop(session, input_schema=input_schema)
+    plan = plan_override or _plan(
+        seeded["tool_version_id"],
+        step_specs,
+        max_parallelism=max_parallelism,
+        max_steps=max_steps,
+        response_step_ids=response_step_ids,
     )
+    # Ensure TOOL configs reference the seeded tool version.
+    if plan_override is not None:
+        rewritten = []
+        for step in plan["steps"]:
+            s = dict(step)
+            if s["type"] == AuthorableStepType.TOOL.value:
+                cfg = dict(s.get("config") or {})
+                cfg["tool_version_id"] = str(seeded["tool_version_id"])
+                s["config"] = cfg
+            rewritten.append(s)
+        plan = {**plan, "steps": rewritten}
     outcome = await ExecutionPlanMaterializer(session).materialize(
         ExecutionMaterializeParams(
             source_type=ExecutionSourceType.MANUAL_TOOL_TEST.value,
@@ -767,3 +812,335 @@ async def test_j_lineage_tamper_fail_closed(
         child.parent_step_id = uuid.uuid4()
         with pytest.raises(AppError):
             assert_tool_step_lineage(execution, child, steps=steps)
+
+
+# ---------------------------------------------------------------------------
+# Integrity gaps — multi-LOOP budget, coherent tamper, CONTINUE timeout, race
+# ---------------------------------------------------------------------------
+
+_LITERAL_X_SCHEMA = {
+    "type": "object",
+    "properties": {"x": {}},
+    "required": ["x"],
+}
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_k_multi_loop_global_budget_fail(
+    integration_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    items = [{"id": i} for i in range(1, 5)]
+    async with integration_session_factory() as session:
+        execution_id, lease, _ = await _materialize_claim(
+            session,
+            step_specs=[
+                _loop("l1", body_step_ids=["b1"]),
+                _tool("b1", depends_on=["l1"]),
+                _loop("l2", body_step_ids=["b2"]),
+                _tool("b2", depends_on=["l2"]),
+            ],
+            items=items,
+            worker_id="pg-k",
+            max_steps=6,
+            response_step_ids=["l1", "l2"],
+        )
+    client = _OkClient()
+    await _run(
+        integration_session_factory,
+        execution_id=execution_id,
+        lease=lease,
+        client=client,
+        worker_id="pg-k",
+    )
+    assert len(client.calls) == 0
+    async with integration_session_factory() as session:
+        execution = await ExecutionRepository(session).get(execution_id)
+        assert execution is not None
+        assert execution.status == ExecutionStatus.FAILED.value
+        assert execution.error_code == PLAN_LIMIT_EXCEEDED
+        assert execution.lease_token is None
+        steps = await ExecutionRepository(session).list_steps(execution_id)
+        assert len(steps) <= 6
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_l_multi_loop_exact_fit_success(
+    integration_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    items = [{"id": 1}, {"id": 2}]
+    async with integration_session_factory() as session:
+        execution_id, lease, _ = await _materialize_claim(
+            session,
+            step_specs=[
+                _loop("l1", body_step_ids=["b1"]),
+                _tool("b1", depends_on=["l1"]),
+                _loop("l2", body_step_ids=["b2"]),
+                _tool("b2", depends_on=["l2"]),
+            ],
+            items=items,
+            worker_id="pg-l",
+            max_steps=6,
+            response_step_ids=["l1", "l2"],
+        )
+    client = _OkClient()
+    outcome = await _run(
+        integration_session_factory,
+        execution_id=execution_id,
+        lease=lease,
+        client=client,
+        worker_id="pg-l",
+    )
+    assert outcome.reason == "EXECUTION_SUCCEEDED"
+    assert len(client.calls) == 4
+    async with integration_session_factory() as session:
+        execution = await ExecutionRepository(session).get(execution_id)
+        assert execution is not None
+        assert execution.status == ExecutionStatus.SUCCEEDED.value
+        steps = await ExecutionRepository(session).list_steps(execution_id)
+        assert len(steps) == 6
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_m_coherent_iteration_tamper_fail_closed(
+    integration_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """After start, coherent iteration_no+step_key retarget → FAILED, no MCP."""
+    async with integration_session_factory() as session:
+        execution_id, lease, _ = await _materialize_claim(
+            session,
+            step_specs=[
+                _loop("loop1", body_step_ids=["body"]),
+                _tool(
+                    "body",
+                    depends_on=["loop1"],
+                    bindings={
+                        "x": {"kind": BindingKind.LITERAL.value, "value": 1}
+                    },
+                ),
+            ],
+            items=[{"id": 1}],
+            worker_id="pg-m",
+            input_schema=_LITERAL_X_SCHEMA,
+            response_step_ids=["loop1"],
+        )
+
+    client = _OkClient()
+    runner = McpToolRunner(
+        session_factory=integration_session_factory,
+        mcp_client=client,
+        secret_resolver_factory=_resolver_factory,
+        lease_seconds=120,
+        result_inline_max_bytes=256_000,
+    )
+    orch = ExecutionOrchestrator(
+        session_factory=integration_session_factory, tool_runner=runner
+    )
+    wave = await orch._prepare_wave(
+        execution_id=execution_id, worker_id="pg-m", lease_token=lease
+    )
+    assert wave.reason in {"WAVE_READY", "NO_READY", "LOOP_CHANGED"}
+
+    async with integration_session_factory() as session:
+        steps = await ExecutionRepository(session).list_steps(execution_id)
+        loop = next(s for s in steps if s.step_key == "loop1")
+        child = _child(steps, template_id="body", iteration_no=1)
+        child.iteration_no = 2
+        child.step_key = iteration_step_key(
+            parent_step_id=loop.id, iteration_no=2, template_step_id="body"
+        )
+        await session.commit()
+
+    # Resume under same lease — must fail closed before Attempt/ToolCall/MCP.
+    outcome = await runner.run_claimed_execution(
+        execution_id=execution_id,
+        worker_id="pg-m",
+        lease_token=lease,
+    )
+    assert outcome.execution_complete or outcome.reason in {
+        "EXECUTION_FAILED",
+        "RESOURCE_CONFLICT",
+    }
+    assert len(client.calls) == 0
+    async with integration_session_factory() as session:
+        execution = await ExecutionRepository(session).get(execution_id)
+        assert execution is not None
+        assert execution.status == ExecutionStatus.FAILED.value
+        assert execution.lease_token is None
+        steps = await ExecutionRepository(session).list_steps(execution_id)
+        for s in steps:
+            if s.step_type != AuthorableStepType.TOOL.value:
+                continue
+            attempts = await ExecutionRepository(session).list_attempts(s.id)
+            assert attempts == []
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_n_continue_timeout_downstream_d(
+    integration_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with integration_session_factory() as session:
+        execution_id, lease, _ = await _materialize_claim(
+            session,
+            step_specs=[
+                _loop(
+                    "L",
+                    body_step_ids=["B"],
+                    on_error="CONTINUE",
+                    timeout_seconds=1,
+                ),
+                _tool("B", depends_on=["L"]),
+                _tool(
+                    "D",
+                    depends_on=["L"],
+                    bindings={
+                        "item": {
+                            "kind": BindingKind.LITERAL.value,
+                            "value": {"id": "downstream"},
+                        }
+                    },
+                ),
+            ],
+            items=[{"id": 1}, {"id": 2}],
+            worker_id="pg-n",
+            response_step_ids=["L", "D"],
+        )
+
+    client = _OkClient()
+    runner = McpToolRunner(
+        session_factory=integration_session_factory,
+        mcp_client=client,
+        secret_resolver_factory=_resolver_factory,
+        lease_seconds=120,
+        result_inline_max_bytes=256_000,
+    )
+    orch = ExecutionOrchestrator(
+        session_factory=integration_session_factory, tool_runner=runner
+    )
+    wave1 = await orch._prepare_wave(
+        execution_id=execution_id, worker_id="pg-n", lease_token=lease
+    )
+    assert wave1.reason in {"WAVE_READY", "NO_READY", "LOOP_CHANGED"}
+    async with integration_session_factory() as session:
+        steps = await ExecutionRepository(session).list_steps(execution_id)
+        loop = next(s for s in steps if s.step_key == "L")
+        assert loop.status == StepStatus.RUNNING.value
+        loop.started_at = datetime.now(UTC) - timedelta(seconds=5)
+        await session.commit()
+
+    await orch._prepare_wave(
+        execution_id=execution_id, worker_id="pg-n", lease_token=lease
+    )
+    async with integration_session_factory() as session:
+        steps = await ExecutionRepository(session).list_steps(execution_id)
+        loop = next(s for s in steps if s.step_key == "L")
+        assert loop.status == StepStatus.TIMED_OUT.value
+        assert loop.error_code == LOOP_TIMEOUT
+        body = next(
+            s for s in steps if (s.step_snapshot or {}).get("id") == "B"
+        )
+        assert body.status in {
+            StepStatus.SKIPPED.value,
+            StepStatus.CANCELLED.value,
+        }
+        assert body.error_code == UPSTREAM_LOOP_STOPPED
+        execution = await ExecutionRepository(session).get(execution_id)
+        assert execution is not None
+        assert execution.lease_token is not None
+        lease = execution.lease_token
+
+    outcome = await runner.run_claimed_execution(
+        execution_id=execution_id,
+        worker_id="pg-n",
+        lease_token=lease,
+    )
+    assert outcome.reason == "EXECUTION_PARTIALLY_SUCCEEDED"
+    assert len(client.calls) == 1
+    assert client.calls[0].get("arguments", {}).get("item") == {
+        "id": "downstream"
+    }
+    async with integration_session_factory() as session:
+        execution = await ExecutionRepository(session).get(execution_id)
+        assert execution is not None
+        assert execution.status == ExecutionStatus.PARTIALLY_SUCCEEDED.value
+        assert execution.lease_token is None
+        steps = await ExecutionRepository(session).list_steps(execution_id)
+        d = next(s for s in steps if s.step_key == "D")
+        assert d.status == StepStatus.SUCCEEDED.value
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_o_next_iteration_materialize_race(
+    integration_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Race two _prepare_wave at n→n+1 after iter1 complete — one iter2 set."""
+    async with integration_session_factory() as session:
+        execution_id, lease, _ = await _materialize_claim(
+            session,
+            step_specs=[
+                _loop("loop1", body_step_ids=["body"]),
+                _tool("body", depends_on=["loop1"]),
+            ],
+            items=[{"id": 1}, {"id": 2}],
+            worker_id="pg-o",
+        )
+
+    client = _OkClient()
+    runner = McpToolRunner(
+        session_factory=integration_session_factory,
+        mcp_client=client,
+        secret_resolver_factory=_resolver_factory,
+        lease_seconds=120,
+        result_inline_max_bytes=256_000,
+    )
+    orch = ExecutionOrchestrator(
+        session_factory=integration_session_factory, tool_runner=runner
+    )
+    # Start LOOP + materialize iter1.
+    await orch._prepare_wave(
+        execution_id=execution_id, worker_id="pg-o", lease_token=lease
+    )
+    # Terminalize iter1 body without MCP so next prepare advances n→n+1.
+    async with integration_session_factory() as session:
+        steps = await ExecutionRepository(session).list_steps(execution_id)
+        loop = next(s for s in steps if s.step_key == "loop1")
+        assert loop.status == StepStatus.RUNNING.value
+        body = _child(steps, template_id="body", iteration_no=1)
+        body.status = StepStatus.SUCCEEDED.value
+        body.finished_at = datetime.now(UTC)
+        body.result_inline = {"structured_content": {"ok": True}}
+        body.lock_version += 1
+        await session.commit()
+
+    barrier = asyncio.Barrier(2)
+
+    async def _once() -> Any:
+        await barrier.wait()
+        return await orch._prepare_wave(
+            execution_id=execution_id,
+            worker_id="pg-o",
+            lease_token=lease,
+        )
+
+    r1, r2 = await asyncio.gather(_once(), _once())
+    reasons = {r1.reason, r2.reason}
+    assert reasons & {"WAVE_READY", "NO_READY", "LOOP_CHANGED", "STALE_LEASE"}
+
+    async with integration_session_factory() as session:
+        steps = await ExecutionRepository(session).list_steps(execution_id)
+        loop = next(s for s in steps if s.step_key == "loop1")
+        iter2 = [
+            s
+            for s in steps
+            if s.parent_step_id == loop.id and s.iteration_no == 2
+        ]
+        assert len(iter2) == 1
+        assert iter2[0].step_key == iteration_step_key(
+            parent_step_id=loop.id, iteration_no=2, template_step_id="body"
+        )
+        # Complete set for single-body LOOP.
+        assert (iter2[0].step_snapshot or {}).get("id") == "body"

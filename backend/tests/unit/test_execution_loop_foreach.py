@@ -22,7 +22,12 @@ from app.domain.enums import (
 )
 from app.execution.binding_resolver import RuntimeBindingResolver
 from app.execution.claim import ExecutionClaimService
+from app.execution.dag import validate_tool_join_dag
 from app.execution.lineage import assert_tool_step_lineage
+from app.execution.loop_reconcile import (
+    UPSTREAM_LOOP_STOPPED,
+    materialize_iteration,
+)
 from app.execution.loop_runtime import (
     LOOP_COLLECTION_TYPE_MISMATCH,
     LOOP_MAX_ITERATIONS_EXCEEDED,
@@ -49,6 +54,7 @@ from app.repositories.mcp_tool_policy import MCPToolPolicyRepository
 from app.schemas.execution_plan import (
     EXECUTION_PLAN_SCHEMA_VERSION,
     ExecutionPlanV1,
+    LoopStepConfigV1,
     compute_plan_hash,
     default_plan_limits,
 )
@@ -354,6 +360,43 @@ def _simple_foreach_plan(
         tool_version_id,
         max_steps=max_steps,
     )
+
+
+def _multi_foreach_plan(
+    tool_version_id: uuid.UUID,
+    *,
+    max_steps: int,
+    max_iterations: int = 10,
+) -> dict[str, Any]:
+    """Two independent root FOR_EACH LOOPs, one body TOOL each."""
+    return _plan(
+        [
+            _loop(
+                "l1",
+                body_step_ids=["b1"],
+                collection_path="/items",
+                max_iterations=max_iterations,
+            ),
+            _tool("b1", depends_on=["l1"]),
+            _loop(
+                "l2",
+                body_step_ids=["b2"],
+                collection_path="/items",
+                max_iterations=max_iterations,
+            ),
+            _tool("b2", depends_on=["l2"]),
+        ],
+        tool_version_id,
+        max_steps=max_steps,
+        response_step_ids=["l1", "l2"],
+    )
+
+
+_LITERAL_X_SCHEMA = {
+    "type": "object",
+    "properties": {"x": {}},
+    "required": ["x"],
+}
 
 
 async def _seed_executable(
@@ -1419,16 +1462,21 @@ async def test_collection_wrong_type_max_iterations_expanded_steps_timeout(
         StepStatus.FAILED.value,
     }
     async with db_session_factory() as session:
-        loop = next(
-            s
-            for s in await ExecutionRepository(session).list_steps(execution_id4)
-            if s.step_key == "loop1"
-        )
+        steps = await ExecutionRepository(session).list_steps(execution_id4)
+        loop = next(s for s in steps if s.step_key == "loop1")
         assert loop.status == StepStatus.TIMED_OUT.value
         assert loop.error_code == LOOP_TIMEOUT
+        bodies = [s for s in steps if s.parent_step_id == loop.id]
+        for b in bodies:
+            assert b.status in {
+                StepStatus.SKIPPED.value,
+                StepStatus.CANCELLED.value,
+            }
+            assert b.error_code == UPSTREAM_LOOP_STOPPED
         execution = await ExecutionRepository(session).get(execution_id4)
         assert execution is not None
         assert execution.status == ExecutionStatus.TIMED_OUT.value
+        assert execution.lease_token is None
     assert len(client4.calls) == 0
 
 
@@ -1727,3 +1775,396 @@ def test_top_level_plan_steps_and_ownership_helpers() -> None:
         )
     )
     assert [s.id for s in top_level_plan_steps(plain)] == ["only"]
+
+
+# ---------------------------------------------------------------------------
+# Integrity gaps — global budget, coherent tamper, CONTINUE/MARK_PARTIAL timeout
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_multi_loop_global_budget_fail(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two LOOPs each size 4: individually 2+4=6 would pass; combined exceeds."""
+    _install_no_side_effects(monkeypatch)
+    async with db_session_factory() as session:
+        seeded = await _seed_executable(session)
+        await session.commit()
+
+    items = [{"id": i} for i in range(1, 5)]
+    plan = _multi_foreach_plan(seeded["tool_version_id"], max_steps=6)
+    client = _OkClient()
+    execution_id, _ = await _claim_and_run(
+        db_session_factory,
+        plan=plan,
+        seeded=seeded,
+        client=client,
+        input_snapshot={"items": items},
+        worker_id="w-glb-fail",
+    )
+    assert len(client.calls) == 0
+    async with db_session_factory() as session:
+        execution = await ExecutionRepository(session).get(execution_id)
+        assert execution is not None
+        assert execution.status == ExecutionStatus.FAILED.value
+        assert execution.error_code == PLAN_LIMIT_EXCEEDED
+        assert execution.lease_token is None
+        steps = await ExecutionRepository(session).list_steps(execution_id)
+        assert len(steps) <= 6
+
+
+@pytest.mark.asyncio
+async def test_multi_loop_exact_fit_success(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two LOOPs size 2 each + 2 tops = max_steps 6 exact fit."""
+    _install_no_side_effects(monkeypatch)
+    async with db_session_factory() as session:
+        seeded = await _seed_executable(session)
+        await session.commit()
+
+    items = [{"id": 1}, {"id": 2}]
+    plan = _multi_foreach_plan(seeded["tool_version_id"], max_steps=6)
+    client = _OkClient()
+    execution_id, outcome = await _claim_and_run(
+        db_session_factory,
+        plan=plan,
+        seeded=seeded,
+        client=client,
+        input_snapshot={"items": items},
+        worker_id="w-glb-ok",
+    )
+    assert outcome.reason == "EXECUTION_SUCCEEDED"
+    assert len(client.calls) == 4
+    async with db_session_factory() as session:
+        execution = await ExecutionRepository(session).get(execution_id)
+        assert execution is not None
+        assert execution.status == ExecutionStatus.SUCCEEDED.value
+        steps = await ExecutionRepository(session).list_steps(execution_id)
+        assert len(steps) == 6
+
+
+@pytest.mark.asyncio
+async def test_coherent_iteration_tamper_literal_body_fail_closed(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Coherent iteration_no+step_key retarget outside pin → fail closed, MCP 0."""
+    _install_no_side_effects(monkeypatch)
+    async with db_session_factory() as session:
+        seeded = await _seed_executable(session, input_schema=_LITERAL_X_SCHEMA)
+        await session.commit()
+
+    plan = _plan(
+        [
+            _loop("loop1", body_step_ids=["body"], max_iterations=10),
+            _tool(
+                "body",
+                depends_on=["loop1"],
+                bindings={"x": {"kind": BindingKind.LITERAL.value, "value": 1}},
+            ),
+        ],
+        seeded["tool_version_id"],
+        response_step_ids=["loop1"],
+    )
+    client = _OkClient()
+    async with db_session_factory() as session:
+        execution_id = await _materialize_queued(
+            session,
+            plan_snapshot=plan,
+            seeded=seeded,
+            input_snapshot={"items": [{"id": 1}]},
+        )
+        claim = await ExecutionClaimService(session, lease_seconds=120).claim(
+            execution_id=execution_id, worker_id="w-coherent"
+        )
+        await session.commit()
+        assert claim.lease_token is not None
+        lease = claim.lease_token
+
+    from app.execution.orchestrator import ExecutionOrchestrator
+
+    runner = McpToolRunner(
+        session_factory=db_session_factory,
+        mcp_client=client,
+        secret_resolver_factory=_resolver_factory,
+        lease_seconds=120,
+        result_inline_max_bytes=256_000,
+    )
+    orch = ExecutionOrchestrator(
+        session_factory=db_session_factory, tool_runner=runner
+    )
+    wave = await orch._prepare_wave(
+        execution_id=execution_id, worker_id="w-coherent", lease_token=lease
+    )
+    assert wave.reason in {"WAVE_READY", "NO_READY", "LOOP_CHANGED"}
+
+    async with db_session_factory() as session:
+        execution = await ExecutionRepository(session).get(execution_id)
+        assert execution is not None
+        steps = await ExecutionRepository(session).list_steps(execution_id)
+        loop = next(s for s in steps if s.step_key == "loop1")
+        child = _child_by_template(steps, template_id="body", iteration_no=1)
+        # Coherent retarget: both iteration_no and canonical step_key for iter 2.
+        child.iteration_no = 2
+        child.step_key = iteration_step_key(
+            parent_step_id=loop.id, iteration_no=2, template_step_id="body"
+        )
+        await session.flush()
+        steps = await ExecutionRepository(session).list_steps(execution_id)
+        child = next(s for s in steps if s.parent_step_id == loop.id)
+        plan_obj = ExecutionPlanV1.model_validate(execution.plan_snapshot)
+        with pytest.raises(AppError):
+            validate_tool_join_dag(plan_obj, steps)
+        loop.status = StepStatus.RUNNING.value
+        with pytest.raises(AppError):
+            assert_tool_step_lineage(execution, child, steps=steps)
+        await session.rollback()
+
+    assert len(client.calls) == 0
+
+
+@pytest.mark.asyncio
+async def test_pending_iter1_with_precreated_iter2_dag_fail_closed(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Iter1 PENDING + pre-created iter2 set → multiple active iterations fail."""
+    _install_no_side_effects(monkeypatch)
+    async with db_session_factory() as session:
+        seeded = await _seed_executable(session)
+        await session.commit()
+
+    plan = _simple_foreach_plan(seeded["tool_version_id"])
+    client = _OkClient()
+    async with db_session_factory() as session:
+        execution_id = await _materialize_queued(
+            session,
+            plan_snapshot=plan,
+            seeded=seeded,
+            input_snapshot={"items": [{"id": 1}, {"id": 2}]},
+        )
+        claim = await ExecutionClaimService(session, lease_seconds=120).claim(
+            execution_id=execution_id, worker_id="w-precreate"
+        )
+        await session.commit()
+        assert claim.lease_token is not None
+        lease = claim.lease_token
+
+    from app.execution.orchestrator import ExecutionOrchestrator
+
+    runner = McpToolRunner(
+        session_factory=db_session_factory,
+        mcp_client=client,
+        secret_resolver_factory=_resolver_factory,
+        lease_seconds=120,
+        result_inline_max_bytes=256_000,
+    )
+    orch = ExecutionOrchestrator(
+        session_factory=db_session_factory, tool_runner=runner
+    )
+    await orch._prepare_wave(
+        execution_id=execution_id, worker_id="w-precreate", lease_token=lease
+    )
+
+    async with db_session_factory() as session:
+        execution = await ExecutionRepository(session).get(execution_id)
+        assert execution is not None
+        steps = await ExecutionRepository(session).list_steps(execution_id)
+        loop = next(s for s in steps if s.step_key == "loop1")
+        iter1 = _child_by_template(steps, template_id="body", iteration_no=1)
+        assert iter1.status == StepStatus.PENDING.value
+        plan_obj = ExecutionPlanV1.model_validate(execution.plan_snapshot)
+        cfg = LoopStepConfigV1.model_validate(
+            next(s for s in plan_obj.steps if s.id == "loop1").config
+        )
+        created = await materialize_iteration(
+            executions=ExecutionRepository(session),
+            execution=execution,
+            loop_step=loop,
+            plan=plan_obj,
+            cfg=cfg,
+            iteration_no=2,
+            existing_steps=steps,
+        )
+        assert len(created) == 1
+        await session.flush()
+        steps2 = await ExecutionRepository(session).list_steps(execution_id)
+        with pytest.raises(AppError) as exc:
+            validate_tool_join_dag(plan_obj, steps2)
+        assert exc.value.code == "RESOURCE_CONFLICT"
+        await session.rollback()
+
+    assert len(client.calls) == 0
+
+
+async def _timeout_continue_or_mark_partial(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    *,
+    seeded: dict[str, Any],
+    on_error_loop: str,
+    worker_id: str,
+) -> tuple[uuid.UUID, _OkClient]:
+    """L CONTINUE/MARK_PARTIAL timeout → B UPSTREAM_LOOP_STOPPED; D still MCP."""
+    plan = _plan(
+        [
+            _loop(
+                "L",
+                body_step_ids=["B"],
+                on_error=on_error_loop,
+                timeout_seconds=1,
+            ),
+            _tool("B", depends_on=["L"]),
+            _tool(
+                "D",
+                depends_on=["L"],
+                bindings={
+                    "item": {
+                        "kind": BindingKind.LITERAL.value,
+                        "value": {"id": "downstream"},
+                    }
+                },
+            ),
+        ],
+        seeded["tool_version_id"],
+        response_step_ids=["L", "D"],
+    )
+    client = _OkClient()
+    async with db_session_factory() as session:
+        execution_id = await _materialize_queued(
+            session,
+            plan_snapshot=plan,
+            seeded=seeded,
+            input_snapshot={"items": [{"id": 1}, {"id": 2}]},
+        )
+        claim = await ExecutionClaimService(session, lease_seconds=120).claim(
+            execution_id=execution_id, worker_id=worker_id
+        )
+        await session.commit()
+        assert claim.lease_token is not None
+        lease = claim.lease_token
+
+    from app.execution.orchestrator import ExecutionOrchestrator
+
+    runner = McpToolRunner(
+        session_factory=db_session_factory,
+        mcp_client=client,
+        secret_resolver_factory=_resolver_factory,
+        lease_seconds=120,
+        result_inline_max_bytes=256_000,
+    )
+    orch = ExecutionOrchestrator(
+        session_factory=db_session_factory, tool_runner=runner
+    )
+    wave1 = await orch._prepare_wave(
+        execution_id=execution_id, worker_id=worker_id, lease_token=lease
+    )
+    assert wave1.reason in {"WAVE_READY", "NO_READY", "LOOP_CHANGED"}
+    async with db_session_factory() as session:
+        steps = await ExecutionRepository(session).list_steps(execution_id)
+        loop = next(s for s in steps if s.step_key == "L")
+        assert loop.status == StepStatus.RUNNING.value
+        body = _child_by_template(steps, template_id="B", iteration_no=1)
+        assert body.status in {StepStatus.PENDING.value, StepStatus.READY.value}
+        loop.started_at = datetime.now(UTC) - timedelta(seconds=5)
+        await session.commit()
+
+    wave2 = await orch._prepare_wave(
+        execution_id=execution_id, worker_id=worker_id, lease_token=lease
+    )
+    assert not wave2.execution_complete or wave2.reason in {
+        "LOOP_CHANGED",
+        "WAVE_READY",
+        "NO_READY",
+        "EXECUTION_PARTIALLY_SUCCEEDED",
+    }
+    async with db_session_factory() as session:
+        steps = await ExecutionRepository(session).list_steps(execution_id)
+        loop = next(s for s in steps if s.step_key == "L")
+        assert loop.status == StepStatus.TIMED_OUT.value
+        assert loop.error_code == LOOP_TIMEOUT
+        body = next(s for s in steps if (s.step_snapshot or {}).get("id") == "B")
+        assert body.status in {
+            StepStatus.SKIPPED.value,
+            StepStatus.CANCELLED.value,
+        }
+        assert body.error_code == UPSTREAM_LOOP_STOPPED
+
+    # Finish remaining work (downstream D) under the same lease if still held.
+    async with db_session_factory() as session:
+        execution = await ExecutionRepository(session).get(execution_id)
+        assert execution is not None
+        if execution.lease_token is not None:
+            lease = execution.lease_token
+            still_running = execution.status == ExecutionStatus.RUNNING.value
+        else:
+            still_running = False
+    if still_running:
+        outcome = await runner.run_claimed_execution(
+            execution_id=execution_id,
+            worker_id=worker_id,
+            lease_token=lease,
+        )
+        assert outcome.reason in {
+            "EXECUTION_PARTIALLY_SUCCEEDED",
+            "EXECUTION_SUCCEEDED",
+        }
+    return execution_id, client
+
+
+@pytest.mark.asyncio
+async def test_continue_timeout_downstream_partial(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_no_side_effects(monkeypatch)
+    async with db_session_factory() as session:
+        seeded = await _seed_executable(session)
+        await session.commit()
+
+    execution_id, client = await _timeout_continue_or_mark_partial(
+        db_session_factory,
+        seeded=seeded,
+        on_error_loop="CONTINUE",
+        worker_id="w-to-cont",
+    )
+    assert len(client.calls) == 1
+    assert client.calls[0].get("arguments", {}).get("item") == {"id": "downstream"}
+    async with db_session_factory() as session:
+        execution = await ExecutionRepository(session).get(execution_id)
+        assert execution is not None
+        assert execution.status == ExecutionStatus.PARTIALLY_SUCCEEDED.value
+        assert execution.lease_token is None
+        steps = await ExecutionRepository(session).list_steps(execution_id)
+        d = next(s for s in steps if s.step_key == "D")
+        assert d.status == StepStatus.SUCCEEDED.value
+
+
+@pytest.mark.asyncio
+async def test_mark_partial_timeout_downstream_partial(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_no_side_effects(monkeypatch)
+    async with db_session_factory() as session:
+        seeded = await _seed_executable(session)
+        await session.commit()
+
+    execution_id, client = await _timeout_continue_or_mark_partial(
+        db_session_factory,
+        seeded=seeded,
+        on_error_loop="MARK_PARTIAL",
+        worker_id="w-to-mark",
+    )
+    assert len(client.calls) == 1
+    async with db_session_factory() as session:
+        execution = await ExecutionRepository(session).get(execution_id)
+        assert execution is not None
+        assert execution.status == ExecutionStatus.PARTIALLY_SUCCEEDED.value
+        assert execution.lease_token is None
+        steps = await ExecutionRepository(session).list_steps(execution_id)
+        d = next(s for s in steps if s.step_key == "D")
+        assert d.status == StepStatus.SUCCEEDED.value
