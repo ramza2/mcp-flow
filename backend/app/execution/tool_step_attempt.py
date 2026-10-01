@@ -92,6 +92,7 @@ class ToolStepAttemptService:
         worker_id: str,
         lease_token: uuid.UUID,
         now: datetime | None = None,
+        forbid_new_approval_wait: bool = False,
     ) -> ToolStepAttemptOutcome | ApprovalWaitOutcome:
         worker = _normalize_worker_id(worker_id)
         ts = now or datetime.now(UTC)
@@ -189,6 +190,16 @@ class ToolStepAttemptService:
                 approval_policy=authz.approval_policy,
             )
             if evidence is None:
+                if forbid_new_approval_wait:
+                    raise AppError(
+                        code="DAG_WAIT_UNSUPPORTED",
+                        message=(
+                            "Multi-Step TOOL/JOIN DAG cannot create "
+                            "Execution-level WAITING_APPROVAL; branch-local "
+                            "suspension is out of scope for this runtime slice."
+                        ),
+                        status_code=409,
+                    )
                 return await ApprovalWaitService(self._session).enter_for_tool_step(
                     execution=execution,
                     step=step,

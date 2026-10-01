@@ -639,17 +639,22 @@ class ExecutionRecoveryService:
             )
         return str(risk_class), max_attempts
     async def _lock_foundation_step(self, execution: Execution) -> ExecutionStep:
+        steps = await self._executions.list_steps(execution.id)
+        if len(steps) != 1:
+            # Parallel TOOL/JOIN wave recovery is out of scope: never re-invoke
+            # terminal Attempt/ToolCall; ambiguous in-flight evidence fails closed.
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message=(
+                    "Multi-Step TOOL/JOIN parallel-wave recovery is unsupported; "
+                    "fail closed without re-invoking ToolCalls."
+                ),
+                status_code=409,
+            )
         if execution.source_type != ExecutionSourceType.AGENT_REQUEST.value:
             raise AppError(
                 code="RESOURCE_CONFLICT",
                 message="Recovery supports AgentRequest Executions only.",
-                status_code=409,
-            )
-        steps = await self._executions.list_steps(execution.id)
-        if len(steps) != 1:
-            raise AppError(
-                code="RESOURCE_CONFLICT",
-                message="AgentRequest Execution must contain exactly one Step.",
                 status_code=409,
             )
         step = await self._executions.lock_step(steps[0].id)

@@ -202,6 +202,35 @@ class _PreparedCall:
     mrtr_input_request_id: uuid.UUID | None = None
     mrtr_input_responses: dict[str, Any] | None = None
     mrtr_request_state: Any = None
+    # DAG wave mode: keep Execution RUNNING + lease so siblings can settle.
+    defer_execution_terminalization: bool = False
+    # Multi-Step DAG: never enter Execution-level WAITING_* states.
+    forbid_execution_wait: bool = False
+
+
+def _apply_or_defer_execution_fatal(
+    execution: Execution,
+    *,
+    error_code: str | None,
+    error_message: str | None,
+    now: datetime,
+    defer: bool,
+) -> None:
+    """Terminalize Execution or only heartbeat when orchestrator owns the wave."""
+    if defer:
+        execution.heartbeat_at = now
+        execution.lock_version += 1
+        return
+    execution.status = ExecutionStatus.FAILED.value
+    execution.error_code = error_code
+    execution.error_message = error_message
+    execution.result_summary = None
+    execution.finished_at = now
+    execution.worker_id = None
+    execution.lease_token = None
+    execution.lease_expires_at = None
+    execution.heartbeat_at = None
+    execution.lock_version += 1
 
 
 def _prepared_invocation_lineage_matches(
@@ -416,10 +445,11 @@ class McpToolRunner:
         worker_id: str,
         lease_token: uuid.UUID,
     ) -> ToolRunOutcome:
-        """Run sequential TOOL orchestration under a claimed Execution lease.
+        """Run TOOL/JOIN DAG wave orchestration under a claimed Execution lease.
 
-        Graph progression and Execution completion are owned by
-        ``ExecutionOrchestrator``. This method remains the Celery/task entry.
+        Graph progression, JOIN reconciliation, and Execution completion are
+        owned by ``ExecutionOrchestrator``. This method remains the Celery/task
+        entry (one task per Execution, not per Step).
         """
         from app.execution.orchestrator import ExecutionOrchestrator
 
@@ -439,6 +469,8 @@ class McpToolRunner:
         step_execution_id: uuid.UUID,
         worker_id: str,
         lease_token: uuid.UUID,
+        defer_execution_terminalization: bool = False,
+        forbid_execution_wait: bool = False,
     ) -> ToolRunOutcome:
         """Invoke MCP for exactly one TOOL Step (safe-retry loop included).
 
@@ -446,7 +478,11 @@ class McpToolRunner:
         terminalize the Execution — ``ExecutionOrchestrator`` applies
         ErrorPolicy / ALL_REQUIRED. Mandatory-fatal dispositions
         (UNKNOWN_OUTCOME, pre-send security/integrity fail-closed) still
-        terminalize Execution here.
+        terminalize Execution here unless ``defer_execution_terminalization``
+        is set (DAG wave mode — siblings must settle first).
+
+        ``forbid_execution_wait`` fail-closes multi-Step Approval/MRTR waits
+        with ``DAG_WAIT_UNSUPPORTED`` / conservative UNKNOWN_OUTCOME.
         """
         while True:
             prep = await self._prepare(
@@ -454,6 +490,8 @@ class McpToolRunner:
                 step_execution_id=step_execution_id,
                 worker_id=worker_id,
                 lease_token=lease_token,
+                defer_execution_terminalization=defer_execution_terminalization,
+                forbid_execution_wait=forbid_execution_wait,
             )
             if prep.prepared is None:
                 assert prep.outcome is not None
@@ -575,15 +613,13 @@ class McpToolRunner:
             tool_call.normalized_status = ToolCallNormalizedStatus.FAILED.value
             tool_call.finished_at = now
 
-        execution.status = ExecutionStatus.FAILED.value
-        execution.error_code = error_code
-        execution.error_message = error_message
-        execution.finished_at = now
-        execution.worker_id = None
-        execution.lease_token = None
-        execution.lease_expires_at = None
-        execution.heartbeat_at = None
-        execution.lock_version += 1
+        _apply_or_defer_execution_fatal(
+            execution,
+            error_code=error_code,
+            error_message=error_message,
+            now=now,
+            defer=prepared.defer_execution_terminalization,
+        )
 
         return ToolRunOutcome(
             execution_id=execution.id,
@@ -761,8 +797,12 @@ class McpToolRunner:
         step_execution_id: uuid.UUID,
         worker_id: str,
         lease_token: uuid.UUID,
+        defer_execution_terminalization: bool = False,
+        forbid_execution_wait: bool = False,
     ) -> _PrepareResult:
         worker = _normalize_worker_id(worker_id)
+        defer = defer_execution_terminalization
+        forbid_wait = forbid_execution_wait
         async with self._session_factory() as session:
             async with session.begin():
                 executions = ExecutionRepository(session)
@@ -943,6 +983,7 @@ class McpToolRunner:
                         worker_id=worker,
                         lease_token=lease_token,
                         now=now,
+                        forbid_new_approval_wait=forbid_wait,
                     )
                 except AppError as exc:
                     # Do not strand RUNNING + READY after recovery/claim when
@@ -1003,15 +1044,13 @@ class McpToolRunner:
                         step.finished_at = now
                         step.lock_version += 1
                     if execution.status == ExecutionStatus.RUNNING.value:
-                        execution.status = ExecutionStatus.FAILED.value
-                        execution.error_code = exc.code
-                        execution.error_message = exc.message
-                        execution.finished_at = now
-                        execution.worker_id = None
-                        execution.lease_token = None
-                        execution.lease_expires_at = None
-                        execution.heartbeat_at = None
-                        execution.lock_version += 1
+                        _apply_or_defer_execution_fatal(
+                            execution,
+                            error_code=exc.code,
+                            error_message=exc.message,
+                            now=now,
+                            defer=defer,
+                        )
                     return _PrepareResult(
                         outcome=ToolRunOutcome(
                             execution_id=execution.id,
@@ -1026,6 +1065,38 @@ class McpToolRunner:
                     )
 
                 if isinstance(attempt_outcome, ApprovalWaitOutcome):
+                    if forbid_wait:
+                        # Should be unreachable when forbid_new_approval_wait is set;
+                        # fail closed without leaving a resumable DAG wait.
+                        if step.status not in _STEP_TERMINAL_STATUSES:
+                            step.status = StepStatus.FAILED.value
+                            step.error_code = "DAG_WAIT_UNSUPPORTED"
+                            step.error_message = (
+                                "Multi-Step TOOL/JOIN DAG cannot enter "
+                                "WAITING_APPROVAL."
+                            )
+                            step.finished_at = now
+                            step.lock_version += 1
+                        if execution.status == ExecutionStatus.RUNNING.value:
+                            _apply_or_defer_execution_fatal(
+                                execution,
+                                error_code="DAG_WAIT_UNSUPPORTED",
+                                error_message=step.error_message,
+                                now=now,
+                                defer=defer,
+                            )
+                        return _PrepareResult(
+                            outcome=ToolRunOutcome(
+                                execution_id=execution.id,
+                                step_execution_id=step.id,
+                                attempt_id=None,
+                                tool_call_id=None,
+                                mcp_called=False,
+                                terminal_status=StepStatus.FAILED.value,
+                                reason="DAG_WAIT_UNSUPPORTED",
+                                disposition=DISPOSITION_FATAL_EXECUTION_FAILURE,
+                            )
+                        )
                     return _PrepareResult(
                         outcome=ToolRunOutcome(
                             execution_id=execution.id,
@@ -1089,15 +1160,13 @@ class McpToolRunner:
                             step.finished_at = now
                             step.lock_version += 1
                         if execution.status == ExecutionStatus.RUNNING.value:
-                            execution.status = ExecutionStatus.FAILED.value
-                            execution.error_code = exc.code
-                            execution.error_message = exc.message
-                            execution.finished_at = now
-                            execution.worker_id = None
-                            execution.lease_token = None
-                            execution.lease_expires_at = None
-                            execution.heartbeat_at = None
-                            execution.lock_version += 1
+                            _apply_or_defer_execution_fatal(
+                                execution,
+                                error_code=exc.code,
+                                error_message=exc.message,
+                                now=now,
+                                defer=defer,
+                            )
                         return _PrepareResult(
                             outcome=ToolRunOutcome(
                                 execution_id=execution.id,
@@ -1138,15 +1207,13 @@ class McpToolRunner:
                             step.finished_at = now
                             step.lock_version += 1
                         if execution.status == ExecutionStatus.RUNNING.value:
-                            execution.status = ExecutionStatus.FAILED.value
-                            execution.error_code = exc.code
-                            execution.error_message = exc.message
-                            execution.finished_at = now
-                            execution.worker_id = None
-                            execution.lease_token = None
-                            execution.lease_expires_at = None
-                            execution.heartbeat_at = None
-                            execution.lock_version += 1
+                            _apply_or_defer_execution_fatal(
+                                execution,
+                                error_code=exc.code,
+                                error_message=exc.message,
+                                now=now,
+                                defer=defer,
+                            )
                         return _PrepareResult(
                             outcome=ToolRunOutcome(
                                 execution_id=execution.id,
@@ -1313,6 +1380,7 @@ class McpToolRunner:
                         output_schema=tool_version.output_schema,
                         result_inline_max_bytes=self._result_inline_max_bytes,
                         now=now,
+                        defer_execution_terminalization=defer,
                     )
                     return _PrepareResult(
                         outcome=ToolRunOutcome(
@@ -1358,6 +1426,8 @@ class McpToolRunner:
                     mrtr_request_state=(
                         mrtr_resume[2] if mrtr_resume is not None else None
                     ),
+                    defer_execution_terminalization=defer,
+                    forbid_execution_wait=forbid_wait,
                 )
                 return _PrepareResult(prepared=prepared)
 
@@ -1583,6 +1653,9 @@ class McpToolRunner:
                         response_bytes=mrtr.raw_size_bytes,
                         first_byte_at=first_byte_at,
                         now=now,
+                        defer_execution_terminalization=(
+                            prepared.defer_execution_terminalization
+                        ),
                     )
 
                 if step_timeout_budget_exhausted(
@@ -1694,15 +1767,13 @@ class McpToolRunner:
                     step.finished_at = now
                     step.lock_version += 1
 
-                    execution.status = ExecutionStatus.FAILED.value
-                    execution.error_code = "MAX_MRTR_ROUNDS_EXCEEDED"
-                    execution.error_message = max_rounds_message
-                    execution.finished_at = now
-                    execution.worker_id = None
-                    execution.lease_token = None
-                    execution.lease_expires_at = None
-                    execution.heartbeat_at = None
-                    execution.lock_version += 1
+                    _apply_or_defer_execution_fatal(
+                        execution,
+                        error_code="MAX_MRTR_ROUNDS_EXCEEDED",
+                        error_message=max_rounds_message,
+                        now=now,
+                        defer=prepared.defer_execution_terminalization,
+                    )
 
                     return ToolRunOutcome(
                         execution_id=execution.id,
@@ -1712,6 +1783,55 @@ class McpToolRunner:
                         mcp_called=True,
                         terminal_status=StepStatus.FAILED.value,
                         reason="MAX_MRTR_ROUNDS_EXCEEDED",
+                        disposition=DISPOSITION_FATAL_EXECUTION_FAILURE,
+                    )
+
+                # Multi-Step DAG: never open Execution-level WAITING_INPUT while
+                # siblings may still be in flight. Remote call already happened —
+                # classify conservatively as UNKNOWN_OUTCOME (no OPEN wait row).
+                if prepared.forbid_execution_wait:
+                    dag_wait_message = (
+                        "Multi-Step TOOL/JOIN DAG cannot enter WAITING_INPUT; "
+                        "branch-local MRTR suspension is out of scope."
+                    )
+                    tool_call.normalized_status = (
+                        ToolCallNormalizedStatus.UNKNOWN_OUTCOME.value
+                    )
+                    tool_call.response_meta = persist_meta
+                    tool_call.response_bytes = mrtr.raw_size_bytes
+                    tool_call.first_byte_at = first_byte_at
+                    tool_call.finished_at = now
+
+                    attempt.status = StepAttemptStatus.UNKNOWN_OUTCOME.value
+                    attempt.error_layer = "PROTOCOL"
+                    attempt.error_code = "DAG_WAIT_UNSUPPORTED"
+                    attempt.error_message = dag_wait_message
+                    attempt.is_retryable = False
+                    attempt.finished_at = now
+                    attempt.worker_id = None
+                    attempt.lease_expires_at = None
+
+                    step.status = StepStatus.UNKNOWN_OUTCOME.value
+                    step.error_code = "DAG_WAIT_UNSUPPORTED"
+                    step.error_message = dag_wait_message
+                    step.finished_at = now
+                    step.lock_version += 1
+
+                    _apply_or_defer_execution_fatal(
+                        execution,
+                        error_code="DAG_WAIT_UNSUPPORTED",
+                        error_message=dag_wait_message,
+                        now=now,
+                        defer=prepared.defer_execution_terminalization,
+                    )
+                    return ToolRunOutcome(
+                        execution_id=execution.id,
+                        step_execution_id=step.id,
+                        attempt_id=attempt.id,
+                        tool_call_id=tool_call.id,
+                        mcp_called=True,
+                        terminal_status=StepStatus.UNKNOWN_OUTCOME.value,
+                        reason="DAG_WAIT_UNSUPPORTED",
                         disposition=DISPOSITION_FATAL_EXECUTION_FAILURE,
                     )
 
@@ -1880,6 +2000,9 @@ class McpToolRunner:
                     result_inline_max_bytes=self._result_inline_max_bytes,
                     now=now,
                     protected=protected,
+                    defer_execution_terminalization=(
+                        prepared.defer_execution_terminalization
+                    ),
                 )
                 mcp_called = not isinstance(call_error, _PreSendFailClosed)
                 reason = (
@@ -1916,6 +2039,7 @@ def _terminalize_mrtr_secret_echo(
     response_bytes: int,
     first_byte_at: datetime | None,
     now: datetime,
+    defer_execution_terminalization: bool = False,
 ) -> ToolRunOutcome:
     """Fail closed when MRTR payload embeds protected plaintext.
 
@@ -1945,16 +2069,13 @@ def _terminalize_mrtr_secret_echo(
     step.finished_at = now
     step.lock_version += 1
 
-    execution.status = ExecutionStatus.FAILED.value
-    execution.error_code = _MRTR_SECRET_ECHO_CODE
-    execution.error_message = _MRTR_SECRET_ECHO_MESSAGE
-    execution.result_summary = None
-    execution.finished_at = now
-    execution.worker_id = None
-    execution.lease_token = None
-    execution.lease_expires_at = None
-    execution.heartbeat_at = None
-    execution.lock_version += 1
+    _apply_or_defer_execution_fatal(
+        execution,
+        error_code=_MRTR_SECRET_ECHO_CODE,
+        error_message=_MRTR_SECRET_ECHO_MESSAGE,
+        now=now,
+        defer=defer_execution_terminalization,
+    )
 
     return ToolRunOutcome(
         execution_id=execution.id,
@@ -2030,12 +2151,17 @@ def _apply_terminal_transition(
     result_inline_max_bytes: int,
     now: datetime,
     protected: tuple[str, ...] = (),
+    defer_execution_terminalization: bool = False,
 ) -> tuple[str, str]:
     """Terminalize ToolCall/Attempt/Step; Execution only for fatal dispositions.
 
     Returns ``(step_terminal_status, disposition)``. Ordinary known TOOL
     failures leave Execution RUNNING under the same lease so
     ``ExecutionOrchestrator`` can apply ErrorPolicy / ALL_REQUIRED.
+
+    When ``defer_execution_terminalization`` is set (DAG wave mode), mandatory
+    fatal dispositions still return ``FATAL_EXECUTION_FAILURE`` but keep
+    Execution RUNNING with the lease so already-dispatched siblings can settle.
 
     Protocol/schema validation uses the in-memory remote ``result``. Persistence
     fields are written from redacted copies when ``protected`` is non-empty.
@@ -2116,21 +2242,19 @@ def _apply_terminal_transition(
         call_error.error_code != "STEP_TIMEOUT_EXCEEDED"
     )
     if terminal == StepStatus.UNKNOWN_OUTCOME.value or pre_send_fatal:
-        execution.status = ExecutionStatus.FAILED.value
-        execution.error_code = error_code
-        execution.error_message = (
+        fatal_message = (
             "MCP tool outcome is unknown after a possible external side effect;"
             " it is not automatically retried."
             if terminal == StepStatus.UNKNOWN_OUTCOME.value
             else error_message
         )
-        execution.result_summary = None
-        execution.finished_at = finished_at
-        execution.worker_id = None
-        execution.lease_token = None
-        execution.lease_expires_at = None
-        execution.heartbeat_at = None
-        execution.lock_version += 1
+        _apply_or_defer_execution_fatal(
+            execution,
+            error_code=error_code,
+            error_message=fatal_message,
+            now=finished_at,
+            defer=defer_execution_terminalization,
+        )
         return terminal, DISPOSITION_FATAL_EXECUTION_FAILURE
 
     # Ordinary known TOOL failure/timeout — keep RUNNING + lease for orchestrator.

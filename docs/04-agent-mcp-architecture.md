@@ -709,18 +709,62 @@ APPROVAL Step persisted `config` (exact field set):
 실행 시점의 보호대상 Tool·입력·정책을 snapshot하고 승인 이후 실제 호출 직전에 hash를 재검증한다
 (authorable APPROVAL Step runtime orchestration은 본 절의 static contract 범위 밖이다).
 
-### 9.7.1 Sequential TOOL runtime orchestration (foundation)
+### 9.7.1 TOOL/JOIN DAG wave runtime orchestration
 
-첫 runtime multi-step slice는 deterministic linear TOOL chain만 실행한다.
+Runtime multi-step slice는 deterministic **wave-based TOOL/JOIN DAG**를 실행한다.
+CONDITION / Step `when` / LOOP / authorable APPROVAL Step은 fail-closed이다.
 
 ```text
-Execution claim
-→ single root TOOL PENDING→READY
-→ TOOL A runs (Step-scoped McpToolRunner)
-→ on SUCCEEDED or continuable known failure: promote next READY
-→ natural end → ALL_REQUIRED aggregation
-→ Execution SUCCEEDED | PARTIALLY_SUCCEEDED | FAILED (+ lease clear)
+claim → validate TOOL/JOIN DAG → promote root TOOLs up to max_parallelism
+→ reconcile local JOINs
+→ reserve eligible TOOL Steps (Plan order, READY+RUNNING slot cap)
+→ asyncio gather concurrent MCP for the reserved wave
+→ wait for whole wave to settle (no mid-wave successor dispatch)
+→ ErrorPolicy / fatal stop / FAIL_EXECUTION after barrier
+→ reconcile JOINs → next wave → ALL_REQUIRED aggregation
 ```
+
+Supported runtime Step types:
+
+```text
+TOOL
+JOIN
+```
+
+TOOL rules (this slice):
+
+- root TOOL allowed; TOOL fan-out allowed
+- TOOL may depend on zero or one Step
+- direct TOOL fan-in (`depends_on > 1`) unsupported — require explicit JOIN
+- fail closed before MCP if violated
+
+JOIN rules:
+
+- local orchestration only (no Attempt / ToolCall / MCP)
+- barrier evaluation: evaluate only after all direct dependencies are terminal
+- policies: `ALL_SUCCESS` / `ALL_COMPLETE` / `ANY_SUCCESS`
+- unsatisfied policy → Step FAILED `JOIN_POLICY_UNSATISFIED` + JOIN `on_error`
+- early-release `ANY_SUCCESS` is out of scope
+
+`Plan.limits.max_parallelism` is a **per-Execution runtime concurrency cap**:
+`count(TOOL READY + TOOL RUNNING)` consumes slots under the Execution row lock.
+JOIN does not consume a remote slot. Cross-Execution / `MCPServer.max_concurrency`
+global admission control is out of scope.
+
+Wave fatal / fail-fast:
+
+- DAG-wave ToolRunner uses `defer_execution_terminalization` so already-dispatched
+  siblings can finish Phase C before Execution terminalization
+- stop precedence: mandatory fatal / UNKNOWN_OUTCOME >
+  FAIL_EXECUTION TIMED_OUT > FAIL_EXECUTION FAILED (Plan order tie-break)
+- untouched PENDING → SKIPPED; unused READY TOOL (never started) → CANCELLED
+
+Multi-Step wait boundary:
+
+- single-TOOL Approval / MRTR WAITING_* behavior unchanged
+- multi-Step DAG must not enter Execution-level WAITING_INPUT / WAITING_APPROVAL
+  while siblings may be in flight (`DAG_WAIT_UNSUPPORTED` / conservative
+  UNKNOWN_OUTCOME for post-MCP MRTR). Branch-local suspension is deferred.
 
 `completion.success_policy` (현재 유일한 값):
 
@@ -732,22 +776,17 @@ ALL_REQUIRED
 - ≥1 SUCCEEDED and (MARK_PARTIAL failure or required CONTINUE failure) → `PARTIALLY_SUCCEEDED`
 - ALL_REQUIRED unsatisfied with zero SUCCEEDED → `FAILED`
 - `response_step_ids` are response-selection metadata only (not success criteria)
+- JOIN policy does not replace Plan completion policy
 
 경계:
 
-- `ExecutionOrchestrator` — READY 선택, ErrorPolicy, PENDING→READY / SKIPPED,
-  ALL_REQUIRED aggregation, Execution completion
-- `McpToolRunner.run_claimed_tool_step` — 단일 TOOL Attempt/ToolCall/MCP
-- Step SUCCEEDED ≠ Execution SUCCEEDED (미완료 Steps가 있으면 lease 유지)
-- Multi-Step expired-lease recovery remains foundation-limited: recovery must not
-  re-invoke a completed Attempt/ToolCall; complex mid-chain CONTINUE checkpoints
-  beyond current evidence are fail-closed
-- fan-out / fan-in / non-TOOL / parallel → fail-closed (이 slice)
-- runtime Binding resolve (`LITERAL` / `SECRET_REF` / `PLAN_INPUT` / `STEP_OUTPUT` /
-  `EXECUTION_CONTEXT`) runs before StepAttempt creation; `LOOP_CONTEXT` fail-closed
-- CONDITION/JOIN/LOOP / authorable APPROVAL Step runtime → 후속
+- one Celery/Execution task; not one task per Step
+- duplicate orchestrator delivery seeing RUNNING TOOL under lease → `WAVE_IN_PROGRESS` NOOP
+- Multi-Step expired-lease / parallel-wave recovery remains fail-closed: never
+  re-invoke terminal Attempt/ToolCall; complex parallel recovery unsupported
+- runtime Binding resolve unchanged; STEP_OUTPUT still requires SUCCEEDED source
 - dynamic Binding + ToolPolicy `requires_approval` / PLAN_CONFIRMATION combination
-  is fail-closed in this slice (existing AgentRequest LITERAL/SECRET_REF Approval path unchanged)
+  remains fail-closed (single-TOOL LITERAL/SECRET_REF Approval path unchanged)
 
 ### 9.5 LOOP
 
