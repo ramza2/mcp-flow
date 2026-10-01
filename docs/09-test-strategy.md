@@ -371,9 +371,9 @@ Dataset은 평가 전 FROZEN하고 실행 중 정답을 변경하지 않는다.
 
 추가 (Sequential TOOL orchestration foundation — linear chain runtime):
 
-- claim promotes exactly one root TOOL READY; downstream stay PENDING
-- fan-out / fan-in / non-TOOL claim → fail-closed (MCP 0)
-- Step SUCCEEDED keeps Execution RUNNING + lease until chain complete
+- claim promotes root TOOL READY (linear: exactly one); downstream stay PENDING
+- direct TOOL fan-in / non-TOOL unsupported types → claim fail-closed (MCP 0)
+- Step SUCCEEDED keeps Execution RUNNING + lease until chain/DAG complete
 - sequential 2/3-TOOL success → N MCP calls; all Steps SUCCEEDED; Execution SUCCEEDED
 - mid-chain FAIL_EXECUTION → Execution FAILED/TIMED_OUT; downstream PENDING→SKIPPED; MCP 0
 - MARK_PARTIAL / CONTINUE progression + ALL_REQUIRED aggregation
@@ -388,6 +388,22 @@ Dataset은 평가 전 FROZEN하고 실행 중 정답을 변경하지 않는다.
   loser ALREADY_READY/STALE_LEASE no-op; no duplicate Attempt/ToolCall; B MCP ≤ 1
 - duplicate delivery after B already READY / Execution SUCCEEDED → no extra MCP,
   Execution not returned to RUNNING
+
+추가 (TOOL/JOIN DAG wave runtime):
+
+- TOOL fan-out + JOIN fan-in + multiple roots
+- JOIN policies ALL_SUCCESS / ALL_COMPLETE / ANY_SUCCESS (barrier evaluation)
+- `max_parallelism` runtime slot cap (READY+RUNNING TOOL); peak MCP ≤ N
+- actual concurrent wave overlap proof (async barrier; both calls enter before release)
+- `max_parallelism=1` → no MCP overlap
+- fatal / FAIL_EXECUTION sibling wave: sibling evidence persisted; no downstream;
+  lease cleared only after wave settlement; PENDING→SKIPPED
+- stop precedence FATAL > FAIL_EXECUTION TIMED_OUT > FAIL_EXECUTION FAILED
+- multi-Step Approval/MRTR → fail closed (`DAG_WAIT_UNSUPPORTED`); single-TOOL waits green
+- JOIN reconcile race → one terminal JOIN; zero Attempt/ToolCall
+- duplicate orchestration / READY race → Attempt/ToolCall/MCP ≤ 1 per Step
+- PostgreSQL concurrent root promotion slots never exceed max_parallelism
+- parallel-wave recovery limitation documented (fail-closed; no re-invoke)
 
 추가 (Runtime Binding resolution — sequential TOOL slice):
 

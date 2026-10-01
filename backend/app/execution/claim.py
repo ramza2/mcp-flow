@@ -16,10 +16,8 @@ from app.domain.enums import (
     ExecutionStatus,
     StepStatus,
 )
-from app.execution.orchestrator import (
-    assert_execution_plan_lineage,
-    validate_sequential_tool_chain,
-)
+from app.execution.dag import validate_tool_join_dag
+from app.execution.orchestrator import assert_execution_plan_lineage
 from app.models.execution import Execution, ExecutionStep
 
 _WORKER_ID_MAX_LEN = 128
@@ -155,20 +153,33 @@ class ExecutionClaimService:
                 or step.started_at is not None
                 or step.attempt_count != 0
                 or step.resolved_input is not None
-                or step.step_type != AuthorableStepType.TOOL.value
+                or step.step_type
+                not in {
+                    AuthorableStepType.TOOL.value,
+                    AuthorableStepType.JOIN.value,
+                }
             ):
                 raise AppError(
                     code="RESOURCE_CONFLICT",
                     message=(
                         "ExecutionStep is inconsistent with initial PENDING "
-                        "sequential TOOL state."
+                        "TOOL/JOIN DAG state."
                     ),
+                    status_code=409,
+                )
+            if (
+                step.step_type == AuthorableStepType.JOIN.value
+                and step.mcp_tool_version_id is not None
+            ):
+                raise AppError(
+                    code="RESOURCE_CONFLICT",
+                    message="JOIN Step must have null mcp_tool_version_id at claim.",
                     status_code=409,
                 )
 
         plan = assert_execution_plan_lineage(execution)
-        chain = validate_sequential_tool_chain(plan, steps)
-        root = next(s for s in steps if s.step_key == chain.root_step_key)
+        dag = validate_tool_join_dag(plan, steps)
+        by_key = {s.step_key: s for s in steps}
 
         token = uuid.uuid4()
         expires_at = ts + timedelta(seconds=self._lease_seconds)
@@ -180,10 +191,18 @@ class ExecutionClaimService:
         execution.started_at = ts
         execution.lock_version += 1
 
-        # Exactly one root READY; non-root Steps remain PENDING.
-        root.status = StepStatus.READY.value
-        root.ready_at = ts
-        root.lock_version += 1
+        # Promote root TOOL Steps in Plan order up to max_parallelism.
+        ready_ids: list = []
+        slots = dag.max_parallelism
+        for key in dag.root_tool_keys:
+            if slots <= 0:
+                break
+            root = by_key[key]
+            root.status = StepStatus.READY.value
+            root.ready_at = ts
+            root.lock_version += 1
+            ready_ids.append(root.id)
+            slots -= 1
         await self._session.flush()
 
         return ExecutionClaimOutcome(
@@ -193,7 +212,7 @@ class ExecutionClaimService:
             worker_id=worker,
             lease_token=token,
             lease_expires_at=expires_at,
-            ready_step_ids=(root.id,),
+            ready_step_ids=tuple(ready_ids),
         )
 
     async def renew_lease(

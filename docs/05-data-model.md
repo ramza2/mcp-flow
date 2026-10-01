@@ -1237,41 +1237,56 @@ Invariant:
 ```text
 RUNNING → worker_id, lease_token, lease_expires_at 필수
 QUEUED  → worker/lease/heartbeat 모두 null
-claim-time READY count = 1 (linear TOOL chain root only)
-fan-out / fan-in / non-TOOL Steps → claim fail-closed (MCP 0)
+claim-time READY count ≤ `Plan.limits.max_parallelism` (root TOOL Steps in
+immutable Plan order; remaining eligible roots stay PENDING)
+direct TOOL fan-in / CONDITION / LOOP / authorable APPROVAL / Step.when →
+claim fail-closed (MCP 0)
+TOOL fan-out + explicit JOIN fan-in are valid for TOOL/JOIN DAG runtime
 ```
 
 중복 broker delivery는 `RUNNING`/terminal 상태를 되돌리지 않고 no-op 처리한다. `queued_at`, `started_at`, `ready_at`은 최초 transition에서만 설정한다.
 
-#### Sequential TOOL orchestration foundation
+#### TOOL/JOIN DAG wave orchestration foundation
 
-`ExecutionOrchestrator` owns graph progression and Execution completion.
-`McpToolRunner.run_claimed_tool_step` owns one TOOL Step invocation (Attempt /
-ToolCall / MCP / MRTR / Approval wait / safe retry).
+`ExecutionOrchestrator` owns wave scheduling, JOIN reconciliation, ErrorPolicy,
+and Execution completion. `McpToolRunner.run_claimed_tool_step` owns one TOOL
+Step invocation (Attempt / ToolCall / MCP / MRTR / Approval wait / safe retry).
 
 ```text
-claim → root TOOL READY
-→ run_claimed_tool_step(root)
-→ ToolCall/Attempt/Step SUCCEEDED (or continuable known failure) while
-  Execution stays RUNNING (lease kept)
-→ orchestrator PENDING→READY next dependent TOOL (ErrorPolicy-aware)
-→ natural end → ALL_REQUIRED aggregation
-→ Execution SUCCEEDED | PARTIALLY_SUCCEEDED | FAILED + finished_at + lease clear
+claim → root TOOLs READY (≤ max_parallelism)
+→ reconcile JOINs → reserve TOOL wave (READY+RUNNING slots)
+→ concurrent run_claimed_tool_step for reserved wave (asyncio gather)
+→ wave barrier settle → ErrorPolicy / fatal stop
+→ JOIN barrier eval → next wave → ALL_REQUIRED aggregation
+→ Execution SUCCEEDED | PARTIALLY_SUCCEEDED | FAILED | TIMED_OUT + lease clear
 ```
 
-Ordinary known mid-chain failures apply Step `on_error`:
+`max_parallelism` is a per-Execution runtime cap (`TOOL READY + TOOL RUNNING`).
+JOIN does not consume a remote concurrency slot. Global
+`MCPServer.max_concurrency` across Executions is out of scope.
 
-- `FAIL_EXECUTION` → Execution FAILED/TIMED_OUT; downstream PENDING→SKIPPED
-- `MARK_PARTIAL` / `CONTINUE` → keep RUNNING; promote next; aggregate at end
+Ordinary known failures apply Step `on_error` after the wave barrier:
+
+- `FAIL_EXECUTION` → after in-flight siblings settle: Execution FAILED/TIMED_OUT;
+  untouched PENDING→SKIPPED; unused READY TOOL→CANCELLED
+- `MARK_PARTIAL` / `CONTINUE` → keep RUNNING; downstream may become eligible;
+  aggregate at end
 
 Mandatory-fatal failures (UNKNOWN_OUTCOME, lineage/authz/policy/secret/
-Binding/schema integrity) ignore `on_error`, terminalize Execution FAILED,
-and SKIP remaining PENDING. CONDITION / JOIN / LOOP / parallel and authorable
-APPROVAL Step runtime remain out of this slice.
+Binding/schema integrity) remain fatal. In multi-Step DAG waves the runner
+defers Execution terminalization until siblings settle; disposition stays fatal.
 
-Multi-Step expired-lease recovery remains foundation-limited: do not re-invoke
-a completed Attempt/ToolCall; complex CONTINUE mid-chain recovery beyond current
-evidence is fail-closed.
+JOIN is local-only (`PENDING→READY→RUNNING→SUCCEEDED|FAILED` in one TX;
+`result_inline` null; zero Attempt/ToolCall). JOIN policies use full-dependency
+barrier evaluation (`ALL_SUCCESS` / `ALL_COMPLETE` / `ANY_SUCCESS`).
+
+Multi-Step DAG must not enter Execution-level `WAITING_INPUT` /
+`WAITING_APPROVAL` (fail closed: `DAG_WAIT_UNSUPPORTED`). Single-TOOL wait
+paths remain unchanged.
+
+Multi-Step parallel-wave recovery remains fail-closed: never re-invoke a
+terminal Attempt/ToolCall; ambiguous in-flight parallel evidence must not cause
+duplicate external calls; complex parallel recovery is unsupported.
 
 Lease heartbeat는 `RUNNING` + 동일 worker_id + 동일 lease_token + 미만료 lease에서만 연장한다. 만료된 lease를 heartbeat로 되살리지 않는다.
 

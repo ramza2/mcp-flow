@@ -255,10 +255,11 @@ async def test_claim_promotes_only_root_ready(
 
 
 @pytest.mark.asyncio
-async def test_claim_rejects_fan_out_graph(
+async def test_claim_allows_tool_fan_out_graph(
     db_session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """TOOL fan-out is valid for TOOL/JOIN DAG runtime (JOIN required for fan-in)."""
     _install_no_side_effects(monkeypatch)
     async with db_session_factory() as session:
         seeded = await _seed_executable(session)
@@ -273,6 +274,38 @@ async def test_claim_rejects_fan_out_graph(
         execution_id = await _materialize_queued(
             session, plan_snapshot=plan, seeded=seeded
         )
+        claim = await ExecutionClaimService(session, lease_seconds=60).claim(
+            execution_id=execution_id, worker_id="worker-a"
+        )
+        await session.commit()
+        assert claim.claimed
+        assert len(claim.ready_step_ids) == 1
+        steps = await ExecutionRepository(session).list_steps(execution_id)
+        by_key = {s.step_key: s for s in steps}
+        assert by_key["a"].status == StepStatus.READY.value
+        assert by_key["b"].status == StepStatus.PENDING.value
+        assert by_key["c"].status == StepStatus.PENDING.value
+
+
+@pytest.mark.asyncio
+async def test_claim_rejects_direct_tool_fan_in(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_no_side_effects(monkeypatch)
+    async with db_session_factory() as session:
+        seeded = await _seed_executable(session)
+        plan = _plan(
+            [
+                _tool("a"),
+                _tool("b"),
+                _tool("c", depends_on=["a", "b"]),
+            ],
+            seeded["tool_version_id"],
+        )
+        execution_id = await _materialize_queued(
+            session, plan_snapshot=plan, seeded=seeded
+        )
         await session.commit()
 
     async with db_session_factory() as session:
@@ -280,7 +313,7 @@ async def test_claim_rejects_fan_out_graph(
             await ExecutionClaimService(session, lease_seconds=60).claim(
                 execution_id=execution_id, worker_id="worker-a"
             )
-        assert "fan-out" in exc.value.message
+        assert "fan-in" in exc.value.message.lower()
         await session.rollback()
 
         execution = await ExecutionRepository(session).get(execution_id)
