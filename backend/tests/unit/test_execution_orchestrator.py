@@ -353,11 +353,12 @@ async def test_sequential_two_tool_success_keeps_execution_running_until_end(
         session_factory=db_session_factory, tool_runner=runner
     )
     # Explicit progression: root SUCCEEDED → next PENDING becomes READY.
-    progressed = await orch._promote_after_success(
+    progressed = await orch._progress_after_terminal_step(
         execution_id=execution_id,
         completed_step_id=root_id,
         worker_id="worker-a",
         lease_token=lease_token,
+        allow_continuable_failure=False,
     )
     assert progressed.execution_complete is False
     assert progressed.promoted is True
@@ -506,7 +507,8 @@ async def test_mid_chain_failure_does_not_run_downstream(
         steps = {s.step_key: s for s in await ExecutionRepository(session).list_steps(execution_id)}
         assert steps["a"].status == StepStatus.SUCCEEDED.value
         assert steps["b"].status == StepStatus.FAILED.value
-        assert steps["c"].status == StepStatus.PENDING.value
+        assert steps["c"].status == StepStatus.SKIPPED.value
+        assert steps["c"].error_code == "UPSTREAM_EXECUTION_STOPPED"
         assert steps["c"].ready_at is None
 
 
@@ -561,11 +563,12 @@ async def test_duplicate_promote_when_b_already_ready_is_noop(
     ).terminal_status == StepStatus.SUCCEEDED.value
     assert len(client.calls) == 1
 
-    first = await orch._promote_after_success(
+    first = await orch._progress_after_terminal_step(
         execution_id=execution_id,
         completed_step_id=root_id,
         worker_id="worker-a",
         lease_token=lease_token,
+        allow_continuable_failure=False,
     )
     assert first.promoted is True
     assert first.reason == "PROMOTED"
@@ -583,22 +586,24 @@ async def test_duplicate_promote_when_b_already_ready_is_noop(
         winner_lease = execution.lease_token
         winner_worker = execution.worker_id
 
-    second = await orch._promote_after_success(
+    second = await orch._progress_after_terminal_step(
         execution_id=execution_id,
         completed_step_id=root_id,
         worker_id="worker-a",
         lease_token=lease_token,
+        allow_continuable_failure=False,
     )
     assert second.promoted is False
     assert second.reason == "ALREADY_READY"
     assert second.execution_complete is False
 
     # Stale lease loser must not clear the winner lease.
-    stale = await orch._promote_after_success(
+    stale = await orch._progress_after_terminal_step(
         execution_id=execution_id,
         completed_step_id=root_id,
         worker_id="other-worker",
         lease_token=uuid.uuid4(),
+        allow_continuable_failure=False,
     )
     assert stale.promoted is False
     assert stale.reason == "STALE_LEASE"

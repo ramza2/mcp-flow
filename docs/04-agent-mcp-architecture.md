@@ -579,11 +579,97 @@ Plan Validator가 ToolPolicy 존재와 timeout 정합성을 최종 판정한다.
 
 ### 9.2 오류정책
 
+Canonical Step `on_error` values:
+
 ```text
 FAIL_EXECUTION
 MARK_PARTIAL
 CONTINUE
 ```
+
+Sequential TOOL runtime semantics (linear chain only):
+
+#### FAIL_EXECUTION
+
+Ordinary known TOOL failure (`FAILED` / `TIMED_OUT`):
+
+- keep the failed Step terminal
+- do not run downstream TOOL Steps
+- remaining downstream `PENDING` → `SKIPPED` (`UPSTREAM_EXECUTION_STOPPED`)
+- Execution becomes terminal immediately; worker/lease/heartbeat cleared
+
+```text
+Step FAILED    → Execution FAILED
+Step TIMED_OUT → Execution TIMED_OUT
+```
+
+#### MARK_PARTIAL
+
+Ordinary known TOOL failure:
+
+- keep the failed Step terminal (do not rewrite to SUCCEEDED/SKIPPED)
+- Execution remains `RUNNING`
+- promote the next linear Step when otherwise eligible
+- if later work succeeds, final Execution is normally `PARTIALLY_SUCCEEDED`
+  (including optional Steps that used MARK_PARTIAL)
+
+#### CONTINUE
+
+Ordinary known TOOL failure:
+
+- keep the failed Step terminal
+- Execution remains `RUNNING`
+- promote the next linear Step when otherwise eligible
+- final status is determined by `ALL_REQUIRED` + Step `required` flags
+
+```text
+optional CONTINUE failure + all required SUCCEEDED → SUCCEEDED
+required CONTINUE failure + ≥1 SUCCEEDED           → PARTIALLY_SUCCEEDED
+required CONTINUE failure(s) + zero SUCCEEDED      → FAILED
+```
+
+`CONTINUE` does not rewrite failure into success.
+
+#### Mandatory-fatal failures (ignore on_error)
+
+The following remain whole-Execution fatal regardless of
+`FAIL_EXECUTION` / `MARK_PARTIAL` / `CONTINUE`:
+
+- `UNKNOWN_OUTCOME`
+- plan hash / step snapshot / lineage corruption
+- lease/fencing invariant corruption
+- authorization / ResourceGrant / AgentToolGrant rejection
+- mutable ToolPolicy fail-closed rejection
+- Approval / confirmation precondition failure
+- dynamic Binding precondition failure
+- input schema validation failure before invocation
+- malformed SECRET_REF / secret materialization security failure
+- unsupported transport/protocol precondition
+- internal execution evidence corruption
+- other fail-closed security/integrity conditions
+
+For fatal failure: no downstream MCP call; Execution terminal; lease cleared;
+downstream `PENDING` → `SKIPPED`. `UNKNOWN_OUTCOME` Step status is preserved;
+Execution is canonical `FAILED` (never auto-retried).
+
+Internal runner disposition (not a public API enum):
+
+```text
+KNOWN_STEP_FAILURE
+FATAL_EXECUTION_FAILURE
+```
+
+#### Ownership
+
+- `McpToolRunner` — ToolCall / StepAttempt / ExecutionStep terminal evidence;
+  returns disposition metadata. Ordinary known failures leave Execution RUNNING.
+- `ExecutionOrchestrator` — `on_error`, progression, fail-fast SKIPPED,
+  `ALL_REQUIRED` aggregation, final Execution status + lease release.
+
+Progression after predecessor `SUCCEEDED`, or after known failure with
+`MARK_PARTIAL` / `CONTINUE`. Do not progress after `FAIL_EXECUTION`,
+`UNKNOWN_OUTCOME`, or mandatory-fatal failure. Downstream Binding still
+fail-closes when `STEP_OUTPUT` requires a SUCCEEDED ancestor.
 
 ### 9.3 JOIN 정책
 
@@ -631,17 +717,31 @@ APPROVAL Step persisted `config` (exact field set):
 Execution claim
 → single root TOOL PENDING→READY
 → TOOL A runs (Step-scoped McpToolRunner)
-→ TOOL A SUCCEEDED; Execution remains RUNNING under the same lease
-→ dependent TOOL B PENDING→READY
-→ … until all required TOOL Steps SUCCEEDED
-→ Execution SUCCEEDED + lease clear
+→ on SUCCEEDED or continuable known failure: promote next READY
+→ natural end → ALL_REQUIRED aggregation
+→ Execution SUCCEEDED | PARTIALLY_SUCCEEDED | FAILED (+ lease clear)
 ```
+
+`completion.success_policy` (현재 유일한 값):
+
+```text
+ALL_REQUIRED
+```
+
+- every `required=true` Step SUCCEEDED and no MARK_PARTIAL failure → `SUCCEEDED`
+- ≥1 SUCCEEDED and (MARK_PARTIAL failure or required CONTINUE failure) → `PARTIALLY_SUCCEEDED`
+- ALL_REQUIRED unsatisfied with zero SUCCEEDED → `FAILED`
+- `response_step_ids` are response-selection metadata only (not success criteria)
 
 경계:
 
-- `ExecutionOrchestrator` — READY 선택, PENDING→READY progression, Execution completion
+- `ExecutionOrchestrator` — READY 선택, ErrorPolicy, PENDING→READY / SKIPPED,
+  ALL_REQUIRED aggregation, Execution completion
 - `McpToolRunner.run_claimed_tool_step` — 단일 TOOL Attempt/ToolCall/MCP
 - Step SUCCEEDED ≠ Execution SUCCEEDED (미완료 Steps가 있으면 lease 유지)
+- Multi-Step expired-lease recovery remains foundation-limited: recovery must not
+  re-invoke a completed Attempt/ToolCall; complex mid-chain CONTINUE checkpoints
+  beyond current evidence are fail-closed
 - fan-out / fan-in / non-TOOL / parallel → fail-closed (이 slice)
 - runtime Binding resolve (`LITERAL` / `SECRET_REF` / `PLAN_INPUT` / `STEP_OUTPUT` /
   `EXECUTION_CONTEXT`) runs before StepAttempt creation; `LOOP_CONTEXT` fail-closed
