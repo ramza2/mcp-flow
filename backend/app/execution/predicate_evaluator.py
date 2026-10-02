@@ -6,7 +6,7 @@ Pure: no DB writes, MCP, LLM, SecretResolver, or expression/eval.
 from __future__ import annotations
 
 import math
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 from app.core.errors import AppError
@@ -116,6 +116,7 @@ class RuntimePredicateEvaluator:
         owning_step: ExecutionStep,
         steps: Sequence[ExecutionStep],
         plan: ExecutionPlanV1,
+        loop_context_override: Mapping[str, Any] | None = None,
     ) -> bool:
         if isinstance(predicate, dict):
             try:
@@ -145,6 +146,7 @@ class RuntimePredicateEvaluator:
             by_key=by_key,
             plan=plan,
             ancestors=ancestors,
+            loop_context_override=loop_context_override,
         )
 
     def _eval(
@@ -156,6 +158,7 @@ class RuntimePredicateEvaluator:
         by_key: dict[str, ExecutionStep],
         plan: ExecutionPlanV1,
         ancestors: dict[str, set[str]],
+        loop_context_override: Mapping[str, Any] | None = None,
     ) -> bool:
         if isinstance(predicate, LogicalPredicate):
             if predicate.op == PredicateOperator.AND:
@@ -167,6 +170,7 @@ class RuntimePredicateEvaluator:
                         by_key=by_key,
                         plan=plan,
                         ancestors=ancestors,
+                    loop_context_override=loop_context_override,
                     ):
                         return False
                 return True
@@ -179,6 +183,7 @@ class RuntimePredicateEvaluator:
                     by_key=by_key,
                     plan=plan,
                     ancestors=ancestors,
+                loop_context_override=loop_context_override,
                 ):
                     return True
             return False
@@ -191,6 +196,7 @@ class RuntimePredicateEvaluator:
                 by_key=by_key,
                 plan=plan,
                 ancestors=ancestors,
+            loop_context_override=loop_context_override,
             )
 
         if isinstance(predicate, UnaryPredicate):
@@ -201,6 +207,7 @@ class RuntimePredicateEvaluator:
                 by_key=by_key,
                 plan=plan,
                 ancestors=ancestors,
+            loop_context_override=loop_context_override,
             )
 
         if isinstance(predicate, ComparisonPredicate):
@@ -211,6 +218,7 @@ class RuntimePredicateEvaluator:
                 by_key=by_key,
                 plan=plan,
                 ancestors=ancestors,
+            loop_context_override=loop_context_override,
             )
 
         raise _fail(_CODE_EVAL_FAILED, "Unsupported Predicate node.")
@@ -224,6 +232,7 @@ class RuntimePredicateEvaluator:
         by_key: dict[str, ExecutionStep],
         plan: ExecutionPlanV1,
         ancestors: dict[str, set[str]],
+        loop_context_override: Mapping[str, Any] | None = None,
     ) -> Any:
         try:
             return self._bindings.resolve_binding(
@@ -234,6 +243,7 @@ class RuntimePredicateEvaluator:
                 plan=plan,
                 ancestors=ancestors,
                 missing_ok=True,
+                loop_context_override=loop_context_override,
             )
         except AppError as exc:
             if exc.code in {
@@ -253,6 +263,7 @@ class RuntimePredicateEvaluator:
         by_key: dict[str, ExecutionStep],
         plan: ExecutionPlanV1,
         ancestors: dict[str, set[str]],
+        loop_context_override: Mapping[str, Any] | None = None,
     ) -> bool:
         binding = predicate.operand
         if isinstance(binding, PlanSecretRefBinding):
@@ -273,6 +284,7 @@ class RuntimePredicateEvaluator:
             by_key=by_key,
             plan=plan,
             ancestors=ancestors,
+        loop_context_override=loop_context_override,
         )
         if predicate.op == PredicateOperator.EXISTS:
             if value is MISSING or isinstance(value, PointerMissing):
@@ -293,6 +305,7 @@ class RuntimePredicateEvaluator:
         by_key: dict[str, ExecutionStep],
         plan: ExecutionPlanV1,
         ancestors: dict[str, set[str]],
+        loop_context_override: Mapping[str, Any] | None = None,
     ) -> bool:
         if isinstance(predicate.left, PlanSecretRefBinding) or isinstance(
             predicate.right, PlanSecretRefBinding
@@ -309,6 +322,7 @@ class RuntimePredicateEvaluator:
             by_key=by_key,
             plan=plan,
             ancestors=ancestors,
+        loop_context_override=loop_context_override,
         )
         right = self._resolve_operand(
             predicate.right,
@@ -317,6 +331,7 @@ class RuntimePredicateEvaluator:
             by_key=by_key,
             plan=plan,
             ancestors=ancestors,
+        loop_context_override=loop_context_override,
         )
 
         if left is MISSING or isinstance(left, PointerMissing):

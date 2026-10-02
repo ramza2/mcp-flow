@@ -17,6 +17,8 @@ from app.execution.loop_runtime import (
     LOOP_COLLECTION_TYPE_MISMATCH,
     build_loop_body_ownership,
     build_loop_context_projection,
+    build_previous_iteration_projection,
+    build_while_loop_context_projection,
     hash_collection,
     template_id_from_step_snapshot,
 )
@@ -181,12 +183,17 @@ class RuntimeBindingResolver:
         plan: ExecutionPlanV1,
         ancestors: dict[str, set[str]],
         missing_ok: bool = False,
+        loop_context_override: Mapping[str, Any] | None = None,
     ) -> Any:
         """Resolve one Binding.
 
         When ``missing_ok`` is True (Predicate evaluation), missing JSON Pointer
         paths return the ``MISSING`` sentinel. TOOL Binding resolution keeps
         ``missing_ok=False`` and still fails closed on MISSING.
+
+        ``loop_context_override`` supplies an explicit WHILE candidate
+        LOOP_CONTEXT projection (parent Predicate only). Default None preserves
+        existing body-instance / fail-closed behavior.
         """
         if isinstance(binding, PlanLiteralBinding):
             return binding.value
@@ -229,6 +236,7 @@ class RuntimeBindingResolver:
                 plan=plan,
                 ancestors=ancestors,
                 missing_ok=missing_ok,
+                loop_context_override=loop_context_override,
             )
         raise AppError(
             code="EXECUTION_PRECONDITION_FAILED",
@@ -355,8 +363,32 @@ class RuntimeBindingResolver:
         plan: ExecutionPlanV1,
         ancestors: dict[str, set[str]],
         missing_ok: bool = False,
+        loop_context_override: Mapping[str, Any] | None = None,
     ) -> Any:
-        """Resolve LOOP_CONTEXT for a flat FOR_EACH body instance."""
+        """Resolve LOOP_CONTEXT for FOR_EACH/WHILE body or WHILE parent override."""
+        # Explicit WHILE parent Predicate candidate context (no body instance).
+        if loop_context_override is not None:
+            if not isinstance(loop_context_override, Mapping):
+                raise AppError(
+                    code="EXECUTION_PRECONDITION_FAILED",
+                    message="loop_context_override must be a mapping.",
+                    status_code=409,
+                )
+            projection = dict(loop_context_override)
+            value = resolve_json_pointer(projection, binding.path)
+            if value is MISSING:
+                if missing_ok:
+                    return MISSING
+                raise AppError(
+                    code="EXECUTION_PRECONDITION_FAILED",
+                    message=(
+                        f"LOOP_CONTEXT path {binding.path!r} is MISSING "
+                        "(not JSON null)."
+                    ),
+                    status_code=409,
+                )
+            return value
+
         if getattr(owning_step, "parent_step_id", None) is None:
             raise AppError(
                 code="EXECUTION_PRECONDITION_FAILED",
@@ -434,6 +466,83 @@ class RuntimeBindingResolver:
                 status_code=409,
             )
 
+        if loop_cfg.mode.value == "WHILE":
+            projection = self._build_while_body_context(
+                parent=parent,
+                parent_plan_step=parent_plan_step,
+                loop_cfg=loop_cfg,
+                by_key=by_key,
+                iteration_no=owning_step.iteration_no,
+                plan=plan,
+            )
+        else:
+            projection = self._build_foreach_body_context(
+                binding=binding,
+                execution=execution,
+                owning_step=owning_step,
+                parent=parent,
+                parent_plan_step=parent_plan_step,
+                loop_cfg=loop_cfg,
+                by_key=by_key,
+                plan=plan,
+                ancestors=ancestors,
+            )
+
+        value = resolve_json_pointer(projection, binding.path)
+        if value is MISSING:
+            if missing_ok:
+                return MISSING
+            raise AppError(
+                code="EXECUTION_PRECONDITION_FAILED",
+                message=(
+                    f"LOOP_CONTEXT path {binding.path!r} is MISSING "
+                    "(not JSON null)."
+                ),
+                status_code=409,
+            )
+        return value
+
+    def _build_while_body_context(
+        self,
+        *,
+        parent: ExecutionStep,
+        parent_plan_step: ExecutionPlanStep,
+        loop_cfg: LoopStepConfigV1,
+        by_key: dict[str, ExecutionStep],
+        iteration_no: int,
+        plan: ExecutionPlanV1,
+    ) -> dict[str, Any]:
+        if iteration_no == 1:
+            previous: dict[str, Any] | None = None
+        else:
+            previous = build_previous_iteration_projection(
+                steps=list(by_key.values()),
+                parent_step_id=parent.id,
+                previous_iteration_no=iteration_no - 1,
+                body_step_ids=loop_cfg.body_step_ids,
+                plan=plan,
+            )
+        return build_while_loop_context_projection(
+            loop_plan_step_id=parent_plan_step.id,
+            iteration_no=iteration_no,
+            max_iterations=loop_cfg.max_iterations,
+            previous_iteration=previous,
+        )
+
+    def _build_foreach_body_context(
+        self,
+        *,
+        binding: PlanLoopContextBinding,
+        execution: Execution,
+        owning_step: ExecutionStep,
+        parent: ExecutionStep,
+        parent_plan_step: ExecutionPlanStep,
+        loop_cfg: LoopStepConfigV1,
+        by_key: dict[str, ExecutionStep],
+        plan: ExecutionPlanV1,
+        ancestors: dict[str, set[str]],
+    ) -> dict[str, Any]:
+        del binding  # path applied by caller
         if loop_cfg.collection is None:
             raise AppError(
                 code="EXECUTION_PRECONDITION_FAILED",
@@ -441,7 +550,6 @@ class RuntimeBindingResolver:
                 status_code=409,
             )
         if isinstance(loop_cfg.collection, PlanLoopContextBinding):
-            # Collection must not recursively depend on LOOP_CONTEXT.
             raise AppError(
                 code="EXECUTION_PRECONDITION_FAILED",
                 message="LOOP collection binding must not use LOOP_CONTEXT.",
@@ -497,26 +605,13 @@ class RuntimeBindingResolver:
                 status_code=409,
             )
 
-        projection = build_loop_context_projection(
+        return build_loop_context_projection(
             loop_plan_step_id=parent_plan_step.id,
             mode=loop_cfg.mode.value,
             iteration_no=owning_step.iteration_no,
             item=collection[owning_step.iteration_no - 1],
             collection_size=actual_size,
         )
-        value = resolve_json_pointer(projection, binding.path)
-        if value is MISSING:
-            if missing_ok:
-                return MISSING
-            raise AppError(
-                code="EXECUTION_PRECONDITION_FAILED",
-                message=(
-                    f"LOOP_CONTEXT path {binding.path!r} is MISSING "
-                    "(not JSON null)."
-                ),
-                status_code=409,
-            )
-        return value
 
     def _resolve_step_output(
         self,

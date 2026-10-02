@@ -452,18 +452,41 @@ def _assert_loop_child_tool_step_lineage(
             status_code=409,
         )
 
-    # Pre-MCP: revalidate FOR_EACH collection pin even for LITERAL-only body TOOLs.
+    # Pre-MCP: revalidate FOR_EACH collection pin / WHILE predicate gate
+    # even for LITERAL-only body TOOLs.
     # Lazy import avoids import cycles with loop_reconcile → binding_resolver.
-    parse_foreach_collection_pin(parent.resolved_input)
-    from app.execution.loop_reconcile import revalidate_foreach_collection_pin
-
-    revalidate_foreach_collection_pin(
-        execution=execution,
-        loop_step=parent,
-        plan=plan,
-        steps=steps,
-        child_iteration_no=step.iteration_no,
+    from app.domain.enums import LoopMode
+    from app.execution.loop_reconcile import (
+        revalidate_foreach_collection_pin,
+        revalidate_while_predicate_gate,
     )
+
+    if loop_cfg.mode == LoopMode.FOR_EACH:
+        parse_foreach_collection_pin(parent.resolved_input)
+        revalidate_foreach_collection_pin(
+            execution=execution,
+            loop_step=parent,
+            plan=plan,
+            steps=steps,
+            child_iteration_no=step.iteration_no,
+        )
+    elif loop_cfg.mode == LoopMode.WHILE:
+        revalidate_while_predicate_gate(
+            execution=execution,
+            loop_step=parent,
+            plan=plan,
+            steps=steps,
+            child_iteration_no=step.iteration_no,
+        )
+    else:
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message=(
+                f"LOOP child TOOL parent mode {loop_cfg.mode.value!r} "
+                "unsupported for pre-MCP gate."
+            ),
+            status_code=409,
+        )
 
     # LOOP body TOOL always uses complex Plan bindings (even under AGENT_REQUEST).
     return ToolStepLineage(

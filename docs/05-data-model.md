@@ -1226,7 +1226,7 @@ iteration_no / ready_at / started_at / finished_at = null
 attempt_count = 0
 all Steps remain PENDING (roots are not READY'd)
 LOOP body templates are NOT materialized as initial rows — they remain in
-plan_snapshot and expand into durable child rows per FOR_EACH iteration
+plan_snapshot and expand into durable child rows per FOR_EACH / WHILE iteration
 (`parent_step_id` / `iteration_no` / deterministic child `step_key`)
 ```
 
@@ -1261,14 +1261,14 @@ QUEUED  → worker/lease/heartbeat 모두 null
 claim-time READY count ≤ `Plan.limits.max_parallelism` (root TOOL Steps in
 immutable Plan order; remaining eligible roots stay PENDING)
 direct TOOL fan-in → claim fail-closed (MCP 0)
-flat FOR_EACH LOOP is claim-valid: root LOOP stays PENDING; body templates are
-absent from initial rows; WHILE / nested LOOP / body APPROVAL fail closed before
-MCP (`LOOP_RUNTIME_UNSUPPORTED`)
+flat FOR_EACH / WHILE LOOP is claim-valid: root LOOP stays PENDING; body
+templates are absent from initial rows; nested LOOP / body APPROVAL fail closed
+before MCP (`LOOP_RUNTIME_UNSUPPORTED`)
 root CONDITION / APPROVAL / LOOP stay PENDING at claim (local reconcile later;
 no ApprovalRequest at claim; no iteration materialization at claim)
 TOOL fan-out + explicit JOIN fan-in + CONDITION + APPROVAL + Step.when + flat
-FOR_EACH are valid for the runtime DAG (root may be CONDITION, APPROVAL, or
-LOOP; JOIN cannot be root)
+FOR_EACH / WHILE are valid for the runtime DAG (root may be CONDITION, APPROVAL,
+or LOOP; JOIN cannot be root)
 ```
 
 중복 broker delivery는 `RUNNING`/terminal 상태를 되돌리지 않고 no-op 처리한다. `queued_at`, `started_at`, `ready_at`은 최초 transition에서만 설정한다.
@@ -1411,7 +1411,8 @@ LITERAL → value
 SECRET_REF / secret PLAN_INPUT → {"kind":"SECRET_REF","secret_id":"<canonical-uuid>"}
 PLAN_INPUT `/` → root projection (secret fields must already be SECRET_REF; never plaintext)
 PLAN_INPUT / STEP_OUTPUT / EXECUTION_CONTEXT → JSON Pointer result (null allowed; MISSING fail-closed)
-LOOP_CONTEXT → active FOR_EACH body instance only (canonical projection + pointer;
+LOOP_CONTEXT → active FOR_EACH/WHILE body instance, or WHILE parent Predicate
+via explicit loop_context_override (canonical projection + pointer;
 outside body / hash drift → fail closed)
 LOOP body STEP_OUTPUT → same parent_step_id + same iteration_no template instance
 (cross-iteration STEP_OUTPUT rejected)

@@ -436,13 +436,34 @@ Dataset은 평가 전 FROZEN하고 실행 중 정답을 변경하지 않는다.
 - body CONDITION / Step.when / JOIN; CONTINUE next-iter; MARK_PARTIAL;
   FAIL_EXECUTION stops future iters
 - collection type mismatch; max_iterations; expanded max_steps; LOOP timeout
-- WHILE / nested LOOP / body APPROVAL → `LOOP_RUNTIME_UNSUPPORTED` before MCP
+- nested LOOP / body APPROVAL → `LOOP_RUNTIME_UNSUPPORTED` before MCP
 - child TOOL lineage + step_key/iteration/parent tamper fail closed
 - same-iteration STEP_OUTPUT success; cross-iteration reject
 - PostgreSQL A–J: happy path, empty, body DAG, LOOP_CONTEXT+STEP_OUTPUT,
   conditional body, CONTINUE partial, max_iterations, duplicate iteration race,
   duplicate child dispatch, lineage tamper
 - recovery limitation: partial LOOP after lease loss remains follow-up
+
+추가 (flat WHILE LOOP runtime):
+
+- pre-check Predicate (not do-while); zero-iteration success
+- WHILE LOOP_CONTEXT: iteration_no/index/max_iterations/previous_iteration
+  (candidate 1 previous=null; body + parent Predicate override)
+- durable `predicate_history` + evidence_hash append/replay; drift fail-closed
+- max_iterations after Predicate (false→success; true→LOOP_MAX_ITERATIONS_EXCEEDED)
+- dynamic max_steps before each materialize (no up-front max_iterations*body reserve)
+- body CONDITION / Step.when / JOIN; CONTINUE/MARK_PARTIAL next Predicate;
+  FAIL_EXECUTION stops; Predicate MISSING/type mandatory-fatal
+- pre-MCP WHILE gate revalidation (LITERAL-only included); FOR_EACH pin preserved
+- static: LOOP Step.when / FOR_EACH collection reject LOOP_CONTEXT; WHILE
+  predicate may use LOOP_CONTEXT; parent STEP_OUTPUT(body) still invalid
+- nested LOOP / body APPROVAL still `LOOP_RUNTIME_UNSUPPORTED`
+- FOR_EACH context/resolved_input unchanged; mixed FOR_EACH+WHILE ok
+- PostgreSQL A–K: zero iter, 3-iter previous, body LOOP_CONTEXT, body DAG,
+  max_iterations CONTINUE, max_steps, duplicate gate races, evidence drift,
+  mixed FOR_EACH+WHILE
+- recovery limitation: same-lease reconstructs from history + durable rows;
+  expired-lease partial complex LOOP remains follow-up
 
 추가 (authorable APPROVAL Step runtime):
 
@@ -469,8 +490,9 @@ Dataset은 평가 전 FROZEN하고 실행 중 정답을 변경하지 않는다.
 추가 (Runtime Binding resolution — sequential TOOL slice):
 
 - LITERAL / SECRET_REF / PLAN_INPUT / STEP_OUTPUT / EXECUTION_CONTEXT resolve
-- LOOP_CONTEXT outside active FOR_EACH body fail-closed; JSON Pointer `/`,
-  `~0`/`~1`, null vs MISSING (body LOOP_CONTEXT in FOR_EACH suite)
+- LOOP_CONTEXT outside active FOR_EACH/WHILE body fail-closed (WHILE parent
+  Predicate override excepted); JSON Pointer `/`, `~0`/`~1`, null vs MISSING
+  (body LOOP_CONTEXT in FOR_EACH / WHILE suites)
 - STEP_OUTPUT from `result_inline` snake_case only; non-ancestor / non-SUCCEEDED fail-closed
 - STEP_OUTPUT source `step_snapshot` ↔ Plan exact lineage before `result_inline`
 - secret PLAN_INPUT plaintext rejected; SECRET_REF never via SecretResolver in resolver

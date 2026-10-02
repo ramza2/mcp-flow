@@ -1490,7 +1490,8 @@ async def test_while_nested_loop_body_approval_fail_closed(
         seeded = await _seed_executable(session)
         await session.commit()
 
-    # WHILE — assert_flat_foreach_runtime_compatible / DAG fail-closed.
+    # WHILE is runtime-supported in #51; nested LOOP / body APPROVAL remain
+    # fail-closed below. Smoke that flat WHILE passes the flat-runtime gate.
     while_plan = _plan(
         [
             _loop(
@@ -1515,26 +1516,7 @@ async def test_while_nested_loop_body_approval_fail_closed(
         response_step_ids=["loop1"],
     )
     parsed = ExecutionPlanV1.model_validate(while_plan)
-    with pytest.raises(AppError) as while_exc:
-        assert_flat_foreach_runtime_compatible(parsed)
-    assert while_exc.value.code == LOOP_RUNTIME_UNSUPPORTED
-
-    # Claim fail-closes before MCP (DAG validates assert_flat_foreach).
-    client = _OkClient()
-    async with db_session_factory() as session:
-        execution_id = await _materialize_queued(
-            session,
-            plan_snapshot=while_plan,
-            seeded=seeded,
-            input_snapshot={},
-        )
-        with pytest.raises(AppError) as claim_exc:
-            await ExecutionClaimService(session, lease_seconds=120).claim(
-                execution_id=execution_id, worker_id="w-while"
-            )
-        assert claim_exc.value.code == LOOP_RUNTIME_UNSUPPORTED
-        await session.rollback()
-    assert len(client.calls) == 0
+    assert_flat_foreach_runtime_compatible(parsed)
 
     # Nested LOOP body template (inner LOOP owned by outer).
     nested = _plan(

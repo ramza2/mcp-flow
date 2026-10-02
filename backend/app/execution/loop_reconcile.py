@@ -1,8 +1,8 @@
-"""FOR_EACH LOOP local reconciliation helpers (docs/04 §9.5).
+"""FOR_EACH / WHILE LOOP local reconciliation helpers (docs/04 §9.5).
 
 Orchestrator-owned: no MCP. Creates durable iteration ExecutionStep rows
-under Execution row lock. WHILE / nested LOOP / body APPROVAL are rejected
-by ``assert_flat_foreach_runtime_compatible`` before body work.
+under Execution row lock. Nested LOOP / body APPROVAL are rejected by
+``assert_flat_foreach_runtime_compatible`` before body work.
 """
 
 from __future__ import annotations
@@ -13,25 +13,43 @@ from collections.abc import Mapping, Sequence
 from datetime import datetime
 from typing import Any
 
+from app.core.canonical_hash import compute_canonical_json_hash
 from app.core.errors import AppError
 from app.domain.enums import AuthorableStepType, LoopMode, StepStatus
-from app.execution.binding_resolver import RuntimeBindingResolver
+from app.execution.binding_resolver import (
+    RuntimeBindingResolver,
+    build_execution_context_projection,
+)
 from app.execution.loop_runtime import (
     LOOP_COLLECTION_TYPE_MISMATCH,
     PLAN_LIMIT_EXCEEDED,
+    append_or_replay_while_history,
+    assert_while_child_immutable_lineage,
+    assert_while_top_level_ancestor_lineage,
+    build_loop_body_ownership,
+    build_previous_iteration_projection,
+    build_while_loop_context_projection,
     child_instances_for_iteration,
+    empty_while_control_evidence,
     hash_collection,
+    hash_while_predicate_evidence,
+    history_entry_for,
     iteration_step_key,
     max_materialized_iteration,
     parse_foreach_collection_pin,
+    parse_while_predicate_history,
+    result_inline_hash,
+    template_id_from_step_snapshot,
     tool_version_for_template,
 )
+from app.execution.predicate_evaluator import RuntimePredicateEvaluator
 from app.models.execution import Execution, ExecutionStep
 from app.repositories.execution import ExecutionRepository
 from app.schemas.execution_plan import (
     ExecutionPlanStep,
     ExecutionPlanV1,
     LoopStepConfigV1,
+    compute_plan_hash,
 )
 from app.schemas.plan_binding import PlanLoopContextBinding
 
@@ -137,6 +155,12 @@ def pin_collection_evidence(
     return evidence
 
 
+def pin_while_control_evidence(*, loop_step: ExecutionStep) -> dict[str, Any]:
+    evidence = empty_while_control_evidence()
+    loop_step.resolved_input = evidence
+    return evidence
+
+
 def assert_collection_pin_stable(
     *,
     loop_step: ExecutionStep,
@@ -200,6 +224,316 @@ def revalidate_foreach_collection_pin(
     return collection
 
 
+def build_while_candidate_context(
+    *,
+    loop_step: ExecutionStep,
+    plan: ExecutionPlanV1,
+    cfg: LoopStepConfigV1,
+    steps: Sequence[ExecutionStep],
+    candidate_iteration_no: int,
+) -> dict[str, Any]:
+    """Build WHILE LOOP_CONTEXT projection for candidate iteration N."""
+    if cfg.mode != LoopMode.WHILE:
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message="WHILE candidate context requires WHILE mode.",
+            status_code=409,
+        )
+    if candidate_iteration_no < 1:
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message="candidate_iteration_no must be >= 1.",
+            status_code=409,
+        )
+    try:
+        parent_plan = ExecutionPlanStep.model_validate(loop_step.step_snapshot)
+    except Exception as exc:
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message="WHILE LOOP step_snapshot is invalid.",
+            status_code=409,
+        ) from exc
+    if candidate_iteration_no == 1:
+        previous: dict[str, Any] | None = None
+    else:
+        previous = build_previous_iteration_projection(
+            steps=steps,
+            parent_step_id=loop_step.id,
+            previous_iteration_no=candidate_iteration_no - 1,
+            body_step_ids=cfg.body_step_ids,
+            plan=plan,
+        )
+    return build_while_loop_context_projection(
+        loop_plan_step_id=parent_plan.id,
+        iteration_no=candidate_iteration_no,
+        max_iterations=cfg.max_iterations,
+        previous_iteration=previous,
+    )
+
+
+def build_while_evidence_object(
+    *,
+    plan: ExecutionPlanV1,
+    execution: Execution,
+    loop_step: ExecutionStep,
+    cfg: LoopStepConfigV1,
+    steps: Sequence[ExecutionStep],
+    candidate_iteration_no: int,
+) -> dict[str, Any]:
+    """Deterministic safe evidence object for WHILE Predicate integrity hash."""
+    if candidate_iteration_no < 1:
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message="candidate_iteration_no must be >= 1.",
+            status_code=409,
+        )
+    plan_hash = compute_plan_hash(plan.model_dump(mode="json"))
+    input_hash = compute_canonical_json_hash(execution.input_snapshot)
+    exec_ctx_hash = compute_canonical_json_hash(
+        build_execution_context_projection(execution)
+    )
+
+    resolver = RuntimeBindingResolver()
+    ancestors_map = resolver.transitive_ancestors(plan)
+    ancestor_ids = ancestors_map.get(loop_step.step_key, set())
+    ownership = build_loop_body_ownership(plan)
+    top_level_ids = [
+        s.id for s in plan.steps if s.id not in ownership.body_to_loop
+    ]
+    plan_by_id = {ps.id: ps for ps in plan.steps}
+    by_key = {s.step_key: s for s in steps}
+    ancestor_evidence: list[dict[str, Any]] = []
+    for step_key in top_level_ids:
+        if step_key not in ancestor_ids:
+            continue
+        row = by_key.get(step_key)
+        if row is None:
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message=(
+                    f"WHILE evidence missing top-level ancestor {step_key!r}."
+                ),
+                status_code=409,
+            )
+        plan_step = plan_by_id[step_key]
+        assert_while_top_level_ancestor_lineage(row=row, plan_step=plan_step)
+        ancestor_evidence.append(
+            {
+                "step_key": step_key,
+                "step_type": row.step_type,
+                "status": row.status,
+                "condition_result": row.condition_result,
+                "error_code": row.error_code,
+                "result_inline_hash": result_inline_hash(row.result_inline),
+            }
+        )
+
+    if candidate_iteration_no == 1:
+        previous_evidence: Any = None
+    else:
+        prev_no = candidate_iteration_no - 1
+        # Completeness + exact immutable lineage before hashing.
+        build_previous_iteration_projection(
+            steps=steps,
+            parent_step_id=loop_step.id,
+            previous_iteration_no=prev_no,
+            body_step_ids=cfg.body_step_ids,
+            plan=plan,
+        )
+        children = child_instances_for_iteration(
+            steps=steps,
+            parent_step_id=loop_step.id,
+            iteration_no=prev_no,
+        )
+        by_template = {
+            template_id_from_step_snapshot(c): c for c in children
+        }
+        previous_evidence = []
+        for tid in cfg.body_step_ids:
+            child = by_template[tid]
+            template = plan_by_id[tid]
+            assert_while_child_immutable_lineage(
+                child=child,
+                parent_step_id=loop_step.id,
+                iteration_no=prev_no,
+                template=template,
+            )
+            previous_evidence.append(
+                {
+                    "template_id": tid,
+                    "runtime_step_key": child.step_key,
+                    "status": child.status,
+                    "condition_result": child.condition_result,
+                    "error_code": child.error_code,
+                    "result_inline_hash": result_inline_hash(child.result_inline),
+                }
+            )
+
+    return {
+        "plan_hash": plan_hash,
+        "candidate_iteration_no": candidate_iteration_no,
+        "input_snapshot_hash": input_hash,
+        "execution_context_hash": exec_ctx_hash,
+        "top_level_ancestors": ancestor_evidence,
+        "previous_iteration": previous_evidence,
+    }
+
+
+def evaluate_while_gate(
+    *,
+    evaluator: RuntimePredicateEvaluator,
+    execution: Execution,
+    loop_step: ExecutionStep,
+    plan: ExecutionPlanV1,
+    cfg: LoopStepConfigV1,
+    steps: Sequence[ExecutionStep],
+    candidate_iteration_no: int,
+) -> bool:
+    """Evaluate WHILE Predicate for candidate N; append/replay history.
+
+    Mutates ``loop_step.resolved_input`` with durable predicate_history.
+    """
+    if cfg.mode != LoopMode.WHILE or cfg.predicate is None:
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message="WHILE gate requires WHILE predicate.",
+            status_code=409,
+        )
+    if loop_step.resolved_input is None:
+        pin_while_control_evidence(loop_step=loop_step)
+    parse_while_predicate_history(loop_step.resolved_input)
+
+    context = build_while_candidate_context(
+        loop_step=loop_step,
+        plan=plan,
+        cfg=cfg,
+        steps=steps,
+        candidate_iteration_no=candidate_iteration_no,
+    )
+    evidence = build_while_evidence_object(
+        plan=plan,
+        execution=execution,
+        loop_step=loop_step,
+        cfg=cfg,
+        steps=steps,
+        candidate_iteration_no=candidate_iteration_no,
+    )
+    evidence_hash = hash_while_predicate_evidence(evidence)
+    result = evaluator.evaluate(
+        cfg.predicate,
+        execution=execution,
+        owning_step=loop_step,
+        steps=steps,
+        plan=plan,
+        loop_context_override=context,
+    )
+    updated = append_or_replay_while_history(
+        resolved_input=dict(loop_step.resolved_input),
+        next_iteration_no=candidate_iteration_no,
+        evidence_hash=evidence_hash,
+        result=result,
+    )
+    loop_step.resolved_input = updated
+    return result
+
+
+def revalidate_while_predicate_gate(
+    *,
+    execution: Execution,
+    loop_step: ExecutionStep,
+    plan: ExecutionPlanV1,
+    steps: Sequence[ExecutionStep],
+    child_iteration_no: int,
+) -> None:
+    """Pre-MCP: prove child iteration N was authorized by a true WHILE gate."""
+    if child_iteration_no is None or child_iteration_no < 1:
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message="WHILE child gate requires iteration_no >= 1.",
+            status_code=409,
+        )
+    try:
+        parent_plan = ExecutionPlanStep.model_validate(loop_step.step_snapshot)
+        cfg = LoopStepConfigV1.model_validate(parent_plan.config)
+    except Exception as exc:
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message="WHILE parent config invalid during gate revalidation.",
+            status_code=409,
+        ) from exc
+    if cfg.mode != LoopMode.WHILE:
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message="WHILE gate revalidation requires WHILE parent LOOP.",
+            status_code=409,
+        )
+    control = parse_while_predicate_history(loop_step.resolved_input)
+    entry = history_entry_for(
+        control["predicate_history"], next_iteration_no=child_iteration_no
+    )
+    if entry is None:
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message=(
+                f"WHILE predicate_history missing gate for iteration "
+                f"{child_iteration_no}."
+            ),
+            status_code=409,
+        )
+    if entry["result"] is not True:
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message=(
+                f"WHILE predicate_history gate for iteration "
+                f"{child_iteration_no} is not true."
+            ),
+            status_code=409,
+        )
+
+    context = build_while_candidate_context(
+        loop_step=loop_step,
+        plan=plan,
+        cfg=cfg,
+        steps=steps,
+        candidate_iteration_no=child_iteration_no,
+    )
+    evidence = build_while_evidence_object(
+        plan=plan,
+        execution=execution,
+        loop_step=loop_step,
+        cfg=cfg,
+        steps=steps,
+        candidate_iteration_no=child_iteration_no,
+    )
+    rebuilt_hash = hash_while_predicate_evidence(evidence)
+    if rebuilt_hash != entry["evidence_hash"]:
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message=(
+                f"WHILE evidence_hash drift for iteration {child_iteration_no}."
+            ),
+            status_code=409,
+        )
+    evaluator = RuntimePredicateEvaluator()
+    fresh = evaluator.evaluate(
+        cfg.predicate,
+        execution=execution,
+        owning_step=loop_step,
+        steps=steps,
+        plan=plan,
+        loop_context_override=context,
+    )
+    if fresh is not True:
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message=(
+                f"WHILE Predicate reevaluation is not true for iteration "
+                f"{child_iteration_no}."
+            ),
+            status_code=409,
+        )
+
+
 def loop_timeout_exceeded(loop_step: ExecutionStep, *, now: datetime) -> bool:
     if loop_step.started_at is None:
         return False
@@ -222,14 +556,10 @@ def assert_global_expanded_max_steps(
     plan: ExecutionPlanV1,
     steps: Sequence[ExecutionStep],
 ) -> None:
-    """Global projected ExecutionStep budget across all RUNNING FOR_EACH LOOPs.
+    """Global projected ExecutionStep budget across RUNNING LOOPs.
 
-    projected_total =
-      current durable ExecutionStep count
-      + remaining not-yet-materialized children reserved by every RUNNING LOOP
-
-    Terminal / PENDING LOOPs do not reserve future rows. Malformed pins fail
-    closed (mandatory-fatal PLAN_LIMIT_EXCEEDED / RESOURCE_CONFLICT).
+    FOR_EACH: reserve remaining pinned collection children.
+    WHILE: do not reserve unknown future iterations (actual rows only).
     """
     current = len(steps)
     remaining = 0
@@ -242,16 +572,13 @@ def assert_global_expanded_max_steps(
         ):
             continue
         try:
-            pin = parse_foreach_collection_pin(step.resolved_input)
             loop_ps = ExecutionPlanStep.model_validate(step.step_snapshot)
             cfg = LoopStepConfigV1.model_validate(loop_ps.config)
-        except AppError:
-            raise
         except Exception as exc:
             raise AppError(
                 code="RESOURCE_CONFLICT",
                 message=(
-                    f"RUNNING LOOP {step.step_key!r} has malformed pin/config "
+                    f"RUNNING LOOP {step.step_key!r} has malformed config "
                     "for expanded max_steps projection."
                 ),
                 status_code=409,
@@ -269,19 +596,46 @@ def assert_global_expanded_max_steps(
                 ),
                 status_code=409,
             )
-        expected_children = pin["collection_size"] * len(cfg.body_step_ids)
-        actual_children = sum(1 for s in steps if s.parent_step_id == step.id)
-        if actual_children > expected_children:
+        if cfg.mode == LoopMode.FOR_EACH:
+            try:
+                pin = parse_foreach_collection_pin(step.resolved_input)
+            except AppError:
+                raise
+            except Exception as exc:
+                raise AppError(
+                    code="RESOURCE_CONFLICT",
+                    message=(
+                        f"RUNNING FOR_EACH LOOP {step.step_key!r} has "
+                        "malformed pin for expanded max_steps."
+                    ),
+                    status_code=409,
+                ) from exc
+            expected_children = pin["collection_size"] * len(cfg.body_step_ids)
+            actual_children = sum(1 for s in steps if s.parent_step_id == step.id)
+            if actual_children > expected_children:
+                raise AppError(
+                    code="RESOURCE_CONFLICT",
+                    message=(
+                        f"LOOP {step.step_key!r} has more child rows "
+                        f"({actual_children}) than pinned budget "
+                        f"({expected_children})."
+                    ),
+                    status_code=409,
+                )
+            remaining += expected_children - actual_children
+        elif cfg.mode == LoopMode.WHILE:
+            # WHILE: only already-materialized children count (via ``current``).
+            # Do not parse WHILE resolved_input as a FOR_EACH collection pin.
+            parse_while_predicate_history(step.resolved_input)
+        else:
             raise AppError(
                 code="RESOURCE_CONFLICT",
                 message=(
-                    f"LOOP {step.step_key!r} has more child rows "
-                    f"({actual_children}) than pinned budget "
-                    f"({expected_children})."
+                    f"RUNNING LOOP {step.step_key!r} mode "
+                    f"{cfg.mode.value!r} unsupported for max_steps."
                 ),
                 status_code=409,
             )
-        remaining += expected_children - actual_children
 
     projected = current + remaining
     if projected > plan.limits.max_steps:
@@ -308,6 +662,27 @@ def assert_expanded_max_steps(
     (including the newly-pinned RUNNING LOOP) is authoritative.
     """
     del collection_size, body_step_count
+    assert_global_expanded_max_steps(plan=plan, steps=steps)
+
+
+def assert_while_next_iteration_max_steps(
+    *,
+    plan: ExecutionPlanV1,
+    steps: Sequence[ExecutionStep],
+    body_step_count: int,
+) -> None:
+    """Before materializing a WHILE candidate iteration: current + body ≤ max."""
+    if len(steps) + body_step_count > plan.limits.max_steps:
+        raise AppError(
+            code=PLAN_LIMIT_EXCEEDED,
+            message=(
+                f"WHILE next iteration would exceed "
+                f"limits.max_steps={plan.limits.max_steps} "
+                f"(existing={len(steps)}, body={body_step_count})."
+            ),
+            status_code=409,
+        )
+    # Also enforce global FOR_EACH reservations remain valid.
     assert_global_expanded_max_steps(plan=plan, steps=steps)
 
 
@@ -486,6 +861,23 @@ def succeed_loop(
         "mode": LoopMode.FOR_EACH.value,
         "iterations_completed": iterations_completed,
         "collection_size": collection_size,
+    }
+    loop_step.error_code = None
+    loop_step.error_message = None
+    loop_step.finished_at = now
+    loop_step.lock_version += 1
+
+
+def succeed_while_loop(
+    loop_step: ExecutionStep,
+    *,
+    iterations_completed: int,
+    now: datetime,
+) -> None:
+    loop_step.status = StepStatus.SUCCEEDED.value
+    loop_step.result_inline = {
+        "mode": LoopMode.WHILE.value,
+        "iterations_completed": iterations_completed,
     }
     loop_step.error_code = None
     loop_step.error_message = None

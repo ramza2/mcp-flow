@@ -407,7 +407,7 @@ Resolver는 SecretResolver / MCP / LLM / DB write를 호출하지 않는다.
 | `PLAN_INPUT` | `Execution.input_snapshot` | immutable execution input; secret inputs stay reference-only; path `/` must not copy plaintext secrets |
 | `STEP_OUTPUT` | upstream `ExecutionStep.result_inline` | same Execution; immutable Plan/`step_snapshot` lineage; SUCCEEDED ancestor only; snake_case result root |
 | `EXECUTION_CONTEXT` | safe projection only | see below |
-| `LOOP_CONTEXT` | LOOP body instance only | fail closed outside active FOR_EACH body |
+| `LOOP_CONTEXT` | LOOP body instance, or WHILE parent Predicate via override | fail closed outside active FOR_EACH/WHILE body (override excepted) |
 
 Persisted TOOL `result_inline` root (canonical snake_case — no camelCase alias):
 
@@ -728,11 +728,12 @@ requires ToolPolicy approval, existing single-TOOL rules still apply
 ### 9.7.1 TOOL/CONDITION/JOIN/APPROVAL DAG wave runtime orchestration
 
 Runtime multi-step slice는 deterministic **wave-based TOOL/CONDITION/JOIN/APPROVAL
-DAG**와 flat `FOR_EACH` LOOP를 실행한다. `WHILE` / nested LOOP / body APPROVAL /
-`LOOP_CONTEXT` outside an active body instance는 fail-closed이다.
+DAG**와 flat `FOR_EACH` / `WHILE` LOOP를 실행한다. nested LOOP / body APPROVAL /
+`LOOP_CONTEXT` outside an active body instance (except explicit WHILE parent
+Predicate override)는 fail-closed이다.
 
 ```text
-claim → validate TOOL/CONDITION/JOIN/APPROVAL/LOOP(FOR_EACH) DAG
+claim → validate TOOL/CONDITION/JOIN/APPROVAL/LOOP(FOR_EACH|WHILE) DAG
 → promote root TOOLs up to max_parallelism
   (root CONDITION / APPROVAL stay PENDING)
 → local reconcile fixed point:
@@ -911,9 +912,9 @@ A TOOL → C CONDITION → PASS TOOL (when C.condition_result==true)
   Plan/input/upstream evidence and are not duplicated into TOOL `resolved_input`
 - dynamic Binding + ToolPolicy `requires_approval` / PLAN_CONFIRMATION combination
   remains fail-closed (single-TOOL LITERAL/SECRET_REF Approval path unchanged)
-- Flat `FOR_EACH` LOOP runtime is supported (body templates + iteration instances).
-  `WHILE` / nested LOOP / body APPROVAL remain fail-closed (`LOOP_RUNTIME_UNSUPPORTED`)
-  before any body MCP. See §9.5.
+- Flat `FOR_EACH` and `WHILE` LOOP runtime is supported (body templates +
+  iteration instances). Nested LOOP / body APPROVAL remain fail-closed
+  (`LOOP_RUNTIME_UNSUPPORTED`) before any body MCP. See §9.5.
 
 ### 9.5 LOOP
 
@@ -924,8 +925,8 @@ FOR_EACH
 WHILE
 ```
 
-Runtime slice (this revision): **flat `FOR_EACH` only**. `WHILE` runtime,
-nested LOOP runtime, and authorable APPROVAL inside a LOOP body are deferred
+Runtime slice (this revision): **flat `FOR_EACH` and flat `WHILE`**. Nested
+LOOP runtime and authorable APPROVAL inside a LOOP body remain deferred
 (fail closed with `LOOP_RUNTIME_UNSUPPORTED` before body MCP).
 
 LOOP Step persisted `config` (exact field set):
@@ -995,15 +996,74 @@ Non-LOOP plans still materialize exactly one ExecutionStep per Plan Step.
   mandatory-fatal.
 - `collection_size > max_iterations` → known LOOP failure
   `LOOP_MAX_ITERATIONS_EXCEEDED` (respects LOOP `on_error`).
-- Expanded runtime step budget:
-  `top_level_count + collection_size * len(body_step_ids) ≤ limits.max_steps`
-  else `PLAN_LIMIT_EXCEEDED` before body MCP.
+- Expanded runtime step budget (global across RUNNING FOR_EACH LOOPs):
+  reserve remaining pinned children; WHILE does not reserve unknown future
+  iterations (see below).
 - Empty collection → LOOP `SUCCEEDED` with
   `{mode, iterations_completed:0, collection_size:0}`; no children / MCP.
 
+#### WHILE pre-check / predicate history
+
+WHILE is **pre-check**, not do-while:
+
+```text
+evaluate Predicate for candidate iteration 1
+false → zero iterations → LOOP SUCCEEDED
+true → materialize iteration 1 → body settles
+→ evaluate Predicate for candidate iteration 2
+...
+```
+
+Execution order on LOOP entry:
+
+```text
+dependency barrier → Step.when → WHILE config.predicate
+```
+
+`Step.when=false` → LOOP `SKIPPED` / `STEP_WHEN_FALSE` with no Predicate
+evaluation, no iteration rows, no MCP. LOOP Step.when must not contain
+`LOOP_CONTEXT` (no active iteration context yet).
+
+Durable control evidence on LOOP `resolved_input` (exact shape):
+
+```json
+{
+  "mode": "WHILE",
+  "predicate_history": [
+    {"next_iteration_no": 1, "evidence_hash": "<sha256>", "result": true},
+    {"next_iteration_no": 2, "evidence_hash": "<sha256>", "result": false}
+  ]
+}
+```
+
+Rules:
+
+- History is contiguous from `1..last evaluated candidate`; no duplicates.
+- `result` is bool; `evidence_hash` is lowercase SHA-256 hex.
+- Append-or-replay: existing entry N must match rebuilt hash + fresh result,
+  else `RESOURCE_CONFLICT` (mandatory-fatal, no new MCP).
+- Evidence hash binds plan_hash, candidate_iteration_no, input_snapshot hash,
+  EXECUTION_CONTEXT hash, top-level ancestor evidence hashes, and previous
+  iteration evidence hashes (not raw previous outputs).
+- Initial Predicate false → history `1=false`, LOOP `SUCCEEDED` with
+  `{mode, iterations_completed:0}`; no children / MCP.
+- Ordering: evaluate Predicate first, then enforce `max_iterations`. Candidate
+  `M+1=true` with `max_iterations=M` → persist gate then
+  `LOOP_MAX_ITERATIONS_EXCEEDED` (no iteration M+1 rows). Candidate
+  `M+1=false` → normal success with `iterations_completed=M`.
+- Dynamic max_steps: before materializing candidate N,
+  `len(current durable Steps) + len(body_step_ids) ≤ limits.max_steps`
+  else `PLAN_LIMIT_EXCEEDED` (mandatory-fatal). Do not reserve
+  `max_iterations * body_size` up front.
+- Timeout checked before each candidate Predicate / next materialization;
+  do not append a new history entry after timeout is detected.
+- Pre-MCP: every WHILE child TOOL (including LITERAL-only) revalidates parent
+  history gate for `child.iteration_no` (entry exists, `result==true`,
+  evidence hash rebuild equality, Predicate reevaluation true).
+
 #### LOOP_CONTEXT projection
 
-For a body runtime instance, expose exactly:
+FOR_EACH body instance (unchanged; no `previous_iteration`):
 
 ```json
 {
@@ -1016,18 +1076,49 @@ For a body runtime instance, expose exactly:
 }
 ```
 
-`iteration_no` is 1-based; `index = iteration_no - 1`. Projection is rebuilt
-deterministically (not persisted as a whole). Outside an active body instance →
-`EXECUTION_PRECONDITION_FAILED`.
+WHILE candidate / body instance:
+
+```json
+{
+  "loop_step_id": "<loop plan id>",
+  "mode": "WHILE",
+  "iteration_no": 2,
+  "index": 1,
+  "max_iterations": 10,
+  "previous_iteration": {
+    "iteration_no": 1,
+    "steps": {
+      "check": {
+        "status": "SUCCEEDED",
+        "condition_result": null,
+        "error_code": null,
+        "result_inline": {"structured_content": {"done": false}}
+      }
+    }
+  }
+}
+```
+
+Candidate iteration 1 has `previous_iteration: null`. Projection is rebuilt
+(not persisted wholesale). `previous_iteration.steps` keys are immutable body
+template ids with exactly `{status, condition_result, error_code, result_inline}`
+from durable evidence of iteration N-1 only.
+
+WHILE parent Predicate may use `LOOP_CONTEXT` via an explicit runtime
+`loop_context_override` (the sole exception to the body-instance rule). Top-level
+non-WHILE Steps without override still reject `LOOP_CONTEXT`.
 
 Allowed in LOOP body TOOL bindings, CONDITION predicates, and Step.when.
+FOR_EACH collection and LOOP Step.when reject `LOOP_CONTEXT` statically.
 
 #### Same-iteration STEP_OUTPUT
 
 Inside a body instance, `STEP_OUTPUT(template_id)` resolves only the
 same-`parent_step_id` + same-`iteration_no` source whose `step_snapshot.id`
-matches. Cross-iteration STEP_OUTPUT is rejected. Outside-body sources must be
-top-level transitive ancestors of the owning LOOP.
+matches. Cross-iteration STEP_OUTPUT is rejected — use `LOOP_CONTEXT`
+`/previous_iteration/...` for previous WHILE body evidence. Outside-body
+sources must be top-level transitive ancestors of the owning LOOP. Parent
+WHILE Predicate must not reference LOOP body templates via `STEP_OUTPUT`.
 
 #### Sequential iterations / parallelism / ErrorPolicy
 
@@ -1037,24 +1128,27 @@ top-level transitive ancestors of the owning LOOP.
   requires JOIN.
 - `Plan.limits.max_parallelism` is global per Execution (counts all TOOL
   READY+RUNNING including body children). LOOP/CONDITION/JOIN consume no remote
-  slot.
+  slot. A WHILE body wave may run concurrently with unrelated top-level /
+  other-loop TOOLs when slots permit.
 - LOOP `timeout_seconds` is the total parent budget from `started_at` (not reset
   per iteration); exhaustion → `LOOP_TIMEOUT` + LOOP `on_error`.
 - Known LOOP failures (`LOOP_MAX_ITERATIONS_EXCEEDED`, `LOOP_TIMEOUT`) respect
   LOOP `on_error` (`FAIL_EXECUTION` / `MARK_PARTIAL` / `CONTINUE`). Control-
-  integrity failures remain mandatory-fatal.
+  integrity / Predicate failures remain mandatory-fatal.
 - ALL_REQUIRED aggregates top-level materialized Steps plus every dynamic body
   instance (template `required`/`on_error` from `step_snapshot`). Zero-iteration
-  FOR_EACH adds no body evidence.
-- LOOP parent result (no raw item aggregation):
-  `{mode, iterations_completed, collection_size}`.
+  FOR_EACH / WHILE adds no body evidence.
+- FOR_EACH parent result: `{mode, iterations_completed, collection_size}`.
+- WHILE parent result: `{mode, iterations_completed}` (history/hashes stay in
+  `resolved_input`).
 
 #### Recovery limitation
 
-Same-lease duplicate orchestration reconstructs the active iteration from
-durable rows. Robust resume of a partially completed LOOP after worker lease
-loss remains follow-up work (never overwrite completed children; never recreate
-an existing iteration; never re-invoke terminal Attempt/ToolCall).
+Same-lease duplicate orchestration reconstructs WHILE progress from
+`predicate_history` + durable iteration child rows (never duplicate history
+entries, recreate an existing iteration, rerun a terminal ToolCall, or
+reinterpret a false gate as true). Robust resume of a partially completed
+complex LOOP after worker lease loss remains follow-up work.
 
 ### 9.6 CONDITION / TOOL config (complex Plan)
 
@@ -1208,7 +1302,8 @@ Type semantics (no implicit coercion):
 - `contains`: string⊃string or array⊃value (no object-key semantics)
 - `SECRET_REF`: `exists` → true, `is_null` → false; binary comparison rejected
   (`PREDICATE_TYPE_MISMATCH`); never resolve plaintext
-- `LOOP_CONTEXT`: active FOR_EACH body instance only (else fail closed)
+- `LOOP_CONTEXT`: active FOR_EACH/WHILE body instance, or WHILE parent Predicate
+  via explicit `loop_context_override` (else fail closed)
 
 Logical short-circuit (persisted child order):
 
