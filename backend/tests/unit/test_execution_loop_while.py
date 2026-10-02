@@ -24,7 +24,6 @@ from app.execution.dag import validate_tool_join_dag
 from app.execution.lineage import assert_tool_step_lineage
 from app.execution.loop_reconcile import (
     build_while_evidence_object,
-    revalidate_while_predicate_gate,
 )
 from app.execution.loop_runtime import (
     LOOP_MAX_ITERATIONS_EXCEEDED,
