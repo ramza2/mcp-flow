@@ -759,8 +759,11 @@ WorkflowVersion.validation_status == VALID
 
 Authorization requires current `workflow.execute` + `WORKFLOW` ResourceGrant, plus
 per-TOOL `mcp.tool.execute` + `MCP_TOOL` ResourceGrant at creation and again at
-Attempt / final pre-send. Plan inputs (`ExecutionPlanV1.inputs`) are the runtime
-input authority (`secret=true` requires exact `SECRET_REF`). Idempotency scope is
+Attempt / final pre-send. Creation is strict (`PUBLISHED` +
+`current_version_id`); already-created Executions remain pinned to their
+`workflow_version_id` even if that version later becomes `DEPRECATED`. Plan
+inputs (`ExecutionPlanV1.inputs`) are the runtime input authority
+(`secret=true` requires exact `SECRET_REF`). Idempotency scope is
 `WORKFLOW_VERSION_EXECUTION_CREATE_V1`. Response schema is
 `WorkflowExecutionCreateResult` (no `input_snapshot` / policy evidence).
 

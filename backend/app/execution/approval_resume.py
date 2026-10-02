@@ -29,7 +29,10 @@ from app.domain.enums import (
 from app.execution.claim import _normalize_worker_id
 from app.execution.completion import build_result_summary
 from app.execution.dag import cancel_unused_ready_tools, skip_all_pending
-from app.execution.runtime_preflight import assert_answered_plan_confirmation
+from app.execution.runtime_preflight import (
+    assert_answered_plan_confirmation,
+    assert_current_workflow_execution_authorized,
+)
 from app.models.approval import ApprovalRequest
 from app.models.execution import Execution, ExecutionStep
 from app.repositories.approval_request import ApprovalRequestRepository
@@ -250,6 +253,12 @@ class ApprovalResumeClaimService:
                 step=step,
                 steps=steps,
             )
+            if execution.source_type == ExecutionSourceType.WORKFLOW_VERSION.value:
+                # Authorable APPROVAL may be terminal or followed only by local
+                # CONDITION/JOIN/LOOP — revalidate Workflow auth before lease.
+                await assert_current_workflow_execution_authorized(
+                    self._session, execution
+                )
         except AppError:
             self._terminalize_resume_precondition_failed(
                 execution=execution, step=step, steps=steps, now=now, authorable=True

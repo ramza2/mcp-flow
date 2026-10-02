@@ -41,6 +41,7 @@ from app.models.agent import AgentToolGrant
 from app.models.approval import ApprovalPolicy
 from app.models.execution import Execution
 from app.models.mcp import MCPServer, MCPTool, MCPToolPolicy, MCPToolVersion
+from app.models.workflow import Workflow, WorkflowVersion
 from app.repositories.agent_tool_grant import AgentToolGrantRepository
 from app.repositories.agent_version import AgentVersionRepository
 from app.repositories.approval_policy import ApprovalPolicyRepository
@@ -52,13 +53,19 @@ from app.repositories.mcp_tool_policy import MCPToolPolicyRepository
 from app.repositories.plan_validation import PlanValidationRepository
 from app.repositories.workflow import WorkflowRepository
 from app.repositories.workflow_version import WorkflowVersionRepository
-from app.schemas.execution_plan import ExecutionPlanV1
+from app.schemas.execution_plan import ExecutionPlanV1, compute_plan_hash
 from app.services.policy_snapshot import build_safe_tool_policy_snapshot
 
 _EXECUTE_PERMISSION = "mcp.tool.execute"
 _WORKFLOW_EXECUTE_PERMISSION = "workflow.execute"
 _MCP_TOOL_RESOURCE = ResourceGrantResourceType.MCP_TOOL.value
 _WORKFLOW_RESOURCE = ResourceGrantResourceType.WORKFLOW.value
+_PINNED_WORKFLOW_VERSION_STATUSES = frozenset(
+    {
+        WorkflowVersionStatus.PUBLISHED.value,
+        WorkflowVersionStatus.DEPRECATED.value,
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -118,19 +125,23 @@ async def assert_source_tool_executable(
             plan_timeout_seconds=plan_timeout_seconds,
         )
     if execution.source_type == ExecutionSourceType.WORKFLOW_VERSION.value:
-        if execution.workflow_version_id is None:
-            raise AppError(
-                code="EXECUTION_PRECONDITION_FAILED",
-                message="Execution.workflow_version_id is required.",
-                status_code=409,
-            )
-        return await assert_current_workflow_tool_executable(
+        await assert_current_workflow_execution_authorized(session, execution)
+        core = await _assert_common_tool_executable(
             session,
             requester_id=execution.requester_id,
-            workflow_version_id=execution.workflow_version_id,
             tool_version_id=tool_version_id,
             expected_policy_snapshot=expected_policy_snapshot,
             plan_timeout_seconds=plan_timeout_seconds,
+        )
+        return RuntimeToolAuthorization(
+            tool_version=core.tool_version,
+            logical_tool=core.logical_tool,
+            server=core.server,
+            tool_policy=core.tool_policy,
+            approval_policy=core.approval_policy,
+            agent_grant=None,
+            confirmation_required=bool(core.tool_policy.requires_confirmation),
+            policy_snapshot=core.policy_snapshot,
         )
     if execution.source_type == ExecutionSourceType.MANUAL_TOOL_TEST.value:
         # Manual tool tests historically reuse Agent preflight with agent_version_id.
@@ -226,6 +237,128 @@ async def assert_current_agent_tool_executable(
     )
 
 
+@dataclass(frozen=True, slots=True)
+class WorkflowExecutionAuthorization:
+    workflow: Workflow
+    workflow_version: WorkflowVersion
+    plan: ExecutionPlanV1
+
+
+async def assert_current_workflow_execution_authorized(
+    session: AsyncSession,
+    execution: Execution,
+) -> WorkflowExecutionAuthorization:
+    """Mutable + pinned Workflow source authorization for an existing Execution.
+
+    Creation eligibility still requires PUBLISHED + current_version_id equality.
+    After Creation, a pinned WorkflowVersion may be DEPRECATED (superseded) and
+    remain valid lineage. Logical Workflow ACTIVE + grants remain mutable.
+    """
+    if execution.source_type != ExecutionSourceType.WORKFLOW_VERSION.value:
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message="Workflow Execution authorization requires WORKFLOW_VERSION.",
+            status_code=409,
+        )
+    if (
+        execution.workflow_version_id is None
+        or execution.agent_request_id is not None
+        or execution.agent_version_id is not None
+    ):
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message="WORKFLOW_VERSION Execution source lineage is inconsistent.",
+            status_code=409,
+        )
+
+    versions = WorkflowVersionRepository(session)
+    workflows = WorkflowRepository(session)
+    auth = AuthorizationRepository(session)
+
+    version = await versions.get(execution.workflow_version_id)
+    if version is None:
+        raise AppError(
+            code="EXECUTION_PRECONDITION_FAILED",
+            message="WorkflowVersion not found.",
+            status_code=409,
+        )
+    if version.status not in _PINNED_WORKFLOW_VERSION_STATUSES:
+        raise AppError(
+            code="EXECUTION_PRECONDITION_FAILED",
+            message=(
+                "pinned WorkflowVersion.status must be PUBLISHED or DEPRECATED."
+            ),
+            status_code=409,
+        )
+
+    workflow = await workflows.get(version.workflow_id)
+    if workflow is None or workflow.deleted_at is not None:
+        raise AppError(
+            code="EXECUTION_PRECONDITION_FAILED",
+            message="Workflow not found.",
+            status_code=409,
+        )
+    if workflow.status != WorkflowStatus.ACTIVE.value:
+        raise AppError(
+            code="EXECUTION_PRECONDITION_FAILED",
+            message="Workflow.status != ACTIVE.",
+            status_code=409,
+        )
+
+    try:
+        plan = ExecutionPlanV1.model_validate(execution.plan_snapshot)
+    except Exception as exc:
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message="Execution.plan_snapshot is invalid.",
+            status_code=409,
+        ) from exc
+    if plan.source.type != "WORKFLOW" or plan.source.workflow_id != workflow.id:
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message="Execution Plan source lineage mismatch.",
+            status_code=409,
+        )
+    if compute_plan_hash(execution.plan_snapshot) != execution.plan_hash:
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message="Execution.plan_hash does not match plan_snapshot.",
+            status_code=409,
+        )
+
+    # Pinned version ownership must match Plan source Workflow.
+    if version.workflow_id != workflow.id:
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message="WorkflowVersion does not belong to owning Workflow.",
+            status_code=409,
+        )
+
+    snapshot = await auth.get_resource_authorization_snapshot(
+        execution.requester_id,
+        permission_code=_WORKFLOW_EXECUTE_PERMISSION,
+        resource_type=_WORKFLOW_RESOURCE,
+        resource_id=workflow.id,
+    )
+    if not (
+        snapshot.user_exists
+        and snapshot.user_active
+        and snapshot.permission_present
+        and snapshot.resource_grant_present
+    ):
+        raise AppError(
+            code="FORBIDDEN",
+            message="workflow.execute + WORKFLOW ResourceGrant 필요.",
+            status_code=403,
+        )
+
+    return WorkflowExecutionAuthorization(
+        workflow=workflow,
+        workflow_version=version,
+        plan=plan,
+    )
+
+
 async def assert_current_workflow_tool_executable(
     session: AsyncSession,
     *,
@@ -235,6 +368,12 @@ async def assert_current_workflow_tool_executable(
     expected_policy_snapshot: dict[str, Any],
     plan_timeout_seconds: int | None = None,
 ) -> RuntimeToolAuthorization:
+    """Creation-time Workflow Tool preflight (requires PUBLISHED version).
+
+    Runtime Attempt/B2 must use ``assert_source_tool_executable`` /
+    ``assert_current_workflow_execution_authorized`` so DEPRECATED pinned
+    versions remain valid for already-created Executions.
+    """
     workflows = WorkflowRepository(session)
     versions = WorkflowVersionRepository(session)
     auth = AuthorizationRepository(session)

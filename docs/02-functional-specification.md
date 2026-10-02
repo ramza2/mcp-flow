@@ -478,6 +478,37 @@ runtime을 사용한다. ToolPolicy `requires_confirmation`은
 Step은 지원). Complex Workflow expired-lease recovery는 follow-up이며 recovery
 sweeper는 `AGENT_REQUEST`만 선택한다.
 
+### Creation eligibility vs pinned Execution runtime
+
+Creation eligibility (new manual Execution only):
+
+```text
+Workflow ACTIVE
+Workflow.current_version_id == version.id
+WorkflowVersion PUBLISHED + VALID
+```
+
+After durable Creation, the Execution remains pinned to exact:
+
+```text
+workflow_version_id / plan_snapshot / plan_hash / policy_snapshot
+```
+
+Publishing a newer WorkflowVersion may transition the pinned version to
+`DEPRECATED` without invalidating that existing Execution. Runtime Attempt / B2 /
+MRTR / authorable Approval resume accept pinned `WorkflowVersion.status in
+{PUBLISHED, DEPRECATED}` and do **not** require
+`Workflow.current_version_id == execution.workflow_version_id`.
+
+Mutable revocation still stops future work of an in-flight Execution:
+
+```text
+Workflow INACTIVE
+workflow.execute revoked
+WORKFLOW ResourceGrant revoked
+Tool / Server / ToolPolicy / ApprovalPolicy drift
+```
+
 ---
 
 # 10. Execution Engine 기능

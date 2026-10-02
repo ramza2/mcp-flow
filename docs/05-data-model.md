@@ -1164,7 +1164,7 @@ Decision persistence:
 `source_type = WORKFLOW_VERSION` manual execution은:
 
 ```text
-workflow_version_id = exact PUBLISHED version
+workflow_version_id = exact version pinned at Creation (then-current PUBLISHED)
 agent_request_id / agent_version_id / plan_validation_run_id = null
 trigger_type = USER
 plan_snapshot = validated WorkflowVersion.plan_definition
@@ -1173,9 +1173,19 @@ input_snapshot = normalized Plan inputs (SECRET_REF reference-only)
 policy_snapshot.schema_version = workflow_execution_policy.v1
 ```
 
-Normal queue staging / claim / Attempt / B2 / authorable APPROVAL resume / MRTR resume
-accept `WORKFLOW_VERSION`. Expired-lease recovery (`FNC-EXE-011`) remains
+Creation still requires the requested version to be the Workflow
+`current_version_id` and `PUBLISHED`/`VALID`. After Creation, runtime
+Attempt / B2 / authorable APPROVAL resume / MRTR resume keep the pinned
+`workflow_version_id` even when that version later becomes `DEPRECATED`
+(superseded by a newer publish). They still require live `Workflow.status ==
+ACTIVE` plus current `workflow.execute` / `WORKFLOW` ResourceGrant (and Tool
+authorization). Expired-lease recovery (`FNC-EXE-011`) remains
 `AGENT_REQUEST`-only in this slice.
+
+`workflow_execution_policy.v1` is immutable security evidence: exact top-level
+fields (`schema_version`, `workflow_id`, `workflow_version_id`, `tool_steps`)
+and a full projection of every Plan TOOL template id (including LOOP body
+templates). Corruption anywhere fails closed before another external call.
 
 ### 13.2 AgentRequest Execution Creation Foundation
 

@@ -1231,9 +1231,12 @@ retry read the Step-specific entry via a source-aware selector; AgentRequest
 
 Mutable Tool authorization is source-aware: shared Tool/Server/User/Policy core
 plus Agent (`AgentVersion` + `AgentToolGrant`) or Workflow (`workflow.execute` +
-`WORKFLOW` grant + published version ownership). ToolPolicy confirmation is
-unsupported for Workflow creation; ToolPolicy Execution-level approval wait is
-`DAG_WAIT_UNSUPPORTED` in this slice (authorable APPROVAL Steps remain supported).
+`WORKFLOW` grant + pinned WorkflowVersion ownership with status in
+`{PUBLISHED, DEPRECATED}`). After Execution Creation, version supersession must
+not invalidate pinned lineage; logical Workflow `ACTIVE` and current grants
+remain revocable. ToolPolicy confirmation is unsupported for Workflow creation;
+ToolPolicy Execution-level approval wait is `DAG_WAIT_UNSUPPORTED` in this slice
+(authorable APPROVAL Steps remain supported).
 
 ### 9.7 Complex Plan static validation foundation
 

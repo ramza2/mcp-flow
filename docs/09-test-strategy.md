@@ -845,18 +845,24 @@ DRAFT → PUBLISHED → DEPRECATED
 
 ### Workflow manual execution (`WORKFLOW_VERSION`)
 
-- ACTIVE Workflow + current PUBLISHED/VALID version only; DRAFT/INACTIVE/ARCHIVED /
-  non-current / DEPRECATED reject
+- Creation: ACTIVE Workflow + current PUBLISHED/VALID version only; DRAFT/INACTIVE/
+  ARCHIVED / non-current / DEPRECATED reject at Creation
+- Runtime pinned Execution: WorkflowVersion may be DEPRECATED after supersession;
+  do not require `current_version_id` equality; Workflow INACTIVE / grant revoke
+  still fail-closed
 - `workflow.execute` + WORKFLOW grant; per-TOOL `mcp.tool.execute` + MCP_TOOL grant
 - Plan inputs authority + SECRET_REF normalization; plaintext secret reject
-- `workflow_execution_policy.v1` per-TOOL snapshot; AgentRequest snapshot unchanged
+- `workflow_execution_policy.v1` exact top-level + full TOOL projection (incl. LOOP
+  body); corruption → RESOURCE_CONFLICT; AgentRequest snapshot unchanged
 - ToolPolicy confirmation → `WORKFLOW_CONFIRMATION_UNSUPPORTED`
 - ToolPolicy approval → `DAG_WAIT_UNSUPPORTED` (authorable APPROVAL supported)
 - Idempotency `WORKFLOW_VERSION_EXECUTION_CREATE_V1` race / key reuse
 - Queue staging + claim accept WORKFLOW_VERSION (not Schedule/Factory by default)
-- Attempt / B2 source-aware auth; grant/policy drift fail-closed (MCP 0)
+- Attempt / B2 source-aware auth; actual Phase-A / B2 grant/policy drift (MCP 0)
+- Authorable APPROVAL resume revalidates Workflow authorization before lease
 - PG: single TOOL e2e, sequential STEP_OUTPUT, FOR_EACH body template policy,
-  authorable APPROVAL resume, MRTR source accept, bounded retry
+  authorable APPROVAL resume, v1-execution/v2-publish, approval grant-revoke,
+  MRTR resume grant-revoke + DEPRECATED pin, bounded retry
 - Expired-lease recovery remains AGENT_REQUEST-only (complex Workflow follow-up)
 
 ---
