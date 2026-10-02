@@ -29,10 +29,7 @@ from app.domain.enums import (
 from app.execution.claim import _normalize_worker_id
 from app.execution.completion import build_result_summary
 from app.execution.dag import cancel_unused_ready_tools, skip_all_pending
-from app.execution.runtime_preflight import (
-    assert_answered_plan_confirmation,
-    assert_current_tool_executable,
-)
+from app.execution.runtime_preflight import assert_answered_plan_confirmation
 from app.models.approval import ApprovalRequest
 from app.models.execution import Execution, ExecutionStep
 from app.repositories.approval_request import ApprovalRequestRepository
@@ -323,12 +320,13 @@ class ApprovalResumeClaimService:
         if execution.source_type not in {
             ExecutionSourceType.AGENT_REQUEST.value,
             ExecutionSourceType.MANUAL_TOOL_TEST.value,
+            ExecutionSourceType.WORKFLOW_VERSION.value,
         }:
             raise AppError(
                 code="RESOURCE_CONFLICT",
                 message=(
                     "Authorable approval resume supports AGENT_REQUEST / "
-                    "MANUAL_TOOL_TEST Executions only."
+                    "MANUAL_TOOL_TEST / WORKFLOW_VERSION Executions only."
                 ),
                 status_code=409,
             )
@@ -432,10 +430,12 @@ class ApprovalResumeClaimService:
         step: ExecutionStep,
         request: ApprovalRequest,
     ) -> ToolStepConfigV1:
+        # ToolPolicy Execution-level approval wait remains AgentRequest-only in
+        # this slice. Workflow uses authorable APPROVAL Steps instead.
         if execution.source_type != ExecutionSourceType.AGENT_REQUEST.value:
             raise AppError(
                 code="RESOURCE_CONFLICT",
-                message="Approval resume supports AgentRequest Executions only.",
+                message="ToolPolicy approval resume supports AgentRequest Executions only.",
                 status_code=409,
             )
         if (
@@ -527,19 +527,22 @@ class ApprovalResumeClaimService:
         request: ApprovalRequest,
         tool_config: ToolStepConfigV1,
     ) -> None:
-        assert execution.agent_version_id is not None
-        authz = await assert_current_tool_executable(
-            self._session,
-            requester_id=execution.requester_id,
-            agent_version_id=execution.agent_version_id,
+        from app.execution.policy_selection import get_expected_tool_policy_snapshot
+        from app.execution.runtime_preflight import assert_source_tool_executable
+
+        expected_policy = get_expected_tool_policy_snapshot(
+            execution,
+            plan_step_id=str(step.step_snapshot.get("id") or step.step_key),
             tool_version_id=tool_config.tool_version_id,
-            expected_policy_snapshot=dict(execution.policy_snapshot),
+        )
+        authz = await assert_source_tool_executable(
+            self._session,
+            execution=execution,
+            tool_version_id=tool_config.tool_version_id,
+            expected_policy_snapshot=expected_policy,
             plan_timeout_seconds=_plan_timeout_seconds(step),
         )
-        if (
-            authz.grant.requires_confirmation
-            or authz.tool_policy.requires_confirmation
-        ):
+        if authz.confirmation_required:
             await _assert_confirmation_evidence(
                 self._session, execution, authz.policy_snapshot
             )

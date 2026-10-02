@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import AppError
 from app.domain.enums import (
+    ExecutionSourceType,
     ExecutionStatus,
     McpInputRequestStatus,
     StepAttemptStatus,
@@ -23,7 +24,8 @@ from app.domain.enums import (
 )
 from app.execution.claim import _normalize_worker_id
 from app.execution.lineage import assert_resume_attempt_lineage
-from app.execution.runtime_preflight import assert_current_tool_executable
+from app.execution.policy_selection import get_expected_tool_policy_snapshot
+from app.execution.runtime_preflight import assert_source_tool_executable
 from app.models.execution import Execution, ExecutionStep
 from app.repositories.execution import ExecutionRepository
 from app.repositories.mcp_input_request import MCPInputRequestRepository
@@ -94,13 +96,27 @@ class MrtrResumeClaimService:
             )
 
         steps = await self._executions.list_steps(execution.id)
-        if len(steps) != 1:
+        waiting_steps = [
+            s for s in steps if s.status == StepStatus.WAITING_INPUT.value
+        ]
+        if len(waiting_steps) != 1:
+            # Single-TOOL AgentRequest and single waiting Workflow TOOL are
+            # supported; multi-wait is fail-closed.
+            if (
+                execution.source_type == ExecutionSourceType.AGENT_REQUEST.value
+                and len(steps) != 1
+            ):
+                raise AppError(
+                    code="RESOURCE_CONFLICT",
+                    message="AgentRequest Execution must contain exactly one Step.",
+                    status_code=409,
+                )
             raise AppError(
                 code="RESOURCE_CONFLICT",
-                message="AgentRequest Execution must contain exactly one Step.",
+                message="MRTR resume requires exactly one WAITING_INPUT Step.",
                 status_code=409,
             )
-        step = await self._executions.lock_step(steps[0].id)
+        step = await self._executions.lock_step(waiting_steps[0].id)
         assert step is not None
         if step.status != StepStatus.WAITING_INPUT.value:
             raise AppError(
@@ -204,12 +220,16 @@ class MrtrResumeClaimService:
                     message="MRTR resume ToolCall evidence does not match round_no.",
                     status_code=409,
                 )
-            await assert_current_tool_executable(
-                self._session,
-                requester_id=execution.requester_id,
-                agent_version_id=execution.agent_version_id,
+            expected_policy = get_expected_tool_policy_snapshot(
+                execution,
+                plan_step_id=str(step.step_snapshot.get("id") or step.step_key),
                 tool_version_id=step.mcp_tool_version_id,
-                expected_policy_snapshot=dict(execution.policy_snapshot),
+            )
+            await assert_source_tool_executable(
+                self._session,
+                execution=execution,
+                tool_version_id=step.mcp_tool_version_id,
+                expected_policy_snapshot=expected_policy,
             )
         except AppError:
             await self._terminalize_precondition_failed(execution, step, ts)

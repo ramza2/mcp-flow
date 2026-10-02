@@ -159,3 +159,26 @@ class WorkflowVersionValidationResponse(BaseModel):
     validation_status: WorkflowVersionValidationStatus
     validation_report: dict[str, Any] | None = None
     content_hash: str
+
+
+class WorkflowExecutionCreateRequest(BaseModel):
+    """POST .../versions/{version_id}/executions request body."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    inputs: dict[str, Any]
+
+
+class WorkflowExecutionCreateResult(BaseModel):
+    """POST .../versions/{version_id}/executions success body."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: uuid.UUID
+    status: str
+    source_type: str
+    trigger_type: str
+    workflow_version_id: uuid.UUID
+    plan_hash: str = Field(min_length=64, max_length=64)
+    requested_at: datetime
+    step_count: int = Field(ge=1)

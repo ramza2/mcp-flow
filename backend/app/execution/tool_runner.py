@@ -10,7 +10,7 @@ Phase B1 (no DB transaction): resolve the server auth secret and materialize
 SECRET_REF tool arguments in memory only.
 
 Phase B2 (short TX, final pre-send gate): re-lock Execution and re-run canonical
-``assert_current_tool_executable`` plus lease/lineage/prepared-invocation drift
+``assert_source_tool_executable`` plus lease/lineage/prepared-invocation drift
 checks immediately before the remote call. Mutable authorization/policy changes
 after Phase A are fail-closed here. This gate does not claim absolute
 linearizability between DB commit and the subsequent socket write.
@@ -88,9 +88,10 @@ from app.execution.retry_decision import (
     remaining_step_timeout_ms,
     step_timeout_budget_exhausted,
 )
+from app.execution.policy_selection import get_expected_tool_policy_snapshot
 from app.execution.runtime_preflight import (
     assert_answered_plan_confirmation,
-    assert_current_tool_executable,
+    assert_source_tool_executable,
 )
 from app.execution.secret_materialize import materialize_tool_arguments
 from app.execution.secret_redaction import (
@@ -701,12 +702,17 @@ class McpToolRunner:
                     )
 
                 try:
-                    authz = await assert_current_tool_executable(
-                        session,
-                        requester_id=execution.requester_id,
-                        agent_version_id=execution.agent_version_id,
+                    plan_step_id = str(step.step_snapshot.get("id") or step.step_key)
+                    expected_policy = get_expected_tool_policy_snapshot(
+                        execution,
+                        plan_step_id=plan_step_id,
                         tool_version_id=step.mcp_tool_version_id,
-                        expected_policy_snapshot=dict(execution.policy_snapshot),
+                    )
+                    authz = await assert_source_tool_executable(
+                        session,
+                        execution=execution,
+                        tool_version_id=step.mcp_tool_version_id,
+                        expected_policy_snapshot=expected_policy,
                         plan_timeout_seconds=_plan_timeout_seconds(step),
                     )
                     if authz.tool_policy.requires_approval:
@@ -727,10 +733,7 @@ class McpToolRunner:
                             return _PreSendFailClosed(
                                 error_code=exc.code, message=exc.message
                             )
-                    if (
-                        authz.grant.requires_confirmation
-                        or authz.tool_policy.requires_confirmation
-                    ):
+                    if authz.confirmation_required:
                         await _assert_confirmation_evidence(
                             session, execution, authz.policy_snapshot
                         )
@@ -1267,12 +1270,17 @@ class McpToolRunner:
                     # ToolStepAttemptService.start(); replays did not, so re-run
                     # them here before ever issuing (or re-issuing) the network call.
                     try:
-                        authz = await assert_current_tool_executable(
-                            session,
-                            requester_id=execution.requester_id,
-                            agent_version_id=execution.agent_version_id,
+                        plan_step_id = str(step.step_snapshot.get("id") or step.step_key)
+                        expected_policy = get_expected_tool_policy_snapshot(
+                            execution,
+                            plan_step_id=plan_step_id,
                             tool_version_id=step.mcp_tool_version_id,
-                            expected_policy_snapshot=dict(execution.policy_snapshot),
+                        )
+                        authz = await assert_source_tool_executable(
+                            session,
+                            execution=execution,
+                            tool_version_id=step.mcp_tool_version_id,
+                            expected_policy_snapshot=expected_policy,
                             plan_timeout_seconds=_plan_timeout_seconds(step),
                         )
                         if authz.tool_policy.requires_approval:
@@ -1294,10 +1302,7 @@ class McpToolRunner:
                                     pre_send_failure = _PreSendFailClosed(
                                         error_code=exc.code, message=exc.message
                                     )
-                        if pre_send_failure is None and (
-                            authz.grant.requires_confirmation
-                            or authz.tool_policy.requires_confirmation
-                        ):
+                        if pre_send_failure is None and authz.confirmation_required:
                             await _assert_confirmation_evidence(
                                 session, execution, authz.policy_snapshot
                             )
@@ -1939,8 +1944,14 @@ class McpToolRunner:
                         status_code=409,
                     )
 
+                plan_step_id = str(step.step_snapshot.get("id") or step.step_key)
+                step_policy = get_expected_tool_policy_snapshot(
+                    execution,
+                    plan_step_id=plan_step_id,
+                    tool_version_id=step.mcp_tool_version_id,
+                )
                 risk_for_classify = (
-                    pinned_risk_class(execution.policy_snapshot) or prepared.risk_class
+                    pinned_risk_class(step_policy) or prepared.risk_class
                 )
                 classified = (
                     _classify_mcp_failure(call_error, risk_class=risk_for_classify)
@@ -1948,7 +1959,7 @@ class McpToolRunner:
                     else StepStatus.FAILED.value
                 )
 
-                max_attempts = pinned_max_attempts(execution.policy_snapshot) or 1
+                max_attempts = pinned_max_attempts(step_policy) or 1
                 retry = decide_safe_transient_retry(
                     call_error=None
                     if call_error is None or isinstance(call_error, _PreSendFailClosed)
@@ -1957,7 +1968,7 @@ class McpToolRunner:
                     risk_class=risk_for_classify,
                     attempt_count=step.attempt_count,
                     max_attempts=max_attempts,
-                    backoff_policy=pinned_backoff_policy(execution.policy_snapshot),
+                    backoff_policy=pinned_backoff_policy(step_policy),
                     step_started_at=step.started_at,
                     timeout_seconds=_plan_timeout_seconds(step),
                     now=now,
