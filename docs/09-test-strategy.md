@@ -829,10 +829,14 @@ DRAFT → PUBLISHED → DEPRECATED
 
 동일 lifecycle을 사용한다.
 
-- DRAFT plan 편집
-- blocking validation error publish 금지
+- DRAFT plan 편집 (incomplete object save allowed; invalidates validation + tool refs)
+- `/validate` persists structured `validation_report`; INVALID leaves zero tool refs
+- LOOP body TOOL templates project into `workflow_version_tool_refs` when VALID
+- blocking validation error / stale dependency publish 금지
 - PUBLISHED plan update 금지
 - ToolVersion 참조 변경 시 새 WorkflowVersion
+- concurrent version create / publish / validate-vs-plan-save races
+- `Execution.workflow_version_id` real FK (Execution creation remains later slice)
 
 ---
 

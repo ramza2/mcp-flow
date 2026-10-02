@@ -983,9 +983,12 @@ id, code, name, description
 owner_id
 status(DRAFT/ACTIVE/INACTIVE/ARCHIVED)
 current_version_id
-visibility
+visibility(PRIVATE/RESTRICTED/INTERNAL)
 Mutable Resource
 ```
+
+Logical Workflow persistence is implemented. `current_version_id` is null or must
+reference a PUBLISHED `workflow_versions` row owned by the same Workflow.
 
 ### 11.2 `workflow_versions`
 
@@ -1012,13 +1015,22 @@ DRAFT → PUBLISHED → DEPRECATED
 
 Published version은 수정하지 않고 변경 시 새 Draft version을 생성한다.
 
-`plan_definition`은 Execution Plan v1 JSON이다. Step Type별 persisted `config` exact shape,
-restricted Predicate AST, Plan BindingValue, LOOP `body_step_ids` / `max_iterations` contract는
+`plan_definition`은 Execution Plan v1 JSON이다. DRAFT may persist an incomplete Plan
+object before it is valid; `/validate` is the authoritative validation action.
+Step Type별 persisted `config` exact shape, restricted Predicate AST, Plan BindingValue,
+LOOP `body_step_ids` / `max_iterations` contract는
 `docs/04-agent-mcp-architecture.md` §9.3–§10.1을 Source of Truth로 한다.
 
 Static complex-plan validation( DAG / typed config / Predicate / binding source / limits )은
 Workflow persistence·runtime orchestration과 분리된 foundation이다. 본 모델은 새 Step Type·상태를
 추가하지 않는다.
+
+`content_hash` is SHA-256 over executable content only:
+`plan_schema_version`, `plan_definition`, `input_schema`, `output_schema`, `policy_defaults`.
+
+Publish rechecks stale ToolVersion / ApprovalPolicy dependencies and requires
+`validation_report.content_hash == content_hash`. Actual Workflow Execution creation
+is a later slice.
 
 ### 11.3 `workflow_version_tool_refs`
 
@@ -1030,6 +1042,10 @@ step_key
 mcp_tool_version_id
 created_at
 ```
+
+Tool refs are a derived projection of the current VALID Plan (including LOOP body TOOL
+templates). Plan save and INVALID validation clear them; they are never retained across
+content changes.
 
 ---
 

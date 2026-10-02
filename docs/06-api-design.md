@@ -735,7 +735,20 @@ POST  /workflows/{workflow_id}/versions/{version_id}/executions
 GET   /workflows/{workflow_id}/impact
 ```
 
-`PUT .../plan`은 `DRAFT` Version에서만 허용한다.
+`PUT .../plan`은 `DRAFT` Version에서만 허용한다. Incomplete DRAFT Plan objects may be
+saved; save resets `validation_status=INVALID`, clears `validation_report`, and clears
+`workflow_version_tool_refs`.
+
+`POST .../validate` is the authoritative DRAFT validation action (static Plan + ToolVersion
++ ApprovalPolicy dependency checks). It does not create Execution, call MCP/LLM, or
+resolve Secrets.
+
+`POST .../publish` requires a fresh VALID report matching `content_hash` and rechecks
+stale dependencies before flipping `current_version_id`. Published versions are immutable.
+Logical Workflow ACTIVE/INACTIVE remains a separate PATCH on the Workflow resource.
+
+`POST .../executions` and `GET .../impact` remain future slices (not in the registry
+foundation).
 
 Canonical Version status:
 

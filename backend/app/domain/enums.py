@@ -81,10 +81,25 @@ class WorkflowStatus(StrEnum):
     ARCHIVED = "ARCHIVED"
 
 
+class WorkflowVisibility(StrEnum):
+    """docs/05 workflows.visibility — same values as AgentVisibility."""
+
+    PRIVATE = "PRIVATE"
+    RESTRICTED = "RESTRICTED"
+    INTERNAL = "INTERNAL"
+
+
 class WorkflowVersionStatus(StrEnum):
     DRAFT = "DRAFT"
     PUBLISHED = "PUBLISHED"
     DEPRECATED = "DEPRECATED"
+
+
+class WorkflowVersionValidationStatus(StrEnum):
+    """docs/05 workflow_versions.validation_status."""
+
+    VALID = "VALID"
+    INVALID = "INVALID"
 
 
 class AgentRequestStatus(StrEnum):

@@ -31,8 +31,8 @@ from app.domain.enums import (
     MCPCheckStatus,
     MCPCheckType,
     MCPDiscoveryMode,
-    MCPProtocolEra,
     McpInputRequestStatus,
+    MCPProtocolEra,
     MCPServerStatus,
     MCPToolStatus,
     MCPTransportType,
@@ -54,6 +54,8 @@ from app.domain.enums import (
     UserStatus,
     WorkflowStatus,
     WorkflowVersionStatus,
+    WorkflowVersionValidationStatus,
+    WorkflowVisibility,
     is_agent_request_terminal,
 )
 
@@ -86,7 +88,9 @@ def expect_exact(enum_cls: type[Enum], expected: set[str]) -> None:
         (AgentVersionValidationStatus, {"VALID", "INVALID"}),
         (AgentToolGrantEffect, {"ALLOW", "DENY"}),
         (WorkflowStatus, {"DRAFT", "ACTIVE", "INACTIVE", "ARCHIVED"}),
+        (WorkflowVisibility, {"PRIVATE", "RESTRICTED", "INTERNAL"}),
         (WorkflowVersionStatus, {"DRAFT", "PUBLISHED", "DEPRECATED"}),
+        (WorkflowVersionValidationStatus, {"VALID", "INVALID"}),
         (
             AgentRequestStatus,
             {

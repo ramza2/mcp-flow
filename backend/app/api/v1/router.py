@@ -12,6 +12,7 @@ from app.api.v1.model_profiles import router as model_profiles_router
 from app.api.v1.permissions import router as permissions_router
 from app.api.v1.roles import router as roles_router
 from app.api.v1.users import router as users_router
+from app.api.v1.workflows import router as workflows_router
 
 api_v1_router = APIRouter()
 api_v1_router.include_router(auth_router)
@@ -28,6 +29,7 @@ protected_router.include_router(executions_router)
 protected_router.include_router(mcp_servers_router)
 protected_router.include_router(mcp_tools_router)
 protected_router.include_router(model_profiles_router)
+protected_router.include_router(workflows_router)
 protected_router.include_router(users_router)
 protected_router.include_router(roles_router)
 protected_router.include_router(permissions_router)
