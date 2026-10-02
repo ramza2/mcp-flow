@@ -72,6 +72,7 @@ from app.execution.cancellation import (
     cancel_prepared_invocation_before_send,
     cancellation_is_requested,
     reconcile_cancel_requested_locked,
+    settle_input_required_after_cancel_locked,
 )
 from app.execution.claim import ExecutionClaimService, _as_utc, _normalize_worker_id
 from app.execution.completion import (
@@ -1709,7 +1710,11 @@ class McpToolRunner:
                     or step is None
                     or attempt is None
                     or tool_call is None
-                    or execution.status != ExecutionStatus.RUNNING.value
+                    or execution.status
+                    not in {
+                        ExecutionStatus.RUNNING.value,
+                        ExecutionStatus.CANCEL_REQUESTED.value,
+                    }
                     or execution.worker_id != prepared.worker_id
                     or execution.lease_token != prepared.lease_token
                     or execution.lease_expires_at is None
@@ -1758,6 +1763,38 @@ class McpToolRunner:
                         now=now,
                         defer_execution_terminalization=(
                             prepared.defer_execution_terminalization
+                        ),
+                    )
+
+                # Cancellation owns a valid already-sent input_required: persist
+                # the network-round ToolCall as SUCCEEDED, cancel logical
+                # Attempt/Step, never open WAITING_INPUT / MCPInputRequest.
+                # Checked before timeout / max-rounds / forbid_execution_wait.
+                if cancellation_is_requested(execution):
+                    cancel_outcome = await settle_input_required_after_cancel_locked(
+                        session,
+                        execution=execution,
+                        step=step,
+                        attempt=attempt,
+                        tool_call=tool_call,
+                        now=now,
+                        persist_meta=persist_meta,
+                        response_bytes=mrtr.raw_size_bytes,
+                        first_byte_at=first_byte_at,
+                    )
+                    return ToolRunOutcome(
+                        execution_id=execution.id,
+                        step_execution_id=step.id,
+                        attempt_id=attempt.id,
+                        tool_call_id=tool_call.id,
+                        mcp_called=True,
+                        terminal_status=StepStatus.CANCELLED.value,
+                        reason=_REASON_CANCEL_REQUESTED,
+                        disposition=(
+                            DISPOSITION_SUCCESS
+                            if cancel_outcome.status
+                            == ExecutionStatus.CANCELLED.value
+                            else DISPOSITION_KNOWN_STEP_FAILURE
                         ),
                     )
 

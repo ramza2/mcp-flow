@@ -961,7 +961,7 @@ Response (`ExecutionCancelResult`):
 }
 ```
 
-권한: `User ACTIVE` + `execution.cancel` + `execution.requester_id == actor`. 타 requester는 `404 NOT_FOUND`. lease/worker 필드는 노출하지 않는다.
+권한: `User ACTIVE` + `execution.cancel` + `execution.requester_id == actor`. 타 requester는 `404 NOT_FOUND`. lease/worker 필드는 노출하지 않는다. 이미 inactive인 session은 Cookie Session 검증이 `401 AUTH_SESSION_INVALID`를 반환할 수 있으며, 서비스 계층 ACTIVE 검사는 403이다 session 무효화를 약화하지 않는다.
 
 응답 직후 `CANCELLED`를 가정하지 않는다. STARTED ToolCall이 있으면 `CANCEL_REQUESTED`가 될 수 있고, in-flight 원격 호출 정산 후 `CANCELLED`로 전환된다. 이미 `CANCELLED`/`CANCEL_REQUESTED`면 idempotent. 비취소 terminal이면 `409 RESOURCE_CONFLICT`.
 

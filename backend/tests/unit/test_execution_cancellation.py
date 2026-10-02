@@ -18,6 +18,7 @@ from app.execution.cancellation import (
     CancellationMode,
     apply_cancellation_locked,
     reconcile_cancel_requested_locked,
+    settle_input_required_after_cancel_locked,
 )
 from app.execution.claim import ExecutionClaimService
 from app.execution.queue import ExecutionQueueService
@@ -380,3 +381,105 @@ async def test_reconcile_cancel_requested_without_started_toolcall(
     )
     await db_session.commit()
     assert outcome.status == ExecutionStatus.CANCELLED.value
+
+
+@pytest.mark.asyncio
+async def test_settle_input_required_after_cancel_no_mir(
+    db_session: AsyncSession,
+) -> None:
+    execution_id, _ = await _created_execution(db_session)
+    assert await ExecutionQueueService(db_session).stage_created_batch(limit=10) == 1
+    await db_session.commit()
+    claim = await ExecutionClaimService(db_session, lease_seconds=60).claim(
+        execution_id=execution_id, worker_id="w1"
+    )
+    await db_session.commit()
+    executions = ExecutionRepository(db_session)
+    steps = await executions.list_steps(execution_id)
+    step = steps[0]
+    step.status = StepStatus.RUNNING.value
+    step.started_at = datetime.now(UTC)
+    step.attempt_count = 1
+    attempt = await executions.create_attempt(
+        step_execution_id=step.id,
+        attempt_no=1,
+        status=StepAttemptStatus.STARTED.value,
+        worker_id="w1",
+        lease_expires_at=datetime.now(UTC) + timedelta(minutes=1),
+        idempotency_key=f"idem-{uuid.uuid4().hex}",
+        request_snapshot={"ok": True},
+        started_at=datetime.now(UTC),
+    )
+    from app.repositories.mcp_tool import MCPToolRepository
+
+    version = await MCPToolRepository(db_session).get_version(step.mcp_tool_version_id)
+    assert version is not None
+    tool = await MCPToolRepository(db_session).get(version.mcp_tool_id)
+    assert tool is not None
+    tool_call = await executions.create_tool_call(
+        step_attempt_id=attempt.id,
+        mcp_server_id=tool.mcp_server_id,
+        mcp_tool_version_id=step.mcp_tool_version_id,
+        protocol_era="CURRENT",
+        protocol_version="2026-07-28",
+        transport_type="STREAMABLE_HTTP",
+        remote_request_id=str(uuid.uuid4()),
+        request_meta={},
+        normalized_status=ToolCallNormalizedStatus.STARTED.value,
+        started_at=datetime.now(UTC),
+    )
+    execution = await executions.lock_execution(execution_id)
+    assert execution is not None
+    execution.status = ExecutionStatus.CANCEL_REQUESTED.value
+    execution.cancel_requested_at = datetime.now(UTC)
+    execution.cancel_reason = "inflight-mrtr"
+    await db_session.flush()
+
+    outcome = await settle_input_required_after_cancel_locked(
+        db_session,
+        execution=execution,
+        step=step,
+        attempt=attempt,
+        tool_call=tool_call,
+        now=datetime.now(UTC),
+        persist_meta={"result_type": "input_required"},
+        response_bytes=64,
+        first_byte_at=datetime.now(UTC),
+    )
+    await db_session.commit()
+    assert outcome.status == ExecutionStatus.CANCELLED.value
+    refreshed_tc = await executions.get_tool_call_for_attempt(attempt.id)
+    assert refreshed_tc is not None
+    assert refreshed_tc.normalized_status == ToolCallNormalizedStatus.SUCCEEDED.value
+    assert refreshed_tc.response_meta == {"result_type": "input_required"}
+    attempt = await executions.get_attempt(attempt.id)
+    assert attempt is not None
+    assert attempt.status == StepAttemptStatus.CANCELLED.value
+    step = await executions.get_step(step.id)
+    assert step is not None
+    assert step.status == StepStatus.CANCELLED.value
+    from app.repositories.mcp_input_request import MCPInputRequestRepository
+
+    mirs = await MCPInputRequestRepository(db_session).list_for_step(
+        execution_id=execution_id, step_execution_id=step.id
+    )
+    assert mirs == []
+
+
+@pytest.mark.asyncio
+async def test_internal_cancel_locked_does_not_commit(
+    db_session: AsyncSession,
+) -> None:
+    execution_id, _ = await _created_execution(db_session)
+    service = ExecutionCancellationService(db_session)
+    outcome = await service.request_internal_cancel_locked(
+        execution_id, reason="SCHEDULE_REPLACE"
+    )
+    assert outcome.status == ExecutionStatus.CANCELLED.value
+    # Uncommitted — a fresh get on the same session still sees the dirty state,
+    # but rolling back must restore CREATED.
+    await db_session.rollback()
+    refreshed = await ExecutionRepository(db_session).get(execution_id)
+    assert refreshed is not None
+    assert refreshed.status == ExecutionStatus.CREATED.value
+    assert refreshed.cancel_requested_at is None

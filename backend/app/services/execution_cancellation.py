@@ -63,6 +63,7 @@ class ExecutionCancellationService:
         actor_user_id: uuid.UUID,
         reason: str | None,
     ) -> CancellationOutcome:
+        """Authorize, lock, apply, and commit user cancellation."""
         await self._assert_actor_may_cancel(actor_user_id)
         execution = await self._require_owned_execution(execution_id, actor_user_id)
         outcome = await apply_cancellation_locked(
@@ -75,15 +76,18 @@ class ExecutionCancellationService:
         await self._session.commit()
         return outcome
 
-    async def request_internal_cancel(
+    async def request_internal_cancel_locked(
         self,
         execution_id: uuid.UUID,
         *,
         reason: str,
+        now: datetime | None = None,
     ) -> CancellationOutcome:
-        """Internal cancellation transition for Schedule REPLACE (#56).
+        """Composable internal cancellation for Schedule REPLACE (#56).
 
-        Not exposed via public API. Caller must already authorize Schedule overlap.
+        Locks the Execution row and applies cancellation. Does NOT commit or
+        rollback — the caller owns the surrounding transaction and any Schedule
+        locks. Not exposed via public API.
         """
         execution = await self._executions.lock_execution(execution_id)
         if execution is None:
@@ -92,12 +96,10 @@ class ExecutionCancellationService:
                 message="Execution not found.",
                 status_code=status.HTTP_404_NOT_FOUND,
             )
-        outcome = await apply_cancellation_locked(
+        return await apply_cancellation_locked(
             self._session,
             execution,
-            now=datetime.now(UTC),
+            now=now or datetime.now(UTC),
             requested_by=None,
             reason=reason,
         )
-        await self._session.commit()
-        return outcome

@@ -706,7 +706,11 @@ Authorization과 상태전이는 분리한다. `ExecutionCancellationService.req
 
 WAITING_APPROVAL 취소 시 PENDING ApprovalRequest → CANCELLED (Decision 없음). WAITING_INPUT 취소 시 OPEN MCPInputRequest → REJECTED. 타 requester는 `404 NOT_FOUND`.
 
-Recovery는 기존처럼 `RUNNING`만 candidate로 하며 `CANCEL_REQUESTED`를 일반 retry 대상으로 선택하지 않는다.
+이미 send boundary를 넘긴 원격 호출이 `input_required`를 반환하면 WAITING_INPUT/OPEN MCPInputRequest를 만들지 않는다. ToolCall 라운드는 SUCCEEDED로 기록하고 logical Attempt/Step은 CANCELLED로 정산한다 (`UNKNOWN_OUTCOME`으로 바꾸지 않음).
+
+Public API에서 inactive session은 Cookie Session 검증이 먼저 `401 AUTH_SESSION_INVALID`를 반환할 수 있다. 서비스 계층 ACTIVE 검사는 403이며 session 동작을 약화하지 않는다.
+
+Recovery는 기존처럼 `RUNNING`만 candidate로 하며 `CANCEL_REQUESTED`를 일반 retry 대상으로 선택하지 않는다. 이미 in-flight인 ToolCall은 owning live worker가 정산해야 한다. crash/expired-lease cancellation reconciliation은 별도 recovery hardening slice이며 이 범위에서 완전성을 주장하지 않는다.
 
 ## FNC-EXE-011. 복구
 

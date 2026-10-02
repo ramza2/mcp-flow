@@ -302,6 +302,43 @@ def _finalize_cancelled(
     execution.lock_version = int(execution.lock_version) + 1
 
 
+async def settle_input_required_after_cancel_locked(
+    session: AsyncSession,
+    *,
+    execution: Execution,
+    step: ExecutionStep,
+    attempt: StepAttempt,
+    tool_call: ToolCall,
+    now: datetime,
+    persist_meta: dict,
+    response_bytes: int | None,
+    first_byte_at: datetime | None,
+) -> CancellationOutcome:
+    """Persist a truthful completed MRTR network round under CANCEL_REQUESTED.
+
+    Does not create MCPInputRequest / WAITING_INPUT. Caller owns the TX and
+    must already hold Execution/Step/Attempt/ToolCall locks.
+    """
+    tool_call.normalized_status = ToolCallNormalizedStatus.SUCCEEDED.value
+    tool_call.response_meta = persist_meta
+    tool_call.response_bytes = response_bytes
+    tool_call.first_byte_at = first_byte_at
+    tool_call.finished_at = now
+
+    if attempt.status == StepAttemptStatus.STARTED.value:
+        _cancel_attempt(attempt, now=now)
+    _cancel_step(step, now=now)
+
+    if execution.status != ExecutionStatus.CANCEL_REQUESTED.value:
+        if execution.cancel_requested_at is None:
+            execution.cancel_requested_at = now
+        execution.status = ExecutionStatus.CANCEL_REQUESTED.value
+        execution.lock_version = int(execution.lock_version) + 1
+
+    await session.flush()
+    return await reconcile_cancel_requested_locked(session, execution, now=now)
+
+
 async def apply_cancellation_locked(
     session: AsyncSession,
     execution: Execution,
@@ -310,7 +347,12 @@ async def apply_cancellation_locked(
     requested_by: uuid.UUID | None,
     reason: str | None,
 ) -> CancellationOutcome:
-    """Apply cancellation under an already-locked Execution row."""
+    """Apply cancellation under an already-locked Execution row.
+
+    Assumes the caller holds the Execution row lock and owns the surrounding
+    transaction. This helper does NOT commit, rollback, or open a nested
+    transaction — Schedule REPLACE (#56) must compose it inside its own TX.
+    """
     if execution.status == ExecutionStatus.CANCELLED.value:
         return _outcome(execution, mode=CancellationMode.IDEMPOTENT)
     if execution.status == ExecutionStatus.CANCEL_REQUESTED.value:
@@ -379,8 +421,15 @@ async def reconcile_cancel_requested_locked(
     *,
     now: datetime,
 ) -> CancellationOutcome:
-    """If CANCEL_REQUESTED and no STARTED ToolCall remains, terminalize CANCELLED."""
+    """If CANCEL_REQUESTED and no STARTED ToolCall remains, terminalize.
+
+    UNKNOWN_OUTCOME / mandatory-fatal Step evidence takes precedence over
+    CANCELLED — cancellation must never hide ambiguous external side effects.
+    """
     if execution.status == ExecutionStatus.CANCELLED.value:
+        return _outcome(execution, mode=CancellationMode.IDEMPOTENT)
+    if execution.status == ExecutionStatus.FAILED.value:
+        # Prior fatal settle under cancel metadata — idempotent.
         return _outcome(execution, mode=CancellationMode.IDEMPOTENT)
     if execution.status != ExecutionStatus.CANCEL_REQUESTED.value:
         raise AppError(
@@ -397,6 +446,36 @@ async def reconcile_cancel_requested_locked(
     for step in sorted(steps, key=lambda s: str(s.id)):
         await executions.lock_step(step.id)
     steps = await executions.list_steps(execution.id)
+
+    unknown = [
+        s for s in steps if s.status == StepStatus.UNKNOWN_OUTCOME.value
+    ]
+    if unknown:
+        # Preserve cancel metadata; fail closed on ambiguous side effects.
+        await _cancel_pending_approvals(session, execution.id, now=now)
+        await _reject_open_mrtr_requests(
+            session,
+            execution.id,
+            now=now,
+            answered_by=execution.cancel_requested_by,
+        )
+        await _cancel_safe_nonterminal_steps(
+            session, steps, now=now, preserve_step_ids=set()
+        )
+        steps = await executions.list_steps(execution.id)
+        cause = unknown[0]
+        execution.status = ExecutionStatus.FAILED.value
+        execution.finished_at = now
+        execution.error_code = cause.error_code
+        execution.error_message = cause.error_message
+        execution.result_summary = build_result_summary(
+            status=ExecutionStatus.FAILED.value,
+            steps=steps,
+        )
+        _clear_execution_lease(execution)
+        execution.lock_version = int(execution.lock_version) + 1
+        return _outcome(execution, mode=CancellationMode.RECONCILED)
+
     await _cancel_pending_approvals(session, execution.id, now=now)
     await _reject_open_mrtr_requests(
         session,

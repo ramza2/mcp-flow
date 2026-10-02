@@ -892,7 +892,12 @@ FNC-EXE-010 / REQ-EXE-009 cancellation (PR #55):
 - PG E in-flight known success → exact 1 MCP, no retry/downstream; PG F UNKNOWN_OUTCOME stays FAILED
 - PG G sequential no downstream; PG H parallel sibling READY cancelled; PG I WAITING_APPROVAL; PG J approved-resume race
 - PG K WAITING_INPUT OPEN→REJECTED; PG L retry suppression; stale-worker fencing after CANCELLED
-- Recovery limitation: `CANCEL_REQUESTED` is not an ordinary SAFE_RETRY candidate
+- PG in-flight `input_required` under `CANCEL_REQUESTED` → ToolCall SUCCEEDED, Attempt/Step CANCELLED, MCPInputRequest 0 (no WAITING_INPUT)
+- PG parallel `input_required` cancel (not DAG_WAIT_UNSUPPORTED); PG parallel UNKNOWN_OUTCOME under cancel → Execution FAILED
+- PG FOR_EACH cancel before next iteration materialization (no iter-2 children / no extra MCP)
+- Inactive session on public cancel API → `401 AUTH_SESSION_INVALID` (session layer); service ACTIVE check remains 403
+- Recovery limitation: `CANCEL_REQUESTED` is never an ordinary SAFE_RETRY candidate. The owning live worker must settle an already in-flight ToolCall. Crash/expired-lease cancellation reconciliation is a separate recovery hardening slice — not claimed here. Schedule REPLACE must fail closed if prior cancellation cannot yet be safely settled.
+- Internal cancel helper does not commit (caller-owned TX for Schedule REPLACE)
 - No remote MCP cancel protocol; Schedule REPLACE not implemented here
 
 ### 완료판정

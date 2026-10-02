@@ -42,6 +42,7 @@ from app.domain.enums import (
     ToolCallNormalizedStatus,
 )
 from app.execution.cancellation import (
+    cancellation_is_requested,
     list_started_tool_calls,
     reconcile_cancel_requested_locked,
 )
@@ -2513,6 +2514,56 @@ class ExecutionOrchestrator:
                         reason=stop_reason,
                         execution_status=exec_status,
                         step_terminal_status=stop.step_status,
+                    )
+
+                # Cancellation owns remaining orchestration after non-fatal wave
+                # settlement. UNKNOWN_OUTCOME / mandatory fatal already handled
+                # above and must never be rewritten to CANCELLED.
+                if cancellation_is_requested(execution):
+                    if execution.status in {
+                        ExecutionStatus.CANCELLED.value,
+                        ExecutionStatus.FAILED.value,
+                    }:
+                        return ProgressOutcome(
+                            execution_complete=True,
+                            promoted=False,
+                            reason=(
+                                _REASON_CANCELLED
+                                if execution.status
+                                == ExecutionStatus.CANCELLED.value
+                                else _REASON_EXECUTION_FAILED
+                            ),
+                            execution_status=execution.status,
+                        )
+                    if (
+                        execution.status == ExecutionStatus.CANCEL_REQUESTED.value
+                        and execution.worker_id == worker_id
+                        and execution.lease_token == lease_token
+                    ):
+                        cancel_outcome = await reconcile_cancel_requested_locked(
+                            session, execution, now=now
+                        )
+                        terminal = cancel_outcome.status in {
+                            ExecutionStatus.CANCELLED.value,
+                            ExecutionStatus.FAILED.value,
+                        }
+                        if cancel_outcome.status == ExecutionStatus.FAILED.value:
+                            reason = _REASON_EXECUTION_FAILED
+                        elif cancel_outcome.status == ExecutionStatus.CANCELLED.value:
+                            reason = _REASON_CANCELLED
+                        else:
+                            reason = _REASON_CANCEL_IN_PROGRESS
+                        return ProgressOutcome(
+                            execution_complete=terminal,
+                            promoted=False,
+                            reason=reason,
+                            execution_status=cancel_outcome.status,
+                        )
+                    return ProgressOutcome(
+                        execution_complete=False,
+                        promoted=False,
+                        reason=_REASON_CANCEL_IN_PROGRESS,
+                        execution_status=execution.status,
                     )
 
                 if not self._has_running_lease(

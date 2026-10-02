@@ -37,8 +37,9 @@ from app.execution.queue import ExecutionQueueService
 from app.execution.tool_runner import McpToolRunner, _PreparedCall
 from app.execution.tool_step_attempt import ToolStepAttemptService
 from app.mcp.client import MCPClientError
-from app.mcp.contracts import NormalizedToolResult
+from app.mcp.contracts import NormalizedInputRequired, NormalizedToolResult
 from app.models.approval import ApprovalDecision, ApprovalRequest
+from app.models.mcp_input_request import MCPInputRequest
 from app.repositories.approval_policy import ApprovalPolicyRepository
 from app.repositories.approval_request import ApprovalRequestRepository
 from app.repositories.execution import ExecutionRepository
@@ -1073,3 +1074,408 @@ async def test_pg_stale_worker_fencing_after_cancel(
         assert execution.status == ExecutionStatus.CANCELLED.value
         assert execution.worker_id is None
         assert execution.lease_token is None
+
+
+# ---------------------------------------------------------------------------
+# In-flight input_required under CANCEL_REQUESTED
+# ---------------------------------------------------------------------------
+
+
+class _BlockingMrtrClient:
+    def __init__(self) -> None:
+        self.calls = 0
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def call_tool(self, endpoint: str, **kwargs: Any):
+        self.calls += 1
+        self.entered.set()
+        await self.release.wait()
+        return (
+            NormalizedInputRequired(
+                input_requests={"city": {"type": "string"}},
+                request_state={"opaque": True, "token": "never-persist"},
+                raw_size_bytes=64,
+                duration_ms=3,
+            ),
+            {"http_status": 200, "duration_ms": 3},
+            datetime.now(UTC),
+        )
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_pg_inflight_input_required_cancel_no_wait(
+    integration_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    execution_id, worker_id, lease_token, _ = await _claim_ready(
+        integration_session_factory, worker_id="pg-mrtr-cx"
+    )
+    async with integration_session_factory() as session:
+        execution = await ExecutionRepository(session).get(execution_id)
+        assert execution is not None
+        requester_id = execution.requester_id
+        await _grant_cancel(session, requester_id)
+
+    client = _BlockingMrtrClient()
+    runner = McpToolRunner(
+        session_factory=integration_session_factory,
+        mcp_client=client,  # type: ignore[arg-type]
+        secret_resolver_factory=_resolver_factory,
+        lease_seconds=60,
+        result_inline_max_bytes=256_000,
+    )
+    task = asyncio.create_task(
+        runner.run_claimed_execution(
+            execution_id=execution_id, worker_id=worker_id, lease_token=lease_token
+        )
+    )
+    await client.entered.wait()
+    async with integration_session_factory() as session:
+        outcome = await ExecutionCancellationService(session).request_user_cancel(
+            execution_id, actor_user_id=requester_id, reason="inflight-mrtr"
+        )
+        assert outcome.status == ExecutionStatus.CANCEL_REQUESTED.value
+    client.release.set()
+    result = await task
+    assert client.calls == 1
+    assert result.mcp_called is True
+    assert result.terminal_status == StepStatus.CANCELLED.value
+    assert result.reason == "CANCEL_REQUESTED"
+
+    async with integration_session_factory() as session:
+        execution = await ExecutionRepository(session).get(execution_id)
+        assert execution is not None
+        assert execution.status == ExecutionStatus.CANCELLED.value
+        assert execution.cancel_requested_at is not None
+        assert execution.worker_id is None
+        assert execution.lease_token is None
+        step = (await ExecutionRepository(session).list_steps(execution_id))[0]
+        assert step.status == StepStatus.CANCELLED.value
+        attempts = await ExecutionRepository(session).list_attempts(step.id)
+        assert len(attempts) == 1
+        assert attempts[0].status == StepAttemptStatus.CANCELLED.value
+        tcs = await ExecutionRepository(session).list_tool_calls(attempts[0].id)
+        assert len(tcs) == 1
+        assert tcs[0].normalized_status == ToolCallNormalizedStatus.SUCCEEDED.value
+        assert tcs[0].response_meta is not None
+        assert tcs[0].response_meta.get("result_type") == "input_required"
+        assert "requestState" not in tcs[0].response_meta
+        assert "inputRequests" not in tcs[0].response_meta
+        mir_count = (
+            await session.execute(
+                select(MCPInputRequest).where(
+                    MCPInputRequest.execution_id == execution_id
+                )
+            )
+        ).scalars().all()
+        assert mir_count == []
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_pg_parallel_input_required_cancel(
+    integration_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A in flight → input_required under cancel; B never starts."""
+    async with integration_session_factory() as session:
+        execution_id, lease_token, seeded = await _materialize_claim(
+            session,
+            step_specs=[_tool("a"), _tool("b")],
+            worker_id="pg-par-mrtr",
+            max_parallelism=2,
+        )
+        requester_id = seeded["requester_id"]
+        await _grant_cancel(session, requester_id)
+        steps = await ExecutionRepository(session).list_steps(execution_id)
+        for s in steps:
+            if s.status == StepStatus.PENDING.value:
+                s.status = StepStatus.READY.value
+                s.ready_at = datetime.now(UTC)
+        await session.commit()
+        by_key = {s.step_key: s for s in steps}
+        a_id = by_key["a"].id
+
+    client = _BlockingMrtrClient()
+    runner = McpToolRunner(
+        session_factory=integration_session_factory,
+        mcp_client=client,  # type: ignore[arg-type]
+        secret_resolver_factory=_resolver_factory,
+        lease_seconds=120,
+        result_inline_max_bytes=256_000,
+    )
+
+    # Cancel sibling B eagerly, then run A under cancel race.
+    async with integration_session_factory() as session:
+        # Start A remote only via tool step; cancel mid-flight.
+        pass
+
+    task = asyncio.create_task(
+        runner.run_claimed_tool_step(
+            execution_id=execution_id,
+            step_execution_id=a_id,
+            worker_id="pg-par-mrtr",
+            lease_token=lease_token,
+            defer_execution_terminalization=True,
+            forbid_execution_wait=True,
+        )
+    )
+    await client.entered.wait()
+    async with integration_session_factory() as session:
+        outcome = await ExecutionCancellationService(session).request_user_cancel(
+            execution_id, actor_user_id=requester_id, reason="par-mrtr"
+        )
+        assert outcome.status == ExecutionStatus.CANCEL_REQUESTED.value
+        steps = await ExecutionRepository(session).list_steps(execution_id)
+        by_key = {s.step_key: s for s in steps}
+        assert by_key["b"].status == StepStatus.CANCELLED.value
+    client.release.set()
+    result = await task
+    assert client.calls == 1
+    assert result.terminal_status == StepStatus.CANCELLED.value
+    assert result.reason == "CANCEL_REQUESTED"
+
+    # Orchestrator settle must not create WAITING_INPUT / UNKNOWN_OUTCOME.
+    orchestrator = ExecutionOrchestrator(
+        session_factory=integration_session_factory,
+        tool_runner=runner,
+    )
+    late = await orchestrator.run(
+        execution_id=execution_id,
+        worker_id="pg-par-mrtr",
+        lease_token=lease_token,
+    )
+    assert late.mcp_called is False
+
+    async with integration_session_factory() as session:
+        execution = await ExecutionRepository(session).get(execution_id)
+        assert execution is not None
+        assert execution.status == ExecutionStatus.CANCELLED.value
+        steps = await ExecutionRepository(session).list_steps(execution_id)
+        by_key = {s.step_key: s for s in steps}
+        assert by_key["a"].status == StepStatus.CANCELLED.value
+        assert by_key["b"].status == StepStatus.CANCELLED.value
+        attempts = await ExecutionRepository(session).list_attempts(by_key["a"].id)
+        tcs = await ExecutionRepository(session).list_tool_calls(attempts[0].id)
+        assert tcs[0].normalized_status == ToolCallNormalizedStatus.SUCCEEDED.value
+        mir = (
+            await session.execute(
+                select(MCPInputRequest).where(
+                    MCPInputRequest.execution_id == execution_id
+                )
+            )
+        ).scalars().all()
+        assert mir == []
+        assert await ExecutionRepository(session).list_attempts(by_key["b"].id) == []
+
+
+# ---------------------------------------------------------------------------
+# Parallel UNKNOWN_OUTCOME under cancellation (DAG defer)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_pg_parallel_unknown_outcome_under_cancel(
+    integration_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    seeded = await _seed_ready_with_policy(
+        integration_session_factory,
+        risk_class=RiskClass.NON_IDEMPOTENT_WRITE.value,
+        max_attempts=1,
+    )
+    async with integration_session_factory() as session:
+        # Build parallel plan with the unsafe tool version.
+        policy = await MCPToolPolicyRepository(session).get_by_tool_id(seeded["tool_id"])
+        assert policy is not None
+        approval = None
+        if policy.approval_policy_id is not None:
+            approval = await ApprovalPolicyRepository(session).get(
+                policy.approval_policy_id
+            )
+        policy_snapshot = build_safe_tool_policy_snapshot(policy, approval)
+        plan = _plan(
+            seeded["tool_version_id"],
+            [_tool("a"), _tool("b")],
+        )
+        limits = default_plan_limits().model_dump(mode="json")
+        limits["max_parallelism"] = 2
+        plan["limits"] = limits
+        outcome = await ExecutionPlanMaterializer(session).materialize(
+            ExecutionMaterializeParams(
+                source_type=ExecutionSourceType.MANUAL_TOOL_TEST.value,
+                trigger_type="TEST",
+                requester_id=seeded["requester_id"],
+                agent_version_id=seeded["agent_version_id"],
+                plan_snapshot=plan,
+                plan_hash=compute_plan_hash(plan),
+                input_snapshot={},
+                policy_snapshot=policy_snapshot,
+                requested_at=datetime.now(UTC),
+            )
+        )
+        execution = outcome.execution
+        execution.status = ExecutionStatus.QUEUED.value
+        execution.queued_at = datetime.now(UTC)
+        execution.lock_version += 1
+        claim = await ExecutionClaimService(session, lease_seconds=120).claim(
+            execution_id=execution.id, worker_id="pg-par-unk"
+        )
+        await session.commit()
+        assert claim.claimed and claim.lease_token is not None
+        execution_id = execution.id
+        lease_token = claim.lease_token
+        requester_id = seeded["requester_id"]
+        await _grant_cancel(session, requester_id)
+        steps = await ExecutionRepository(session).list_steps(execution_id)
+        by_key = {s.step_key: s for s in steps}
+        a_id = by_key["a"].id
+
+    client = _UnknownOutcomeClient()
+    runner = McpToolRunner(
+        session_factory=integration_session_factory,
+        mcp_client=client,  # type: ignore[arg-type]
+        secret_resolver_factory=_resolver_factory,
+        lease_seconds=120,
+        result_inline_max_bytes=256_000,
+    )
+    task = asyncio.create_task(
+        runner.run_claimed_tool_step(
+            execution_id=execution_id,
+            step_execution_id=a_id,
+            worker_id="pg-par-unk",
+            lease_token=lease_token,
+            defer_execution_terminalization=True,
+            forbid_execution_wait=True,
+        )
+    )
+    await client.entered.wait()
+    async with integration_session_factory() as session:
+        cancel = await ExecutionCancellationService(session).request_user_cancel(
+            execution_id, actor_user_id=requester_id, reason="par-unk"
+        )
+        assert cancel.status == ExecutionStatus.CANCEL_REQUESTED.value
+        steps = await ExecutionRepository(session).list_steps(execution_id)
+        by_key = {s.step_key: s for s in steps}
+        assert by_key["b"].status == StepStatus.CANCELLED.value
+    client.release.set()
+    result = await task
+    assert client.calls == 1
+    assert result.terminal_status == StepStatus.UNKNOWN_OUTCOME.value
+    assert result.disposition == "FATAL_EXECUTION_FAILURE"
+
+    orchestrator = ExecutionOrchestrator(
+        session_factory=integration_session_factory,
+        tool_runner=runner,
+    )
+    settled = await orchestrator.run(
+        execution_id=execution_id,
+        worker_id="pg-par-unk",
+        lease_token=lease_token,
+    )
+    assert settled.mcp_called is False
+
+    async with integration_session_factory() as session:
+        execution = await ExecutionRepository(session).get(execution_id)
+        assert execution is not None
+        assert execution.status == ExecutionStatus.FAILED.value
+        assert execution.cancel_requested_at is not None
+        steps = await ExecutionRepository(session).list_steps(execution_id)
+        by_key = {s.step_key: s for s in steps}
+        assert by_key["a"].status == StepStatus.UNKNOWN_OUTCOME.value
+        assert by_key["b"].status == StepStatus.CANCELLED.value
+        assert await ExecutionRepository(session).list_attempts(by_key["b"].id) == []
+
+
+# ---------------------------------------------------------------------------
+# LOOP — cancel before next iteration materialization
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_pg_foreach_cancel_before_next_iteration(
+    integration_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tests.integration.test_execution_loop_foreach import (
+        _loop,
+        _materialize_claim as _loop_materialize,
+        _tool as _loop_tool,
+        _child,
+    )
+
+    async with integration_session_factory() as session:
+        execution_id, lease_token, seeded = await _loop_materialize(
+            session,
+            step_specs=[
+                _loop("loop1", body_step_ids=["body"], max_iterations=5),
+                _loop_tool("body"),
+            ],
+            items=["x", "y", "z"],
+            worker_id="pg-loop-cx",
+        )
+        requester_id = seeded["requester_id"]
+        await _grant_cancel(session, requester_id)
+
+    client = _StubSuccess()
+    runner = McpToolRunner(
+        session_factory=integration_session_factory,
+        mcp_client=client,  # type: ignore[arg-type]
+        secret_resolver_factory=_resolver_factory,
+        lease_seconds=120,
+        result_inline_max_bytes=256_000,
+    )
+    # Cancel after first body Attempt finalizes and before settle_wave local
+    # LOOP reconciliation can materialize iteration 2.
+    cancelled = {"done": False}
+    original_finalize = runner._finalize_locked
+
+    async def _finalize_then_cancel(*args: Any, **kwargs: Any):
+        result = await original_finalize(*args, **kwargs)
+        if (
+            client.calls >= 1
+            and result.terminal_status == StepStatus.SUCCEEDED.value
+            and not cancelled["done"]
+        ):
+            cancelled["done"] = True
+            async with integration_session_factory() as session:
+                await ExecutionCancellationService(session).request_user_cancel(
+                    execution_id,
+                    actor_user_id=requester_id,
+                    reason="no-iter-2",
+                )
+        return result
+
+    monkeypatch.setattr(runner, "_finalize_locked", _finalize_then_cancel)
+    orchestrator = ExecutionOrchestrator(
+        session_factory=integration_session_factory,
+        tool_runner=runner,
+    )
+    outcome = await orchestrator.run(
+        execution_id=execution_id,
+        worker_id="pg-loop-cx",
+        lease_token=lease_token,
+    )
+    assert outcome.mcp_called is True or client.calls >= 1
+    assert client.calls == 1
+
+    async with integration_session_factory() as session:
+        execution = await ExecutionRepository(session).get(execution_id)
+        assert execution is not None
+        assert execution.status == ExecutionStatus.CANCELLED.value
+        steps = await ExecutionRepository(session).list_steps(execution_id)
+        # Iteration 1 body exists; no iteration 2+ children after cancel.
+        iter2 = [
+            s
+            for s in steps
+            if s.parent_step_id is not None and s.iteration_no == 2
+        ]
+        assert iter2 == []
+        body1 = _child(steps, template_id="body", iteration_no=1)
+        assert body1.status == StepStatus.SUCCEEDED.value
+        loop_steps = [
+            s for s in steps if s.step_type == AuthorableStepType.LOOP.value
+        ]
+        assert len(loop_steps) == 1
+        assert loop_steps[0].status == StepStatus.CANCELLED.value
