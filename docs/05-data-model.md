@@ -1640,9 +1640,11 @@ Unique `(schedule_id, scheduled_for)`로 중복 occurrence를 차단한다.
 
 - Durable `next_run_at`/`scheduled_for`는 UTC-aware.
 - `schedule_expression` 평가는 `timezone` IANA name 기준; 서버 로컬 timezone에 의존하지 않는다.
-- CRON: 5-field only; ambiguous local time은 `fold=0`; spring-forward nonexistent wall time은 skip.
-- ONCE: expression은 timezone-local wall clock; offset/`Z` 금지.
-- INTERVAL: `start_at` inclusive anchor; window는 `start_at` inclusive / `end_at` exclusive.
+- CRON: exactly 5 fields; v1 grammar digits/`*`/`,`/`-`/`/` only (no `@macros`, `L`, `#`, `?`, names). croniter validates standard fields; MCPFlow owns DST (ambiguous → `fold=0`; spring-forward nonexistent → skip, never mutate wall clock). Far-future `start_at` positions the cron cursor near the inclusive lower bound (does not scan every prior tick).
+- ONCE: timezone-local wall clock (`YYYY-MM-DDTHH:MM:SS`, no Z/offset); nonexistent spring-forward → `VALIDATION_ERROR`; ambiguous fall-back → `fold=0` only.
+- INTERVAL: `start_at` inclusive anchor; window는 `start_at` inclusive / `end_at` exclusive; duration overflow → `VALIDATION_ERROR`.
+- `max_catch_up` DB CHECK: `BETWEEN 1 AND 100`.
+- Occurrence list `from` inclusive / `to` exclusive; timezone-aware only.
 - Partial index `ix_schedules_active_next_run_at`는 `status='ACTIVE'` 행만 대상 (trigger slice 준비).
 - Permission bootstrap: `schedule.manage` (migration `20261002_0021`).
 

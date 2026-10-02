@@ -110,7 +110,10 @@ def upgrade() -> None:
             "overlap_policy IN ('ALLOW', 'SKIP', 'QUEUE', 'REPLACE')",
             name="ck_schedules_overlap_policy",
         ),
-        sa.CheckConstraint("max_catch_up >= 1", name="ck_schedules_max_catch_up"),
+        sa.CheckConstraint(
+            "max_catch_up BETWEEN 1 AND 100",
+            name="ck_schedules_max_catch_up",
+        ),
         sa.CheckConstraint("lock_version >= 1", name="ck_schedules_lock_version"),
         sa.CheckConstraint(
             "end_at IS NULL OR start_at IS NULL OR end_at > start_at",

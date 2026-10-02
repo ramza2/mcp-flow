@@ -951,7 +951,7 @@ Approval `REJECTED/EXPIRED`를 Execution `REJECTED/EXPIRED` 상태로 직접 매
 
 | Layer | Module |
 |-------|--------|
-| Unit | `tests/unit/test_schedule_recurrence.py` — timezone, CRON/ONCE/INTERVAL contracts, DST, window, preview bounds |
+| Unit | `tests/unit/test_schedule_recurrence.py` — timezone, CRON grammar/DST (spring skip, fall fold=0, second-fold cursor), ONCE nonexistent/invalid calendar, INTERVAL overflow, far-future `start_at`, window, preview bounds |
 | Unit | `tests/unit/test_schedule_service.py` — PAUSED default, version pin, grants/SECRET_REF, lock, lifecycle |
 | API | `tests/api/test_schedules.py` — auth/CSRF/`schedule.manage`, If-Match, list, activate/pause/resume |
 | Integration | `tests/integration/test_schedule_registry.py` — migration constraints, occurrence unique, deprecate pin |

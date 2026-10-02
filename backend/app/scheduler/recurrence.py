@@ -2,6 +2,10 @@
 
 Pure module: no DB, no network, no system timezone dependence.
 Durable outputs are UTC-aware. Expression evaluation uses Schedule.timezone.
+
+DST policy is owned by MCPFlow (not croniter):
+- spring-forward nonexistent wall time → skip candidate
+- fall-back ambiguous wall time → fold=0 only (never fold=1)
 """
 
 from __future__ import annotations
@@ -26,6 +30,8 @@ _INTERVAL_RE = re.compile(
     r"^P(?:(?P<days>\d+)D)?(?:T(?:(?P<hours>\d+)H)?(?:(?P<minutes>\d+)M)?"
     r"(?:(?P<seconds>\d+)S)?)?$"
 )
+# Schedule v1 CRON field grammar: digits, *, ,, -, / only (no L/#/?/@/names).
+_CRON_FIELD_RE = re.compile(r"^[0-9*,\-/]+$")
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,17 +97,52 @@ def _parse_interval(expression: str) -> timedelta:
             message="INTERVAL expression must match P[nD][T[nH][nM][nS]].",
             status_code=400,
         )
-    days = int(match.group("days") or 0)
-    hours = int(match.group("hours") or 0)
-    minutes = int(match.group("minutes") or 0)
-    seconds = int(match.group("seconds") or 0)
+    try:
+        days = int(match.group("days") or 0)
+        hours = int(match.group("hours") or 0)
+        minutes = int(match.group("minutes") or 0)
+        seconds = int(match.group("seconds") or 0)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise AppError(
+            code="VALIDATION_ERROR",
+            message="INTERVAL numeric components overflow.",
+            status_code=400,
+        ) from exc
     if days == 0 and hours == 0 and minutes == 0 and seconds == 0:
         raise AppError(
             code="VALIDATION_ERROR",
             message="INTERVAL duration must be positive.",
             status_code=400,
         )
-    return timedelta(days=days, hours=hours, minutes=minutes, seconds=seconds)
+    try:
+        return timedelta(days=days, hours=hours, minutes=minutes, seconds=seconds)
+    except OverflowError as exc:
+        raise AppError(
+            code="VALIDATION_ERROR",
+            message="INTERVAL duration overflows timedelta bounds.",
+            status_code=400,
+        ) from exc
+
+
+def _local_wall_exists(local_naive: datetime, tz: ZoneInfo) -> bool:
+    """Return False for nonexistent spring-forward wall times.
+
+    Localize naive wall clock with fold=0 and round-trip through UTC. If the
+    wall clock components change, the local time does not exist.
+    """
+    if local_naive.tzinfo is not None:
+        raise ValueError("expected naive local wall clock")
+    probe = local_naive.replace(tzinfo=tz, fold=0)
+    back = probe.astimezone(UTC).astimezone(tz)
+    return (
+        back.fold == 0
+        and back.year == probe.year
+        and back.month == probe.month
+        and back.day == probe.day
+        and back.hour == probe.hour
+        and back.minute == probe.minute
+        and back.second == probe.second
+    )
 
 
 def _parse_once_local(expression: str, tz: ZoneInfo) -> datetime:
@@ -119,17 +160,29 @@ def _parse_once_local(expression: str, tz: ZoneInfo) -> datetime:
             message="ONCE expression must be YYYY-MM-DDTHH:MM:SS.",
             status_code=400,
         )
-    local = datetime(
-        int(match.group("y")),
-        int(match.group("m")),
-        int(match.group("d")),
-        int(match.group("H")),
-        int(match.group("M")),
-        int(match.group("S")),
-        tzinfo=tz,
-    )
+    try:
+        local_naive = datetime(
+            int(match.group("y")),
+            int(match.group("m")),
+            int(match.group("d")),
+            int(match.group("H")),
+            int(match.group("M")),
+            int(match.group("S")),
+        )
+    except ValueError as exc:
+        raise AppError(
+            code="VALIDATION_ERROR",
+            message="ONCE expression is not a valid local date/time.",
+            status_code=400,
+        ) from exc
+    if not _local_wall_exists(local_naive, tz):
+        raise AppError(
+            code="VALIDATION_ERROR",
+            message="ONCE local wall time does not exist in timezone.",
+            status_code=400,
+        )
     # Ambiguous fall-back: fold=0 only (one occurrence).
-    return local.replace(fold=0)
+    return local_naive.replace(tzinfo=tz, fold=0)
 
 
 def _validate_cron(expression: str) -> str:
@@ -153,6 +206,16 @@ def _validate_cron(expression: str) -> str:
             message="CRON must be exactly 5 fields (minute hour dom month dow).",
             status_code=400,
         )
+    for field in fields:
+        if not _CRON_FIELD_RE.fullmatch(field):
+            raise AppError(
+                code="VALIDATION_ERROR",
+                message=(
+                    "CRON v1 supports only digits, *, ,, -, / "
+                    "(no L, #, ?, names, or macros)."
+                ),
+                status_code=400,
+            )
     if not croniter.is_valid(raw):
         raise AppError(
             code="VALIDATION_ERROR",
@@ -212,24 +275,6 @@ def _in_window(
     return True
 
 
-def _local_wall_exists(local_naive_or_aware: datetime, tz: ZoneInfo) -> bool:
-    """Return False for nonexistent spring-forward wall times."""
-    if local_naive_or_aware.tzinfo is None:
-        probe = local_naive_or_aware.replace(tzinfo=tz)
-    else:
-        probe = local_naive_or_aware.astimezone(tz).replace(tzinfo=tz)
-    # Round-trip: if zone shifts the wall clock, the local time does not exist.
-    back = probe.astimezone(UTC).astimezone(tz)
-    return (
-        back.year == probe.year
-        and back.month == probe.month
-        and back.day == probe.day
-        and back.hour == probe.hour
-        and back.minute == probe.minute
-        and back.second == probe.second
-    )
-
-
 def _next_cron_utc(
     *,
     expression: str,
@@ -238,20 +283,37 @@ def _next_cron_utc(
     start_at: datetime | None,
     end_at: datetime | None,
 ) -> datetime | None:
-    cursor_local = after_utc.astimezone(tz)
-    # Exclusive cursor: first occurrence strictly after `after`.
-    itr = croniter(expression, cursor_local)
+    """Compute next CRON occurrence with MCPFlow-owned DST policy.
+
+    croniter receives only a **naive local wall-clock** cursor and returns naive
+    candidates. Localization, fold=0, nonexistent skip, and UTC comparison are
+    applied here so croniter DST normalization cannot alter Schedule semantics.
+
+    ``after`` is exclusive. ``start_at`` is inclusive. When ``start_at > after``,
+    the cron cursor is positioned near ``start_at`` so far-future windows do not
+    burn ``_MAX_SCAN`` skipping pre-window ticks.
+    """
+    # Exclusive croniter base in naive local time.
+    if start_at is not None and start_at > after_utc:
+        # Inclusive start_at: exclusive cursor just before start_at wall clock.
+        bound_local = start_at.astimezone(tz)
+        cursor_naive = bound_local.replace(tzinfo=None) - timedelta(microseconds=1)
+    else:
+        cursor_naive = after_utc.astimezone(tz).replace(tzinfo=None)
+
+    itr = croniter(expression, cursor_naive)
     for _ in range(_MAX_SCAN):
-        nxt = itr.get_next(datetime)
-        if nxt.tzinfo is None:
-            nxt = nxt.replace(tzinfo=tz)
-        else:
-            nxt = nxt.astimezone(tz)
-        # Ambiguous: fold=0 only.
-        nxt = nxt.replace(fold=0)
-        if not _local_wall_exists(nxt, tz):
+        nxt_naive = itr.get_next(datetime)
+        if getattr(nxt_naive, "tzinfo", None) is not None:
+            # Defense: never accept croniter timezone policy.
+            nxt_naive = nxt_naive.replace(tzinfo=None)
+
+        if not _local_wall_exists(nxt_naive, tz):
+            # Spring-forward nonexistent wall time — skip, do not mutate.
             continue
-        utc = _to_utc(nxt)
+
+        localized = nxt_naive.replace(tzinfo=tz, fold=0)
+        utc = _to_utc(localized)
         if utc <= after_utc:
             continue
         if start_at is not None and utc < start_at:
@@ -277,11 +339,18 @@ def _next_interval_utc(
             status_code=400,
         )
     anchor = _to_utc(_require_aware(start_at, field="start_at"))
-    if after_utc < anchor:
-        candidate = anchor
-    else:
-        steps = ((after_utc - anchor) // delta) + 1
-        candidate = anchor + steps * delta
+    try:
+        if after_utc < anchor:
+            candidate = anchor
+        else:
+            steps = ((after_utc - anchor) // delta) + 1
+            candidate = anchor + steps * delta
+    except OverflowError as exc:
+        raise AppError(
+            code="VALIDATION_ERROR",
+            message="INTERVAL next-run calculation overflowed.",
+            status_code=400,
+        ) from exc
     if end_at is not None and candidate >= end_at:
         return None
     if start_at is not None and candidate < start_at:

@@ -388,3 +388,102 @@ async def test_csrf_required_on_mutations(
     target_id = await _seed_agent_target(db_session_factory)
     no_csrf = await client.post(API, json=_create_body(target_id))
     assert no_csrf.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_invalid_status_filter_422(schedule_client: AsyncClient) -> None:
+    response = await schedule_client.get(API, params={"status": "WAITING"})
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "VALIDATION_ERROR"
+
+
+@pytest.mark.asyncio
+async def test_invalid_target_type_filter_422(schedule_client: AsyncClient) -> None:
+    response = await schedule_client.get(API, params={"target_type": "AGENT"})
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "VALIDATION_ERROR"
+
+
+@pytest.mark.asyncio
+async def test_invalid_occurrence_status_filter_422(
+    schedule_client: AsyncClient,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    target_id = await _seed_agent_target(db_session_factory)
+    created = await schedule_client.post(API, json=_create_body(target_id))
+    schedule_id = created.json()["id"]
+    response = await schedule_client.get(
+        f"{API}/{schedule_id}/occurrences",
+        params={"status": "PENDING"},
+    )
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "VALIDATION_ERROR"
+
+
+@pytest.mark.asyncio
+async def test_occurrence_naive_from_to_rejected(
+    schedule_client: AsyncClient,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    target_id = await _seed_agent_target(db_session_factory)
+    created = await schedule_client.post(API, json=_create_body(target_id))
+    schedule_id = created.json()["id"]
+    # Query param without offset is naive and must be rejected.
+    response = await schedule_client.get(
+        f"{API}/{schedule_id}/occurrences",
+        params={"from": "2026-01-01T00:00:00"},
+    )
+    assert response.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_occurrence_to_exclusive_boundary(
+    schedule_client: AsyncClient,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from app.repositories.schedule_occurrence import ScheduleOccurrenceRepository
+
+    target_id = await _seed_agent_target(db_session_factory)
+    created = await schedule_client.post(API, json=_create_body(target_id))
+    schedule_id = uuid.UUID(created.json()["id"])
+    boundary = datetime(2026, 6, 1, 12, 0, 0, tzinfo=UTC)
+    async with db_session_factory() as session:
+        repo = ScheduleOccurrenceRepository(session)
+        await repo.create_planned(schedule_id, boundary)
+        await session.commit()
+
+    inclusive = await schedule_client.get(
+        f"{API}/{schedule_id}/occurrences",
+        params={
+            "from": "2026-06-01T12:00:00Z",
+            "to": "2026-06-01T12:00:01Z",
+        },
+    )
+    assert inclusive.status_code == 200
+    assert inclusive.json()["total"] == 1
+
+    exclusive = await schedule_client.get(
+        f"{API}/{schedule_id}/occurrences",
+        params={
+            "from": "2026-06-01T00:00:00Z",
+            "to": "2026-06-01T12:00:00Z",
+        },
+    )
+    assert exclusive.status_code == 200
+    assert exclusive.json()["total"] == 0
+
+
+@pytest.mark.asyncio
+async def test_patch_explicit_null_rejected(
+    schedule_client: AsyncClient,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    target_id = await _seed_agent_target(db_session_factory)
+    created = await schedule_client.post(API, json=_create_body(target_id))
+    schedule_id = created.json()["id"]
+    response = await schedule_client.patch(
+        f"{API}/{schedule_id}",
+        headers={"If-Match": "1"},
+        json={"name": None, "lock_version": 1},
+    )
+    assert response.status_code == 422

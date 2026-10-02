@@ -14,6 +14,7 @@ from app.domain.enums import (
     AgentStatus,
     AgentVersionStatus,
     AgentVersionValidationStatus,
+    OccurrenceStatus,
     ResourceGrantResourceType,
     ScheduleMisfirePolicy,
     ScheduleOverlapPolicy,
@@ -106,6 +107,99 @@ class ScheduleService:
             message="Schedule lock_version does not match.",
             status_code=status.HTTP_409_CONFLICT,
         )
+
+    def _parse_status_filter(self, status_filter: str | None) -> str | None:
+        if status_filter is None or not str(status_filter).strip():
+            return None
+        allowed = {s.value for s in ScheduleStatus}
+        parts = [part.strip() for part in str(status_filter).split(",") if part.strip()]
+        if not parts:
+            raise AppError(
+                code="VALIDATION_ERROR",
+                message="status filter must not be empty.",
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            )
+        for part in parts:
+            if part not in allowed:
+                raise AppError(
+                    code="VALIDATION_ERROR",
+                    message=(
+                        "Invalid status. Allowed: ACTIVE, PAUSED, COMPLETED, ERROR."
+                    ),
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                )
+        return ",".join(parts)
+
+    def _parse_target_type_filter(self, target_type: str | None) -> str | None:
+        if target_type is None or not str(target_type).strip():
+            return None
+        value = str(target_type).strip()
+        allowed = {s.value for s in ScheduleTargetType}
+        if value not in allowed:
+            raise AppError(
+                code="VALIDATION_ERROR",
+                message=(
+                    "Invalid target_type. Allowed: AGENT_VERSION, WORKFLOW_VERSION."
+                ),
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            )
+        return value
+
+    def _parse_occurrence_status_filter(self, status_filter: str | None) -> str | None:
+        if status_filter is None or not str(status_filter).strip():
+            return None
+        value = str(status_filter).strip()
+        allowed = {s.value for s in OccurrenceStatus}
+        if value not in allowed:
+            raise AppError(
+                code="VALIDATION_ERROR",
+                message=(
+                    "Invalid occurrence status. Allowed: PLANNED, SKIPPED, "
+                    "ENQUEUED, RUNNING, COMPLETED, FAILED."
+                ),
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            )
+        return value
+
+    def _normalize_occurrence_window(
+        self,
+        from_time: datetime | None,
+        to_time: datetime | None,
+    ) -> tuple[datetime | None, datetime | None]:
+        if from_time is not None:
+            if from_time.tzinfo is None:
+                raise AppError(
+                    code="VALIDATION_ERROR",
+                    message="from must be timezone-aware.",
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                )
+            from_time = from_time.astimezone(UTC)
+        if to_time is not None:
+            if to_time.tzinfo is None:
+                raise AppError(
+                    code="VALIDATION_ERROR",
+                    message="to must be timezone-aware.",
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                )
+            to_time = to_time.astimezone(UTC)
+        if from_time is not None and to_time is not None and to_time <= from_time:
+            raise AppError(
+                code="VALIDATION_ERROR",
+                message="to must be greater than from.",
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            )
+        return from_time, to_time
+
+    async def _reload_if_desired_status(
+        self,
+        schedule_id: uuid.UUID,
+        owner_id: uuid.UUID,
+        desired: ScheduleStatus,
+    ) -> Schedule | None:
+        current = await self._schedules.get_for_owner(schedule_id, owner_id)
+        if current is not None and current.status == desired.value:
+            return current
+        return None
 
     def _validate_max_catch_up(self, value: int, misfire: str) -> None:
         if value < 1 or value > 100:
@@ -359,8 +453,8 @@ class ScheduleService:
             page=page,
             page_size=page_size,
             q=q,
-            status=status_filter,
-            target_type=target_type,
+            status=self._parse_status_filter(status_filter),
+            target_type=self._parse_target_type_filter(target_type),
             sort=sort,
         )
 
@@ -376,8 +470,12 @@ class ScheduleService:
         expected_lock_version: int,
     ) -> Schedule:
         schedule = await self._require_owned(schedule_id, owner_id)
+        if schedule.lock_version != expected_lock_version:
+            self._raise_version_conflict()
+
         payload = data.model_dump(exclude_unset=True, exclude={"lock_version"})
         if not payload:
+            # No-op with correct lock_version: return current without bumping.
             return schedule
 
         current_status = ScheduleStatus(schedule.status)
@@ -555,6 +653,11 @@ class ScheduleService:
             next_run_at=next_run,
         )
         if updated is None:
+            raced = await self._reload_if_desired_status(
+                schedule_id, owner_id, ScheduleStatus.ACTIVE
+            )
+            if raced is not None:
+                return raced
             self._raise_version_conflict()
         await self._session.commit()
         await self._session.refresh(updated)
@@ -578,6 +681,11 @@ class ScheduleService:
             status=ScheduleStatus.PAUSED.value,
         )
         if updated is None:
+            raced = await self._reload_if_desired_status(
+                schedule_id, owner_id, ScheduleStatus.PAUSED
+            )
+            if raced is not None:
+                return raced
             self._raise_version_conflict()
         await self._session.commit()
         await self._session.refresh(updated)
@@ -649,6 +757,11 @@ class ScheduleService:
             next_run_at=next_run,
         )
         if updated is None:
+            raced = await self._reload_if_desired_status(
+                schedule_id, owner_id, ScheduleStatus.ACTIVE
+            )
+            if raced is not None:
+                return raced
             self._raise_version_conflict()
         await self._session.commit()
         await self._session.refresh(updated)
@@ -666,11 +779,12 @@ class ScheduleService:
         page_size: int = 20,
     ) -> tuple[list[ScheduleOccurrence], int]:
         await self._require_owned(schedule_id, owner_id)
+        from_utc, to_utc = self._normalize_occurrence_window(from_time, to_time)
         return await self._occurrences.list_for_schedule(
             schedule_id,
-            status=status_filter,
-            from_time=from_time,
-            to_time=to_time,
+            status=self._parse_occurrence_status_filter(status_filter),
+            from_time=from_utc,
+            to_time=to_utc,
             page=page,
             page_size=page_size,
         )

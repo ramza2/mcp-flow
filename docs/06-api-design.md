@@ -1065,7 +1065,7 @@ GET   /schedules/{schedule_id}/occurrences
 
 Response `target_id`는 XOR FK(`agent_version_id` | `workflow_version_id`)의 단일 UUID projection.
 
-Expression API contract는 FNC-SCH-001과 동일(CRON 5-field / ONCE local / INTERVAL ISO subset).
+Expression API contract는 FNC-SCH-001과 동일(CRON 5-field numeric grammar / ONCE local / INTERVAL ISO subset).
 
 생성 예:
 

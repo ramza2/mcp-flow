@@ -6,7 +6,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.domain.enums import (
     ScheduleMisfirePolicy,
@@ -17,6 +17,21 @@ from app.domain.enums import (
     OccurrenceStatus,
 )
 from app.models.schedule import Schedule, ScheduleOccurrence
+
+_NON_NULLABLE_UPDATE_FIELDS = frozenset(
+    {
+        "name",
+        "target_type",
+        "target_id",
+        "schedule_type",
+        "schedule_expression",
+        "timezone",
+        "inputs",
+        "overlap_policy",
+        "misfire_policy",
+        "max_catch_up",
+    }
+)
 
 
 class ScheduleCreate(BaseModel):
@@ -82,6 +97,15 @@ class ScheduleUpdate(BaseModel):
         if value is not None and value.tzinfo is None:
             raise ValueError("timestamps must be timezone-aware RFC3339 values.")
         return value
+
+    @model_validator(mode="after")
+    def _reject_explicit_null_non_nullable(self) -> ScheduleUpdate:
+        # Omitted fields are fine; explicit JSON null on non-nullable fields is not.
+        # description / start_at / end_at remain clearable via null.
+        for field_name in _NON_NULLABLE_UPDATE_FIELDS:
+            if field_name in self.model_fields_set and getattr(self, field_name) is None:
+                raise ValueError(f"{field_name} cannot be null")
+        return self
 
 
 class ScheduleResponse(BaseModel):

@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.errors import AppError
 from app.domain.enums import OccurrenceStatus
 from app.models.schedule import ScheduleOccurrence
 
@@ -28,6 +29,17 @@ def _is_schedule_occurrence_unique_violation(exc: IntegrityError) -> bool:
     return _UQ_SCHEDULE_OCCURRENCE in msg
 
 
+def _normalize_scheduled_for_utc(scheduled_for: datetime) -> datetime:
+    """Require timezone-aware scheduled_for and normalize to UTC for durable keys."""
+    if scheduled_for.tzinfo is None:
+        raise AppError(
+            code="VALIDATION_ERROR",
+            message="scheduled_for must be timezone-aware.",
+            status_code=400,
+        )
+    return scheduled_for.astimezone(UTC)
+
+
 class ScheduleOccurrenceRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
@@ -43,10 +55,11 @@ class ScheduleOccurrenceRepository:
         schedule_id: uuid.UUID,
         scheduled_for: datetime,
     ) -> ScheduleOccurrence | None:
+        scheduled_for_utc = _normalize_scheduled_for_utc(scheduled_for)
         result = await self._session.execute(
             select(ScheduleOccurrence).where(
                 ScheduleOccurrence.schedule_id == schedule_id,
-                ScheduleOccurrence.scheduled_for == scheduled_for,
+                ScheduleOccurrence.scheduled_for == scheduled_for_utc,
             )
         )
         return result.scalar_one_or_none()
@@ -69,7 +82,8 @@ class ScheduleOccurrenceRepository:
         if from_time is not None:
             stmt = stmt.where(ScheduleOccurrence.scheduled_for >= from_time)
         if to_time is not None:
-            stmt = stmt.where(ScheduleOccurrence.scheduled_for <= to_time)
+            # Canonical API: to is exclusive.
+            stmt = stmt.where(ScheduleOccurrence.scheduled_for < to_time)
 
         count_stmt = select(func.count()).select_from(stmt.order_by(None).subquery())
         total = int((await self._session.execute(count_stmt)).scalar_one())
@@ -91,13 +105,14 @@ class ScheduleOccurrenceRepository:
         schedule_id: uuid.UUID,
         scheduled_for: datetime,
     ) -> ScheduleOccurrence:
-        existing = await self.get_by_schedule_and_time(schedule_id, scheduled_for)
+        scheduled_for_utc = _normalize_scheduled_for_utc(scheduled_for)
+        existing = await self.get_by_schedule_and_time(schedule_id, scheduled_for_utc)
         if existing is not None:
             return existing
 
         occurrence = ScheduleOccurrence(
             schedule_id=schedule_id,
-            scheduled_for=scheduled_for,
+            scheduled_for=scheduled_for_utc,
             status=OccurrenceStatus.PLANNED.value,
         )
         try:
@@ -109,7 +124,9 @@ class ScheduleOccurrenceRepository:
         except IntegrityError as exc:
             if not _is_schedule_occurrence_unique_violation(exc):
                 raise
-            existing = await self.get_by_schedule_and_time(schedule_id, scheduled_for)
+            existing = await self.get_by_schedule_and_time(
+                schedule_id, scheduled_for_utc
+            )
             if existing is None:
                 raise
             return existing

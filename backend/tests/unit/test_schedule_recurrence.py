@@ -136,7 +136,7 @@ def test_interval_rejects_year_month_week(expression: str) -> None:
 
 
 def test_ny_spring_forward_skips_nonexistent_wall_time() -> None:
-    """2:30 AM on US spring-forward day does not exist; next is 3:00 AM EDT."""
+    """2:30 AM on US spring-forward day does not exist; skip to next day 02:30 EDT."""
     after = _utc(2026, 3, 8, 5, 0, 0)
     nxt = next_scheduled_at(
         schedule_type="CRON",
@@ -146,7 +146,11 @@ def test_ny_spring_forward_skips_nonexistent_wall_time() -> None:
         start_at=None,
         end_at=None,
     )
-    assert nxt == _utc(2026, 3, 8, 7, 0, 0)
+    # 2026-03-09 02:30 America/New_York (EDT, UTC-4) → 06:30Z
+    assert nxt == _utc(2026, 3, 9, 6, 30, 0)
+    # Must not mutate to same-day 03:00 / 03:30.
+    assert nxt != _utc(2026, 3, 8, 7, 0, 0)
+    assert nxt != _utc(2026, 3, 8, 7, 30, 0)
 
 
 def test_ny_fall_back_fold_zero_single_occurrence_in_preview() -> None:
@@ -164,6 +168,112 @@ def test_ny_fall_back_fold_zero_single_occurrence_in_preview() -> None:
     nov1 = [t for t in times if t.date() == datetime(2026, 11, 1, tzinfo=UTC).date()]
     assert len(nov1) == 1
     assert nov1[0] == _utc(2026, 11, 1, 5, 30, 0)
+    from zoneinfo import ZoneInfo
+
+    ny = ZoneInfo("America/New_York")
+    local = nov1[0].astimezone(ny)
+    assert local.hour == 1 and local.minute == 30
+    assert local.fold == 0
+    # fold=1 duplicate must never appear.
+    assert all(t.astimezone(ny).fold == 0 for t in times)
+
+
+def test_ny_fall_back_second_fold_cursor_skips_prior_fold0() -> None:
+    """Cursor inside second fold must not emit first-fold 01:30 or fold=1."""
+    # 2026-11-01T06:15:00Z == local second-fold 01:15 EST.
+    after = _utc(2026, 11, 1, 6, 15, 0)
+    nxt = next_scheduled_at(
+        schedule_type="CRON",
+        expression="30 1 * * *",
+        timezone="America/New_York",
+        after=after,
+        start_at=None,
+        end_at=None,
+    )
+    assert nxt == _utc(2026, 11, 2, 6, 30, 0)
+    assert nxt != _utc(2026, 11, 1, 5, 30, 0)
+    from zoneinfo import ZoneInfo
+
+    local = nxt.astimezone(ZoneInfo("America/New_York"))
+    assert local.fold == 0
+
+
+def test_once_spring_forward_nonexistent_rejected() -> None:
+    with pytest.raises(AppError) as exc:
+        validate_schedule_expression(
+            "ONCE", "2026-03-08T02:30:00", "America/New_York"
+        )
+    assert exc.value.code == "VALIDATION_ERROR"
+    assert "does not exist" in exc.value.message
+
+
+def test_once_fall_back_uses_fold_zero() -> None:
+    validated = validate_schedule_expression(
+        "ONCE", "2026-11-01T01:30:00", "America/New_York"
+    )
+    assert validated.once_local is not None
+    assert validated.once_local.fold == 0
+    assert validated.once_local.astimezone(UTC) == _utc(2026, 11, 1, 5, 30, 0)
+
+
+@pytest.mark.parametrize(
+    "expression",
+    [
+        "2026-13-01T09:00:00",
+        "2026-02-30T09:00:00",
+        "2026-01-01T25:00:00",
+        "2026-01-01T09:61:00",
+    ],
+)
+def test_once_invalid_calendar_values_are_validation_errors(expression: str) -> None:
+    with pytest.raises(AppError) as exc:
+        validate_schedule_expression("ONCE", expression, "UTC")
+    assert exc.value.code == "VALIDATION_ERROR"
+    assert exc.value.status_code == 400
+
+
+def test_interval_overflow_is_validation_error() -> None:
+    with pytest.raises(AppError) as exc:
+        validate_schedule_expression("INTERVAL", "P999999999999999999D", "UTC")
+    assert exc.value.code == "VALIDATION_ERROR"
+    assert "overflow" in exc.value.message.lower()
+
+
+@pytest.mark.parametrize("expression", ["0 9 * * L", "0 9 * * 1#1", "0 9 * * ?", "0 9 * MON *"])
+def test_cron_rejects_extension_syntax(expression: str) -> None:
+    with pytest.raises(AppError) as exc:
+        validate_schedule_expression("CRON", expression, "UTC")
+    assert exc.value.code == "VALIDATION_ERROR"
+
+
+def test_cron_far_future_start_at_does_not_exhaust_scan() -> None:
+    after = _utc(2026, 1, 1, 0, 0, 0)
+    start_at = _utc(2026, 3, 1, 0, 0, 0)
+    nxt = next_scheduled_at(
+        schedule_type="CRON",
+        expression="* * * * *",
+        timezone="UTC",
+        after=after,
+        start_at=start_at,
+        end_at=None,
+    )
+    assert nxt == start_at
+
+
+def test_cron_far_future_start_beyond_ten_thousand_ticks() -> None:
+    """More than 10_000 minute ticks before start_at must still resolve."""
+    after = _utc(2026, 1, 1, 0, 0, 0)
+    start_at = after + timedelta(days=30)
+    nxt = next_scheduled_at(
+        schedule_type="CRON",
+        expression="* * * * *",
+        timezone="UTC",
+        after=after,
+        start_at=start_at,
+        end_at=None,
+    )
+    assert nxt == start_at
+    assert (start_at - after).total_seconds() / 60 > 10_000
 
 
 def test_start_inclusive_end_exclusive_window() -> None:

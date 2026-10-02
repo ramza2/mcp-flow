@@ -58,7 +58,10 @@ class Schedule(Base, MutableResourceMixin):
             "overlap_policy IN ('ALLOW', 'SKIP', 'QUEUE', 'REPLACE')",
             name="ck_schedules_overlap_policy",
         ),
-        CheckConstraint("max_catch_up >= 1", name="ck_schedules_max_catch_up"),
+        CheckConstraint(
+            "max_catch_up BETWEEN 1 AND 100",
+            name="ck_schedules_max_catch_up",
+        ),
         CheckConstraint("lock_version >= 1", name="ck_schedules_lock_version"),
         CheckConstraint(
             "end_at IS NULL OR start_at IS NULL OR end_at > start_at",

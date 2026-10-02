@@ -276,3 +276,70 @@ async def test_workflow_secret_ref_persisted_not_plaintext(
         assert "plaintext" not in raw
         assert str(secret_id) in raw
         assert BindingKind.SECRET_REF.value in raw
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_max_catch_up_db_rejects_101(
+    integration_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with integration_session_factory() as session:
+        owner_id = await _seed_schedule_manager(session)
+        agent_version_id = await _seed_published_agent_version(session, owner_id)
+        await session.commit()
+        with pytest.raises(IntegrityError):
+            await session.execute(
+                text(
+                    """
+                    INSERT INTO schedules (
+                      id, name, owner_id, target_type, agent_version_id,
+                      schedule_type, schedule_expression, timezone,
+                      input_template, misfire_policy, overlap_policy,
+                      max_catch_up, status, lock_version
+                    ) VALUES (
+                      gen_random_uuid(), 'bad-catch-up', :owner_id,
+                      'AGENT_VERSION', :agent_version_id,
+                      'CRON', '0 9 * * *', 'UTC',
+                      '{}'::jsonb, 'SKIP', 'SKIP',
+                      101, 'PAUSED', 1
+                    )
+                    """
+                ),
+                {
+                    "owner_id": str(owner_id),
+                    "agent_version_id": str(agent_version_id),
+                },
+            )
+            await session.flush()
+        await session.rollback()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_occurrence_equivalent_offset_normalizes_to_same_row(
+    integration_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with integration_session_factory() as session:
+        owner_id = await _seed_schedule_manager(session)
+        agent_version_id = await _seed_published_agent_version(session, owner_id)
+        schedule = await ScheduleService(session).create(
+            _schedule_body(
+                target_type=ScheduleTargetType.AGENT_VERSION,
+                target_id=agent_version_id,
+            ),
+            owner_id=owner_id,
+        )
+        schedule_id = schedule.id
+        await session.commit()
+
+    from datetime import timezone
+
+    utc_instant = datetime(2026, 7, 1, 12, 0, 0, tzinfo=UTC)
+    offset_instant = utc_instant.astimezone(timezone(timedelta(hours=9)))
+    async with integration_session_factory() as session:
+        repo = ScheduleOccurrenceRepository(session)
+        first = await repo.create_planned(schedule_id, utc_instant)
+        second = await repo.create_planned(schedule_id, offset_instant)
+        await session.commit()
+        assert first.id == second.id
+        assert first.scheduled_for == utc_instant

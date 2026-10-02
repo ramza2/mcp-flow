@@ -539,3 +539,60 @@ async def test_activate_once_future_ok(db_session: AsyncSession) -> None:
     )
     active = await ScheduleService(db_session).activate(schedule.id, owner_id=owner_id)
     assert active.next_run_at is not None
+
+
+@pytest.mark.asyncio
+async def test_noop_patch_stale_lock_conflicts(db_session: AsyncSession) -> None:
+    owner_id, schedule = await _create_agent_schedule(db_session)
+    assert schedule.lock_version == 1
+    # Bump lock_version with a real update first.
+    service = ScheduleService(db_session)
+    bumped = await service.update(
+        schedule.id,
+        ScheduleUpdate(name="Bump", lock_version=1),
+        owner_id=owner_id,
+        expected_lock_version=1,
+    )
+    assert bumped.lock_version == 2
+    with pytest.raises(AppError) as exc:
+        await service.update(
+            bumped.id,
+            ScheduleUpdate(lock_version=1),
+            owner_id=owner_id,
+            expected_lock_version=1,
+        )
+    assert exc.value.code == "RESOURCE_VERSION_CONFLICT"
+
+
+@pytest.mark.asyncio
+async def test_noop_patch_correct_lock_returns_without_bump(
+    db_session: AsyncSession,
+) -> None:
+    owner_id, schedule = await _create_agent_schedule(db_session)
+    service = ScheduleService(db_session)
+    same = await service.update(
+        schedule.id,
+        ScheduleUpdate(lock_version=schedule.lock_version),
+        owner_id=owner_id,
+        expected_lock_version=schedule.lock_version,
+    )
+    assert same.lock_version == schedule.lock_version
+    assert same.name == schedule.name
+
+
+@pytest.mark.asyncio
+async def test_explicit_null_patch_fields_rejected_at_schema() -> None:
+    from pydantic import ValidationError
+
+    for payload in (
+        {"name": None, "lock_version": 1},
+        {"target_id": None, "lock_version": 1},
+        {"schedule_expression": None, "lock_version": 1},
+        {"timezone": None, "lock_version": 1},
+        {"inputs": None, "lock_version": 1},
+        {"overlap_policy": None, "lock_version": 1},
+        {"misfire_policy": None, "lock_version": 1},
+        {"max_catch_up": None, "lock_version": 1},
+    ):
+        with pytest.raises(ValidationError):
+            ScheduleUpdate.model_validate(payload)

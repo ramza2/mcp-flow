@@ -816,9 +816,9 @@ WORKFLOW_VERSION
 표현식 contract (registry slice):
 
 ```text
-CRON   — 5-field croniter, @macro 금지, Schedule.timezone 기준 DST(fold=0, spring-forward skip)
-ONCE   — local YYYY-MM-DDTHH:MM:SS (Z/offset 금지) → UTC 저장/계산
-INTERVAL — ISO-8601 P…D T…H/M/S only, start_at anchor (activate 시 unset이면 now)
+CRON   — exactly 5 fields; Schedule v1 grammar digits/*/,-,/ only (no @macros, L, #, ?, names); croniter validates standard fields; Schedule.timezone DST (fold=0, spring-forward skip)
+ONCE   — local YYYY-MM-DDTHH:MM:SS (Z/offset 금지); nonexistent spring-forward wall time rejected; ambiguous fold=0 → UTC
+INTERVAL — ISO-8601 P…D T…H/M/S only, start_at anchor (activate 시 unset이면 now); overflow → VALIDATION_ERROR
 ```
 
 ## FNC-SCH-002. Schedule lifecycle
