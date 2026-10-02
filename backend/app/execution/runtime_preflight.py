@@ -11,6 +11,7 @@ source-specific grant/lineage checks via thin wrappers.
 
 from __future__ import annotations
 
+import json
 import math
 import uuid
 from dataclasses import dataclass
@@ -36,6 +37,7 @@ from app.domain.enums import (
     ToolVersionValidationStatus,
     WorkflowStatus,
     WorkflowVersionStatus,
+    WorkflowVersionValidationStatus,
 )
 from app.models.agent import AgentToolGrant
 from app.models.approval import ApprovalPolicy
@@ -55,6 +57,7 @@ from app.repositories.workflow import WorkflowRepository
 from app.repositories.workflow_version import WorkflowVersionRepository
 from app.schemas.execution_plan import ExecutionPlanV1, compute_plan_hash
 from app.services.policy_snapshot import build_safe_tool_policy_snapshot
+from app.services.workflow_content import workflow_version_content_hash
 
 _EXECUTE_PERMISSION = "mcp.tool.execute"
 _WORKFLOW_EXECUTE_PERMISSION = "workflow.execute"
@@ -66,6 +69,13 @@ _PINNED_WORKFLOW_VERSION_STATUSES = frozenset(
         WorkflowVersionStatus.DEPRECATED.value,
     }
 )
+
+
+def _semantic_equal(left: Any, right: Any) -> bool:
+    """Order-insensitive JSON semantic equality (not raw string compare)."""
+    return json.loads(json.dumps(left, sort_keys=True, default=str)) == json.loads(
+        json.dumps(right, sort_keys=True, default=str)
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -290,6 +300,18 @@ async def assert_current_workflow_execution_authorized(
             ),
             status_code=409,
         )
+    if version.validation_status != WorkflowVersionValidationStatus.VALID.value:
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message="pinned WorkflowVersion.validation_status must be VALID.",
+            status_code=409,
+        )
+    if version.plan_schema_version != execution.plan_schema_version:
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message="WorkflowVersion.plan_schema_version mismatch.",
+            status_code=409,
+        )
 
     workflow = await workflows.get(version.workflow_id)
     if workflow is None or workflow.deleted_at is not None:
@@ -302,6 +324,50 @@ async def assert_current_workflow_execution_authorized(
         raise AppError(
             code="EXECUTION_PRECONDITION_FAILED",
             message="Workflow.status != ACTIVE.",
+            status_code=409,
+        )
+    if version.workflow_id != workflow.id:
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message="WorkflowVersion does not belong to owning Workflow.",
+            status_code=409,
+        )
+
+    if not isinstance(version.plan_definition, dict):
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message="WorkflowVersion.plan_definition must be a JSON object.",
+            status_code=409,
+        )
+    try:
+        version_plan = ExecutionPlanV1.model_validate(version.plan_definition)
+    except Exception as exc:
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message="WorkflowVersion.plan_definition is invalid.",
+            status_code=409,
+        ) from exc
+    if (
+        version_plan.source.type != "WORKFLOW"
+        or version_plan.source.workflow_id != workflow.id
+    ):
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message="WorkflowVersion Plan source lineage mismatch.",
+            status_code=409,
+        )
+
+    recomputed_content = workflow_version_content_hash(
+        plan_schema_version=version.plan_schema_version,
+        plan_definition=version.plan_definition,
+        input_schema=version.input_schema,
+        output_schema=version.output_schema,
+        policy_defaults=version.policy_defaults,
+    )
+    if recomputed_content != version.content_hash:
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message="WorkflowVersion content_hash mismatch.",
             status_code=409,
         )
 
@@ -319,18 +385,23 @@ async def assert_current_workflow_execution_authorized(
             message="Execution Plan source lineage mismatch.",
             status_code=409,
         )
+
+    # Immutable Version content must equal pinned Execution snapshot (semantic).
+    execution_canonical = plan.model_dump(mode="json")
+    version_canonical = version_plan.model_dump(mode="json")
+    if not _semantic_equal(execution_canonical, version_canonical):
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message=(
+                "Execution.plan_snapshot does not match pinned "
+                "WorkflowVersion.plan_definition."
+            ),
+            status_code=409,
+        )
     if compute_plan_hash(execution.plan_snapshot) != execution.plan_hash:
         raise AppError(
             code="RESOURCE_CONFLICT",
             message="Execution.plan_hash does not match plan_snapshot.",
-            status_code=409,
-        )
-
-    # Pinned version ownership must match Plan source Workflow.
-    if version.workflow_id != workflow.id:
-        raise AppError(
-            code="RESOURCE_CONFLICT",
-            message="WorkflowVersion does not belong to owning Workflow.",
             status_code=409,
         )
 

@@ -251,6 +251,131 @@ async def test_workflow_inactive_fails_pinned_execution_auth(
     assert exc.value.status_code == 409
 
 
+async def _authz_or_raise(session: AsyncSession, execution, tool_version_id):
+    steps = await ExecutionRepository(session).list_steps(execution.id)
+    lineage = assert_tool_step_lineage(execution, steps[0], steps=steps)
+    expected = get_expected_tool_policy_snapshot(
+        execution,
+        plan_step_id=lineage.plan_step.id,
+        tool_version_id=tool_version_id,
+    )
+    return await assert_source_tool_executable(
+        session,
+        execution=execution,
+        tool_version_id=tool_version_id,
+        expected_policy_snapshot=expected,
+        plan_timeout_seconds=30,
+    )
+
+
+@pytest.mark.asyncio
+async def test_workflow_version_plan_definition_drift_resource_conflict(
+    db_session: AsyncSession,
+) -> None:
+    """Pinned Version plan_definition mutation fails closed (immutable lineage)."""
+    import copy
+
+    from app.repositories.workflow_version import WorkflowVersionRepository
+    from app.services.workflow_content import workflow_version_content_hash
+
+    ctx = await _seed_ready_workflow(db_session)
+    outcome = await _create_workflow_execution(db_session, ctx, idempotency_key=_idem_key())
+    execution = await ExecutionRepository(db_session).get(outcome.result.id)
+    assert execution is not None
+
+    version = await WorkflowVersionRepository(db_session).get(ctx["version_id"])
+    assert version is not None
+    drifted = copy.deepcopy(version.plan_definition)
+    drifted["goal"] = "tampered-version-plan"
+    version.plan_definition = drifted
+    version.content_hash = workflow_version_content_hash(
+        plan_schema_version=version.plan_schema_version,
+        plan_definition=version.plan_definition,
+        input_schema=version.input_schema,
+        output_schema=version.output_schema,
+        policy_defaults=version.policy_defaults,
+    )
+    await db_session.commit()
+
+    execution = await ExecutionRepository(db_session).get(outcome.result.id)
+    assert execution is not None
+    with pytest.raises(AppError) as exc:
+        await _authz_or_raise(db_session, execution, ctx["tool_version_id"])
+    assert exc.value.status_code == 409
+    assert exc.value.code == "RESOURCE_CONFLICT"
+
+
+@pytest.mark.asyncio
+async def test_workflow_version_content_hash_drift_resource_conflict(
+    db_session: AsyncSession,
+) -> None:
+    from app.repositories.workflow_version import WorkflowVersionRepository
+
+    ctx = await _seed_ready_workflow(db_session)
+    outcome = await _create_workflow_execution(db_session, ctx, idempotency_key=_idem_key())
+    version = await WorkflowVersionRepository(db_session).get(ctx["version_id"])
+    assert version is not None
+    version.content_hash = "0" * 64
+    await db_session.commit()
+
+    execution = await ExecutionRepository(db_session).get(outcome.result.id)
+    assert execution is not None
+    with pytest.raises(AppError) as exc:
+        await _authz_or_raise(db_session, execution, ctx["tool_version_id"])
+    assert exc.value.status_code == 409
+    assert exc.value.code == "RESOURCE_CONFLICT"
+
+
+@pytest.mark.asyncio
+async def test_execution_plan_snapshot_coherent_tamper_resource_conflict(
+    db_session: AsyncSession,
+) -> None:
+    """Coherent Execution snapshot+hash tamper still fails Version equality."""
+    import copy
+
+    from app.schemas.execution_plan import compute_plan_hash
+
+    ctx = await _seed_ready_workflow(db_session)
+    outcome = await _create_workflow_execution(db_session, ctx, idempotency_key=_idem_key())
+    execution = await ExecutionRepository(db_session).get(outcome.result.id)
+    assert execution is not None
+
+    tampered = copy.deepcopy(execution.plan_snapshot)
+    tampered["goal"] = "coherent-execution-tamper"
+    execution.plan_snapshot = tampered
+    execution.plan_hash = compute_plan_hash(tampered)
+    await db_session.commit()
+
+    execution = await ExecutionRepository(db_session).get(outcome.result.id)
+    assert execution is not None
+    assert compute_plan_hash(execution.plan_snapshot) == execution.plan_hash
+    with pytest.raises(AppError) as exc:
+        await _authz_or_raise(db_session, execution, ctx["tool_version_id"])
+    assert exc.value.status_code == 409
+    assert exc.value.code == "RESOURCE_CONFLICT"
+
+
+@pytest.mark.asyncio
+async def test_workflow_version_validation_status_drift_resource_conflict(
+    db_session: AsyncSession,
+) -> None:
+    from app.domain.enums import WorkflowVersionValidationStatus
+    from app.repositories.workflow_version import WorkflowVersionRepository
+
+    ctx = await _seed_ready_workflow(db_session)
+    outcome = await _create_workflow_execution(db_session, ctx, idempotency_key=_idem_key())
+    version = await WorkflowVersionRepository(db_session).get(ctx["version_id"])
+    assert version is not None
+    version.validation_status = WorkflowVersionValidationStatus.INVALID.value
+    await db_session.commit()
+
+    execution = await ExecutionRepository(db_session).get(outcome.result.id)
+    assert execution is not None
+    with pytest.raises(AppError) as exc:
+        await _authz_or_raise(db_session, execution, ctx["tool_version_id"])
+    assert exc.value.status_code == 409
+    assert exc.value.code == "RESOURCE_CONFLICT"
+
 
 @pytest.mark.asyncio
 async def test_policy_snapshot_corruption_cases(db_session: AsyncSession) -> None:

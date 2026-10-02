@@ -1177,9 +1177,20 @@ Creation still requires the requested version to be the Workflow
 `current_version_id` and `PUBLISHED`/`VALID`. After Creation, runtime
 Attempt / B2 / authorable APPROVAL resume / MRTR resume keep the pinned
 `workflow_version_id` even when that version later becomes `DEPRECATED`
-(superseded by a newer publish). They still require live `Workflow.status ==
-ACTIVE` plus current `workflow.execute` / `WORKFLOW` ResourceGrant (and Tool
-authorization). Expired-lease recovery (`FNC-EXE-011`) remains
+(superseded by a newer publish). They still require:
+
+```text
+WorkflowVersion.status in {PUBLISHED, DEPRECATED}
+WorkflowVersion.validation_status == VALID
+WorkflowVersion.content_hash integrity
+canonical Execution.plan_snapshot == canonical WorkflowVersion.plan_definition
+Execution.plan_hash == compute_plan_hash(plan_snapshot)
+Workflow.status == ACTIVE
+current workflow.execute + WORKFLOW ResourceGrant
+```
+
+Do not require `Workflow.current_version_id == Execution.workflow_version_id`
+at runtime. Expired-lease recovery (`FNC-EXE-011`) remains
 `AGENT_REQUEST`-only in this slice.
 
 `workflow_execution_policy.v1` is immutable security evidence: exact top-level
