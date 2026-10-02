@@ -66,6 +66,8 @@ class ExecutionRepository:
             started_at=None,
             finished_at=None,
             cancel_requested_at=None,
+            cancel_requested_by=None,
+            cancel_reason=None,
             lock_version=lock_version,
             retention_until=None,
         )

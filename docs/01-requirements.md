@@ -273,7 +273,7 @@ Plan v1 authoring Step Type은 `TOOL`, `CONDITION`, `JOIN`, `APPROVAL`, `LOOP`�
 | `REQ-EXE-006` | Step/Execution timeout을 적용한다. | Must | `TIMED_OUT`과 후속정책 적용. |
 | `REQ-EXE-007` | retry max/backoff를 지원한다. | Must | Attempt 이력과 한도 준수. |
 | `REQ-EXE-008` | 부작용 Tool 자동 retry를 제한한다. | Must | non-idempotent 중복 호출 방지. |
-| `REQ-EXE-009` | 취소 요청을 지원한다. | Must | `CANCEL_REQUESTED` 후 신규 Step 차단. |
+| `REQ-EXE-009` | 취소 요청을 지원한다. | Must | `POST /executions/{id}/cancel` + requester-only `execution.cancel`. `CANCEL_REQUESTED`≠`CANCELLED`; in-flight MCP는 1회 정산 후 신규 Step/Attempt/retry 차단. Schedule `overlap_policy=REPLACE` 선행 원시. |
 | `REQ-EXE-010` | 재시작 후 durable 상태를 복구한다. | Must | lease/handle 기반 복구. |
 | `REQ-EXE-011` | 시스템/사용자/Server/Tool 동시실행 한도를 지원한다. | Must | 초과 작업 유실 없음. |
 | `REQ-EXE-012` | 대용량 결과를 DB/Object Storage 정책으로 분리한다. | Should | 무제한 DB/LLM context 적재 금지. |

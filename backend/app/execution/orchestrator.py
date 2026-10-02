@@ -41,6 +41,10 @@ from app.domain.enums import (
     StepStatus,
     ToolCallNormalizedStatus,
 )
+from app.execution.cancellation import (
+    list_started_tool_calls,
+    reconcile_cancel_requested_locked,
+)
 from app.execution.completion import (
     DISPOSITION_FATAL_EXECUTION_FAILURE,
     DISPOSITION_KNOWN_STEP_FAILURE,
@@ -117,6 +121,9 @@ _REASON_EXECUTION_PARTIAL = "EXECUTION_PARTIALLY_SUCCEEDED"
 _REASON_EXECUTION_FAILED = "EXECUTION_FAILED"
 _REASON_EXECUTION_TIMED_OUT = "EXECUTION_TIMED_OUT"
 _REASON_WAVE_IN_PROGRESS = "WAVE_IN_PROGRESS"
+_REASON_CANCEL_IN_PROGRESS = "CANCEL_IN_PROGRESS"
+_REASON_CANCELLED = "CANCELLED"
+_REASON_CANCEL_REQUESTED = "CANCEL_REQUESTED"
 
 _STEP_TERMINAL = frozenset(
     {
@@ -402,6 +409,16 @@ class ExecutionOrchestrator:
                     terminal_status=None,
                     reason=_REASON_WAVE_IN_PROGRESS,
                 )
+            if prepared.reason == _REASON_CANCEL_IN_PROGRESS:
+                return ToolRunOutcome(
+                    execution_id=execution_id,
+                    step_execution_id=None,
+                    attempt_id=None,
+                    tool_call_id=None,
+                    mcp_called=False,
+                    terminal_status=prepared.execution_status,
+                    reason=_REASON_CANCEL_IN_PROGRESS,
+                )
             if prepared.execution_complete:
                 return ToolRunOutcome(
                     execution_id=execution_id,
@@ -502,6 +519,9 @@ class ExecutionOrchestrator:
                     "STEP_ALREADY_TERMINAL",
                     "RESOURCE_CONFLICT",
                     "TOOL_CALL_ALREADY_STARTED",
+                    _REASON_CANCEL_REQUESTED,
+                    _REASON_CANCELLED,
+                    _REASON_CANCEL_IN_PROGRESS,
                 }:
                     return outcome
 
@@ -579,6 +599,24 @@ class ExecutionOrchestrator:
                         promoted=False,
                         reason="STEP_ALREADY_TERMINAL",
                         execution_status=execution.status,
+                    )
+                if execution.status == ExecutionStatus.CANCEL_REQUESTED.value:
+                    started = await list_started_tool_calls(session, execution.id)
+                    if started:
+                        return ProgressOutcome(
+                            execution_complete=False,
+                            promoted=False,
+                            reason=_REASON_CANCEL_IN_PROGRESS,
+                            execution_status=execution.status,
+                        )
+                    outcome = await reconcile_cancel_requested_locked(
+                        session, execution, now=now
+                    )
+                    return ProgressOutcome(
+                        execution_complete=True,
+                        promoted=False,
+                        reason=_REASON_CANCELLED,
+                        execution_status=outcome.status,
                     )
                 steps = await executions.list_steps(execution.id)
                 waiting = [

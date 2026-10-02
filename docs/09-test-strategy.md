@@ -884,6 +884,17 @@ DRAFT → PUBLISHED → DEPRECATED
 | `WF-CANCEL` | CANCEL_REQUESTED→CANCELLED |
 | `WF-RECOVERY` | Worker lease 복구 |
 
+FNC-EXE-010 / REQ-EXE-009 cancellation (PR #55):
+
+- API: auth/CSRF/permission/404 IDOR/422 reason/idempotent CANCELLED+CANCEL_REQUESTED/409 terminals
+- Unit coordinator: CREATED/QUEUED immediate; RUNNING no ToolCall; STARTED Attempt only; STARTED ToolCall → CANCEL_REQUESTED; idempotent reason
+- PG A queue/cancel race; PG B claim/cancel race; PG C cancel before Attempt; PG D cancel between Phase A and B2 (MCP 0)
+- PG E in-flight known success → exact 1 MCP, no retry/downstream; PG F UNKNOWN_OUTCOME stays FAILED
+- PG G sequential no downstream; PG H parallel sibling READY cancelled; PG I WAITING_APPROVAL; PG J approved-resume race
+- PG K WAITING_INPUT OPEN→REJECTED; PG L retry suppression; stale-worker fencing after CANCELLED
+- Recovery limitation: `CANCEL_REQUESTED` is not an ordinary SAFE_RETRY candidate
+- No remote MCP cancel protocol; Schedule REPLACE not implemented here
+
 ### 완료판정
 
 1. 예상 terminal Execution 상태

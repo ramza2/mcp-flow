@@ -68,6 +68,11 @@ from app.domain.enums import (
     StepStatus,
     ToolCallNormalizedStatus,
 )
+from app.execution.cancellation import (
+    cancel_prepared_invocation_before_send,
+    cancellation_is_requested,
+    reconcile_cancel_requested_locked,
+)
 from app.execution.claim import ExecutionClaimService, _as_utc, _normalize_worker_id
 from app.execution.completion import (
     DISPOSITION_FATAL_EXECUTION_FAILURE,
@@ -117,6 +122,7 @@ logger = logging.getLogger(__name__)
 
 _REASON_SAFE_RETRY_READY = "SAFE_RETRY_READY"
 _REASON_WAITING_INPUT = "WAITING_INPUT"
+_REASON_CANCEL_REQUESTED = "CANCEL_REQUESTED"
 _SAFE_RISK_CLASSES = frozenset({RiskClass.READ_ONLY.value, RiskClass.IDEMPOTENT_WRITE.value})
 _STEP_TERMINAL_STATUSES = frozenset(
     {
@@ -654,7 +660,11 @@ class McpToolRunner:
                 now = datetime.now(UTC)
                 if (
                     execution is None
-                    or execution.status != ExecutionStatus.RUNNING.value
+                    or execution.status
+                    not in {
+                        ExecutionStatus.RUNNING.value,
+                        ExecutionStatus.CANCEL_REQUESTED.value,
+                    }
                     or execution.worker_id != prepared.worker_id
                     or execution.lease_token != prepared.lease_token
                     or execution.lease_expires_at is None
@@ -699,6 +709,29 @@ class McpToolRunner:
                         tool_call=tool_call,
                         prepared=prepared,
                         now=now,
+                    )
+
+                # Cooperative cancel before network send: MCP=0, no security failure.
+                if cancellation_is_requested(execution):
+                    outcome = await cancel_prepared_invocation_before_send(
+                        session,
+                        execution=execution,
+                        step=step,
+                        attempt=attempt,
+                        tool_call=tool_call,
+                        now=now,
+                    )
+                    return ToolRunOutcome(
+                        execution_id=execution.id,
+                        step_execution_id=step.id,
+                        attempt_id=attempt.id,
+                        tool_call_id=tool_call.id,
+                        mcp_called=False,
+                        terminal_status=StepStatus.CANCELLED.value,
+                        reason=_REASON_CANCEL_REQUESTED,
+                        disposition=DISPOSITION_KNOWN_STEP_FAILURE
+                        if outcome.status == ExecutionStatus.CANCEL_REQUESTED.value
+                        else DISPOSITION_SUCCESS,
                     )
 
                 try:
@@ -920,8 +953,73 @@ class McpToolRunner:
                         )
                     )
 
+                # Cancellation beats new Attempts / retries — Phase A gate.
+                # Includes already-CANCELLED Executions that were cancelled between
+                # SAFE_RETRY_READY and the next Attempt (cancel_requested_at set).
+                if cancellation_is_requested(execution):
+                    if execution.status == ExecutionStatus.CANCELLED.value:
+                        return _PrepareResult(
+                            outcome=ToolRunOutcome(
+                                execution_id=execution.id,
+                                step_execution_id=step.id,
+                                attempt_id=None,
+                                tool_call_id=None,
+                                mcp_called=False,
+                                terminal_status=ExecutionStatus.CANCELLED.value,
+                                reason=_REASON_CANCEL_REQUESTED,
+                            )
+                        )
+                    if (
+                        execution.worker_id != worker
+                        or execution.lease_token != lease_token
+                        or execution.lease_expires_at is None
+                        or _as_utc(execution.lease_expires_at) <= _as_utc(now)
+                    ):
+                        # Stale owner must not rewrite cancellation evidence.
+                        return _PrepareResult(
+                            outcome=self._noop(
+                                execution.id,
+                                "LEASE_MISMATCH",
+                                status=execution.status,
+                            )
+                        )
+                    if execution.status == ExecutionStatus.RUNNING.value:
+                        # Corrupted transition: cancel metadata present but status
+                        # still RUNNING — fail closed without remote call.
+                        execution.status = ExecutionStatus.CANCEL_REQUESTED.value
+                        execution.lock_version = int(execution.lock_version) + 1
+                    if execution.status == ExecutionStatus.CANCEL_REQUESTED.value:
+                        outcome = await reconcile_cancel_requested_locked(
+                            session, execution, now=now
+                        )
+                        return _PrepareResult(
+                            outcome=ToolRunOutcome(
+                                execution_id=execution.id,
+                                step_execution_id=step.id,
+                                attempt_id=None,
+                                tool_call_id=None,
+                                mcp_called=False,
+                                terminal_status=outcome.status,
+                                reason=_REASON_CANCEL_REQUESTED,
+                            )
+                        )
+
+                if execution.status == ExecutionStatus.CANCELLED.value:
+                    return _PrepareResult(
+                        outcome=self._noop(
+                            execution.id,
+                            "STEP_ALREADY_TERMINAL",
+                            step_id=step.id,
+                            status=execution.status,
+                        )
+                    )
+
                 if (
-                    execution.status != ExecutionStatus.RUNNING.value
+                    execution.status
+                    not in {
+                        ExecutionStatus.RUNNING.value,
+                        ExecutionStatus.CANCEL_REQUESTED.value,
+                    }
                     or execution.worker_id != worker
                     or execution.lease_token != lease_token
                     or execution.lease_expires_at is None
@@ -1925,7 +2023,11 @@ class McpToolRunner:
                     or step is None
                     or attempt is None
                     or tool_call is None
-                    or execution.status != ExecutionStatus.RUNNING.value
+                    or execution.status
+                    not in {
+                        ExecutionStatus.RUNNING.value,
+                        ExecutionStatus.CANCEL_REQUESTED.value,
+                    }
                     or execution.worker_id != prepared.worker_id
                     or execution.lease_token != prepared.lease_token
                     or execution.lease_expires_at is None
@@ -1960,9 +2062,12 @@ class McpToolRunner:
                 )
 
                 max_attempts = pinned_max_attempts(step_policy) or 1
+                cancel_active = cancellation_is_requested(execution)
                 retry = decide_safe_transient_retry(
                     call_error=None
-                    if call_error is None or isinstance(call_error, _PreSendFailClosed)
+                    if call_error is None
+                    or isinstance(call_error, _PreSendFailClosed)
+                    or cancel_active
                     else call_error,
                     classified_terminal=classified,
                     risk_class=risk_for_classify,
@@ -1974,7 +2079,7 @@ class McpToolRunner:
                     now=now,
                 )
 
-                if retry.schedule_retry:
+                if retry.schedule_retry and not cancel_active:
                     attempt_terminal = _apply_retry_checkpoint(
                         step=step,
                         attempt=attempt,
@@ -2016,6 +2121,31 @@ class McpToolRunner:
                     ),
                 )
                 mcp_called = not isinstance(call_error, _PreSendFailClosed)
+
+                # After truthful remote settlement under CANCEL_REQUESTED:
+                # UNKNOWN_OUTCOME/FATAL keeps FAILED; otherwise cancel remaining.
+                if (
+                    cancel_active
+                    and execution.status == ExecutionStatus.CANCEL_REQUESTED.value
+                    and disposition != DISPOSITION_FATAL_EXECUTION_FAILURE
+                    and terminal != StepStatus.UNKNOWN_OUTCOME.value
+                ):
+                    cancel_outcome = await reconcile_cancel_requested_locked(
+                        session, execution, now=now
+                    )
+                    return ToolRunOutcome(
+                        execution_id=execution.id,
+                        step_execution_id=step.id,
+                        attempt_id=attempt.id,
+                        tool_call_id=tool_call.id,
+                        mcp_called=mcp_called,
+                        terminal_status=terminal,
+                        reason=_REASON_CANCEL_REQUESTED
+                        if cancel_outcome.status == ExecutionStatus.CANCELLED.value
+                        else terminal,
+                        disposition=disposition,
+                    )
+
                 reason = (
                     "STEP_SUCCEEDED"
                     if terminal == StepStatus.SUCCEEDED.value
