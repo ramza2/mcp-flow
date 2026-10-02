@@ -52,39 +52,63 @@ from tests.unit.test_workflow_registry import (
 
 
 @pytest.mark.integration
-def test_alembic_schedule_migration_objects_and_permission(
-    integration_database_url: str,
+@pytest.mark.asyncio
+async def test_alembic_schedule_migration_objects_and_permission(
+    integration_session: AsyncSession,
 ) -> None:
-    backend_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-    cfg = Config(os.path.join(backend_dir, "alembic.ini"))
-    cfg.set_main_option("sqlalchemy.url", integration_database_url)
-    os.environ["MCPFLOW_DATABASE_URL"] = integration_database_url
-    from app.core.config import get_settings
+    # alembic_upgrade_head fixture already applied head via async URL.
+    tables = (
+        await integration_session.execute(
+            text(
+                "SELECT tablename FROM pg_tables "
+                "WHERE schemaname = 'public' AND tablename IN "
+                "('schedules', 'schedule_occurrences')"
+            )
+        )
+    ).fetchall()
+    names = {r[0] for r in tables}
+    assert names == {"schedules", "schedule_occurrences"}
 
-    get_settings.cache_clear()
-    command.upgrade(cfg, "head")
+    uq = (
+        await integration_session.execute(
+            text(
+                "SELECT 1 FROM pg_constraint "
+                "WHERE conname = 'uq_schedule_occurrences_schedule_scheduled_for'"
+            )
+        )
+    ).scalar_one_or_none()
+    assert uq == 1
 
-    import sqlalchemy as sa
-    from sqlalchemy import create_engine, inspect
+    idx = (
+        await integration_session.execute(
+            text(
+                "SELECT 1 FROM pg_indexes "
+                "WHERE indexname = 'ix_schedules_active_next_run_at'"
+            )
+        )
+    ).scalar_one_or_none()
+    assert idx == 1
 
-    engine = create_engine(integration_database_url.replace("+asyncpg", ""))
-    insp = inspect(engine)
-    assert "schedules" in insp.get_table_names()
-    assert "schedule_occurrences" in insp.get_table_names()
-    uqs = {
-        c["name"]
-        for c in insp.get_unique_constraints("schedule_occurrences")
-    }
-    assert "uq_schedule_occurrences_schedule_scheduled_for" in uqs
-    indexes = {i["name"] for i in insp.get_indexes("schedules")}
-    assert "ix_schedules_active_next_run_at" in indexes
+    perm = (
+        await integration_session.execute(
+            text("SELECT code FROM permissions WHERE code = 'schedule.manage'")
+        )
+    ).scalar_one_or_none()
+    assert perm == "schedule.manage"
 
-    with engine.connect() as conn:
-        row = conn.execute(
-            sa.text("SELECT code FROM permissions WHERE code = 'schedule.manage'")
-        ).fetchone()
-        assert row is not None
-    engine.dispose()
+    # Naming convention is ck_%(table_name)s_%(constraint_name)s; Alembic may
+    # persist an extra table prefix when the logical name already includes it.
+    xor_names = (
+        await integration_session.execute(
+            text(
+                "SELECT conname FROM pg_constraint "
+                "WHERE conrelid = 'schedules'::regclass AND contype = 'c' "
+                "AND (conname = 'ck_schedules_target_xor' "
+                "OR conname LIKE '%_ck_schedules_target_xor')"
+            )
+        )
+    ).scalars().all()
+    assert len(xor_names) == 1
 
 
 @pytest.mark.integration

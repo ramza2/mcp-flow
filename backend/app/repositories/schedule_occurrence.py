@@ -15,16 +15,17 @@ from app.models.schedule import ScheduleOccurrence
 _UQ_SCHEDULE_OCCURRENCE = "uq_schedule_occurrences_schedule_scheduled_for"
 
 
-def _constraint_name(exc: IntegrityError) -> str | None:
+def _is_schedule_occurrence_unique_violation(exc: IntegrityError) -> bool:
+    """Match only UNIQUE(schedule_id, scheduled_for); never hide unrelated errors."""
     orig = getattr(exc, "orig", None)
-    if orig is None:
-        return None
-    diag = getattr(orig, "diag", None)
+    diag = getattr(orig, "diag", None) if orig is not None else None
     name = getattr(diag, "constraint_name", None) if diag is not None else None
-    if name:
-        return str(name)
-    name = getattr(orig, "constraint_name", None)
-    return str(name) if name else None
+    if name is None and orig is not None:
+        name = getattr(orig, "constraint_name", None)
+    if name is not None and str(name) == _UQ_SCHEDULE_OCCURRENCE:
+        return True
+    msg = str(orig if orig is not None else exc)
+    return _UQ_SCHEDULE_OCCURRENCE in msg
 
 
 class ScheduleOccurrenceRepository:
@@ -90,6 +91,10 @@ class ScheduleOccurrenceRepository:
         schedule_id: uuid.UUID,
         scheduled_for: datetime,
     ) -> ScheduleOccurrence:
+        existing = await self.get_by_schedule_and_time(schedule_id, scheduled_for)
+        if existing is not None:
+            return existing
+
         occurrence = ScheduleOccurrence(
             schedule_id=schedule_id,
             scheduled_for=scheduled_for,
@@ -102,7 +107,7 @@ class ScheduleOccurrenceRepository:
                 await self._session.refresh(occurrence)
                 return occurrence
         except IntegrityError as exc:
-            if _constraint_name(exc) != _UQ_SCHEDULE_OCCURRENCE:
+            if not _is_schedule_occurrence_unique_violation(exc):
                 raise
             existing = await self.get_by_schedule_and_time(schedule_id, scheduled_for)
             if existing is None:
