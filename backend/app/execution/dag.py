@@ -21,6 +21,7 @@ from app.execution.completion import is_continuable_known_failure, plan_step_for
 from app.execution.loop_runtime import (
     LoopBodyOwnership,
     assert_flat_foreach_runtime_compatible,
+    assert_while_parent_control_state,
     build_loop_body_ownership,
     history_entry_for,
     iteration_step_key,
@@ -549,6 +550,25 @@ def validate_tool_join_dag(
             top_rows=top_rows,
             child_rows=child_rows,
             plan_by_id=plan_by_id,
+        )
+
+    # WHILE parent ↔ predicate_history terminal/control invariants — every
+    # top-level WHILE, including terminal parents with zero children.
+    for top in top_rows:
+        if top.step_type != AuthorableStepType.LOOP.value:
+            continue
+        try:
+            loop_ps = plan_by_id[top.step_key]
+            loop_cfg = LoopStepConfigV1.model_validate(loop_ps.config)
+        except Exception:
+            continue
+        if loop_cfg.mode != LoopMode.WHILE:
+            continue
+        assert_while_parent_control_state(
+            parent=top,
+            plan=plan,
+            steps=steps,
+            cfg=loop_cfg,
         )
 
     # Acyclic + full coverage via Kahn on the scheduling keys.

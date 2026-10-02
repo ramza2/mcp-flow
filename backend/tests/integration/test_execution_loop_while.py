@@ -740,7 +740,7 @@ async def test_g_h_i_duplicate_gate_races(
         iter2 = [s for s in steps if s.parent_step_id == loop.id and s.iteration_no == 2]
         assert len(iter2) == 1
 
-    # I: false-gate race after final iteration — full run to completion once
+    # I: actual concurrent false-gate race after iter1 terminal.
     async with integration_session_factory() as session:
         eid3, lease3, _ = await _materialize_claim(
             session,
@@ -755,24 +755,58 @@ async def test_g_h_i_duplicate_gate_races(
             response_step_ids=["L"],
             worker_id="pg-i",
         )
-    client3 = _ValueClient()
-    outcome3 = await _run(
-        integration_session_factory,
-        execution_id=eid3,
-        lease=lease3,
-        client=client3,
-        worker_id="pg-i",
+    orch3 = ExecutionOrchestrator(
+        session_factory=integration_session_factory,
+        tool_runner=McpToolRunner(
+            session_factory=integration_session_factory,
+            mcp_client=_ValueClient(),
+            secret_resolver_factory=_resolver_factory,
+            lease_seconds=120,
+            result_inline_max_bytes=256_000,
+        ),
     )
-    assert outcome3.reason == "EXECUTION_SUCCEEDED"
+    await orch3._prepare_wave(
+        execution_id=eid3, worker_id="pg-i", lease_token=lease3
+    )
+    async with integration_session_factory() as session:
+        steps = await ExecutionRepository(session).list_steps(eid3)
+        loop = next(s for s in steps if s.step_key == "L")
+        assert loop.status == StepStatus.RUNNING.value
+        b1 = _child(steps, template_id="B", iteration_no=1)
+        b1.status = StepStatus.SUCCEEDED.value
+        b1.finished_at = datetime.now(UTC)
+        # value=1 → candidate2 previous < 1 is false
+        b1.result_inline = {"structured_content": {"value": 1, "ok": True}}
+        b1.lock_version += 1
+        await session.commit()
+        hist = parse_while_predicate_history(loop.resolved_input)
+        assert len(hist["predicate_history"]) == 1
+        assert hist["predicate_history"][0]["result"] is True
+
+    barrier3 = asyncio.Barrier(2)
+
+    async def _false_gate() -> Any:
+        await barrier3.wait()
+        return await orch3._prepare_wave(
+            execution_id=eid3, worker_id="pg-i", lease_token=lease3
+        )
+
+    await asyncio.gather(_false_gate(), _false_gate())
     async with integration_session_factory() as session:
         steps = await ExecutionRepository(session).list_steps(eid3)
         loop = next(s for s in steps if s.step_key == "L")
         hist = parse_while_predicate_history(loop.resolved_input)
-        false_gates = [e for e in hist["predicate_history"] if e["result"] is False]
-        assert len(false_gates) == 1
-        assert false_gates[0]["next_iteration_no"] == 2
+        gate2 = [e for e in hist["predicate_history"] if e["next_iteration_no"] == 2]
+        assert len(gate2) == 1
+        assert gate2[0]["result"] is False
         assert loop.status == StepStatus.SUCCEEDED.value
-        assert len([s for s in steps if s.parent_step_id == loop.id]) == 1
+        assert loop.result_inline == {
+            "mode": "WHILE",
+            "iterations_completed": 1,
+        }
+        assert not any(
+            s.parent_step_id == loop.id and s.iteration_no == 2 for s in steps
+        )
 
 
 @pytest.mark.integration
@@ -941,3 +975,266 @@ async def test_k_mixed_foreach_while(
         }
         assert "previous_iteration" not in (fe.resolved_input or {})
         parse_while_predicate_history(w.resolved_input)
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_l_max_boundary_race(
+    integration_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Race two _prepare_wave at candidate M+1=true — one history entry, no iter3."""
+    async with integration_session_factory() as session:
+        eid, lease, _ = await _materialize_claim(
+            session,
+            step_specs=[
+                _while(
+                    "L",
+                    body_step_ids=["B"],
+                    predicate=_always_true(),
+                    max_iterations=2,
+                    on_error="CONTINUE",
+                ),
+                _tool("B", depends_on=["L"]),
+                _tool(
+                    "D",
+                    depends_on=["L"],
+                    bindings={
+                        "value": {"kind": BindingKind.LITERAL.value, "value": 99}
+                    },
+                ),
+            ],
+            response_step_ids=["L", "D"],
+            worker_id="pg-l",
+        )
+    orch = ExecutionOrchestrator(
+        session_factory=integration_session_factory,
+        tool_runner=McpToolRunner(
+            session_factory=integration_session_factory,
+            mcp_client=_ValueClient(),
+            secret_resolver_factory=_resolver_factory,
+            lease_seconds=120,
+            result_inline_max_bytes=256_000,
+        ),
+    )
+    # Materialize + manually settle iters 1 and 2.
+    await orch._prepare_wave(
+        execution_id=eid, worker_id="pg-l", lease_token=lease
+    )
+    async with integration_session_factory() as session:
+        steps = await ExecutionRepository(session).list_steps(eid)
+        b1 = _child(steps, template_id="B", iteration_no=1)
+        b1.status = StepStatus.SUCCEEDED.value
+        b1.finished_at = datetime.now(UTC)
+        b1.result_inline = {"structured_content": {"value": 1, "ok": True}}
+        b1.lock_version += 1
+        await session.commit()
+    await orch._prepare_wave(
+        execution_id=eid, worker_id="pg-l", lease_token=lease
+    )
+    async with integration_session_factory() as session:
+        steps = await ExecutionRepository(session).list_steps(eid)
+        loop = next(s for s in steps if s.step_key == "L")
+        assert loop.status == StepStatus.RUNNING.value
+        b2 = _child(steps, template_id="B", iteration_no=2)
+        b2.status = StepStatus.SUCCEEDED.value
+        b2.finished_at = datetime.now(UTC)
+        b2.result_inline = {"structured_content": {"value": 2, "ok": True}}
+        b2.lock_version += 1
+        await session.commit()
+        hist = parse_while_predicate_history(loop.resolved_input)
+        assert [e["result"] for e in hist["predicate_history"]] == [True, True]
+
+    barrier = asyncio.Barrier(2)
+
+    async def _once() -> Any:
+        await barrier.wait()
+        return await orch._prepare_wave(
+            execution_id=eid, worker_id="pg-l", lease_token=lease
+        )
+
+    await asyncio.gather(_once(), _once())
+    async with integration_session_factory() as session:
+        steps = await ExecutionRepository(session).list_steps(eid)
+        loop = next(s for s in steps if s.step_key == "L")
+        hist = parse_while_predicate_history(loop.resolved_input)
+        gate3 = [e for e in hist["predicate_history"] if e["next_iteration_no"] == 3]
+        assert len(gate3) == 1
+        assert gate3[0]["result"] is True
+        assert loop.status == StepStatus.FAILED.value
+        assert loop.error_code == LOOP_MAX_ITERATIONS_EXCEEDED
+        assert not any(s.iteration_no == 3 for s in steps)
+
+    # CONTINUE → downstream D still eligible; complete without duplicate MCP.
+    client = _ValueClient()
+    outcome = await _run(
+        integration_session_factory,
+        execution_id=eid,
+        lease=lease,
+        client=client,
+        worker_id="pg-l",
+    )
+    assert outcome.reason == "EXECUTION_PARTIALLY_SUCCEEDED"
+    assert len(client.calls) == 1  # only D (B settled manually)
+    async with integration_session_factory() as session:
+        steps = await ExecutionRepository(session).list_steps(eid)
+        d = next(s for s in steps if s.step_key == "D")
+        assert d.status == StepStatus.SUCCEEDED.value
+        attempts = await ExecutionRepository(session).list_attempts(d.id)
+        assert len(attempts) == 1
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_m_terminal_history_tamper_blocks_downstream(
+    integration_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """SUCCEEDED WHILE with tampered final false gate must block D MCP."""
+    async with integration_session_factory() as session:
+        eid, lease, _ = await _materialize_claim(
+            session,
+            step_specs=[
+                _while(
+                    "L",
+                    body_step_ids=["B"],
+                    predicate=_prev_lt("B", 1),
+                ),
+                _tool("B", depends_on=["L"]),
+                _tool(
+                    "D",
+                    depends_on=["L"],
+                    bindings={
+                        "value": {"kind": BindingKind.LITERAL.value, "value": 42}
+                    },
+                ),
+            ],
+            response_step_ids=["L", "D"],
+            worker_id="pg-m",
+        )
+    orch = ExecutionOrchestrator(
+        session_factory=integration_session_factory,
+        tool_runner=McpToolRunner(
+            session_factory=integration_session_factory,
+            mcp_client=_ValueClient(),
+            secret_resolver_factory=_resolver_factory,
+            lease_seconds=120,
+            result_inline_max_bytes=256_000,
+        ),
+    )
+    await orch._prepare_wave(
+        execution_id=eid, worker_id="pg-m", lease_token=lease
+    )
+    async with integration_session_factory() as session:
+        steps = await ExecutionRepository(session).list_steps(eid)
+        b1 = _child(steps, template_id="B", iteration_no=1)
+        b1.status = StepStatus.SUCCEEDED.value
+        b1.finished_at = datetime.now(UTC)
+        b1.result_inline = {"structured_content": {"value": 1, "ok": True}}
+        b1.lock_version += 1
+        await session.commit()
+    # Finalize LOOP SUCCEEDED with [true, false]
+    await orch._prepare_wave(
+        execution_id=eid, worker_id="pg-m", lease_token=lease
+    )
+    async with integration_session_factory() as session:
+        steps = await ExecutionRepository(session).list_steps(eid)
+        loop = next(s for s in steps if s.step_key == "L")
+        assert loop.status == StepStatus.SUCCEEDED.value
+        hist = parse_while_predicate_history(loop.resolved_input)
+        assert [e["result"] for e in hist["predicate_history"]] == [True, False]
+        # Variant B: false → true while keeping SUCCEEDED
+        entries = list(hist["predicate_history"])
+        entries[-1] = {**entries[-1], "result": True}
+        loop.resolved_input = {"mode": "WHILE", "predicate_history": entries}
+        loop.lock_version += 1
+        await session.commit()
+
+    client = _ValueClient()
+    try:
+        await _run(
+            integration_session_factory,
+            execution_id=eid,
+            lease=lease,
+            client=client,
+            worker_id="pg-m",
+        )
+    except Exception:
+        pass
+    async with integration_session_factory() as session:
+        execution = await ExecutionRepository(session).get(eid)
+        assert execution is not None
+        assert execution.status == ExecutionStatus.FAILED.value
+        assert execution.error_code == "RESOURCE_CONFLICT"
+        assert execution.lease_token is None
+        steps = await ExecutionRepository(session).list_steps(eid)
+        d = next(s for s in steps if s.step_key == "D")
+        attempts = await ExecutionRepository(session).list_attempts(d.id)
+        assert len(attempts) == 0
+        assert d.attempt_count == 0
+    assert len(client.calls) == 0
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_n_previous_lineage_snapshot_drift(
+    integration_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with integration_session_factory() as session:
+        eid, lease, _ = await _materialize_claim(
+            session,
+            step_specs=[
+                _while(
+                    "L",
+                    body_step_ids=["B"],
+                    predicate=_prev_lt("B", 3),
+                ),
+                _tool("B", depends_on=["L"]),
+            ],
+            response_step_ids=["L"],
+            worker_id="pg-n",
+        )
+    client = _ValueClient()
+    runner = McpToolRunner(
+        session_factory=integration_session_factory,
+        mcp_client=client,
+        secret_resolver_factory=_resolver_factory,
+        lease_seconds=120,
+        result_inline_max_bytes=256_000,
+    )
+    orch = ExecutionOrchestrator(
+        session_factory=integration_session_factory, tool_runner=runner
+    )
+    await orch._prepare_wave(
+        execution_id=eid, worker_id="pg-n", lease_token=lease
+    )
+    async with integration_session_factory() as session:
+        steps = await ExecutionRepository(session).list_steps(eid)
+        b1 = _child(steps, template_id="B", iteration_no=1)
+        b1.status = StepStatus.SUCCEEDED.value
+        b1.finished_at = datetime.now(UTC)
+        b1.result_inline = {"structured_content": {"value": 1, "ok": True}}
+        b1.lock_version += 1
+        await session.commit()
+    await orch._prepare_wave(
+        execution_id=eid, worker_id="pg-n", lease_token=lease
+    )
+    async with integration_session_factory() as session:
+        steps = await ExecutionRepository(session).list_steps(eid)
+        b1 = _child(steps, template_id="B", iteration_no=1)
+        snap = dict(b1.step_snapshot)
+        snap["timeout_seconds"] = 4242
+        snap["name"] = "drifted"
+        b1.step_snapshot = snap
+        b1.lock_version += 1
+        await session.commit()
+
+    async with integration_session_factory() as session:
+        steps = await ExecutionRepository(session).list_steps(eid)
+        execution = await ExecutionRepository(session).get(eid)
+        assert execution is not None
+        b2 = _child(steps, template_id="B", iteration_no=2)
+        with pytest.raises(AppError) as exc:
+            assert_tool_step_lineage(execution, b2, steps=steps)
+        assert exc.value.code == "RESOURCE_CONFLICT"
+        attempts = await ExecutionRepository(session).list_attempts(b2.id)
+        assert len(attempts) == 0
+    assert len(client.calls) == 0

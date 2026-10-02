@@ -24,6 +24,8 @@ from app.execution.loop_runtime import (
     LOOP_COLLECTION_TYPE_MISMATCH,
     PLAN_LIMIT_EXCEEDED,
     append_or_replay_while_history,
+    assert_while_child_immutable_lineage,
+    assert_while_top_level_ancestor_lineage,
     build_loop_body_ownership,
     build_previous_iteration_projection,
     build_while_loop_context_projection,
@@ -259,8 +261,8 @@ def build_while_candidate_context(
             parent_step_id=loop_step.id,
             previous_iteration_no=candidate_iteration_no - 1,
             body_step_ids=cfg.body_step_ids,
+            plan=plan,
         )
-    del plan  # Plan identity validated by caller via cfg/snapshot.
     return build_while_loop_context_projection(
         loop_plan_step_id=parent_plan.id,
         iteration_no=candidate_iteration_no,
@@ -298,6 +300,7 @@ def build_while_evidence_object(
     top_level_ids = [
         s.id for s in plan.steps if s.id not in ownership.body_to_loop
     ]
+    plan_by_id = {ps.id: ps for ps in plan.steps}
     by_key = {s.step_key: s for s in steps}
     ancestor_evidence: list[dict[str, Any]] = []
     for step_key in top_level_ids:
@@ -312,6 +315,8 @@ def build_while_evidence_object(
                 ),
                 status_code=409,
             )
+        plan_step = plan_by_id[step_key]
+        assert_while_top_level_ancestor_lineage(row=row, plan_step=plan_step)
         ancestor_evidence.append(
             {
                 "step_key": step_key,
@@ -327,12 +332,13 @@ def build_while_evidence_object(
         previous_evidence: Any = None
     else:
         prev_no = candidate_iteration_no - 1
-        # Completeness enforced via previous_iteration projection builder.
+        # Completeness + exact immutable lineage before hashing.
         build_previous_iteration_projection(
             steps=steps,
             parent_step_id=loop_step.id,
             previous_iteration_no=prev_no,
             body_step_ids=cfg.body_step_ids,
+            plan=plan,
         )
         children = child_instances_for_iteration(
             steps=steps,
@@ -345,6 +351,13 @@ def build_while_evidence_object(
         previous_evidence = []
         for tid in cfg.body_step_ids:
             child = by_template[tid]
+            template = plan_by_id[tid]
+            assert_while_child_immutable_lineage(
+                child=child,
+                parent_step_id=loop_step.id,
+                iteration_no=prev_no,
+                template=template,
+            )
             previous_evidence.append(
                 {
                     "template_id": tid,

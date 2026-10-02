@@ -20,7 +20,12 @@ from app.domain.enums import (
     StepStatus,
 )
 from app.execution.claim import ExecutionClaimService
+from app.execution.dag import validate_tool_join_dag
 from app.execution.lineage import assert_tool_step_lineage
+from app.execution.loop_reconcile import (
+    build_while_evidence_object,
+    revalidate_while_predicate_gate,
+)
 from app.execution.loop_runtime import (
     LOOP_MAX_ITERATIONS_EXCEEDED,
     LOOP_RUNTIME_UNSUPPORTED,
@@ -28,6 +33,7 @@ from app.execution.loop_runtime import (
     PLAN_LIMIT_EXCEEDED,
     append_or_replay_while_history,
     assert_flat_foreach_runtime_compatible,
+    assert_while_parent_control_state,
     build_loop_context_projection,
     build_while_loop_context_projection,
     empty_while_control_evidence,
@@ -1297,4 +1303,398 @@ async def test_predicate_missing_fatal(
             "PREDICATE_EVALUATION_FAILED",
             "PREDICATE_TYPE_MISMATCH",
         }
+    assert len(client.calls) == 0
+
+
+# ---------------------------------------------------------------------------
+# Terminal-history / immutable lineage integrity
+# ---------------------------------------------------------------------------
+
+
+def _digest(n: int = 0) -> str:
+    return f"{n:064x}"[-64:]
+
+
+def test_zero_iteration_terminal_history_tamper() -> None:
+    parent = type(
+        "P",
+        (),
+        {
+            "id": uuid.uuid4(),
+            "step_key": "L",
+            "step_type": AuthorableStepType.LOOP.value,
+            "parent_step_id": None,
+            "status": StepStatus.SUCCEEDED.value,
+            "error_code": None,
+            "result_inline": {"mode": "WHILE", "iterations_completed": 0},
+            "resolved_input": {
+                "mode": "WHILE",
+                "predicate_history": [
+                    {
+                        "next_iteration_no": 1,
+                        "evidence_hash": _digest(1),
+                        "result": False,
+                    }
+                ],
+            },
+            "step_snapshot": None,
+        },
+    )()
+    plan_dict = _plan(
+        [
+            _while_loop("L", body_step_ids=["B"], predicate=_always_false()),
+            _tool("B", depends_on=["L"]),
+        ],
+        uuid.uuid4(),
+        response_step_ids=["L"],
+    )
+    plan = ExecutionPlanV1.model_validate(plan_dict)
+    parent.step_snapshot = next(
+        s.model_dump(mode="json") for s in plan.steps if s.id == "L"
+    )
+    assert_while_parent_control_state(parent=parent, plan=plan, steps=[parent])
+
+    # history=[]
+    parent.resolved_input = {"mode": "WHILE", "predicate_history": []}
+    with pytest.raises(AppError) as e1:
+        assert_while_parent_control_state(parent=parent, plan=plan, steps=[parent])
+    assert e1.value.code == "RESOURCE_CONFLICT"
+
+    # history=[1:true]
+    parent.resolved_input = {
+        "mode": "WHILE",
+        "predicate_history": [
+            {"next_iteration_no": 1, "evidence_hash": _digest(1), "result": True}
+        ],
+    }
+    with pytest.raises(AppError) as e2:
+        assert_while_parent_control_state(parent=parent, plan=plan, steps=[parent])
+    assert e2.value.code == "RESOURCE_CONFLICT"
+
+    # iterations_completed=1 with zero children
+    parent.resolved_input = {
+        "mode": "WHILE",
+        "predicate_history": [
+            {"next_iteration_no": 1, "evidence_hash": _digest(1), "result": False}
+        ],
+    }
+    parent.result_inline = {"mode": "WHILE", "iterations_completed": 1}
+    with pytest.raises(AppError) as e3:
+        assert_while_parent_control_state(parent=parent, plan=plan, steps=[parent])
+    assert e3.value.code == "RESOURCE_CONFLICT"
+
+    # extra gate2
+    parent.result_inline = {"mode": "WHILE", "iterations_completed": 0}
+    parent.resolved_input = {
+        "mode": "WHILE",
+        "predicate_history": [
+            {"next_iteration_no": 1, "evidence_hash": _digest(1), "result": False},
+            {"next_iteration_no": 2, "evidence_hash": _digest(2), "result": False},
+        ],
+    }
+    with pytest.raises(AppError) as e4:
+        assert_while_parent_control_state(parent=parent, plan=plan, steps=[parent])
+    assert e4.value.code == "RESOURCE_CONFLICT"
+
+
+@pytest.mark.asyncio
+async def test_max_iterations_terminal_history_tamper(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_no_side_effects(monkeypatch)
+    async with db_session_factory() as session:
+        seeded = await _seed_executable(session)
+        await session.commit()
+
+    client = _ValueClient()
+    plan = _simple_while_plan(
+        seeded["tool_version_id"],
+        predicate=_always_true(),
+        max_iterations=2,
+    )
+    eid, _ = await _claim_and_run(
+        db_session_factory, plan=plan, seeded=seeded, client=client
+    )
+    async with db_session_factory() as session:
+        steps = await ExecutionRepository(session).list_steps(eid)
+        loop = next(s for s in steps if s.step_key == "L")
+        assert loop.status == StepStatus.FAILED.value
+        assert loop.error_code == LOOP_MAX_ITERATIONS_EXCEEDED
+        plan_obj = ExecutionPlanV1.model_validate(
+            (await ExecutionRepository(session).get(eid)).plan_snapshot
+        )
+        assert_while_parent_control_state(
+            parent=loop, plan=plan_obj, steps=steps
+        )
+
+        # Corrupt: gate3 false instead of true
+        hist = parse_while_predicate_history(loop.resolved_input)
+        bad = dict(loop.resolved_input)
+        entries = list(hist["predicate_history"])
+        entries[-1] = {**entries[-1], "result": False}
+        bad["predicate_history"] = entries
+        loop.resolved_input = bad
+        with pytest.raises(AppError) as exc:
+            assert_while_parent_control_state(
+                parent=loop, plan=plan_obj, steps=steps
+            )
+        assert exc.value.code == "RESOURCE_CONFLICT"
+
+        # Corrupt: missing gate3
+        loop.resolved_input = {
+            "mode": "WHILE",
+            "predicate_history": entries[:2],
+        }
+        with pytest.raises(AppError):
+            assert_while_parent_control_state(
+                parent=loop, plan=plan_obj, steps=steps
+            )
+
+
+@pytest.mark.asyncio
+async def test_succeeded_terminal_history_removed_false_gate(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_no_side_effects(monkeypatch)
+    async with db_session_factory() as session:
+        seeded = await _seed_executable(session)
+        await session.commit()
+
+    plan = _simple_while_plan(
+        seeded["tool_version_id"],
+        predicate=_prev_lt_predicate("B", 1),
+    )
+    eid, _ = await _claim_and_run(
+        db_session_factory,
+        plan=plan,
+        seeded=seeded,
+        client=_ValueClient(),
+    )
+    async with db_session_factory() as session:
+        steps = await ExecutionRepository(session).list_steps(eid)
+        loop = next(s for s in steps if s.step_key == "L")
+        assert loop.status == StepStatus.SUCCEEDED.value
+        plan_obj = ExecutionPlanV1.model_validate(
+            (await ExecutionRepository(session).get(eid)).plan_snapshot
+        )
+        # Valid
+        assert_while_parent_control_state(
+            parent=loop, plan=plan_obj, steps=steps
+        )
+        # Remove final false gate — still SUCCEEDED
+        hist = parse_while_predicate_history(loop.resolved_input)
+        loop.resolved_input = {
+            "mode": "WHILE",
+            "predicate_history": hist["predicate_history"][:1],
+        }
+        with pytest.raises(AppError) as exc:
+            validate_tool_join_dag(plan_obj, steps)
+        assert exc.value.code == "RESOURCE_CONFLICT"
+        # false → true while remaining SUCCEEDED
+        loop.resolved_input = {
+            "mode": "WHILE",
+            "predicate_history": [
+                hist["predicate_history"][0],
+                {
+                    **hist["predicate_history"][1],
+                    "result": True,
+                },
+            ],
+        }
+        with pytest.raises(AppError) as exc2:
+            assert_while_parent_control_state(
+                parent=loop, plan=plan_obj, steps=steps
+            )
+        assert exc2.value.code == "RESOURCE_CONFLICT"
+
+
+@pytest.mark.asyncio
+async def test_top_level_ancestor_snapshot_drift_fail_closed(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_no_side_effects(monkeypatch)
+    async with db_session_factory() as session:
+        seeded = await _seed_executable(session)
+        await session.commit()
+
+    # Upstream A TOOL feeds WHILE predicate; then body B.
+    pred = {
+        "op": "or",
+        "children": [
+            {"op": "is_null", "operand": _lc("/previous_iteration")},
+            {
+                "op": "lt",
+                "left": _lc(
+                    "/previous_iteration/steps/B/result_inline"
+                    "/structured_content/value"
+                ),
+                "right": {"kind": BindingKind.LITERAL.value, "value": 1},
+            },
+        ],
+    }
+    # Also depend on ancestor via STEP_OUTPUT in predicate so evidence includes A.
+    pred_with_a = {
+        "op": "and",
+        "children": [
+            {
+                "op": "eq",
+                "left": {
+                    "kind": BindingKind.STEP_OUTPUT.value,
+                    "step_id": "A",
+                    "path": "/structured_content/value",
+                },
+                "right": {"kind": BindingKind.LITERAL.value, "value": 7},
+            },
+            pred,
+        ],
+    }
+    plan = _plan(
+        [
+            _tool(
+                "A",
+                bindings={
+                    "value": {"kind": BindingKind.LITERAL.value, "value": 7}
+                },
+            ),
+            _while_loop(
+                "L",
+                body_step_ids=["B"],
+                predicate=pred_with_a,
+                depends_on=["A"],
+                max_iterations=3,
+            ),
+            _tool("B", depends_on=["L"], bindings={"value": _lc("/iteration_no")}),
+        ],
+        seeded["tool_version_id"],
+        response_step_ids=["L"],
+    )
+    async with db_session_factory() as session:
+        eid = await _materialize_queued(
+            session, plan_snapshot=plan, seeded=seeded, input_snapshot={}
+        )
+        claim = await ExecutionClaimService(session, lease_seconds=120).claim(
+            execution_id=eid, worker_id="w-anc"
+        )
+        await session.commit()
+        lease = claim.lease_token
+    client = _ValueClient()
+    runner = McpToolRunner(
+        session_factory=db_session_factory,
+        mcp_client=client,
+        secret_resolver_factory=_resolver_factory,
+        lease_seconds=120,
+        result_inline_max_bytes=256_000,
+    )
+    # Full run to SUCCEEDED (1 iteration: previous null → true, then value=1 → stop)
+    await runner.run_claimed_execution(
+        execution_id=eid, worker_id="w-anc", lease_token=lease
+    )
+    async with db_session_factory() as session:
+        steps = await ExecutionRepository(session).list_steps(eid)
+        loop = next(s for s in steps if s.step_key == "L")
+        # Re-open as RUNNING-like gate rebuild: mutate A snapshot after pin
+        a = next(s for s in steps if s.step_key == "A")
+        snap = dict(a.step_snapshot)
+        snap["timeout_seconds"] = 999
+        a.step_snapshot = snap
+        a.lock_version += 1
+        execution = await ExecutionRepository(session).get(eid)
+        plan_obj = ExecutionPlanV1.model_validate(execution.plan_snapshot)
+        await session.commit()
+
+    async with db_session_factory() as session:
+        steps = await ExecutionRepository(session).list_steps(eid)
+        loop = next(s for s in steps if s.step_key == "L")
+        execution = await ExecutionRepository(session).get(eid)
+        plan_obj = ExecutionPlanV1.model_validate(execution.plan_snapshot)
+        from app.schemas.execution_plan import LoopStepConfigV1
+
+        cfg = LoopStepConfigV1.model_validate(
+            next(s for s in plan_obj.steps if s.id == "L").config
+        )
+        with pytest.raises(AppError) as exc:
+            build_while_evidence_object(
+                plan=plan_obj,
+                execution=execution,
+                loop_step=loop,
+                cfg=cfg,
+                steps=steps,
+                candidate_iteration_no=1,
+            )
+        assert exc.value.code == "RESOURCE_CONFLICT"
+
+
+@pytest.mark.asyncio
+async def test_previous_iteration_snapshot_drift_fail_closed(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_no_side_effects(monkeypatch)
+    async with db_session_factory() as session:
+        seeded = await _seed_executable(session)
+        await session.commit()
+
+    plan = _simple_while_plan(
+        seeded["tool_version_id"],
+        predicate=_prev_lt_predicate("B", 3),
+    )
+    async with db_session_factory() as session:
+        eid = await _materialize_queued(
+            session, plan_snapshot=plan, seeded=seeded, input_snapshot={}
+        )
+        claim = await ExecutionClaimService(session, lease_seconds=120).claim(
+            execution_id=eid, worker_id="w-prev"
+        )
+        await session.commit()
+        lease = claim.lease_token
+    client = _ValueClient()
+    runner = McpToolRunner(
+        session_factory=db_session_factory,
+        mcp_client=client,
+        secret_resolver_factory=_resolver_factory,
+        lease_seconds=120,
+        result_inline_max_bytes=256_000,
+    )
+    orch = ExecutionOrchestrator(
+        session_factory=db_session_factory, tool_runner=runner
+    )
+    await orch._prepare_wave(
+        execution_id=eid, worker_id="w-prev", lease_token=lease
+    )
+    async with db_session_factory() as session:
+        steps = await ExecutionRepository(session).list_steps(eid)
+        b1 = _child_by_template(steps, template_id="B", iteration_no=1)
+        b1.status = StepStatus.SUCCEEDED.value
+        b1.finished_at = datetime.now(UTC)
+        b1.result_inline = {"structured_content": {"value": 1, "ok": True}}
+        b1.lock_version += 1
+        await session.commit()
+    await orch._prepare_wave(
+        execution_id=eid, worker_id="w-prev", lease_token=lease
+    )
+    # Mutate previous child snapshot (keep template id / result / status).
+    async with db_session_factory() as session:
+        steps = await ExecutionRepository(session).list_steps(eid)
+        b1 = _child_by_template(steps, template_id="B", iteration_no=1)
+        snap = dict(b1.step_snapshot)
+        snap["name"] = "tampered-name"
+        snap["timeout_seconds"] = 12345
+        b1.step_snapshot = snap
+        b1.lock_version += 1
+        await session.commit()
+
+    async with db_session_factory() as session:
+        steps = await ExecutionRepository(session).list_steps(eid)
+        execution = await ExecutionRepository(session).get(eid)
+        assert execution is not None
+        b2 = _child_by_template(steps, template_id="B", iteration_no=2)
+        with pytest.raises(AppError) as exc:
+            assert_tool_step_lineage(execution, b2, steps=steps)
+        assert exc.value.code == "RESOURCE_CONFLICT"
+        assert b2.attempt_count == 0
+        attempts = await ExecutionRepository(session).list_attempts(b2.id)
+        assert len(attempts) == 0
     assert len(client.calls) == 0

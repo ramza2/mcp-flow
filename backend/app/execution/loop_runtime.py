@@ -371,16 +371,129 @@ def result_inline_hash(result_inline: Any) -> str:
     return compute_canonical_json_hash(result_inline)
 
 
+_ITERATION_TERMINAL = frozenset(
+    {
+        "SUCCEEDED",
+        "FAILED",
+        "TIMED_OUT",
+        "SKIPPED",
+        "CANCELLED",
+        "UNKNOWN_OUTCOME",
+    }
+)
+
+
+def assert_while_child_immutable_lineage(
+    *,
+    child: ExecutionStep,
+    parent_step_id: uuid.UUID,
+    iteration_no: int,
+    template: ExecutionPlanStep,
+) -> None:
+    """Prove a WHILE body child is exact immutable runtime evidence."""
+    if child.parent_step_id != parent_step_id:
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message="WHILE child parent_step_id lineage mismatch.",
+            status_code=409,
+        )
+    if child.iteration_no != iteration_no:
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message=(
+                f"WHILE child iteration_no={child.iteration_no} != "
+                f"expected {iteration_no}."
+            ),
+            status_code=409,
+        )
+    if child.step_snapshot != template.model_dump(mode="json"):
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message=(
+                f"WHILE child template {template.id!r} step_snapshot is not an "
+                "exact Plan Step projection."
+            ),
+            status_code=409,
+        )
+    if child.step_type != template.type.value:
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message=(
+                f"WHILE child template {template.id!r} step_type drift."
+            ),
+            status_code=409,
+        )
+    expected_key = iteration_step_key(
+        parent_step_id=parent_step_id,
+        iteration_no=iteration_no,
+        template_step_id=template.id,
+    )
+    if child.step_key != expected_key:
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message=(
+                f"WHILE child key drift for template {template.id!r}: "
+                f"{child.step_key!r} != {expected_key!r}."
+            ),
+            status_code=409,
+        )
+
+
+def assert_while_top_level_ancestor_lineage(
+    *,
+    row: ExecutionStep,
+    plan_step: ExecutionPlanStep,
+) -> None:
+    """Prove a top-level ancestor row is exact immutable Plan evidence."""
+    if row.parent_step_id is not None:
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message=(
+                f"WHILE evidence ancestor {plan_step.id!r} is not top-level."
+            ),
+            status_code=409,
+        )
+    if row.step_key != plan_step.id:
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message=(
+                f"WHILE evidence ancestor step_key {row.step_key!r} != "
+                f"Plan id {plan_step.id!r}."
+            ),
+            status_code=409,
+        )
+    if row.step_type != plan_step.type.value:
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message=(
+                f"WHILE evidence ancestor {plan_step.id!r} step_type drift."
+            ),
+            status_code=409,
+        )
+    if row.step_snapshot != plan_step.model_dump(mode="json"):
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message=(
+                f"WHILE evidence ancestor {plan_step.id!r} step_snapshot is "
+                "not an exact Plan Step projection."
+            ),
+            status_code=409,
+        )
+
+
 def build_previous_iteration_projection(
     *,
     steps: Sequence[ExecutionStep],
     parent_step_id: uuid.UUID,
     previous_iteration_no: int,
     body_step_ids: Sequence[str],
+    plan: ExecutionPlanV1 | None = None,
 ) -> dict[str, Any]:
     """Build complete previous_iteration projection for candidate N > 1.
 
     Requires exact body template set, all children terminal, immutable lineage.
+    When ``plan`` is provided, each child ``step_snapshot`` must equal the
+    immutable body Plan Step JSON.
     """
     if previous_iteration_no < 1:
         raise AppError(
@@ -424,16 +537,7 @@ def build_previous_iteration_projection(
             ),
             status_code=409,
         )
-    _ITERATION_TERMINAL = frozenset(
-        {
-            "SUCCEEDED",
-            "FAILED",
-            "TIMED_OUT",
-            "SKIPPED",
-            "CANCELLED",
-            "UNKNOWN_OUTCOME",
-        }
-    )
+    plan_by_id = {ps.id: ps for ps in plan.steps} if plan is not None else None
     step_map: dict[str, dict[str, Any]] = {}
     for tid in body_step_ids:
         child = by_template[tid]
@@ -446,24 +550,449 @@ def build_previous_iteration_projection(
                 ),
                 status_code=409,
             )
-        expected_key = iteration_step_key(
-            parent_step_id=parent_step_id,
-            iteration_no=previous_iteration_no,
-            template_step_id=tid,
-        )
-        if child.step_key != expected_key:
-            raise AppError(
-                code="RESOURCE_CONFLICT",
-                message=(
-                    f"WHILE previous iteration child key drift for {tid!r}."
-                ),
-                status_code=409,
+        if plan_by_id is not None:
+            template = plan_by_id.get(tid)
+            if template is None:
+                raise AppError(
+                    code="RESOURCE_CONFLICT",
+                    message=f"WHILE body template {tid!r} missing from Plan.",
+                    status_code=409,
+                )
+            assert_while_child_immutable_lineage(
+                child=child,
+                parent_step_id=parent_step_id,
+                iteration_no=previous_iteration_no,
+                template=template,
             )
+        else:
+            expected_key = iteration_step_key(
+                parent_step_id=parent_step_id,
+                iteration_no=previous_iteration_no,
+                template_step_id=tid,
+            )
+            if child.step_key != expected_key:
+                raise AppError(
+                    code="RESOURCE_CONFLICT",
+                    message=(
+                        f"WHILE previous iteration child key drift for {tid!r}."
+                    ),
+                    status_code=409,
+                )
         step_map[tid] = previous_iteration_step_projection(child)
     return {
         "iteration_no": previous_iteration_no,
         "steps": step_map,
     }
+
+
+def _assert_iteration_set_complete_terminal(
+    *,
+    steps: Sequence[ExecutionStep],
+    parent: ExecutionStep,
+    iteration_no: int,
+    body_step_ids: Sequence[str],
+    plan: ExecutionPlanV1,
+) -> None:
+    plan_by_id = {ps.id: ps for ps in plan.steps}
+    children = child_instances_for_iteration(
+        steps=steps,
+        parent_step_id=parent.id,
+        iteration_no=iteration_no,
+    )
+    if len(children) != len(body_step_ids):
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message=(
+                f"WHILE {parent.step_key!r} iteration {iteration_no} incomplete "
+                f"({len(children)}/{len(body_step_ids)})."
+            ),
+            status_code=409,
+        )
+    by_template = {template_id_from_step_snapshot(c): c for c in children}
+    if set(by_template) != set(body_step_ids):
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message=(
+                f"WHILE {parent.step_key!r} iteration {iteration_no} template "
+                "set mismatch."
+            ),
+            status_code=409,
+        )
+    for tid in body_step_ids:
+        child = by_template[tid]
+        template = plan_by_id[tid]
+        assert_while_child_immutable_lineage(
+            child=child,
+            parent_step_id=parent.id,
+            iteration_no=iteration_no,
+            template=template,
+        )
+        if child.status not in _ITERATION_TERMINAL:
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message=(
+                    f"WHILE {parent.step_key!r} iteration {iteration_no} "
+                    f"template {tid!r} is nonterminal."
+                ),
+                status_code=409,
+            )
+
+
+def assert_while_parent_control_state(
+    *,
+    parent: ExecutionStep,
+    plan: ExecutionPlanV1,
+    steps: Sequence[ExecutionStep],
+    cfg: LoopStepConfigV1 | None = None,
+) -> None:
+    """Canonical WHILE parent ↔ predicate_history durable control invariant.
+
+    Invoked from runtime DAG validation for every top-level WHILE LOOP,
+    including terminal parents with or without child rows.
+    """
+    from app.domain.enums import StepStatus
+
+    if parent.parent_step_id is not None:
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message="WHILE control state requires a top-level LOOP parent.",
+            status_code=409,
+        )
+    if parent.step_type != AuthorableStepType.LOOP.value:
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message="WHILE control state requires step_type LOOP.",
+            status_code=409,
+        )
+    try:
+        parent_plan = ExecutionPlanStep.model_validate(parent.step_snapshot)
+        loop_cfg = cfg or LoopStepConfigV1.model_validate(parent_plan.config)
+    except Exception as exc:
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message=f"WHILE {parent.step_key!r} config/snapshot invalid.",
+            status_code=409,
+        ) from exc
+    if loop_cfg.mode != LoopMode.WHILE:
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message="assert_while_parent_control_state requires WHILE mode.",
+            status_code=409,
+        )
+    expected_parent = next(
+        (ps for ps in plan.steps if ps.id == parent.step_key), None
+    )
+    if expected_parent is None or (
+        expected_parent.model_dump(mode="json") != parent.step_snapshot
+    ):
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message=(
+                f"WHILE {parent.step_key!r} parent snapshot is not an exact "
+                "Plan Step projection."
+            ),
+            status_code=409,
+        )
+
+    children = [s for s in steps if s.parent_step_id == parent.id]
+    max_n = max_materialized_iteration(
+        steps=children, parent_step_id=parent.id
+    )
+    body_ids = tuple(loop_cfg.body_step_ids)
+    status = parent.status
+
+    # Step.when SKIPPED: no children, no predicate history.
+    if (
+        status == StepStatus.SKIPPED.value
+        and parent.error_code == "STEP_WHEN_FALSE"
+    ):
+        if children:
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message=(
+                    f"WHILE {parent.step_key!r} SKIPPED/STEP_WHEN_FALSE must "
+                    "have no children."
+                ),
+                status_code=409,
+            )
+        if parent.resolved_input is not None:
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message=(
+                    f"WHILE {parent.step_key!r} SKIPPED/STEP_WHEN_FALSE must "
+                    "have no predicate history."
+                ),
+                status_code=409,
+            )
+        return
+
+    if parent.resolved_input is None:
+        # Only brief PENDING before start may lack control evidence.
+        if status == StepStatus.PENDING.value and not children:
+            return
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message=(
+                f"WHILE {parent.step_key!r} missing resolved_input control "
+                f"evidence in status {status!r}."
+            ),
+            status_code=409,
+        )
+
+    control = parse_while_predicate_history(parent.resolved_input)
+    history = control["predicate_history"]
+
+    if status == StepStatus.SUCCEEDED.value:
+        # Require complete terminal iters 1..N, true gates 1..N, false N+1.
+        if max_n > 0:
+            present = {c.iteration_no for c in children if c.iteration_no}
+            if present != set(range(1, max_n + 1)):
+                raise AppError(
+                    code="RESOURCE_CONFLICT",
+                    message=(
+                        f"WHILE {parent.step_key!r} SUCCEEDED iterations are "
+                        "not contiguous."
+                    ),
+                    status_code=409,
+                )
+            for n in range(1, max_n + 1):
+                _assert_iteration_set_complete_terminal(
+                    steps=steps,
+                    parent=parent,
+                    iteration_no=n,
+                    body_step_ids=body_ids,
+                    plan=plan,
+                )
+                entry = history_entry_for(history, next_iteration_no=n)
+                if entry is None or entry["result"] is not True:
+                    raise AppError(
+                        code="RESOURCE_CONFLICT",
+                        message=(
+                            f"WHILE {parent.step_key!r} SUCCEEDED requires "
+                            f"true gate for iteration {n}."
+                        ),
+                        status_code=409,
+                    )
+        if len(history) != max_n + 1:
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message=(
+                    f"WHILE {parent.step_key!r} SUCCEEDED history length "
+                    f"{len(history)} != iterations_completed+1 ({max_n + 1})."
+                ),
+                status_code=409,
+            )
+        final = history_entry_for(history, next_iteration_no=max_n + 1)
+        if final is None or final["result"] is not False:
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message=(
+                    f"WHILE {parent.step_key!r} SUCCEEDED requires final false "
+                    f"gate at candidate {max_n + 1}."
+                ),
+                status_code=409,
+            )
+        expected_result = {
+            "mode": LoopMode.WHILE.value,
+            "iterations_completed": max_n,
+        }
+        if parent.result_inline != expected_result:
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message=(
+                    f"WHILE {parent.step_key!r} SUCCEEDED result_inline must "
+                    f"be exactly {expected_result!r}."
+                ),
+                status_code=409,
+            )
+        if parent.error_code is not None:
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message=(
+                    f"WHILE {parent.step_key!r} SUCCEEDED must have "
+                    "error_code null."
+                ),
+                status_code=409,
+            )
+        return
+
+    if (
+        status == StepStatus.FAILED.value
+        and parent.error_code == LOOP_MAX_ITERATIONS_EXCEEDED
+    ):
+        m = loop_cfg.max_iterations
+        if max_n != m:
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message=(
+                    f"WHILE {parent.step_key!r} LOOP_MAX_ITERATIONS_EXCEEDED "
+                    f"requires exactly {m} materialized iterations "
+                    f"(got {max_n})."
+                ),
+                status_code=409,
+            )
+        for n in range(1, m + 1):
+            _assert_iteration_set_complete_terminal(
+                steps=steps,
+                parent=parent,
+                iteration_no=n,
+                body_step_ids=body_ids,
+                plan=plan,
+            )
+            entry = history_entry_for(history, next_iteration_no=n)
+            if entry is None or entry["result"] is not True:
+                raise AppError(
+                    code="RESOURCE_CONFLICT",
+                    message=(
+                        f"WHILE {parent.step_key!r} "
+                        "LOOP_MAX_ITERATIONS_EXCEEDED requires true gate "
+                        f"for iteration {n}."
+                    ),
+                    status_code=409,
+                )
+        if len(history) != m + 1:
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message=(
+                    f"WHILE {parent.step_key!r} "
+                    "LOOP_MAX_ITERATIONS_EXCEEDED history length "
+                    f"{len(history)} != max_iterations+1 ({m + 1})."
+                ),
+                status_code=409,
+            )
+        final = history_entry_for(history, next_iteration_no=m + 1)
+        if final is None or final["result"] is not True:
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message=(
+                    f"WHILE {parent.step_key!r} "
+                    "LOOP_MAX_ITERATIONS_EXCEEDED requires true gate at "
+                    f"candidate {m + 1}."
+                ),
+                status_code=409,
+            )
+        if any(c.iteration_no == m + 1 for c in children):
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message=(
+                    f"WHILE {parent.step_key!r} "
+                    "LOOP_MAX_ITERATIONS_EXCEEDED must not materialize "
+                    f"iteration {m + 1}."
+                ),
+                status_code=409,
+            )
+        return
+
+    if status == StepStatus.RUNNING.value:
+        if max_n < 1:
+            # Durable TX: gate append + materialize are same reconcile pass.
+            # Only brief empty history before first gate is valid.
+            if history:
+                raise AppError(
+                    code="RESOURCE_CONFLICT",
+                    message=(
+                        f"WHILE {parent.step_key!r} RUNNING with no children "
+                        "must have empty predicate_history."
+                    ),
+                    status_code=409,
+                )
+            return
+        # Children 1..N present.
+        present = {c.iteration_no for c in children if c.iteration_no}
+        if present != set(range(1, max_n + 1)):
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message=(
+                    f"WHILE {parent.step_key!r} RUNNING iterations are not "
+                    "contiguous."
+                ),
+                status_code=409,
+            )
+        for n in range(1, max_n + 1):
+            entry = history_entry_for(history, next_iteration_no=n)
+            if entry is None or entry["result"] is not True:
+                raise AppError(
+                    code="RESOURCE_CONFLICT",
+                    message=(
+                        f"WHILE {parent.step_key!r} RUNNING requires true "
+                        f"gate for materialized iteration {n}."
+                    ),
+                    status_code=409,
+                )
+        # No false gate at or before N.
+        for entry in history:
+            n = int(entry["next_iteration_no"])
+            if n <= max_n and entry["result"] is False:
+                raise AppError(
+                    code="RESOURCE_CONFLICT",
+                    message=(
+                        f"WHILE {parent.step_key!r} RUNNING has false gate "
+                        f"at or before iteration {max_n}."
+                    ),
+                    status_code=409,
+                )
+        nxt = history_entry_for(history, next_iteration_no=max_n + 1)
+        if nxt is not None:
+            if nxt["result"] is False:
+                raise AppError(
+                    code="RESOURCE_CONFLICT",
+                    message=(
+                        f"WHILE {parent.step_key!r} RUNNING cannot retain a "
+                        f"false gate at candidate {max_n + 1}."
+                    ),
+                    status_code=409,
+                )
+            # Durable TX: true gate N+1 implies iteration N+1 rows exist.
+            if max_n + 1 not in present:
+                raise AppError(
+                    code="RESOURCE_CONFLICT",
+                    message=(
+                        f"WHILE {parent.step_key!r} RUNNING has true gate "
+                        f"{max_n + 1} without iteration rows."
+                    ),
+                    status_code=409,
+                )
+        # No history beyond max_n+1 while still RUNNING without those iters.
+        if len(history) > max_n + 1:
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message=(
+                    f"WHILE {parent.step_key!r} RUNNING history extends past "
+                    f"candidate {max_n + 1}."
+                ),
+                status_code=409,
+            )
+        return
+
+    if status == StepStatus.TIMED_OUT.value and parent.error_code == LOOP_TIMEOUT:
+        # History may contain only already-evaluated true gates for actual
+        # materialized iterations. No future candidate after timeout.
+        if max_n > 0:
+            for n in range(1, max_n + 1):
+                entry = history_entry_for(history, next_iteration_no=n)
+                if entry is None or entry["result"] is not True:
+                    raise AppError(
+                        code="RESOURCE_CONFLICT",
+                        message=(
+                            f"WHILE {parent.step_key!r} TIMED_OUT requires "
+                            f"true gate for materialized iteration {n}."
+                        ),
+                        status_code=409,
+                    )
+        if len(history) > max_n:
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message=(
+                    f"WHILE {parent.step_key!r} TIMED_OUT must not retain a "
+                    "candidate history entry after timeout."
+                ),
+                status_code=409,
+            )
+        return
+
+    # Other FAILED / CANCELLED / etc.: do not over-constrain; history shape
+    # already validated by parse_while_predicate_history when present.
+    return
 
 
 def hash_while_predicate_evidence(evidence: Mapping[str, Any]) -> str:

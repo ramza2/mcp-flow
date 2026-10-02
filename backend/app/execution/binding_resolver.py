@@ -473,6 +473,7 @@ class RuntimeBindingResolver:
                 loop_cfg=loop_cfg,
                 by_key=by_key,
                 iteration_no=owning_step.iteration_no,
+                plan=plan,
             )
         else:
             projection = self._build_foreach_body_context(
@@ -509,6 +510,7 @@ class RuntimeBindingResolver:
         loop_cfg: LoopStepConfigV1,
         by_key: dict[str, ExecutionStep],
         iteration_no: int,
+        plan: ExecutionPlanV1,
     ) -> dict[str, Any]:
         if iteration_no == 1:
             previous: dict[str, Any] | None = None
@@ -518,6 +520,7 @@ class RuntimeBindingResolver:
                 parent_step_id=parent.id,
                 previous_iteration_no=iteration_no - 1,
                 body_step_ids=loop_cfg.body_step_ids,
+                plan=plan,
             )
         return build_while_loop_context_projection(
             loop_plan_step_id=parent_plan_step.id,
