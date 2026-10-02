@@ -305,6 +305,8 @@ Plan v1 authoring Step Type은 `TOOL`, `CONDITION`, `JOIN`, `APPROVAL`, `LOOP`�
 | ID | 요구사항 | 우선순위 | 수용기준 |
 |---|---|---:|---|
 | `REQ-SCH-001` | AgentVersion 또는 Published WorkflowVersion을 예약한다. | Must | occurrence와 Execution 연결. |
+
+**Registry foundation (현재 slice):** `schedule.manage`로 소유자 범위 CRUD·activate/pause/resume·occurrence 조회까지 제공한다. Scheduler trigger/Execution enqueue는 후속 slice이다. 생성 기본 상태는 `PAUSED`, `target_id`는 명시 Version ID pin.
 | `REQ-SCH-002` | timezone·시작/종료·반복·입력을 명시한다. | Must | Server timezone 비의존. |
 | `REQ-SCH-003` | 생성/변경 시 version·input·권한을 검증한다. | Must | 무효 예약 활성화 차단. |
 | `REQ-SCH-004` | 활성·일시정지·재개·완료를 지원한다. | Must | pause 중 신규 실행 없음. |

@@ -29,6 +29,7 @@ from app.models.outbox import OutboxEvent
 from app.models.parameter_build import ParameterBuildRun
 from app.models.plan_generation import PlanGenerationRun, PlanGenerationToolRef
 from app.models.plan_validation import PlanValidationRun
+from app.models.schedule import Schedule, ScheduleOccurrence
 from app.models.secret import SecretRecord
 from app.models.session import Session
 from app.models.tool_selection import (
@@ -54,6 +55,8 @@ __all__ = [
     "ExecutionStep",
     "StepAttempt",
     "ToolCall",
+    "Schedule",
+    "ScheduleOccurrence",
     "SecretRecord",
     "EmbeddingProfile",
     "LLMProfile",

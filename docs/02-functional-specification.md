@@ -811,11 +811,23 @@ WORKFLOW_VERSION
 
 논리 Resource의 “최신 버전”을 실행시점에 자동 선택하지 않는다.
 
+생성 시 `schedule_type`/`schedule_expression`/`timezone`을 검증하고, Workflow target은 `workflow.execute` + WORKFLOW ResourceGrant 및 Plan input(`SECRET_REF` 정규화)을 검증한다. 신규 Schedule 기본 상태는 `PAUSED`, `next_run_at`은 null.
+
+표현식 contract (registry slice):
+
+```text
+CRON   — exactly 5 fields; Schedule v1 grammar digits/*/,-,/ only (no @macros, L, #, ?, names); croniter validates standard fields; Schedule.timezone DST (fold=0, spring-forward skip)
+ONCE   — local YYYY-MM-DDTHH:MM:SS (Z/offset 금지); nonexistent spring-forward wall time rejected; ambiguous fold=0 → UTC
+INTERVAL — ISO-8601 P…D T…H/M/S only, start_at anchor (activate 시 unset이면 now); overflow → VALIDATION_ERROR
+```
+
 ## FNC-SCH-002. Schedule lifecycle
 
 ```text
 ACTIVE PAUSED COMPLETED ERROR
 ```
+
+`ACTIVE`는 name/description만 PATCH 가능. `PAUSED`는 전체 config PATCH 가능하며 config 변경 시 `next_run_at`을 null로 재설정한다. `pause`는 `next_run_at`을 보존하고, `resume`은 overdue `next_run_at`을 보존(null일 때만 재계산). activate/resume 시 target Version·권한을 재검증한다.
 
 ## FNC-SCH-003. Occurrence
 

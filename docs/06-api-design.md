@@ -1048,17 +1048,24 @@ PostgreSQL durable `execution_events`를 기준으로 누락 event를 재전송�
 
 ## 17. Schedule API
 
+**Registry foundation slice:** 모든 route는 Session 인증 + `schedule.manage` + owner isolation(타 owner 404). `POST /trigger` 및 Scheduler worker enqueue는 **미구현**(후속).
+
 ```text
 GET   /schedules
 POST  /schedules
 GET   /schedules/{schedule_id}
-PATCH /schedules/{schedule_id}
+PATCH /schedules/{schedule_id}          (If-Match 또는 body.lock_version 필수)
 POST  /schedules/{schedule_id}/activate
 POST  /schedules/{schedule_id}/pause
 POST  /schedules/{schedule_id}/resume
-POST  /schedules/{schedule_id}/trigger
 GET   /schedules/{schedule_id}/occurrences
 ```
+
+`POST` 생성 기본값: `status=PAUSED`, `next_run_at=null`, `overlap_policy=SKIP`, `misfire_policy=SKIP`, `max_catch_up=1`.
+
+Response `target_id`는 XOR FK(`agent_version_id` | `workflow_version_id`)의 단일 UUID projection.
+
+Expression API contract는 FNC-SCH-001과 동일(CRON 5-field numeric grammar / ONCE local / INTERVAL ISO subset).
 
 생성 예:
 

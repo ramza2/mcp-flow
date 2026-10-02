@@ -24,6 +24,10 @@ _BOOTSTRAP_META: dict[str, tuple[str, str]] = {
     "execution.cancel": ("Execution Cancel", "Cancel running Executions."),
     "approval.decide": ("Approval Decide", "Approve or reject pending Approvals."),
     "audit.read": ("Audit Read", "Read audit records."),
+    "schedule.manage": (
+        "Schedule Manage",
+        "Create/read/update/activate/pause/resume schedules owned by the actor.",
+    ),
 }
 
 
