@@ -272,6 +272,12 @@ class ScheduleStatus(StrEnum):
     ERROR = "ERROR"
 
 
+class ScheduleType(StrEnum):
+    CRON = "CRON"
+    ONCE = "ONCE"
+    INTERVAL = "INTERVAL"
+
+
 class OccurrenceStatus(StrEnum):
     PLANNED = "PLANNED"
     SKIPPED = "SKIPPED"
@@ -485,4 +491,5 @@ BOOTSTRAP_PERMISSION_CODES: tuple[str, ...] = (
     "execution.cancel",
     "approval.decide",
     "audit.read",
+    "schedule.manage",
 )

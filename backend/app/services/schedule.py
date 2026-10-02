@@ -488,6 +488,8 @@ class ScheduleService:
         self, schedule_id: uuid.UUID, *, owner_id: uuid.UUID
     ) -> Schedule:
         schedule = await self._require_owned(schedule_id, owner_id)
+        if schedule.status == ScheduleStatus.ACTIVE.value:
+            return schedule
         if schedule.status != ScheduleStatus.PAUSED.value:
             raise AppError(
                 code="RESOURCE_CONFLICT",
@@ -500,9 +502,7 @@ class ScheduleService:
         if schedule.schedule_type == ScheduleType.INTERVAL.value and start_at is None:
             start_at = now
 
-        agent_version_id = schedule.agent_version_id
-        workflow_version_id = schedule.workflow_version_id
-        target_id = agent_version_id or workflow_version_id
+        target_id = schedule.agent_version_id or schedule.workflow_version_id
         if target_id is None:
             raise AppError(
                 code="VALIDATION_ERROR",
@@ -515,6 +515,12 @@ class ScheduleService:
             requester_id=owner_id,
             inputs=dict(schedule.input_template or {}),
         )
+        validate_schedule_expression(
+            schedule.schedule_type,
+            schedule.schedule_expression,
+            schedule.timezone,
+        )
+        self._assert_window(start_at, schedule.end_at)
 
         next_run = self._compute_next_run(
             schedule_type=schedule.schedule_type,
@@ -529,6 +535,15 @@ class ScheduleService:
                 code="SCHEDULE_TIME_IN_PAST",
                 message="ONCE schedule time is in the past.",
                 status_code=status.HTTP_409_CONFLICT,
+            )
+        if (
+            schedule.schedule_type != ScheduleType.ONCE.value
+            and next_run is None
+        ):
+            raise AppError(
+                code="VALIDATION_ERROR",
+                message="No future occurrence within schedule window.",
+                status_code=status.HTTP_400_BAD_REQUEST,
             )
 
         updated = await self._schedules.update_atomic(
@@ -547,12 +562,15 @@ class ScheduleService:
 
     async def pause(self, schedule_id: uuid.UUID, *, owner_id: uuid.UUID) -> Schedule:
         schedule = await self._require_owned(schedule_id, owner_id)
+        if schedule.status == ScheduleStatus.PAUSED.value:
+            return schedule
         if schedule.status != ScheduleStatus.ACTIVE.value:
             raise AppError(
                 code="RESOURCE_CONFLICT",
                 message="Only ACTIVE Schedule can be paused.",
                 status_code=status.HTTP_409_CONFLICT,
             )
+        # Preserve next_run_at for future misfire decisions.
         updated = await self._schedules.update_atomic(
             schedule_id,
             expected_lock_version=schedule.lock_version,
@@ -567,6 +585,8 @@ class ScheduleService:
 
     async def resume(self, schedule_id: uuid.UUID, *, owner_id: uuid.UUID) -> Schedule:
         schedule = await self._require_owned(schedule_id, owner_id)
+        if schedule.status == ScheduleStatus.ACTIVE.value:
+            return schedule
         if schedule.status != ScheduleStatus.PAUSED.value:
             raise AppError(
                 code="RESOURCE_CONFLICT",
@@ -579,6 +599,27 @@ class ScheduleService:
         if schedule.schedule_type == ScheduleType.INTERVAL.value and start_at is None:
             start_at = now
 
+        target_id = schedule.agent_version_id or schedule.workflow_version_id
+        if target_id is None:
+            raise AppError(
+                code="VALIDATION_ERROR",
+                message="Schedule target is missing.",
+                status_code=status.HTTP_400_BAD_REQUEST,
+            )
+        await self._validate_target(
+            target_type=schedule.target_type,
+            target_id=target_id,
+            requester_id=owner_id,
+            inputs=dict(schedule.input_template or {}),
+        )
+        validate_schedule_expression(
+            schedule.schedule_type,
+            schedule.schedule_expression,
+            schedule.timezone,
+        )
+        self._assert_window(start_at, schedule.end_at)
+
+        # Preserve overdue next_run_at; only recompute when null (config edit).
         next_run = schedule.next_run_at
         if next_run is None:
             next_run = self._compute_next_run(

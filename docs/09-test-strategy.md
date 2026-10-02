@@ -947,16 +947,22 @@ Approval `REJECTED/EXPIRED`를 Execution `REJECTED/EXPIRED` 상태로 직접 매
 
 ## 17. Schedule 시험
 
-- `AGENT_VERSION` 예약
-- `WORKFLOW_VERSION` 예약
-- timezone/DST
-- occurrence unique
-- overlap `ALLOW/SKIP/QUEUE/REPLACE`
-- misfire `SKIP/RUN_ONCE/CATCH_UP_LIMITED`
-- pause/resume
-- 예약 후 Permission 회수
-- target Version deprecated/inactive 정책
-- 수동 trigger
+### Registry foundation (implemented)
+
+| Layer | Module |
+|-------|--------|
+| Unit | `tests/unit/test_schedule_recurrence.py` — timezone, CRON/ONCE/INTERVAL contracts, DST, window, preview bounds |
+| Unit | `tests/unit/test_schedule_service.py` — PAUSED default, version pin, grants/SECRET_REF, lock, lifecycle |
+| API | `tests/api/test_schedules.py` — auth/CSRF/`schedule.manage`, If-Match, list, activate/pause/resume |
+| Integration | `tests/integration/test_schedule_registry.py` — migration constraints, occurrence unique, deprecate pin |
+
+### Trigger / runtime (follow-up)
+
+- overlap `ALLOW/SKIP/QUEUE/REPLACE` runtime
+- misfire `SKIP/RUN_ONCE/CATCH_UP_LIMITED` enqueue
+- 예약 후 Permission 회수 at fire time
+- 수동 `POST /trigger`
+- Scheduler worker + `SCHEDULE_OCCURRENCE` Execution
 
 예약이 logical Agent/Workflow의 최신 version을 암묵적으로 실행하지 않는지 확인한다.
 

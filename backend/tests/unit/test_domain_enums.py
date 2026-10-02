@@ -45,6 +45,7 @@ from app.domain.enums import (
     ScheduleOverlapPolicy,
     ScheduleStatus,
     ScheduleTargetType,
+    ScheduleType,
     SecretKind,
     SecretStatus,
     StepStatus,
@@ -184,6 +185,7 @@ def expect_exact(enum_cls: type[Enum], expected: set[str]) -> None:
             },
         ),
         (ScheduleTargetType, {"AGENT_VERSION", "WORKFLOW_VERSION"}),
+        (ScheduleType, {"CRON", "ONCE", "INTERVAL"}),
         (ScheduleOverlapPolicy, {"ALLOW", "SKIP", "QUEUE", "REPLACE"}),
         (ScheduleMisfirePolicy, {"SKIP", "RUN_ONCE", "CATCH_UP_LIMITED"}),
         (
@@ -322,6 +324,7 @@ def test_authorable_step_excludes_visual_or_script_types(forbidden: str) -> None
 
 def test_bootstrap_permission_codes_include_tool_execute() -> None:
     assert "mcp.tool.execute" in BOOTSTRAP_PERMISSION_CODES
+    assert "schedule.manage" in BOOTSTRAP_PERMISSION_CODES
     assert len(BOOTSTRAP_PERMISSION_CODES) == len(set(BOOTSTRAP_PERMISSION_CODES))
 
 

@@ -43,6 +43,13 @@ class ScheduleCreate(BaseModel):
             raise ValueError("inputs must be a JSON object.")
         return value
 
+    @field_validator("start_at", "end_at")
+    @classmethod
+    def _aware(cls, value: datetime | None) -> datetime | None:
+        if value is not None and value.tzinfo is None:
+            raise ValueError("timestamps must be timezone-aware RFC3339 values.")
+        return value
+
 
 class ScheduleUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -67,6 +74,13 @@ class ScheduleUpdate(BaseModel):
     def _inputs_object(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
         if value is not None and not isinstance(value, dict):
             raise ValueError("inputs must be a JSON object.")
+        return value
+
+    @field_validator("start_at", "end_at")
+    @classmethod
+    def _aware(cls, value: datetime | None) -> datetime | None:
+        if value is not None and value.tzinfo is None:
+            raise ValueError("timestamps must be timezone-aware RFC3339 values.")
         return value
 
 
