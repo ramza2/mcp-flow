@@ -371,7 +371,11 @@ async def test_complex_plan_tool_refs_projected_once(
         )
         tv = await _seed_tool_version(session)
         policy_id = await _seed_approval_policy(session)
-        plan = _complex_plan(workflow_id=workflow.id, tool_version_id=tv, approval_policy_id=policy_id)
+        plan = _complex_plan(
+            workflow_id=workflow.id,
+            tool_version_id=tv,
+            approval_policy_id=policy_id,
+        )
         version = await versions.create_version(
             workflow.id, WorkflowVersionCreate(plan_definition=plan)
         )

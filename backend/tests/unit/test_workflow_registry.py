@@ -40,7 +40,6 @@ from app.services.workflow_version import WorkflowVersionService
 from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-
 # ---------------------------------------------------------------------------
 # Fixtures / helpers
 # ---------------------------------------------------------------------------

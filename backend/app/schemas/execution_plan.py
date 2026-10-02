@@ -10,7 +10,7 @@ validate exact shapes per Step Type. AgentRequest single-TOOL plans keep
 from __future__ import annotations
 
 import uuid
-from typing import Annotated, Any, Literal, Union
+from typing import Annotated, Any, Literal
 
 from pydantic import (
     BaseModel,
@@ -78,7 +78,7 @@ class PlanSourceWorkflow(BaseModel):
 
 
 PlanSource = Annotated[
-    Union[PlanSourceAgent, PlanSourceWorkflow],
+    PlanSourceAgent | PlanSourceWorkflow,
     Field(discriminator="type"),
 ]
 
