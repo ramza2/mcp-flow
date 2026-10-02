@@ -73,18 +73,17 @@ async def _seed_approval_policy(
         return policy.id
 
 
-def _tool_plan(tool_version_id: uuid.UUID) -> dict[str, Any]:
+def _tool_plan(workflow_id: uuid.UUID, tool_version_id: uuid.UUID) -> dict[str, Any]:
     from app.domain.enums import AuthorableStepType, BindingKind
     from app.schemas.execution_plan import (
         EXECUTION_PLAN_SCHEMA_VERSION,
         default_plan_limits,
     )
 
-    agent_version_id = str(uuid.uuid4())
     return {
         "schema_version": EXECUTION_PLAN_SCHEMA_VERSION,
         "goal": "api workflow fixture",
-        "source": {"type": "AGENT", "agent_version_id": agent_version_id},
+        "source": {"type": "WORKFLOW", "workflow_id": str(workflow_id)},
         "inputs": {},
         "limits": default_plan_limits().model_dump(mode="json"),
         "steps": [
@@ -195,7 +194,7 @@ async def test_versions_create_list_get_and_cross_workflow_404(
     tv = await _seed_tool_version(db_session_factory)
     workflow = await _create_workflow(db_client)
     workflow_id = workflow["id"]
-    plan = _tool_plan(tv)
+    plan = _tool_plan(uuid.UUID(workflow_id), tv)
 
     v1 = await db_client.post(
         f"{API}/{workflow_id}/versions",
@@ -246,7 +245,7 @@ async def test_put_plan_validate_publish_deprecate(
     tv = await _seed_tool_version(db_session_factory)
     workflow = await _create_workflow(db_client)
     workflow_id = workflow["id"]
-    plan = _tool_plan(tv)
+    plan = _tool_plan(uuid.UUID(workflow_id), tv)
 
     created = await db_client.post(
         f"{API}/{workflow_id}/versions",
@@ -350,7 +349,7 @@ async def test_active_requires_published_and_archived_immutable(
 
     version = await db_client.post(
         f"{API}/{workflow_id}/versions",
-        json={"plan_definition": _tool_plan(tv)},
+        json={"plan_definition": _tool_plan(uuid.UUID(workflow_id), tv)},
     )
     version_id = version.json()["id"]
     await db_client.post(f"{API}/{workflow_id}/versions/{version_id}/validate")
@@ -407,7 +406,7 @@ async def test_validate_invalid_plan_and_approval_policy(
     # Missing tool version
     missing_tv = await db_client.post(
         f"{API}/{workflow_id}/versions",
-        json={"plan_definition": _tool_plan(uuid.uuid4())},
+        json={"plan_definition": _tool_plan(uuid.UUID(workflow_id), uuid.uuid4())},
     )
     mid = missing_tv.json()["id"]
     bad = await db_client.post(f"{API}/{workflow_id}/versions/{mid}/validate")
@@ -418,7 +417,7 @@ async def test_validate_invalid_plan_and_approval_policy(
     # Valid tool plan
     good = await db_client.post(
         f"{API}/{workflow_id}/versions",
-        json={"plan_definition": _tool_plan(tv)},
+        json={"plan_definition": _tool_plan(uuid.UUID(workflow_id), tv)},
     )
     gid = good.json()["id"]
     ok = await db_client.post(f"{API}/{workflow_id}/versions/{gid}/validate")

@@ -15,6 +15,7 @@ from app.core.errors import AppError
 from app.domain.enums import (
     ApprovalPolicyStatus,
     AuthorableStepType,
+    ToolVersionValidationStatus,
     WorkflowVersionStatus,
     WorkflowVersionValidationStatus,
 )
@@ -230,9 +231,9 @@ class WorkflowVersionService:
         content_hash = workflow_version_content_hash(
             plan_schema_version=version.plan_schema_version,
             plan_definition=plan_definition,
-            input_schema=dict(version.input_schema or {}),
-            output_schema=dict(version.output_schema or {}),
-            policy_defaults=dict(version.policy_defaults or {}),
+            input_schema=version.input_schema,
+            output_schema=version.output_schema,
+            policy_defaults=version.policy_defaults,
         )
         updated = await self._versions.update_plan(
             version,
@@ -286,6 +287,24 @@ class WorkflowVersionService:
                     )
                 )
                 tool_check = "NOT_FOUND"
+                continue
+            if tv.validation_status != ToolVersionValidationStatus.VALID:
+                errors.append(
+                    _error(
+                        code="WORKFLOW_TOOL_VERSION_INVALID",
+                        message=(
+                            f"tool_version_id {cfg.tool_version_id} "
+                            "validation_status is not VALID."
+                        ),
+                        step_id=step.id,
+                        details={
+                            "step_id": step.id,
+                            "tool_version_id": str(cfg.tool_version_id),
+                            "validation_status": tv.validation_status,
+                        },
+                    )
+                )
+                tool_check = "INVALID"
                 continue
             tool_refs.append((step.id, cfg.tool_version_id))
 
@@ -410,6 +429,33 @@ class WorkflowVersionService:
                 plan = None
 
         if plan is not None:
+            if plan.source.type != "WORKFLOW":
+                errors.append(
+                    _error(
+                        code="WORKFLOW_PLAN_SOURCE_INVALID",
+                        message=(
+                            "Workflow Plan source.type must be WORKFLOW "
+                            f"(got {plan.source.type!r})."
+                        ),
+                    )
+                )
+                checks["plan_schema"] = "ERROR"
+            elif plan.source.workflow_id != version.workflow_id:
+                errors.append(
+                    _error(
+                        code="WORKFLOW_PLAN_SOURCE_MISMATCH",
+                        message=(
+                            "Workflow Plan source.workflow_id must equal the "
+                            "owning Workflow id."
+                        ),
+                        details={
+                            "expected_workflow_id": str(version.workflow_id),
+                            "plan_workflow_id": str(plan.source.workflow_id),
+                        },
+                    )
+                )
+                checks["plan_schema"] = "ERROR"
+
             static_result = self._static_validator.validate(plan)
             if not static_result.ok:
                 checks["static_plan"] = "ERROR"
@@ -444,6 +490,27 @@ class WorkflowVersionService:
         }
         return valid, report, tool_refs if valid else []
 
+    async def _invalidate_draft_for_publish(
+        self,
+        version: WorkflowVersion,
+        *,
+        report: dict[str, Any] | None,
+        message: str,
+    ) -> None:
+        """Persist INVALID + clear tool refs, then raise RESOURCE_CONFLICT."""
+
+        await self._versions.set_validation(
+            version,
+            validation_status=str(WorkflowVersionValidationStatus.INVALID),
+            validation_report=report,
+        )
+        await self._tool_refs.clear(version.id)
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message=message,
+            status_code=status.HTTP_409_CONFLICT,
+        )
+
     async def validate(
         self, workflow_id: uuid.UUID, version_id: uuid.UUID
     ) -> WorkflowVersion:
@@ -462,14 +529,46 @@ class WorkflowVersionService:
                 status_code=status.HTTP_409_CONFLICT,
             )
 
-        # Recompute hash from persisted fields — protect against content drift.
-        recomputed = workflow_version_content_hash(
-            plan_schema_version=version.plan_schema_version,
-            plan_definition=dict(version.plan_definition or {}),
-            input_schema=dict(version.input_schema or {}),
-            output_schema=dict(version.output_schema or {}),
-            policy_defaults=dict(version.policy_defaults or {}),
-        )
+        # Hash exact persisted JSON — never coerce non-objects to {}.
+        try:
+            recomputed = workflow_version_content_hash(
+                plan_schema_version=version.plan_schema_version,
+                plan_definition=version.plan_definition,
+                input_schema=version.input_schema,
+                output_schema=version.output_schema,
+                policy_defaults=version.policy_defaults,
+            )
+        except (TypeError, ValueError):
+            report = {
+                "schema_version": "1.0",
+                "valid": False,
+                "content_hash": version.content_hash,
+                "errors": [
+                    _error(
+                        code="PLAN_DEFINITION_INVALID",
+                        message=(
+                            "WorkflowVersion executable content is not "
+                            "JSON-hashable."
+                        ),
+                    )
+                ],
+                "checks": {
+                    "plan_schema": "ERROR",
+                    "static_plan": "SKIPPED",
+                    "tool_versions": "SKIPPED",
+                    "approval_policies": "SKIPPED",
+                },
+            }
+            updated = await self._versions.set_validation(
+                version,
+                validation_status=str(WorkflowVersionValidationStatus.INVALID),
+                validation_report=report,
+            )
+            await self._tool_refs.clear(updated.id)
+            await self._session.commit()
+            await self._session.refresh(updated)
+            return updated
+
         if recomputed != version.content_hash:
             version.content_hash = recomputed
 
@@ -495,65 +594,96 @@ class WorkflowVersionService:
     async def _assert_publish_ready(
         self, version: WorkflowVersion
     ) -> list[tuple[str, uuid.UUID]]:
-        """Stale-dependency recheck before publish. Returns expected tool refs."""
+        """Stale-dependency recheck before publish. Returns expected tool refs.
 
-        recomputed = workflow_version_content_hash(
-            plan_schema_version=version.plan_schema_version,
-            plan_definition=dict(version.plan_definition or {}),
-            input_schema=dict(version.input_schema or {}),
-            output_schema=dict(version.output_schema or {}),
-            policy_defaults=dict(version.policy_defaults or {}),
-        )
-        if recomputed != version.content_hash:
-            raise AppError(
-                code="RESOURCE_CONFLICT",
-                message="WorkflowVersion content_hash drifted from persisted fields.",
-                status_code=status.HTTP_409_CONFLICT,
+        Any stale/malformed evidence invalidates the DRAFT before raising.
+        """
+
+        try:
+            recomputed = workflow_version_content_hash(
+                plan_schema_version=version.plan_schema_version,
+                plan_definition=version.plan_definition,
+                input_schema=version.input_schema,
+                output_schema=version.output_schema,
+                policy_defaults=version.policy_defaults,
             )
+        except (TypeError, ValueError):
+            await self._invalidate_draft_for_publish(
+                version,
+                report=None,
+                message=(
+                    "WorkflowVersion publish blocked by malformed executable "
+                    "content."
+                ),
+            )
+
+        if recomputed != version.content_hash:
+            version.content_hash = recomputed
+            _valid, report, _refs = await self._build_validation(version)
+            await self._invalidate_draft_for_publish(
+                version,
+                report=report,
+                message=(
+                    "WorkflowVersion content_hash drifted from persisted fields."
+                ),
+            )
+
         report = version.validation_report or {}
         if (
             version.validation_status != WorkflowVersionValidationStatus.VALID
             or report.get("valid") is not True
             or report.get("content_hash") != version.content_hash
         ):
-            raise AppError(
-                code="RESOURCE_CONFLICT",
+            _valid, fresh_report, _refs = await self._build_validation(version)
+            await self._invalidate_draft_for_publish(
+                version,
+                report=fresh_report,
                 message=(
                     "WorkflowVersion must be VALID with matching "
                     "validation_report.content_hash before publish."
                 ),
-                status_code=status.HTTP_409_CONFLICT,
             )
 
         valid, fresh_report, tool_refs = await self._build_validation(version)
         if not valid:
-            await self._versions.set_validation(
+            await self._invalidate_draft_for_publish(
                 version,
-                validation_status=str(WorkflowVersionValidationStatus.INVALID),
-                validation_report=fresh_report,
-            )
-            await self._tool_refs.clear(version.id)
-            raise AppError(
-                code="RESOURCE_CONFLICT",
+                report=fresh_report,
                 message=(
-                    "WorkflowVersion publish blocked by stale or invalid dependencies."
+                    "WorkflowVersion publish blocked by stale or invalid "
+                    "dependencies."
                 ),
-                status_code=status.HTTP_409_CONFLICT,
             )
 
         existing = await self._tool_refs.list_for_version(version.id)
         existing_map = {r.step_key: r.mcp_tool_version_id for r in existing}
         expected_map = {k: v for k, v in tool_refs}
         if existing_map != expected_map:
-            raise AppError(
-                code="RESOURCE_CONFLICT",
+            mismatch_report = {
+                "schema_version": "1.0",
+                "valid": False,
+                "content_hash": version.content_hash,
+                "errors": [
+                    _error(
+                        code="WORKFLOW_TOOL_REFS_MISMATCH",
+                        message=(
+                            "workflow_version_tool_refs do not match current "
+                            "Plan TOOL projections."
+                        ),
+                    )
+                ],
+                "checks": dict(fresh_report.get("checks") or {}),
+            }
+            await self._invalidate_draft_for_publish(
+                version,
+                report=mismatch_report,
                 message=(
                     "workflow_version_tool_refs do not match current Plan TOOL "
                     "projections."
                 ),
-                status_code=status.HTTP_409_CONFLICT,
             )
         return tool_refs
+
 
     async def publish(
         self, workflow_id: uuid.UUID, version_id: uuid.UUID

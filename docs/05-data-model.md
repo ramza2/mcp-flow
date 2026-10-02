@@ -1015,8 +1015,11 @@ DRAFT → PUBLISHED → DEPRECATED
 
 Published version은 수정하지 않고 변경 시 새 Draft version을 생성한다.
 
-`plan_definition`은 Execution Plan v1 JSON이다. DRAFT may persist an incomplete Plan
-object before it is valid; `/validate` is the authoritative validation action.
+`plan_definition`은 Execution Plan v1 JSON이다. Valid Workflow Plans use
+`source.type=WORKFLOW` with `source.workflow_id` equal to the owning Workflow.
+DRAFT may persist an incomplete Plan object before it is valid; `/validate` is the
+authoritative validation action and rejects AGENT / mismatched Workflow sources
+with structured INVALID reports (not HTTP 422).
 Step Type별 persisted `config` exact shape, restricted Predicate AST, Plan BindingValue,
 LOOP `body_step_ids` / `max_iterations` contract는
 `docs/04-agent-mcp-architecture.md` §9.3–§10.1을 Source of Truth로 한다.

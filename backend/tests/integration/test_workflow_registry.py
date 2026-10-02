@@ -46,10 +46,10 @@ from app.services.workflow_version import WorkflowVersionService
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-_AV = uuid.uuid4()
 
-
-async def _seed_tool_version(session: AsyncSession) -> uuid.UUID:
+async def _seed_tool_version(
+    session: AsyncSession, *, validation_status: str = "VALID"
+) -> uuid.UUID:
     server = await MCPServerRepository(session).create(
         code=f"wf-int-{uuid.uuid4().hex[:8]}",
         name="Integration WF Server",
@@ -69,7 +69,7 @@ async def _seed_tool_version(session: AsyncSession) -> uuid.UUID:
         mcp_tool_id=tool.id,
         version_no=1,
         content_hash=uuid.uuid4().hex,
-        validation_status="VALID",
+        validation_status=validation_status,
         remote_description="int",
         input_schema={
             "type": "object",
@@ -95,6 +95,7 @@ async def _seed_approval_policy(
 
 def _base_plan(
     *,
+    workflow_id: uuid.UUID,
     steps: list[dict[str, Any]],
     limits: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -116,7 +117,7 @@ def _base_plan(
     return {
         "schema_version": EXECUTION_PLAN_SCHEMA_VERSION,
         "goal": "workflow integration fixture",
-        "source": {"type": "AGENT", "agent_version_id": str(_AV)},
+        "source": {"type": "WORKFLOW", "workflow_id": str(workflow_id)},
         "inputs": {},
         "limits": lim,
         "steps": steps,
@@ -151,12 +152,16 @@ def _tool(
     }
 
 
-def _tool_plan(tool_version_id: uuid.UUID) -> dict[str, Any]:
-    return _base_plan(steps=[_tool("step_a", tool_version_id=tool_version_id)])
+def _tool_plan(workflow_id: uuid.UUID, tool_version_id: uuid.UUID) -> dict[str, Any]:
+    return _base_plan(
+        workflow_id=workflow_id,
+        steps=[_tool("step_a", tool_version_id=tool_version_id)],
+    )
 
 
 def _complex_plan(
     *,
+    workflow_id: uuid.UUID,
     tool_version_id: uuid.UUID,
     approval_policy_id: uuid.UUID,
 ) -> dict[str, Any]:
@@ -228,7 +233,9 @@ def _complex_plan(
         _tool("body_tool", tool_version_id=tool_version_id, depends_on=["loop1"]),
         _tool("final", tool_version_id=tool_version_id, depends_on=["loop1"]),
     ]
-    plan = _base_plan(steps=steps, limits={"max_parallelism": 4})
+    plan = _base_plan(
+        workflow_id=workflow_id, steps=steps, limits={"max_parallelism": 4}
+    )
     plan["completion"]["response_step_ids"] = ["final"]
     return plan
 
@@ -262,7 +269,7 @@ async def test_execution_workflow_version_fk(
         tv = await _seed_tool_version(session)
         version = await WorkflowVersionService(session).create_version(
             workflow.id,
-            WorkflowVersionCreate(plan_definition=_tool_plan(tv)),
+            WorkflowVersionCreate(plan_definition=_tool_plan(workflow.id, tv)),
         )
         user = await UserRepository(session).create(
             username=f"u-{uuid.uuid4().hex[:8]}",
@@ -285,7 +292,7 @@ async def test_execution_workflow_version_fk(
             plan_validation_run_id=None,
             status=ExecutionStatus.CREATED.value,
             plan_schema_version=EXECUTION_PLAN_SCHEMA_VERSION,
-            plan_snapshot=_tool_plan(uuid.uuid4()),
+            plan_snapshot=_tool_plan(workflow.id, uuid.uuid4()),
             plan_hash="a" * 64,
             input_snapshot={},
             policy_snapshot={},
@@ -335,7 +342,7 @@ async def test_valid_tool_workflow_validate_and_publish(
         tv = await _seed_tool_version(session)
         version = await versions.create_version(
             workflow.id,
-            WorkflowVersionCreate(plan_definition=_tool_plan(tv)),
+            WorkflowVersionCreate(plan_definition=_tool_plan(workflow.id, tv)),
         )
         validated = await versions.validate(workflow.id, version.id)
         assert validated.validation_status == WorkflowVersionValidationStatus.VALID
@@ -364,7 +371,7 @@ async def test_complex_plan_tool_refs_projected_once(
         )
         tv = await _seed_tool_version(session)
         policy_id = await _seed_approval_policy(session)
-        plan = _complex_plan(tool_version_id=tv, approval_policy_id=policy_id)
+        plan = _complex_plan(workflow_id=workflow.id, tool_version_id=tv, approval_policy_id=policy_id)
         version = await versions.create_version(
             workflow.id, WorkflowVersionCreate(plan_definition=plan)
         )
@@ -392,6 +399,7 @@ async def test_invalid_cyclic_draft_keeps_row_clears_refs(
         )
         tv = await _seed_tool_version(session)
         cycle = _base_plan(
+            workflow_id=workflow.id,
             steps=[
                 _tool("a", tool_version_id=tv, depends_on=["b"]),
                 _tool("b", tool_version_id=tv, depends_on=["a"]),
@@ -426,7 +434,7 @@ async def test_plan_edit_invalidates_after_valid(
         tv = await _seed_tool_version(session)
         version = await versions.create_version(
             workflow.id,
-            WorkflowVersionCreate(plan_definition=_tool_plan(tv)),
+            WorkflowVersionCreate(plan_definition=_tool_plan(workflow.id, tv)),
         )
         await versions.validate(workflow.id, version.id)
         assert (
@@ -439,6 +447,7 @@ async def test_plan_edit_invalidates_after_valid(
             version.id,
             WorkflowPlanPut(
                 plan_definition=_base_plan(
+                    workflow_id=workflow.id,
                     steps=[_tool("step_b", tool_version_id=tv)]
                 )
             ),
@@ -463,14 +472,14 @@ async def test_publish_v1_then_v2_deprecates_previous(
         tv = await _seed_tool_version(session)
         v1 = await versions.create_version(
             workflow.id,
-            WorkflowVersionCreate(plan_definition=_tool_plan(tv), change_summary="v1"),
+            WorkflowVersionCreate(plan_definition=_tool_plan(workflow.id, tv), change_summary="v1"),
         )
         await versions.validate(workflow.id, v1.id)
         await versions.publish(workflow.id, v1.id)
 
         v2 = await versions.create_version(
             workflow.id,
-            WorkflowVersionCreate(plan_definition=_tool_plan(tv), change_summary="v2"),
+            WorkflowVersionCreate(plan_definition=_tool_plan(workflow.id, tv), change_summary="v2"),
         )
         await versions.validate(workflow.id, v2.id)
         await versions.publish(workflow.id, v2.id)
@@ -499,7 +508,7 @@ async def test_concurrent_version_create_distinct_version_no(
         )
         tv = await _seed_tool_version(session)
         workflow_id = workflow.id
-        plan = _tool_plan(tv)
+        plan = _tool_plan(workflow.id, tv)
 
     barrier = asyncio.Barrier(2)
 
@@ -520,20 +529,16 @@ async def test_concurrent_version_create_distinct_version_no(
     results = await asyncio.gather(_create("a"), _create("b"))
     numbers = sorted(r for r in results if isinstance(r, int))
     errors = [r for r in results if isinstance(r, str)]
-    if len(numbers) == 2:
-        assert numbers == [1, 2]
-    else:
-        assert len(numbers) == 1
-        assert errors and "RESOURCE_CONFLICT" in errors[0]
+    assert errors == [], f"expected both creates to succeed, got {results!r}"
+    assert numbers == [1, 2]
 
     async with integration_session_factory() as session:
         versions, total = await WorkflowVersionRepository(session).list_for_workflow(
             workflow_id
         )
-        assert total >= 1
+        assert total == 2
         nos = sorted(v.version_no for v in versions)
-        assert nos == list(range(1, len(nos) + 1))
-        assert len(nos) == len(set(nos))
+        assert nos == [1, 2]
 
 
 @pytest.mark.integration
@@ -549,11 +554,11 @@ async def test_concurrent_publish_exactly_one_current(
         workflow_id = workflow.id
         v2 = await versions.create_version(
             workflow_id,
-            WorkflowVersionCreate(plan_definition=_tool_plan(tv), change_summary="v2"),
+            WorkflowVersionCreate(plan_definition=_tool_plan(workflow.id, tv), change_summary="v2"),
         )
         v3 = await versions.create_version(
             workflow_id,
-            WorkflowVersionCreate(plan_definition=_tool_plan(tv), change_summary="v3"),
+            WorkflowVersionCreate(plan_definition=_tool_plan(workflow.id, tv), change_summary="v3"),
         )
         await versions.validate(workflow_id, v2.id)
         await versions.validate(workflow_id, v3.id)
@@ -613,12 +618,14 @@ async def test_validate_vs_plan_save_race_consistent(
         workflow_id = workflow.id
         version = await versions.create_version(
             workflow_id,
-            WorkflowVersionCreate(plan_definition=_tool_plan(tv)),
+            WorkflowVersionCreate(plan_definition=_tool_plan(workflow.id, tv)),
         )
         await versions.validate(workflow_id, version.id)
         version_id = version.id
         old_hash = version.content_hash
-        new_plan = _base_plan(steps=[_tool("step_b", tool_version_id=tv)])
+        new_plan = _base_plan(
+            workflow_id=workflow.id, steps=[_tool("step_b", tool_version_id=tv)]
+        )
 
     barrier = asyncio.Barrier(2)
 
@@ -691,6 +698,7 @@ async def test_stale_inactive_approval_policy_blocks_publish(
         tv = await _seed_tool_version(session)
         policy_id = await _seed_approval_policy(session, status="ACTIVE")
         plan = _base_plan(
+            workflow_id=workflow.id,
             steps=[
                 _tool("t1", tool_version_id=tv),
                 {
@@ -726,5 +734,48 @@ async def test_stale_inactive_approval_policy_blocks_publish(
         after = await versions.get_version(workflow.id, version.id)
         assert after.status == WorkflowVersionStatus.DRAFT
         assert after.validation_status == WorkflowVersionValidationStatus.INVALID
+        wf_after = await WorkflowService(session).get(workflow.id)
+        assert wf_after.current_version_id == wf_before.current_version_id
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_publish_tool_ref_corruption_invalidates_draft(
+    integration_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with integration_session_factory() as session:
+        versions = WorkflowVersionService(session)
+        workflow = await WorkflowService(session).create(
+            WorkflowCreate(name="ToolRef Corrupt WF")
+        )
+        tv = await _seed_tool_version(session)
+        version = await versions.create_version(
+            workflow.id,
+            WorkflowVersionCreate(plan_definition=_tool_plan(workflow.id, tv)),
+        )
+        ok = await versions.validate(workflow.id, version.id)
+        assert ok.validation_status == WorkflowVersionValidationStatus.VALID
+        refs = await WorkflowVersionToolRefRepository(session).list_for_version(
+            version.id
+        )
+        assert len(refs) == 1
+
+        await WorkflowVersionToolRefRepository(session).clear(version.id)
+        await WorkflowVersionToolRefRepository(session).replace_all(
+            version.id, [("tampered_step", tv)]
+        )
+        await session.commit()
+
+        wf_before = await WorkflowService(session).get(workflow.id)
+        with pytest.raises(AppError) as exc:
+            await versions.publish(workflow.id, version.id)
+        assert exc.value.code == "RESOURCE_CONFLICT"
+
+        after = await versions.get_version(workflow.id, version.id)
+        assert after.status == WorkflowVersionStatus.DRAFT
+        assert after.validation_status == WorkflowVersionValidationStatus.INVALID
+        assert (
+            await WorkflowVersionToolRefRepository(session).list_for_version(version.id)
+        ) == []
         wf_after = await WorkflowService(session).get(workflow.id)
         assert wf_after.current_version_id == wf_before.current_version_id

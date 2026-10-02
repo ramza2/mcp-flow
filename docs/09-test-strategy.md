@@ -830,12 +830,17 @@ DRAFT → PUBLISHED → DEPRECATED
 동일 lifecycle을 사용한다.
 
 - DRAFT plan 편집 (incomplete object save allowed; invalidates validation + tool refs)
+- Plan source ownership: WORKFLOW + matching workflow_id (AGENT / mismatch → INVALID)
 - `/validate` persists structured `validation_report`; INVALID leaves zero tool refs
+- malformed durable JSON shapes → INVALID structured report (no raw exceptions)
+- pinned MCPToolVersion must be `validation_status=VALID`
 - LOOP body TOOL templates project into `workflow_version_tool_refs` when VALID
+- VALID implies ToolRef projection integrity; publish invalidates on mismatch
 - blocking validation error / stale dependency publish 금지
 - PUBLISHED plan update 금지
 - ToolVersion 참조 변경 시 새 WorkflowVersion
-- concurrent version create / publish / validate-vs-plan-save races
+- concurrent version create serializes to distinct version_no=[1,2]
+- concurrent publish / validate-vs-plan-save races
 - `Execution.workflow_version_id` real FK (Execution creation remains later slice)
 
 ---
