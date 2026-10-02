@@ -79,6 +79,7 @@ from app.execution.completion import (
 from app.execution.lineage import assert_resume_attempt_lineage
 from app.execution.mrtr_constants import MAX_MRTR_ROUNDS
 from app.execution.mrtr_wait import assert_durable_waiting_input
+from app.execution.policy_selection import get_expected_tool_policy_snapshot
 from app.execution.result_validator import validate_tool_result
 from app.execution.retry_decision import (
     decide_safe_transient_retry,
@@ -88,7 +89,6 @@ from app.execution.retry_decision import (
     remaining_step_timeout_ms,
     step_timeout_budget_exhausted,
 )
-from app.execution.policy_selection import get_expected_tool_policy_snapshot
 from app.execution.runtime_preflight import (
     assert_answered_plan_confirmation,
     assert_source_tool_executable,

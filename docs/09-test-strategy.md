@@ -841,7 +841,23 @@ DRAFT → PUBLISHED → DEPRECATED
 - ToolVersion 참조 변경 시 새 WorkflowVersion
 - concurrent version create serializes to distinct version_no=[1,2]
 - concurrent publish / validate-vs-plan-save races
-- `Execution.workflow_version_id` real FK (Execution creation remains later slice)
+- `Execution.workflow_version_id` real FK
+
+### Workflow manual execution (`WORKFLOW_VERSION`)
+
+- ACTIVE Workflow + current PUBLISHED/VALID version only; DRAFT/INACTIVE/ARCHIVED /
+  non-current / DEPRECATED reject
+- `workflow.execute` + WORKFLOW grant; per-TOOL `mcp.tool.execute` + MCP_TOOL grant
+- Plan inputs authority + SECRET_REF normalization; plaintext secret reject
+- `workflow_execution_policy.v1` per-TOOL snapshot; AgentRequest snapshot unchanged
+- ToolPolicy confirmation → `WORKFLOW_CONFIRMATION_UNSUPPORTED`
+- ToolPolicy approval → `DAG_WAIT_UNSUPPORTED` (authorable APPROVAL supported)
+- Idempotency `WORKFLOW_VERSION_EXECUTION_CREATE_V1` race / key reuse
+- Queue staging + claim accept WORKFLOW_VERSION (not Schedule/Factory by default)
+- Attempt / B2 source-aware auth; grant/policy drift fail-closed (MCP 0)
+- PG: single TOOL e2e, sequential STEP_OUTPUT, FOR_EACH body template policy,
+  authorable APPROVAL resume, MRTR source accept, bounded retry
+- Expired-lease recovery remains AGENT_REQUEST-only (complex Workflow follow-up)
 
 ---
 

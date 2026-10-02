@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import uuid
-from typing import Any
 
 import pytest
 from httpx import AsyncClient
@@ -61,6 +60,7 @@ async def _seed_published_workflow(
     from app.services.authorization import ResourceGrantService
     from app.services.workflow import WorkflowService
     from app.services.workflow_version import WorkflowVersionService
+
     from tests.unit.test_workflow_registry import _tool_plan
 
     async with db_session_factory() as session:
@@ -145,9 +145,13 @@ async def _seed_published_workflow(
             ),
         )
         from app.repositories.role import PermissionRepository
-        from app.schemas.auth import RoleCreate, RolePermissionReplaceRequest, UserRoleReplaceRequest
-        from app.services.role import RoleService
         from app.repositories.user import UserRepository
+        from app.schemas.auth import (
+            RoleCreate,
+            RolePermissionReplaceRequest,
+            UserRoleReplaceRequest,
+        )
+        from app.services.role import RoleService
         from app.services.user import UserService
 
         role = await RoleService(session).create(

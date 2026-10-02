@@ -37,8 +37,8 @@ from app.execution.lineage import (
     build_secret_safe_request_snapshot,
     materialize_secret_safe_resolved_input,
 )
-from app.execution.resolved_input_schema import validate_resolved_tool_arguments
 from app.execution.policy_selection import get_expected_tool_policy_snapshot
+from app.execution.resolved_input_schema import validate_resolved_tool_arguments
 from app.execution.runtime_preflight import (
     assert_answered_plan_confirmation,
     assert_source_tool_executable,

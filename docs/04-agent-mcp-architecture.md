@@ -1205,6 +1205,36 @@ AgentRequest foundation TOOL config는 §9.1.1을 따르며 bindings는
 Step 공통 `when` 필드는 optional Predicate AST다(`null` 또는 생략 가능).
 `when`이 있으면 Predicate AST 구조 검증을 통과해야 한다.
 
+### 9.6.1 Workflow Execution policy snapshot
+
+Manual Workflow Execution (`source_type=WORKFLOW_VERSION`) pins a multi-TOOL policy
+snapshot distinct from AgentRequest single-TOOL shape:
+
+```json
+{
+  "schema_version": "workflow_execution_policy.v1",
+  "workflow_id": "<uuid>",
+  "workflow_version_id": "<uuid>",
+  "tool_steps": {
+    "<plan_step_id>": {
+      "tool_version_id": "<uuid>",
+      "policy": { "tool_policy": {}, "approval_policy": null }
+    }
+  }
+}
+```
+
+Runtime selects the pinned entry by immutable Plan TOOL template id
+(`lineage.plan_step.id`), including LOOP body templates. Attempt / B2 / normal
+retry read the Step-specific entry via a source-aware selector; AgentRequest
+`Execution.policy_snapshot` shape is unchanged.
+
+Mutable Tool authorization is source-aware: shared Tool/Server/User/Policy core
+plus Agent (`AgentVersion` + `AgentToolGrant`) or Workflow (`workflow.execute` +
+`WORKFLOW` grant + published version ownership). ToolPolicy confirmation is
+unsupported for Workflow creation; ToolPolicy Execution-level approval wait is
+`DAG_WAIT_UNSUPPORTED` in this slice (authorable APPROVAL Steps remain supported).
+
 ### 9.7 Complex Plan static validation foundation
 
 AgentRequest single-TOOL Validator(§11.1)와 별도로, Workflow multi-step 준비를 위한

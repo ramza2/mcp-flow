@@ -1013,10 +1013,14 @@ async def test_requires_approval_valid_creates_without_approval_request(
     execution = await ExecutionRepository(db_session).get(created.result.id)
     assert execution is not None
     assert execution.status == ExecutionStatus.CREATED.value
-    # ApprovalRequest entity is intentionally out of scope for this foundation.
-    from app.db.metadata import metadata
+    # Creation must not enter ToolPolicy WAITING_APPROVAL / create ApprovalRequest.
+    from app.repositories.approval_request import ApprovalRequestRepository
 
-    assert "approval_requests" not in metadata.tables
+    pending = await ApprovalRequestRepository(db_session).find_pending_for_execution(
+        execution_id=execution.id
+    )
+    assert pending is None
+    assert execution.status == ExecutionStatus.CREATED.value
 
 
 # ---------------------------------------------------------------------------

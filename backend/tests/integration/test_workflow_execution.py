@@ -225,7 +225,7 @@ async def test_pg_sequential_step_output_plan_materializes_two_steps(
                         "location": {
                             "kind": BindingKind.STEP_OUTPUT.value,
                             "step_id": "step_a",
-                            "path": "/location",
+                            "path": "/structured_content/location",
                         }
                     },
                 ),
@@ -358,3 +358,377 @@ async def test_pg_retry_max_attempts_pinned_at_creation(
             tool_version_id=ctx["tool_version_id"],
         )
         assert policy["tool_policy"]["max_attempts"] == 2
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_pg_sequential_step_output_e2e_stub_mcp(
+    integration_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A → B(STEP_OUTPUT) with distinct ToolVersions; both MCP calls succeed."""
+    async with integration_session_factory() as session:
+        tv_a = await _seed_tool_version(session)
+        tv_b = await _seed_tool_version(session)
+        tool_a = await _activate_tool(session, tv_a)
+        tool_b = await _activate_tool(session, tv_b)
+        workflow = await _create_workflow(session)
+        plan = _base_plan(
+            workflow_id=workflow.id,
+            steps=[
+                _tool("step_a", tool_version_id=tv_a),
+                _tool(
+                    "step_b",
+                    tool_version_id=tv_b,
+                    depends_on=["step_a"],
+                    bindings={
+                        "location": {
+                            "kind": BindingKind.STEP_OUTPUT.value,
+                            "step_id": "step_a",
+                            "path": "/structured_content/location",
+                        }
+                    },
+                ),
+            ],
+        )
+        version = await _create_draft_version(session, workflow.id, plan=plan)
+        await _publish_and_activate(session, workflow.id, version.id)
+        user_id = await _seed_authorized_workflow_user(
+            session, workflow_id=workflow.id, tool_ids=[tool_a, tool_b]
+        )
+        await session.commit()
+        ctx = {
+            "workflow_id": workflow.id,
+            "version_id": version.id,
+            "requester_id": user_id,
+        }
+
+    class _SeqClient:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+
+        async def call_tool(self, endpoint, **kwargs):
+            from datetime import UTC, datetime
+
+            self.calls.append(dict(kwargs))
+            n = len(self.calls)
+            return (
+                NormalizedToolResult(
+                    protocol_success=True,
+                    tool_error=False,
+                    structured_content={"location": f"city-{n}", "ok": True},
+                ),
+                {"http_status": 200},
+                datetime.now(UTC),
+            )
+
+    client = _SeqClient()
+    execution_id, worker_id, lease_token = await _claim_workflow_execution(
+        integration_session_factory, ctx=ctx
+    )
+    runner = McpToolRunner(
+        session_factory=integration_session_factory,
+        mcp_client=client,
+        secret_resolver_factory=_resolver_factory,
+        lease_seconds=120,
+        result_inline_max_bytes=256_000,
+    )
+    await runner.run_claimed_execution(
+        execution_id=execution_id,
+        worker_id=worker_id,
+        lease_token=lease_token,
+    )
+    assert len(client.calls) == 2
+    async with integration_session_factory() as session:
+        execution = await ExecutionRepository(session).get(execution_id)
+        assert execution is not None
+        assert execution.status == ExecutionStatus.SUCCEEDED.value
+        steps = await ExecutionRepository(session).list_steps(execution.id)
+        by = {s.step_key: s for s in steps}
+        assert by["step_b"].resolved_input == {"location": "city-1"}
+        snap = execution.policy_snapshot
+        assert snap["schema_version"] == "workflow_execution_policy.v1"
+        assert set(snap["tool_steps"]) == {"step_a", "step_b"}
+        assert (
+            snap["tool_steps"]["step_a"]["tool_version_id"]
+            != snap["tool_steps"]["step_b"]["tool_version_id"]
+        )
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_pg_foreach_workflow_body_policy_and_mcp(
+    integration_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from app.domain.enums import AuthorableStepType, LoopMode
+    from app.models.mcp import MCPToolVersion
+    from sqlalchemy import update
+
+    async with integration_session_factory() as session:
+        tv_id = await _seed_tool_version(session)
+        # Body TOOL reads LOOP_CONTEXT /item (foreach projection).
+        await session.execute(
+            update(MCPToolVersion)
+            .where(MCPToolVersion.id == tv_id)
+            .values(
+                input_schema={
+                    "type": "object",
+                    "properties": {"item": {"type": "object"}},
+                    "required": ["item"],
+                }
+            )
+        )
+        tool_id = await _activate_tool(session, tv_id)
+        workflow = await _create_workflow(session)
+        plan = _base_plan(
+            workflow_id=workflow.id,
+            steps=[
+                {
+                    "id": "loop1",
+                    "name": "loop1",
+                    "type": AuthorableStepType.LOOP.value,
+                    "required": True,
+                    "depends_on": [],
+                    "when": None,
+                    "timeout_seconds": 30,
+                    "on_error": "FAIL_EXECUTION",
+                    "config": {
+                        "mode": LoopMode.FOR_EACH.value,
+                        "collection": {
+                            "kind": BindingKind.PLAN_INPUT.value,
+                            "path": "/items",
+                        },
+                        "body_step_ids": ["body"],
+                        "max_iterations": 10,
+                    },
+                },
+                _tool(
+                    "body",
+                    tool_version_id=tv_id,
+                    depends_on=["loop1"],
+                    bindings={
+                        "item": {
+                            "kind": BindingKind.LOOP_CONTEXT.value,
+                            "path": "/item",
+                        }
+                    },
+                ),
+            ],
+            limits={"max_loop_iterations": 10, "max_steps": 20},
+        )
+        plan["inputs"] = {"items": {"type": "array", "required": True, "secret": False}}
+        plan["completion"]["response_step_ids"] = ["loop1"]
+        version = await _create_draft_version(session, workflow.id, plan=plan)
+        await _publish_and_activate(session, workflow.id, version.id)
+        user_id = await _seed_authorized_workflow_user(
+            session, workflow_id=workflow.id, tool_ids=[tool_id]
+        )
+        await session.commit()
+        ctx = {
+            "workflow_id": workflow.id,
+            "version_id": version.id,
+            "requester_id": user_id,
+            "tool_version_id": tv_id,
+        }
+
+    class _LoopClient:
+        def __init__(self) -> None:
+            self.calls: list[Any] = []
+
+        async def call_tool(self, endpoint, **kwargs):
+            from datetime import UTC, datetime
+
+            self.calls.append(kwargs)
+            return (
+                NormalizedToolResult(
+                    protocol_success=True,
+                    tool_error=False,
+                    structured_content={"ok": True},
+                ),
+                {"http_status": 200},
+                datetime.now(UTC),
+            )
+
+    client = _LoopClient()
+    async with integration_session_factory() as session:
+        outcome = await WorkflowExecutionCreationService(
+            session
+        ).create_from_workflow_version(
+            workflow_id=ctx["workflow_id"],
+            version_id=ctx["version_id"],
+            requester_id=ctx["requester_id"],
+            idempotency_key=_idem_key(),
+            body=WorkflowExecutionCreateRequest(
+                inputs={"items": [{"id": 1}, {"id": 2}]}
+            ),
+        )
+        execution_id = outcome.result.id
+        execution = await ExecutionRepository(session).get(execution_id)
+        assert execution is not None
+        assert "body" in execution.policy_snapshot["tool_steps"]
+        await ExecutionQueueService(session).stage_created_batch(limit=10)
+        await session.commit()
+
+    async with integration_session_factory() as session:
+        claim = await ExecutionClaimService(session, lease_seconds=120).claim(
+            execution_id=execution_id, worker_id="pg-foreach"
+        )
+        assert claim.claimed
+        worker_id = claim.worker_id
+        lease_token = claim.lease_token
+        await session.commit()
+
+    runner = McpToolRunner(
+        session_factory=integration_session_factory,
+        mcp_client=client,
+        secret_resolver_factory=_resolver_factory,
+        lease_seconds=120,
+        result_inline_max_bytes=256_000,
+    )
+    await runner.run_claimed_execution(
+        execution_id=execution_id,
+        worker_id=worker_id,
+        lease_token=lease_token,
+    )
+    assert len(client.calls) == 2
+    async with integration_session_factory() as session:
+        execution = await ExecutionRepository(session).get(execution_id)
+        assert execution is not None
+        assert execution.status == ExecutionStatus.SUCCEEDED.value
+        steps = await ExecutionRepository(session).list_steps(execution.id)
+        body_rows = [s for s in steps if s.iteration_no is not None]
+        assert {s.iteration_no for s in body_rows} == {1, 2}
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_pg_authorable_approval_workflow_resume(
+    integration_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from app.approval.decision import ApprovalDecisionService
+    from app.domain.enums import AuthorableStepType
+    from app.execution.approval_resume import ApprovalResumeClaimService
+    from app.repositories.approval_policy import ApprovalPolicyRepository
+    from app.repositories.approval_request import ApprovalRequestRepository
+
+    from tests.integration.test_execution_approval_step import _grant_decide
+
+    async with integration_session_factory() as session:
+        tv_id = await _seed_tool_version(session)
+        tool_id = await _activate_tool(session, tv_id)
+        policy = await ApprovalPolicyRepository(session).create(
+            code=f"ap-wf-{uuid.uuid4().hex[:8]}",
+            name="WF Authorable",
+            decision_mode="ANY",
+            required_approvals=1,
+            default_expiry_seconds=3600,
+            approver_scope={},
+            allow_self_approval=True,
+        )
+        await session.flush()
+        workflow = await _create_workflow(session)
+        plan = _base_plan(
+            workflow_id=workflow.id,
+            steps=[
+                _tool("step_a", tool_version_id=tv_id),
+                {
+                    "id": "gate",
+                    "name": "gate",
+                    "type": AuthorableStepType.APPROVAL.value,
+                    "required": True,
+                    "depends_on": ["step_a"],
+                    "when": None,
+                    "timeout_seconds": 30,
+                    "on_error": "FAIL_EXECUTION",
+                    "config": {"approval_policy_id": str(policy.id)},
+                },
+                _tool("step_b", tool_version_id=tv_id, depends_on=["gate"]),
+            ],
+        )
+        version = await _create_draft_version(session, workflow.id, plan=plan)
+        await _publish_and_activate(session, workflow.id, version.id)
+        user_id = await _seed_authorized_workflow_user(
+            session, workflow_id=workflow.id, tool_ids=[tool_id]
+        )
+        await _grant_decide(session, user_id=user_id)
+        await session.commit()
+        ctx = {
+            "workflow_id": workflow.id,
+            "version_id": version.id,
+            "requester_id": user_id,
+        }
+
+    class _Client:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def call_tool(self, endpoint, **kwargs):
+            from datetime import UTC, datetime
+
+            self.calls += 1
+            return (
+                NormalizedToolResult(
+                    protocol_success=True,
+                    tool_error=False,
+                    structured_content={"ok": True, "n": self.calls},
+                ),
+                {"http_status": 200},
+                datetime.now(UTC),
+            )
+
+    client = _Client()
+    execution_id, worker_id, lease_token = await _claim_workflow_execution(
+        integration_session_factory, ctx=ctx
+    )
+    runner = McpToolRunner(
+        session_factory=integration_session_factory,
+        mcp_client=client,
+        secret_resolver_factory=_resolver_factory,
+        lease_seconds=120,
+        result_inline_max_bytes=256_000,
+    )
+    await runner.run_claimed_execution(
+        execution_id=execution_id,
+        worker_id=worker_id,
+        lease_token=lease_token,
+    )
+
+    async with integration_session_factory() as session:
+        execution = await ExecutionRepository(session).get(execution_id)
+        assert execution is not None
+        assert execution.status == ExecutionStatus.WAITING_APPROVAL.value
+        assert execution.workflow_version_id == ctx["version_id"]
+        pending = await ApprovalRequestRepository(session).find_pending_for_execution(
+            execution_id=execution_id
+        )
+        assert pending is not None
+        approval_id = pending.id
+        await ApprovalDecisionService(session).decide(
+            approval_id=approval_id,
+            actor_user_id=ctx["requester_id"],
+            decision="APPROVE",
+        )
+        await session.commit()
+
+    async with integration_session_factory() as session:
+        resume = await ApprovalResumeClaimService(session, lease_seconds=120).claim(
+            execution_id=execution_id,
+            approval_request_id=approval_id,
+            worker_id="pg-wf-resume",
+        )
+        assert resume.claimed
+        worker_id = resume.worker_id
+        lease_token = resume.lease_token
+        await session.commit()
+
+    await runner.run_claimed_execution(
+        execution_id=execution_id,
+        worker_id=worker_id,
+        lease_token=lease_token,
+    )
+    async with integration_session_factory() as session:
+        execution = await ExecutionRepository(session).get(execution_id)
+        assert execution is not None
+        assert execution.id == execution_id
+        assert execution.workflow_version_id == ctx["version_id"]
+        assert execution.status == ExecutionStatus.SUCCEEDED.value
+        assert client.calls == 2

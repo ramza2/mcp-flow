@@ -444,7 +444,39 @@ Blocking validation error가 없는 `DRAFT`만 `PUBLISHED`로 전환한다. 게�
 
 ## FNC-WF-010. 수동 실행
 
-Published WorkflowVersion + typed input으로 Execution을 생성하며 실행시점 Permission/Tool 상태를 재검증한다.
+`POST /workflows/{workflow_id}/versions/{version_id}/executions`는 exact current
+PUBLISHED `WorkflowVersion`에 대해 durable Execution을 생성한다.
+
+필수 전제:
+
+```text
+Workflow.status == ACTIVE
+Workflow.current_version_id == version.id
+WorkflowVersion.status == PUBLISHED
+WorkflowVersion.validation_status == VALID
+workflow.execute + WORKFLOW ResourceGrant
+per-TOOL mcp.tool.execute + MCP_TOOL ResourceGrant
+```
+
+요청 `inputs`는 `ExecutionPlanV1.inputs`를 따른다. `secret=true` Plan input은
+exact `SECRET_REF`만 허용하며 Creation 시 SecretResolver를 호출하지 않는다.
+
+생성 결과:
+
+```text
+source_type = WORKFLOW_VERSION
+trigger_type = USER
+workflow_version_id = exact version
+agent_request_id / agent_version_id / plan_validation_run_id = null
+policy_snapshot.schema_version = workflow_execution_policy.v1
+```
+
+정상 경로는 queue staging → claim → 기존 TOOL/CONDITION/JOIN/APPROVAL/FOR_EACH/WHILE
+runtime을 사용한다. ToolPolicy `requires_confirmation`은
+`WORKFLOW_CONFIRMATION_UNSUPPORTED`로 Creation 전 fail-closed한다. ToolPolicy
+`requires_approval`은 이번 slice에서 `DAG_WAIT_UNSUPPORTED`(authorable APPROVAL
+Step은 지원). Complex Workflow expired-lease recovery는 follow-up이며 recovery
+sweeper는 `AGENT_REQUEST`만 선택한다.
 
 ---
 

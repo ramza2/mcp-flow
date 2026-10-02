@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import uuid
-
 import pytest
 from app.core.errors import AppError
 from app.domain.enums import ExecutionSourceType, ExecutionStatus, StepStatus
@@ -16,9 +14,12 @@ from app.execution.runtime_preflight import assert_source_tool_executable
 from app.repositories.execution import ExecutionRepository
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from tests.unit.test_execution_creation import _create as _create_agent, _idem_key, _seed_ready
+from tests.unit.test_execution_creation import _create as _create_agent
+from tests.unit.test_execution_creation import _idem_key, _seed_ready
 from tests.unit.test_workflow_execution_creation import (
     _create as _create_workflow_execution,
+)
+from tests.unit.test_workflow_execution_creation import (
     _seed_ready_workflow,
 )
 

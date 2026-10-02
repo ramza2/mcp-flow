@@ -3,15 +3,15 @@
 from __future__ import annotations
 
 import pytest
-from sqlalchemy.exc import IntegrityError, OperationalError
-from sqlalchemy.ext.asyncio import AsyncSession
-
 from app.core.errors import AppError
 from app.domain.enums import ExecutionSourceType, ExecutionStatus
 from app.execution.claim import ExecutionClaimService
 from app.execution.queue import ExecutionQueueService
 from app.execution.tasks import _is_retryable_database_error, claim_execution_task
 from app.repositories.execution import ExecutionRepository
+from sqlalchemy.exc import IntegrityError, OperationalError
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from tests.unit.test_execution_queue_claim import _created_execution
 
 
