@@ -46,6 +46,7 @@ class Execution(Base):
             "requested_at",
         ),
         Index("ix_executions_agent_version_id", "agent_version_id"),
+        Index("ix_executions_workflow_version_id", "workflow_version_id"),
         Index("ix_executions_plan_validation_run_id", "plan_validation_run_id"),
         Index("ix_executions_parent_execution_id", "parent_execution_id"),
         Index(
@@ -75,9 +76,10 @@ class Execution(Base):
         ForeignKey("agent_versions.id", ondelete="RESTRICT"),
         nullable=True,
     )
-    # Soft UUID placeholders until Workflow/Schedule persistence exists.
     workflow_version_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), nullable=True
+        UUID(as_uuid=True),
+        ForeignKey("workflow_versions.id", ondelete="RESTRICT"),
+        nullable=True,
     )
     schedule_occurrence_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), nullable=True

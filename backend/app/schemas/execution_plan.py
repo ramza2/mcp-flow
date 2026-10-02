@@ -10,9 +10,16 @@ validate exact shapes per Step Type. AgentRequest single-TOOL plans keep
 from __future__ import annotations
 
 import uuid
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
 
 from app.domain.enums import AuthorableStepType, JoinPolicy, LoopMode
 from app.schemas.parameter_binding import BindingValue
@@ -54,6 +61,26 @@ class PlanSourceAgent(BaseModel):
 
     type: Literal["AGENT"] = "AGENT"
     agent_version_id: uuid.UUID
+
+
+class PlanSourceWorkflow(BaseModel):
+    """WorkflowVersion-owned plan source (docs/04 §9).
+
+    Pins the owning logical Workflow only. Exact WorkflowVersion is pinned by
+    Execution.workflow_version_id, not by Plan content (avoids self-referential
+    create/hash semantics when cloning versions).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["WORKFLOW"] = "WORKFLOW"
+    workflow_id: uuid.UUID
+
+
+PlanSource = Annotated[
+    PlanSourceAgent | PlanSourceWorkflow,
+    Field(discriminator="type"),
+]
 
 
 class PlanInputDefinition(BaseModel):
@@ -224,7 +251,7 @@ class ExecutionPlanV1(BaseModel):
 
     schema_version: Literal["1.0"]
     goal: str
-    source: PlanSourceAgent
+    source: PlanSource
     inputs: dict[str, PlanInputDefinition]
     limits: PlanLimits
     steps: list[ExecutionPlanStep]

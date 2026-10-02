@@ -36,6 +36,7 @@ from app.models.tool_selection import (
     ToolSelectionCandidate,
     ToolSelectionRun,
 )
+from app.models.workflow import Workflow, WorkflowVersion, WorkflowVersionToolRef
 
 __all__ = [
     "Agent",
@@ -79,4 +80,7 @@ __all__ = [
     "ToolSelectionRun",
     "User",
     "UserRole",
+    "Workflow",
+    "WorkflowVersion",
+    "WorkflowVersionToolRef",
 ]

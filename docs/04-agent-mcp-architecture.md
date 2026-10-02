@@ -514,6 +514,32 @@ LOOP_CONTEXT
 }
 ```
 
+### Plan `source` (discriminated)
+
+Exact field sets only — no mixed fields:
+
+```json
+{"type":"AGENT","agent_version_id":"<uuid>"}
+```
+
+```json
+{"type":"WORKFLOW","workflow_id":"<uuid>"}
+```
+
+Rules:
+
+```text
+source.type = AGENT
+→ agent_version_id required
+→ AgentRequest Plan Generator emits this shape
+
+source.type = WORKFLOW
+→ workflow_id required (owning logical Workflow)
+→ WorkflowVersion.plan_definition must use this shape
+→ do not put workflow_version_id inside Plan source
+  (Execution.workflow_version_id pins the exact version)
+```
+
 ### 9.1 Step 공통 구조
 
 ```json
