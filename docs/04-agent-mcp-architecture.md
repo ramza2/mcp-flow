@@ -1757,11 +1757,18 @@ MCP progress는 `execution.step.progress` event로 normalize한다. progress 비
 
 ### Cancellation
 
-1. Execution에 `CANCEL_REQUESTED`를 기록한다.
-2. 신규 Step claim을 중지한다.
-3. 가능하면 MCP cancellation을 전달한다.
-4. 취소 불가능한 외부 호출은 결과를 기다리되 후속 Step을 시작하지 않는다.
-5. 이미 발생한 side effect 가능성을 결과에 표시한다.
+협력적 취소 (Current MCP에 remote `tasks/cancel` / `tools/cancel` 없음 — invent하지 않음).
+
+1. `cancel_requested_at`(+ optional by/reason)를 기록한다.
+2. STARTED ToolCall이 없으면 immediate `CANCELLED`; 있으면 `CANCEL_REQUESTED`로 lease를 유지한다.
+3. B2 final pre-send gate에서 `CANCEL_REQUESTED`면 MCP=0으로 prepared Attempt/ToolCall/Step을 CANCELLED 처리한다.
+4. 이미 send boundary를 넘긴 원격 호출은 정확히 1회 정산한다 (성공 증거 보존; `UNKNOWN_OUTCOME`은 Execution `FAILED` 유지).
+5. 취소 후 신규 Step / Attempt / SAFE_RETRY / downstream MCP를 시작하지 않는다.
+6. 이미 전송된 호출이 valid `input_required`를 반환해도 WAITING_INPUT/OPEN MCPInputRequest를 열지 않는다 — ToolCall 라운드 SUCCEEDED + Attempt/Step CANCELLED.
+7. `UNKNOWN_OUTCOME` / mandatory fatal은 취소보다 우선하여 Execution `FAILED`를 유지한다 (CANCELLED로 숨기지 않음).
+8. Recovery는 `CANCEL_REQUESTED`를 ordinary retry candidate로 선택하지 않는다. crash/expired-lease cancellation reconciliation은 후속 hardening.
+9. `apply_cancellation_locked`는 caller TX ownership을 가정하며 commit하지 않는다 (Schedule REPLACE 조합용).
+10. 이 원시는 Schedule `overlap_policy=REPLACE`의 선행 조건이며 REPLACE 자체는 후속 PR.
 
 ### Tasks extension
 

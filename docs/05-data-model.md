@@ -1154,6 +1154,8 @@ Decision persistence:
 | `error_code`, `error_message` | 최종 오류 |
 | `trace_id`, `priority` | 추적/우선순위 |
 | lifecycle | requested/queued/started/finished/cancel_requested |
+| `cancel_requested_by` | 취소를 요청한 User FK (nullable; Schedule REPLACE 등 내부 취소는 null) |
+| `cancel_reason` | 취소 사유 varchar(500) nullable — `error_*` / `result_summary` / `policy_snapshot`에 넣지 않음 |
 | `worker_id` | 현재 Execution orchestration lease holder (nullable) |
 | `lease_token` | stale worker update를 차단하는 opaque UUID claim token (nullable) |
 | `lease_expires_at`, `heartbeat_at` | orchestration lease 만료/heartbeat (nullable) |

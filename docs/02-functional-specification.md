@@ -687,7 +687,30 @@ runtime preflight (authz / Tool / Server / Policy / ApprovalPolicy / confirmatio
 
 ## FNC-EXE-010. 취소
 
-취소 요청 → `CANCEL_REQUESTED` → 신규 Step 차단 → 가능한 remote cancel → 안전한 종료 후 `CANCELLED`.
+협력적 Execution 취소 (remote MCP cancel protocol 없음).
+
+```text
+POST /api/v1/executions/{execution_id}/cancel
+→ User ACTIVE + execution.cancel + requester_id == actor
+→ cancel_requested_at / cancel_requested_by / cancel_reason 기록
+→ CREATED|QUEUED|WAITING_*|RUNNING(no STARTED ToolCall) → immediate CANCELLED
+→ RUNNING + STARTED ToolCall → CANCEL_REQUESTED (lease 유지)
+→ B2 pre-send: CANCEL_REQUESTED면 MCP=0, Attempt/ToolCall/Step CANCELLED
+→ in-flight 원격 호출은 정확히 1회 정산 (성공 증거 보존, UNKNOWN_OUTCOME은 FAILED 유지)
+→ 취소 후 신규 Step / Attempt / SAFE_RETRY 금지
+```
+
+Authorization과 상태전이는 분리한다. `ExecutionCancellationService.request_user_cancel`은 사용자 권한을 검사하고, 공유 `apply_cancellation_locked`는 이후 Schedule REPLACE 내부 취소가 재사용한다 (공개 system-cancel API 없음).
+
+`CANCELLED`/`CANCEL_REQUESTED` 중복 요청은 idempotent이며 최초 reason/timestamp를 덮어쓰지 않는다. 이미 `SUCCEEDED`/`FAILED`/`TIMED_OUT`/`PARTIALLY_SUCCEEDED`이면 `409 RESOURCE_CONFLICT`.
+
+WAITING_APPROVAL 취소 시 PENDING ApprovalRequest → CANCELLED (Decision 없음). WAITING_INPUT 취소 시 OPEN MCPInputRequest → REJECTED. 타 requester는 `404 NOT_FOUND`.
+
+이미 send boundary를 넘긴 원격 호출이 `input_required`를 반환하면 WAITING_INPUT/OPEN MCPInputRequest를 만들지 않는다. ToolCall 라운드는 SUCCEEDED로 기록하고 logical Attempt/Step은 CANCELLED로 정산한다 (`UNKNOWN_OUTCOME`으로 바꾸지 않음).
+
+Public API에서 inactive session은 Cookie Session 검증이 먼저 `401 AUTH_SESSION_INVALID`를 반환할 수 있다. 서비스 계층 ACTIVE 검사는 403이며 session 동작을 약화하지 않는다.
+
+Recovery는 기존처럼 `RUNNING`만 candidate로 하며 `CANCEL_REQUESTED`를 일반 retry 대상으로 선택하지 않는다. 이미 in-flight인 ToolCall은 owning live worker가 정산해야 한다. crash/expired-lease cancellation reconciliation은 별도 recovery hardening slice이며 이 범위에서 완전성을 주장하지 않는다.
 
 ## FNC-EXE-011. 복구
 
