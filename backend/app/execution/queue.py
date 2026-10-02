@@ -195,7 +195,12 @@ class ExecutionQueueService:
             select(Execution)
             .where(
                 Execution.status == ExecutionStatus.CREATED.value,
-                Execution.source_type == ExecutionSourceType.AGENT_REQUEST.value,
+                Execution.source_type.in_(
+                    (
+                        ExecutionSourceType.AGENT_REQUEST.value,
+                        ExecutionSourceType.WORKFLOW_VERSION.value,
+                    )
+                ),
             )
             .order_by(Execution.requested_at.asc(), Execution.id.asc())
             .limit(bounded)

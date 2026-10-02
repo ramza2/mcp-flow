@@ -3,15 +3,15 @@
 from __future__ import annotations
 
 import pytest
-from sqlalchemy.exc import IntegrityError, OperationalError
-from sqlalchemy.ext.asyncio import AsyncSession
-
 from app.core.errors import AppError
 from app.domain.enums import ExecutionSourceType, ExecutionStatus
 from app.execution.claim import ExecutionClaimService
 from app.execution.queue import ExecutionQueueService
 from app.execution.tasks import _is_retryable_database_error, claim_execution_task
 from app.repositories.execution import ExecutionRepository
+from sqlalchemy.exc import IntegrityError, OperationalError
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from tests.unit.test_execution_queue_claim import _created_execution
 
 
@@ -34,13 +34,13 @@ def test_claim_task_retries_only_connection_level_database_errors() -> None:
 
 
 @pytest.mark.asyncio
-async def test_stager_ignores_non_agent_request_created_execution(
+async def test_stager_ignores_schedule_and_factory_created_execution(
     db_session: AsyncSession,
 ) -> None:
     execution_id, _ = await _created_execution(db_session)
     execution = await ExecutionRepository(db_session).get(execution_id)
     assert execution is not None
-    execution.source_type = ExecutionSourceType.WORKFLOW_VERSION.value
+    execution.source_type = ExecutionSourceType.SCHEDULE_OCCURRENCE.value
     await db_session.commit()
 
     staged = await ExecutionQueueService(db_session).stage_created_batch(limit=10)
@@ -54,7 +54,30 @@ async def test_stager_ignores_non_agent_request_created_execution(
 
 
 @pytest.mark.asyncio
-async def test_claim_rejects_non_agent_request_queued_execution(
+async def test_stager_accepts_workflow_version_created_execution(
+    db_session: AsyncSession,
+) -> None:
+    execution_id, _ = await _created_execution(db_session)
+    execution = await ExecutionRepository(db_session).get(execution_id)
+    assert execution is not None
+    execution.source_type = ExecutionSourceType.WORKFLOW_VERSION.value
+    execution.agent_request_id = None
+    execution.agent_version_id = None
+    execution.plan_validation_run_id = None
+    await db_session.commit()
+
+    staged = await ExecutionQueueService(db_session).stage_created_batch(limit=10)
+    await db_session.commit()
+
+    assert staged == 1
+    execution = await ExecutionRepository(db_session).get(execution_id)
+    assert execution is not None
+    assert execution.status == ExecutionStatus.QUEUED.value
+    assert execution.queued_at is not None
+
+
+@pytest.mark.asyncio
+async def test_claim_rejects_schedule_queued_execution(
     db_session: AsyncSession,
 ) -> None:
     execution_id, _ = await _created_execution(db_session)
@@ -63,7 +86,7 @@ async def test_claim_rejects_non_agent_request_queued_execution(
 
     execution = await ExecutionRepository(db_session).get(execution_id)
     assert execution is not None
-    execution.source_type = ExecutionSourceType.WORKFLOW_VERSION.value
+    execution.source_type = ExecutionSourceType.SCHEDULE_OCCURRENCE.value
     await db_session.commit()
 
     with pytest.raises(AppError) as exc_info:

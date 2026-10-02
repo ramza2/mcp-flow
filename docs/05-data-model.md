@@ -1149,7 +1149,7 @@ Decision persistence:
 | `status` | Canonical Execution status |
 | `plan_schema_version`, `plan_snapshot`, `plan_hash` | immutable plan |
 | `input_snapshot` | secret ref만 포함 |
-| `policy_snapshot` | 실행 생성 당시 합성정책 |
+| `policy_snapshot` | 실행 생성 당시 합성정책. AgentRequest는 single-TOOL `{tool_policy, approval_policy}` shape. WORKFLOW_VERSION은 `workflow_execution_policy.v1` per-TOOL map (`tool_steps[plan_step_id]`) |
 | `result_summary` | 최종 ResponseEnvelope |
 | `error_code`, `error_message` | 최종 오류 |
 | `trace_id`, `priority` | 추적/우선순위 |
@@ -1160,6 +1160,43 @@ Decision persistence:
 | `lock_version`, `retention_until` | 동시성/보존 |
 
 `source_type = AGENT_REQUEST` foundation은 `plan_validation_run_id`로 해당 Execution이 고정한 exact READY validation evidence를 pin한다. creation 이후 Plan/validation lineage를 재해석하지 않는다.
+
+`source_type = WORKFLOW_VERSION` manual execution은:
+
+```text
+workflow_version_id = exact version pinned at Creation (then-current PUBLISHED)
+agent_request_id / agent_version_id / plan_validation_run_id = null
+trigger_type = USER
+plan_snapshot = validated WorkflowVersion.plan_definition
+plan_hash = compute_plan_hash(plan_snapshot)  # not WorkflowVersion.content_hash
+input_snapshot = normalized Plan inputs (SECRET_REF reference-only)
+policy_snapshot.schema_version = workflow_execution_policy.v1
+```
+
+Creation still requires the requested version to be the Workflow
+`current_version_id` and `PUBLISHED`/`VALID`. After Creation, runtime
+Attempt / B2 / authorable APPROVAL resume / MRTR resume keep the pinned
+`workflow_version_id` even when that version later becomes `DEPRECATED`
+(superseded by a newer publish). They still require:
+
+```text
+WorkflowVersion.status in {PUBLISHED, DEPRECATED}
+WorkflowVersion.validation_status == VALID
+WorkflowVersion.content_hash integrity
+canonical Execution.plan_snapshot == canonical WorkflowVersion.plan_definition
+Execution.plan_hash == compute_plan_hash(plan_snapshot)
+Workflow.status == ACTIVE
+current workflow.execute + WORKFLOW ResourceGrant
+```
+
+Do not require `Workflow.current_version_id == Execution.workflow_version_id`
+at runtime. Expired-lease recovery (`FNC-EXE-011`) remains
+`AGENT_REQUEST`-only in this slice.
+
+`workflow_execution_policy.v1` is immutable security evidence: exact top-level
+fields (`schema_version`, `workflow_id`, `workflow_version_id`, `tool_steps`)
+and a full projection of every Plan TOOL template id (including LOOP body
+templates). Corruption anywhere fails closed before another external call.
 
 ### 13.2 AgentRequest Execution Creation Foundation
 

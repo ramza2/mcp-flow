@@ -1,17 +1,17 @@
 """Shared current-Tool executable preflight (FNC-EXE-004).
 
 Used by:
-- ExecutionCreationService (creation-time Tool/Server/Grant/Policy checks)
+- ExecutionCreationService / WorkflowExecutionCreationService
 - ToolStepAttemptService (Attempt-start revalidation)
 - McpToolRunner final pre-send gate (Phase B2, immediately before tools/call)
 
-AgentRequest PlanValidationRun / confirmation *lineage selection* stays in
-ExecutionCreationService. PLAN_CONFIRMATION *evidence* checking is shared via
-``assert_answered_plan_confirmation``.
+Common Tool/Server/User/Policy checks are shared. Agent and Workflow add
+source-specific grant/lineage checks via thin wrappers.
 """
 
 from __future__ import annotations
 
+import json
 import math
 import uuid
 from dataclasses import dataclass
@@ -27,6 +27,7 @@ from app.domain.enums import (
     ApprovalPolicyStatus,
     ClarificationRequestStatus,
     ClarificationRequestType,
+    ExecutionSourceType,
     MCPProtocolEra,
     MCPServerStatus,
     MCPToolStatus,
@@ -34,10 +35,15 @@ from app.domain.enums import (
     ResourceGrantResourceType,
     RiskClass,
     ToolVersionValidationStatus,
+    WorkflowStatus,
+    WorkflowVersionStatus,
+    WorkflowVersionValidationStatus,
 )
 from app.models.agent import AgentToolGrant
 from app.models.approval import ApprovalPolicy
+from app.models.execution import Execution
 from app.models.mcp import MCPServer, MCPTool, MCPToolPolicy, MCPToolVersion
+from app.models.workflow import Workflow, WorkflowVersion
 from app.repositories.agent_tool_grant import AgentToolGrantRepository
 from app.repositories.agent_version import AgentVersionRepository
 from app.repositories.approval_policy import ApprovalPolicyRepository
@@ -47,10 +53,29 @@ from app.repositories.mcp_server import MCPServerRepository
 from app.repositories.mcp_tool import MCPToolRepository
 from app.repositories.mcp_tool_policy import MCPToolPolicyRepository
 from app.repositories.plan_validation import PlanValidationRepository
+from app.repositories.workflow import WorkflowRepository
+from app.repositories.workflow_version import WorkflowVersionRepository
+from app.schemas.execution_plan import ExecutionPlanV1, compute_plan_hash
 from app.services.policy_snapshot import build_safe_tool_policy_snapshot
+from app.services.workflow_content import workflow_version_content_hash
 
 _EXECUTE_PERMISSION = "mcp.tool.execute"
+_WORKFLOW_EXECUTE_PERMISSION = "workflow.execute"
 _MCP_TOOL_RESOURCE = ResourceGrantResourceType.MCP_TOOL.value
+_WORKFLOW_RESOURCE = ResourceGrantResourceType.WORKFLOW.value
+_PINNED_WORKFLOW_VERSION_STATUSES = frozenset(
+    {
+        WorkflowVersionStatus.PUBLISHED.value,
+        WorkflowVersionStatus.DEPRECATED.value,
+    }
+)
+
+
+def _semantic_equal(left: Any, right: Any) -> bool:
+    """Order-insensitive JSON semantic equality (not raw string compare)."""
+    return json.loads(json.dumps(left, sort_keys=True, default=str)) == json.loads(
+        json.dumps(right, sort_keys=True, default=str)
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,7 +85,8 @@ class RuntimeToolAuthorization:
     server: MCPServer
     tool_policy: MCPToolPolicy
     approval_policy: ApprovalPolicy | None
-    grant: AgentToolGrant
+    agent_grant: AgentToolGrant | None
+    confirmation_required: bool
     policy_snapshot: dict[str, Any]
 
 
@@ -73,24 +99,98 @@ async def assert_current_tool_executable(
     expected_policy_snapshot: dict[str, Any],
     plan_timeout_seconds: int | None = None,
 ) -> RuntimeToolAuthorization:
-    """Fail-closed current-state checks for Tool execution (FNC-EXE-004).
+    """AgentRequest-compatible current-Tool preflight (backward-compatible API)."""
+    return await assert_current_agent_tool_executable(
+        session,
+        requester_id=requester_id,
+        agent_version_id=agent_version_id,
+        tool_version_id=tool_version_id,
+        expected_policy_snapshot=expected_policy_snapshot,
+        plan_timeout_seconds=plan_timeout_seconds,
+    )
 
-    ``expected_policy_snapshot`` is the immutable snapshot pinned at creation
-    (READY PlanValidationRun.policy_snapshot / Execution.policy_snapshot).
-    Current safe policy must equal it.
-    """
-    tools = MCPToolRepository(session)
-    servers = MCPServerRepository(session)
-    policies = MCPToolPolicyRepository(session)
-    approvals = ApprovalPolicyRepository(session)
-    grants = AgentToolGrantRepository(session)
-    auth = AuthorizationRepository(session)
+
+async def assert_source_tool_executable(
+    session: AsyncSession,
+    *,
+    execution: Execution,
+    tool_version_id: uuid.UUID,
+    expected_policy_snapshot: dict[str, Any],
+    plan_timeout_seconds: int | None = None,
+) -> RuntimeToolAuthorization:
+    """Dispatch current-Tool authorization by Execution.source_type."""
+    if execution.source_type == ExecutionSourceType.AGENT_REQUEST.value:
+        if execution.agent_version_id is None:
+            raise AppError(
+                code="EXECUTION_PRECONDITION_FAILED",
+                message="Execution.agent_version_id is required.",
+                status_code=409,
+            )
+        return await assert_current_agent_tool_executable(
+            session,
+            requester_id=execution.requester_id,
+            agent_version_id=execution.agent_version_id,
+            tool_version_id=tool_version_id,
+            expected_policy_snapshot=expected_policy_snapshot,
+            plan_timeout_seconds=plan_timeout_seconds,
+        )
+    if execution.source_type == ExecutionSourceType.WORKFLOW_VERSION.value:
+        await assert_current_workflow_execution_authorized(session, execution)
+        core = await _assert_common_tool_executable(
+            session,
+            requester_id=execution.requester_id,
+            tool_version_id=tool_version_id,
+            expected_policy_snapshot=expected_policy_snapshot,
+            plan_timeout_seconds=plan_timeout_seconds,
+        )
+        return RuntimeToolAuthorization(
+            tool_version=core.tool_version,
+            logical_tool=core.logical_tool,
+            server=core.server,
+            tool_policy=core.tool_policy,
+            approval_policy=core.approval_policy,
+            agent_grant=None,
+            confirmation_required=bool(core.tool_policy.requires_confirmation),
+            policy_snapshot=core.policy_snapshot,
+        )
+    if execution.source_type == ExecutionSourceType.MANUAL_TOOL_TEST.value:
+        # Manual tool tests historically reuse Agent preflight with agent_version_id.
+        if execution.agent_version_id is None:
+            raise AppError(
+                code="EXECUTION_PRECONDITION_FAILED",
+                message="Execution.agent_version_id is required.",
+                status_code=409,
+            )
+        return await assert_current_agent_tool_executable(
+            session,
+            requester_id=execution.requester_id,
+            agent_version_id=execution.agent_version_id,
+            tool_version_id=tool_version_id,
+            expected_policy_snapshot=expected_policy_snapshot,
+            plan_timeout_seconds=plan_timeout_seconds,
+        )
+    raise AppError(
+        code="RESOURCE_CONFLICT",
+        message=(
+            f"Unsupported Execution.source_type for Tool authorization: "
+            f"{execution.source_type!r}."
+        ),
+        status_code=409,
+    )
+
+
+async def assert_current_agent_tool_executable(
+    session: AsyncSession,
+    *,
+    requester_id: uuid.UUID,
+    agent_version_id: uuid.UUID,
+    tool_version_id: uuid.UUID,
+    expected_policy_snapshot: dict[str, Any],
+    plan_timeout_seconds: int | None = None,
+) -> RuntimeToolAuthorization:
     versions = AgentVersionRepository(session)
+    grants = AgentToolGrantRepository(session)
 
-    # AgentVersion must still resolve. Creation foundation does not require
-    # PUBLISHED-only at Execution create time, so inventing a PUBLISHED-only
-    # Attempt gate would diverge from existing AgentRequest Execution lineage.
-    # Unknown/non-canonical status values fail closed.
     agent_version = await versions.get(agent_version_id)
     if agent_version is None:
         raise AppError(
@@ -106,6 +206,350 @@ async def assert_current_tool_executable(
             message="invalid AgentVersion.status.",
             status_code=409,
         ) from exc
+
+    core = await _assert_common_tool_executable(
+        session,
+        requester_id=requester_id,
+        tool_version_id=tool_version_id,
+        expected_policy_snapshot=expected_policy_snapshot,
+        plan_timeout_seconds=plan_timeout_seconds,
+    )
+
+    version_grants = await grants.list_for_version(agent_version_id)
+    grant = next(
+        (g for g in version_grants if g.mcp_tool_id == core.logical_tool.id), None
+    )
+    if grant is None or grant.effect != AgentToolGrantEffect.ALLOW.value:
+        raise AppError(
+            code="FORBIDDEN",
+            message="AgentToolGrant ALLOW 필요.",
+            status_code=403,
+        )
+    if grant.parameter_constraints is not None:
+        raise AppError(
+            code="EXECUTION_PRECONDITION_FAILED",
+            message="parameter_constraints는 fail-closed.",
+            status_code=409,
+        )
+
+    confirmation_required = bool(
+        grant.requires_confirmation or core.tool_policy.requires_confirmation
+    )
+    return RuntimeToolAuthorization(
+        tool_version=core.tool_version,
+        logical_tool=core.logical_tool,
+        server=core.server,
+        tool_policy=core.tool_policy,
+        approval_policy=core.approval_policy,
+        agent_grant=grant,
+        confirmation_required=confirmation_required,
+        policy_snapshot=core.policy_snapshot,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class WorkflowExecutionAuthorization:
+    workflow: Workflow
+    workflow_version: WorkflowVersion
+    plan: ExecutionPlanV1
+
+
+async def assert_current_workflow_execution_authorized(
+    session: AsyncSession,
+    execution: Execution,
+) -> WorkflowExecutionAuthorization:
+    """Mutable + pinned Workflow source authorization for an existing Execution.
+
+    Creation eligibility still requires PUBLISHED + current_version_id equality.
+    After Creation, a pinned WorkflowVersion may be DEPRECATED (superseded) and
+    remain valid lineage. Logical Workflow ACTIVE + grants remain mutable.
+    """
+    if execution.source_type != ExecutionSourceType.WORKFLOW_VERSION.value:
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message="Workflow Execution authorization requires WORKFLOW_VERSION.",
+            status_code=409,
+        )
+    if (
+        execution.workflow_version_id is None
+        or execution.agent_request_id is not None
+        or execution.agent_version_id is not None
+    ):
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message="WORKFLOW_VERSION Execution source lineage is inconsistent.",
+            status_code=409,
+        )
+
+    versions = WorkflowVersionRepository(session)
+    workflows = WorkflowRepository(session)
+    auth = AuthorizationRepository(session)
+
+    version = await versions.get(execution.workflow_version_id)
+    if version is None:
+        raise AppError(
+            code="EXECUTION_PRECONDITION_FAILED",
+            message="WorkflowVersion not found.",
+            status_code=409,
+        )
+    if version.status not in _PINNED_WORKFLOW_VERSION_STATUSES:
+        raise AppError(
+            code="EXECUTION_PRECONDITION_FAILED",
+            message=(
+                "pinned WorkflowVersion.status must be PUBLISHED or DEPRECATED."
+            ),
+            status_code=409,
+        )
+    if version.validation_status != WorkflowVersionValidationStatus.VALID.value:
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message="pinned WorkflowVersion.validation_status must be VALID.",
+            status_code=409,
+        )
+    if version.plan_schema_version != execution.plan_schema_version:
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message="WorkflowVersion.plan_schema_version mismatch.",
+            status_code=409,
+        )
+
+    workflow = await workflows.get(version.workflow_id)
+    if workflow is None or workflow.deleted_at is not None:
+        raise AppError(
+            code="EXECUTION_PRECONDITION_FAILED",
+            message="Workflow not found.",
+            status_code=409,
+        )
+    if workflow.status != WorkflowStatus.ACTIVE.value:
+        raise AppError(
+            code="EXECUTION_PRECONDITION_FAILED",
+            message="Workflow.status != ACTIVE.",
+            status_code=409,
+        )
+    if version.workflow_id != workflow.id:
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message="WorkflowVersion does not belong to owning Workflow.",
+            status_code=409,
+        )
+
+    if not isinstance(version.plan_definition, dict):
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message="WorkflowVersion.plan_definition must be a JSON object.",
+            status_code=409,
+        )
+    try:
+        version_plan = ExecutionPlanV1.model_validate(version.plan_definition)
+    except Exception as exc:
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message="WorkflowVersion.plan_definition is invalid.",
+            status_code=409,
+        ) from exc
+    if (
+        version_plan.source.type != "WORKFLOW"
+        or version_plan.source.workflow_id != workflow.id
+    ):
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message="WorkflowVersion Plan source lineage mismatch.",
+            status_code=409,
+        )
+
+    recomputed_content = workflow_version_content_hash(
+        plan_schema_version=version.plan_schema_version,
+        plan_definition=version.plan_definition,
+        input_schema=version.input_schema,
+        output_schema=version.output_schema,
+        policy_defaults=version.policy_defaults,
+    )
+    if recomputed_content != version.content_hash:
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message="WorkflowVersion content_hash mismatch.",
+            status_code=409,
+        )
+
+    try:
+        plan = ExecutionPlanV1.model_validate(execution.plan_snapshot)
+    except Exception as exc:
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message="Execution.plan_snapshot is invalid.",
+            status_code=409,
+        ) from exc
+    if plan.source.type != "WORKFLOW" or plan.source.workflow_id != workflow.id:
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message="Execution Plan source lineage mismatch.",
+            status_code=409,
+        )
+
+    # Immutable Version content must equal pinned Execution snapshot (semantic).
+    execution_canonical = plan.model_dump(mode="json")
+    version_canonical = version_plan.model_dump(mode="json")
+    if not _semantic_equal(execution_canonical, version_canonical):
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message=(
+                "Execution.plan_snapshot does not match pinned "
+                "WorkflowVersion.plan_definition."
+            ),
+            status_code=409,
+        )
+    if compute_plan_hash(execution.plan_snapshot) != execution.plan_hash:
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message="Execution.plan_hash does not match plan_snapshot.",
+            status_code=409,
+        )
+
+    snapshot = await auth.get_resource_authorization_snapshot(
+        execution.requester_id,
+        permission_code=_WORKFLOW_EXECUTE_PERMISSION,
+        resource_type=_WORKFLOW_RESOURCE,
+        resource_id=workflow.id,
+    )
+    if not (
+        snapshot.user_exists
+        and snapshot.user_active
+        and snapshot.permission_present
+        and snapshot.resource_grant_present
+    ):
+        raise AppError(
+            code="FORBIDDEN",
+            message="workflow.execute + WORKFLOW ResourceGrant 필요.",
+            status_code=403,
+        )
+
+    return WorkflowExecutionAuthorization(
+        workflow=workflow,
+        workflow_version=version,
+        plan=plan,
+    )
+
+
+async def assert_current_workflow_tool_executable(
+    session: AsyncSession,
+    *,
+    requester_id: uuid.UUID,
+    workflow_version_id: uuid.UUID,
+    tool_version_id: uuid.UUID,
+    expected_policy_snapshot: dict[str, Any],
+    plan_timeout_seconds: int | None = None,
+) -> RuntimeToolAuthorization:
+    """Creation-time Workflow Tool preflight (requires PUBLISHED version).
+
+    Runtime Attempt/B2 must use ``assert_source_tool_executable`` /
+    ``assert_current_workflow_execution_authorized`` so DEPRECATED pinned
+    versions remain valid for already-created Executions.
+    """
+    workflows = WorkflowRepository(session)
+    versions = WorkflowVersionRepository(session)
+    auth = AuthorizationRepository(session)
+
+    version = await versions.get(workflow_version_id)
+    if version is None:
+        raise AppError(
+            code="EXECUTION_PRECONDITION_FAILED",
+            message="WorkflowVersion not found.",
+            status_code=409,
+        )
+    if version.status != WorkflowVersionStatus.PUBLISHED.value:
+        raise AppError(
+            code="EXECUTION_PRECONDITION_FAILED",
+            message="WorkflowVersion.status != PUBLISHED.",
+            status_code=409,
+        )
+    workflow = await workflows.get(version.workflow_id)
+    if workflow is None or workflow.deleted_at is not None:
+        raise AppError(
+            code="EXECUTION_PRECONDITION_FAILED",
+            message="Workflow not found.",
+            status_code=409,
+        )
+    if workflow.status != WorkflowStatus.ACTIVE.value:
+        raise AppError(
+            code="EXECUTION_PRECONDITION_FAILED",
+            message="Workflow.status != ACTIVE.",
+            status_code=409,
+        )
+    try:
+        plan = ExecutionPlanV1.model_validate(version.plan_definition)
+    except Exception as exc:
+        raise AppError(
+            code="EXECUTION_PRECONDITION_FAILED",
+            message="WorkflowVersion plan_definition invalid.",
+            status_code=409,
+        ) from exc
+    if plan.source.type != "WORKFLOW" or plan.source.workflow_id != workflow.id:
+        raise AppError(
+            code="EXECUTION_PRECONDITION_FAILED",
+            message="Workflow Plan source lineage mismatch.",
+            status_code=409,
+        )
+
+    snapshot = await auth.get_resource_authorization_snapshot(
+        requester_id,
+        permission_code=_WORKFLOW_EXECUTE_PERMISSION,
+        resource_type=_WORKFLOW_RESOURCE,
+        resource_id=workflow.id,
+    )
+    if not (
+        snapshot.user_exists
+        and snapshot.user_active
+        and snapshot.permission_present
+        and snapshot.resource_grant_present
+    ):
+        raise AppError(
+            code="FORBIDDEN",
+            message="workflow.execute + WORKFLOW ResourceGrant 필요.",
+            status_code=403,
+        )
+
+    core = await _assert_common_tool_executable(
+        session,
+        requester_id=requester_id,
+        tool_version_id=tool_version_id,
+        expected_policy_snapshot=expected_policy_snapshot,
+        plan_timeout_seconds=plan_timeout_seconds,
+    )
+    return RuntimeToolAuthorization(
+        tool_version=core.tool_version,
+        logical_tool=core.logical_tool,
+        server=core.server,
+        tool_policy=core.tool_policy,
+        approval_policy=core.approval_policy,
+        agent_grant=None,
+        confirmation_required=bool(core.tool_policy.requires_confirmation),
+        policy_snapshot=core.policy_snapshot,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class _CommonToolAuth:
+    tool_version: MCPToolVersion
+    logical_tool: MCPTool
+    server: MCPServer
+    tool_policy: MCPToolPolicy
+    approval_policy: ApprovalPolicy | None
+    policy_snapshot: dict[str, Any]
+
+
+async def _assert_common_tool_executable(
+    session: AsyncSession,
+    *,
+    requester_id: uuid.UUID,
+    tool_version_id: uuid.UUID,
+    expected_policy_snapshot: dict[str, Any],
+    plan_timeout_seconds: int | None,
+) -> _CommonToolAuth:
+    tools = MCPToolRepository(session)
+    servers = MCPServerRepository(session)
+    policies = MCPToolPolicyRepository(session)
+    approvals = ApprovalPolicyRepository(session)
+    auth = AuthorizationRepository(session)
 
     tool_version = await tools.get_version(tool_version_id)
     if tool_version is None:
@@ -171,24 +615,6 @@ async def assert_current_tool_executable(
             code="FORBIDDEN",
             message="mcp.tool.execute + MCP_TOOL ResourceGrant 필요.",
             status_code=403,
-        )
-
-    version_grants = await grants.list_for_version(agent_version_id)
-    grant = next(
-        (g for g in version_grants if g.mcp_tool_id == logical_tool.id), None
-    )
-    if grant is None or grant.effect != AgentToolGrantEffect.ALLOW.value:
-        raise AppError(
-            code="FORBIDDEN",
-            message="AgentToolGrant ALLOW 필요.",
-            status_code=403,
-        )
-    # Canonical parameter_constraints DSL is not yet defined — fail closed.
-    if grant.parameter_constraints is not None:
-        raise AppError(
-            code="EXECUTION_PRECONDITION_FAILED",
-            message="parameter_constraints는 fail-closed.",
-            status_code=409,
         )
 
     tool_policy = await policies.get_by_tool_id(logical_tool.id)
@@ -265,13 +691,12 @@ async def assert_current_tool_executable(
             status_code=409,
         )
 
-    return RuntimeToolAuthorization(
+    return _CommonToolAuth(
         tool_version=tool_version,
         logical_tool=logical_tool,
         server=server,
         tool_policy=tool_policy,
         approval_policy=approval_policy,
-        grant=grant,
         policy_snapshot=current_policy,
     )
 

@@ -468,10 +468,7 @@ class ExecutionCreationService:
             plan_timeout_seconds=step.timeout_seconds,
         )
 
-        if (
-            authz.grant.requires_confirmation
-            or authz.tool_policy.requires_confirmation
-        ):
+        if authz.confirmation_required:
             await assert_answered_plan_confirmation(
                 self._session,
                 agent_request_id=request.id,

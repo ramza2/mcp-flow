@@ -37,10 +37,11 @@ from app.execution.lineage import (
     build_secret_safe_request_snapshot,
     materialize_secret_safe_resolved_input,
 )
+from app.execution.policy_selection import get_expected_tool_policy_snapshot
 from app.execution.resolved_input_schema import validate_resolved_tool_arguments
 from app.execution.runtime_preflight import (
     assert_answered_plan_confirmation,
-    assert_current_tool_executable,
+    assert_source_tool_executable,
 )
 from app.models.execution import Execution, ExecutionStep
 from app.repositories.execution import ExecutionRepository
@@ -135,22 +136,31 @@ class ToolStepAttemptService:
                 status_code=409,
             )
 
-        assert execution.agent_version_id is not None
         steps = await self._executions.list_steps(execution.id)
         lineage = assert_tool_step_lineage(execution, step, steps=steps)
-        authz = await assert_current_tool_executable(
-            self._session,
-            requester_id=execution.requester_id,
-            agent_version_id=execution.agent_version_id,
+        expected_policy = get_expected_tool_policy_snapshot(
+            execution,
+            plan_step_id=lineage.plan_step.id,
             tool_version_id=lineage.tool_version_id,
-            expected_policy_snapshot=dict(execution.policy_snapshot),
+        )
+        authz = await assert_source_tool_executable(
+            self._session,
+            execution=execution,
+            tool_version_id=lineage.tool_version_id,
+            expected_policy_snapshot=expected_policy,
             plan_timeout_seconds=self._plan_timeout_seconds(step),
         )
 
-        if (
-            authz.grant.requires_confirmation
-            or authz.tool_policy.requires_confirmation
-        ):
+        if authz.confirmation_required:
+            if execution.source_type == ExecutionSourceType.WORKFLOW_VERSION.value:
+                raise AppError(
+                    code="WORKFLOW_CONFIRMATION_UNSUPPORTED",
+                    message=(
+                        "Workflow ToolPolicy requires_confirmation is not "
+                        "supported at Attempt time."
+                    ),
+                    status_code=409,
+                )
             if binding_kinds_include_dynamic(lineage.bindings):
                 raise AppError(
                     code="EXECUTION_PRECONDITION_FAILED",
@@ -341,16 +351,28 @@ class ToolStepAttemptService:
         if execution.source_type not in {
             ExecutionSourceType.AGENT_REQUEST.value,
             ExecutionSourceType.MANUAL_TOOL_TEST.value,
+            ExecutionSourceType.WORKFLOW_VERSION.value,
         }:
             raise AppError(
                 code="RESOURCE_CONFLICT",
                 message=(
                     "Attempt foundation supports AGENT_REQUEST / "
-                    "MANUAL_TOOL_TEST Executions only."
+                    "MANUAL_TOOL_TEST / WORKFLOW_VERSION Executions only."
                 ),
                 status_code=409,
             )
-        if execution.agent_version_id is None:
+        if execution.source_type == ExecutionSourceType.WORKFLOW_VERSION.value:
+            if (
+                execution.workflow_version_id is None
+                or execution.agent_version_id is not None
+                or execution.agent_request_id is not None
+            ):
+                raise AppError(
+                    code="RESOURCE_CONFLICT",
+                    message="WORKFLOW_VERSION Attempt source lineage is inconsistent.",
+                    status_code=409,
+                )
+        elif execution.agent_version_id is None:
             raise AppError(
                 code="RESOURCE_CONFLICT",
                 message="Execution.agent_version_id is required.",

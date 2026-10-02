@@ -25,6 +25,7 @@ _CLAIMABLE_SOURCES = frozenset(
     {
         ExecutionSourceType.AGENT_REQUEST.value,
         ExecutionSourceType.MANUAL_TOOL_TEST.value,
+        ExecutionSourceType.WORKFLOW_VERSION.value,
     }
 )
 
@@ -105,10 +106,38 @@ class ExecutionClaimService:
             raise AppError(
                 code="RESOURCE_CONFLICT",
                 message=(
-                    "Claim supports AGENT_REQUEST / MANUAL_TOOL_TEST Executions only."
+                    "Claim supports AGENT_REQUEST / MANUAL_TOOL_TEST / "
+                    "WORKFLOW_VERSION Executions only."
                 ),
                 status_code=409,
             )
+        if execution.source_type == ExecutionSourceType.WORKFLOW_VERSION.value:
+            if (
+                execution.workflow_version_id is None
+                or execution.agent_request_id is not None
+                or execution.agent_version_id is not None
+            ):
+                raise AppError(
+                    code="RESOURCE_CONFLICT",
+                    message="WORKFLOW_VERSION Execution source lineage is inconsistent.",
+                    status_code=409,
+                )
+            try:
+                from app.schemas.execution_plan import ExecutionPlanV1
+
+                plan = ExecutionPlanV1.model_validate(execution.plan_snapshot)
+            except Exception as exc:
+                raise AppError(
+                    code="RESOURCE_CONFLICT",
+                    message="WORKFLOW_VERSION Execution plan_snapshot is invalid.",
+                    status_code=409,
+                ) from exc
+            if plan.source.type != "WORKFLOW":
+                raise AppError(
+                    code="RESOURCE_CONFLICT",
+                    message="WORKFLOW_VERSION Execution plan.source.type must be WORKFLOW.",
+                    status_code=409,
+                )
         if execution.queued_at is None or execution.started_at is not None:
             raise AppError(
                 code="RESOURCE_CONFLICT",

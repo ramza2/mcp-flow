@@ -20,7 +20,10 @@ from app.domain.enums import (
 )
 from app.execution.claim import ExecutionClaimService, _as_utc
 from app.execution.queue import ExecutionQueueService
-from app.execution.runtime_preflight import assert_current_tool_executable
+from app.execution.runtime_preflight import (
+    assert_current_tool_executable,
+    assert_source_tool_executable,
+)
 from app.execution.tool_step_attempt import (
     ToolStepAttemptService,
     materialize_secret_safe_resolved_input,
@@ -590,17 +593,22 @@ async def test_creation_and_attempt_share_current_tool_preflight(
 ) -> None:
     _install_no_side_effects(monkeypatch)
     calls: list[str] = []
-    real = assert_current_tool_executable
+    real_agent = assert_current_tool_executable
+    real_source = assert_source_tool_executable
 
-    async def _spy(*args: Any, **kwargs: Any) -> Any:
+    async def _spy_agent(*args: Any, **kwargs: Any) -> Any:
         calls.append("preflight")
-        return await real(*args, **kwargs)
+        return await real_agent(*args, **kwargs)
+
+    async def _spy_source(*args: Any, **kwargs: Any) -> Any:
+        calls.append("preflight")
+        return await real_source(*args, **kwargs)
 
     monkeypatch.setattr(
-        "app.services.execution_creation.assert_current_tool_executable", _spy
+        "app.services.execution_creation.assert_current_tool_executable", _spy_agent
     )
     monkeypatch.setattr(
-        "app.execution.tool_step_attempt.assert_current_tool_executable", _spy
+        "app.execution.tool_step_attempt.assert_source_tool_executable", _spy_source
     )
 
     seeded = await _seed_ready(db_session)

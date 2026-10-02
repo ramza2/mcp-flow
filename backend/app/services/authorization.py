@@ -22,6 +22,7 @@ from app.repositories.role import (
     UserRoleRepository,
 )
 from app.repositories.user import UserRepository
+from app.repositories.workflow import WorkflowRepository
 from app.schemas.auth import AuthorizationDecision, ResourceGrantCreate
 
 
@@ -34,6 +35,7 @@ class ResourceGrantService:
         self._agents = AgentRepository(session)
         self._servers = MCPServerRepository(session)
         self._tools = MCPToolRepository(session)
+        self._workflows = WorkflowRepository(session)
 
     async def _require_user(self, user_id: uuid.UUID) -> None:
         if await self._users.get(user_id) is None:
@@ -55,11 +57,13 @@ class ResourceGrantService:
         self, resource_type: ResourceGrantResourceType, resource_id: uuid.UUID
     ) -> None:
         if resource_type == ResourceGrantResourceType.WORKFLOW:
-            raise AppError(
-                code="RESOURCE_CONFLICT",
-                message="Workflow resource registry is not implemented yet.",
-                status_code=status.HTTP_409_CONFLICT,
-            )
+            if await self._workflows.get(resource_id) is None:
+                raise AppError(
+                    code="VALIDATION_ERROR",
+                    message=f"WORKFLOW resource_id {resource_id} does not exist.",
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                )
+            return
         if resource_type == ResourceGrantResourceType.AGENT:
             if await self._agents.get(resource_id) is None:
                 raise AppError(

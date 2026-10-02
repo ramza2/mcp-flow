@@ -5,12 +5,14 @@ from __future__ import annotations
 import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, Header, Query, status
+from fastapi import APIRouter, Header, Query, Response, status
 
-from app.api.dependencies import DbSessionDep
+from app.api.dependencies import CurrentPrincipalDep, DbSessionDep
 from app.core.errors import AppError
 from app.schemas.workflow import (
     WorkflowCreate,
+    WorkflowExecutionCreateRequest,
+    WorkflowExecutionCreateResult,
     WorkflowListResponse,
     WorkflowPlanPut,
     WorkflowResponse,
@@ -21,6 +23,7 @@ from app.schemas.workflow import (
     WorkflowVersionValidationResponse,
 )
 from app.services.workflow import WorkflowService
+from app.services.workflow_execution_creation import WorkflowExecutionCreationService
 from app.services.workflow_version import WorkflowVersionService
 
 router = APIRouter(prefix="/workflows", tags=["workflows"])
@@ -234,3 +237,43 @@ async def deprecate_version(
 ) -> WorkflowVersionResponse:
     version = await WorkflowVersionService(session).deprecate(workflow_id, version_id)
     return WorkflowVersionResponse.model_validate(version)
+
+
+@router.post(
+    "/{workflow_id}/versions/{version_id}/executions",
+    response_model=WorkflowExecutionCreateResult,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_workflow_version_execution(
+    session: DbSessionDep,
+    principal: CurrentPrincipalDep,
+    response: Response,
+    workflow_id: uuid.UUID,
+    version_id: uuid.UUID,
+    body: WorkflowExecutionCreateRequest,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+) -> WorkflowExecutionCreateResult:
+    if idempotency_key is None or not idempotency_key.strip():
+        raise AppError(
+            code="VALIDATION_ERROR",
+            message="Idempotency-Key header is required.",
+            status_code=400,
+        )
+    key = idempotency_key.strip()
+    if len(key) > 128:
+        raise AppError(
+            code="VALIDATION_ERROR",
+            message="Idempotency-Key must be at most 128 characters.",
+            status_code=400,
+        )
+    outcome = await WorkflowExecutionCreationService(
+        session
+    ).create_from_workflow_version(
+        workflow_id=workflow_id,
+        version_id=version_id,
+        requester_id=principal.user_id,
+        idempotency_key=key,
+        body=body,
+    )
+    response.status_code = outcome.http_status
+    return outcome.result

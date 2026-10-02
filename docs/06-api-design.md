@@ -747,8 +747,27 @@ resolve Secrets.
 stale dependencies before flipping `current_version_id`. Published versions are immutable.
 Logical Workflow ACTIVE/INACTIVE remains a separate PATCH on the Workflow resource.
 
-`POST .../executions` and `GET .../impact` remain future slices (not in the registry
-foundation).
+`POST .../executions` creates a durable `WORKFLOW_VERSION` Execution for the exact
+route pair (`workflow_id`, `version_id`) when:
+
+```text
+Workflow.status == ACTIVE
+Workflow.current_version_id == version_id
+WorkflowVersion.status == PUBLISHED
+WorkflowVersion.validation_status == VALID
+```
+
+Authorization requires current `workflow.execute` + `WORKFLOW` ResourceGrant, plus
+per-TOOL `mcp.tool.execute` + `MCP_TOOL` ResourceGrant at creation and again at
+Attempt / final pre-send. Creation is strict (`PUBLISHED` +
+`current_version_id`); already-created Executions remain pinned to their
+`workflow_version_id` even if that version later becomes `DEPRECATED`. Plan
+inputs (`ExecutionPlanV1.inputs`) are the runtime input authority
+(`secret=true` requires exact `SECRET_REF`). Idempotency scope is
+`WORKFLOW_VERSION_EXECUTION_CREATE_V1`. Response schema is
+`WorkflowExecutionCreateResult` (no `input_snapshot` / policy evidence).
+
+`GET .../impact` remains a future slice.
 
 Canonical Version status:
 
