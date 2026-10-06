@@ -3,6 +3,9 @@
 PostgreSQL polling worker owns due Schedule processing. No Celery Beat.
 Caller-owned transactions for Schedule REPLACE composition with #55 cancel.
 
+Schedule runtime lock order: Schedule → Execution → ScheduleOccurrence.
+Worker paths that already own Execution must never acquire Schedule FOR UPDATE.
+
 Canonical iteration order per Schedule batch:
 1. reconcile existing Execution projections
 2. release held QUEUE/REPLACE occurrences (oldest first)
@@ -298,6 +301,11 @@ class ScheduleRuntimeService:
         limit: int,
         now: datetime,
     ) -> int:
+        """Project Execution status onto Occurrence rows.
+
+        May lock ScheduleOccurrence; Execution is read without FOR UPDATE
+        (Execution is authoritative). Avoids Occurrence → Execution lock inversion.
+        """
         stmt = (
             select(ScheduleOccurrence)
             .where(
@@ -523,7 +531,16 @@ class ScheduleRuntimeService:
         *,
         now: datetime,
     ) -> str:
-        """Return ALLOW | SKIP | QUEUE_WAIT | REPLACE_WAIT."""
+        """Return ALLOW | SKIP | QUEUE_WAIT | REPLACE_WAIT.
+
+        Schedule row is already locked by the caller. Overlap detection that only
+        needs existence of active priors uses read-only lookups (Schedule lock
+        serializes due decisions for this Schedule).
+
+        REPLACE mutates prior Executions via #55 cancel. Lock order:
+        ``Schedule → Execution (id ASC) → ScheduleOccurrence``.
+        Never hold a prior Occurrence row lock while waiting for its Execution.
+        """
         priors = await self._active_priors(schedule.id, before=occurrence.scheduled_for)
         if not priors:
             return "ALLOW"
@@ -540,18 +557,74 @@ class ScheduleRuntimeService:
         await self._supersede_older_replace_waits(
             schedule.id, before=occurrence.scheduled_for, now=now
         )
-        # Refresh priors after supersession.
+        # Refresh priors after supersession (still read-only).
         priors = await self._active_priors(schedule.id, before=occurrence.scheduled_for)
         if not priors:
             occurrence.decision_reason = reasons.OVERLAP_REPLACE
             return "ALLOW"
 
-        still_inflight = False
-        for prior_occ, prior_exec in priors:
-            if prior_exec is None:
-                # Unmaterialized held peer still blocks.
-                still_inflight = True
-                continue
+        return await self._replace_cancel_priors(priors, occurrence=occurrence, now=now)
+
+    async def _replace_cancel_priors(
+        self,
+        priors: list[tuple[ScheduleOccurrence, Execution | None]],
+        *,
+        occurrence: ScheduleOccurrence,
+        now: datetime,
+    ) -> str:
+        """Cancel active prior Executions under Schedule → Execution → Occurrence.
+
+        Schedule runtime lock order: Schedule → Execution → ScheduleOccurrence.
+        Worker paths that already own Execution must never acquire Schedule FOR UPDATE.
+        """
+        # 1) Identify candidate prior Executions without holding Occurrence locks.
+        prior_execs = [
+            prior_exec
+            for _occ, prior_exec in priors
+            if prior_exec is not None and prior_exec.status in _NONTERMINAL_EXECUTION
+        ]
+        # Unmaterialized held peers still block without Execution locks.
+        unmaterialized_waits = any(
+            prior_exec is None
+            and prior_occ.decision_reason in _WAIT_REASONS
+            for prior_occ, prior_exec in priors
+        )
+
+        # 2) Lock matching nonterminal Executions in deterministic id ASC order.
+        locked_by_id: dict[uuid.UUID, Execution] = {}
+        if prior_execs:
+            exec_ids = sorted({e.id for e in prior_execs})
+            exec_stmt = (
+                select(Execution)
+                .where(Execution.id.in_(exec_ids))
+                .order_by(Execution.id.asc())
+                .with_for_update()
+            )
+            for row in (await self._session.execute(exec_stmt)).scalars().all():
+                locked_by_id[row.id] = row
+
+        # 3) After Execution locks are held, lock related Occurrence rows for
+        #    projection updates (never before Execution).
+        occ_ids = [
+            prior_occ.id
+            for prior_occ, prior_exec in priors
+            if prior_exec is not None and prior_exec.id in locked_by_id
+        ]
+        locked_occs: dict[uuid.UUID, ScheduleOccurrence] = {}
+        if occ_ids:
+            occ_stmt = (
+                select(ScheduleOccurrence)
+                .where(ScheduleOccurrence.id.in_(occ_ids))
+                .order_by(ScheduleOccurrence.id.asc())
+                .with_for_update()
+            )
+            for row in (await self._session.execute(occ_stmt)).scalars().all():
+                locked_occs[row.id] = row
+
+        # 4) Cancel in Execution.id ASC order under caller-owned TX (#55 primitive).
+        still_inflight = unmaterialized_waits
+        for exec_id in sorted(locked_by_id.keys()):
+            prior_exec = locked_by_id[exec_id]
             if prior_exec.status in _TERMINAL_EXECUTION:
                 continue
             outcome = await self._cancel.request_internal_cancel_locked(
@@ -559,17 +632,25 @@ class ScheduleRuntimeService:
                 reason="SCHEDULE_OVERLAP_REPLACE",
                 now=now,
             )
+            prior_occ = None
+            if prior_exec.schedule_occurrence_id is not None:
+                prior_occ = locked_occs.get(prior_exec.schedule_occurrence_id)
+
             if outcome.status == ExecutionStatus.CANCEL_REQUESTED.value:
                 still_inflight = True
             elif outcome.status in _TERMINAL_EXECUTION:
                 mapped = self._project_occurrence_status(outcome.status)
-                if mapped is not None and prior_occ.status not in {
-                    OccurrenceStatus.COMPLETED.value,
-                    OccurrenceStatus.FAILED.value,
-                    OccurrenceStatus.SKIPPED.value,
-                }:
+                if (
+                    prior_occ is not None
+                    and mapped is not None
+                    and prior_occ.status
+                    not in {
+                        OccurrenceStatus.COMPLETED.value,
+                        OccurrenceStatus.FAILED.value,
+                        OccurrenceStatus.SKIPPED.value,
+                    }
+                ):
                     prior_occ.status = mapped
-                    # Preserve prior decision_reason; only set finished_at.
                     prior_occ.finished_at = now
             else:
                 still_inflight = True
@@ -586,7 +667,11 @@ class ScheduleRuntimeService:
         before: datetime,
         now: datetime,
     ) -> None:
-        """Newer REPLACE candidate supersedes older unmaterialized REPLACE_WAIT."""
+        """Newer REPLACE candidate supersedes older unmaterialized REPLACE_WAIT.
+
+        Under Schedule lock only — no Execution rows involved for unmaterialized
+        waits. Safe as ``Schedule → ScheduleOccurrence``.
+        """
         stmt = (
             select(ScheduleOccurrence)
             .where(
@@ -673,6 +758,11 @@ class ScheduleRuntimeService:
         *,
         before: datetime,
     ) -> list[tuple[ScheduleOccurrence, Execution | None]]:
+        """Read-only active prior lookup.
+
+        Caller holds the Schedule row lock, which serializes due decisions.
+        Do not lock Occurrence rows here — REPLACE acquires Execution locks first.
+        """
         stmt = (
             select(ScheduleOccurrence)
             .where(
@@ -687,7 +777,6 @@ class ScheduleRuntimeService:
                 ),
             )
             .order_by(ScheduleOccurrence.scheduled_for.asc())
-            .with_for_update()
         )
         rows = list((await self._session.execute(stmt)).scalars().all())
         out: list[tuple[ScheduleOccurrence, Execution | None]] = []
@@ -723,6 +812,11 @@ class ScheduleRuntimeService:
     async def _list_waiting_occurrences(
         self, schedule_id: uuid.UUID
     ) -> list[ScheduleOccurrence]:
+        """Read held QUEUE/REPLACE waits under Schedule lock (no Occurrence FOR UPDATE).
+
+        Schedule ownership serializes due/wait decisions. Avoid locking Occurrence
+        rows before any REPLACE path that must lock Executions first.
+        """
         stmt = (
             select(ScheduleOccurrence)
             .where(
@@ -731,7 +825,6 @@ class ScheduleRuntimeService:
                 ScheduleOccurrence.decision_reason.in_(tuple(_WAIT_REASONS)),
             )
             .order_by(ScheduleOccurrence.scheduled_for.asc())
-            .with_for_update()
         )
         return list((await self._session.execute(stmt)).scalars().all())
 

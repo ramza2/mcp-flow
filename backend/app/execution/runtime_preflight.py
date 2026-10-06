@@ -326,6 +326,16 @@ async def _assert_schedule_occurrence_lineage(
     session: AsyncSession,
     execution: Execution,
 ) -> None:
+    """Read-only ScheduleOccurrence + Schedule owner lineage.
+
+    Worker paths (ToolRunner / Approval / MRTR) already own Execution state.
+    Do NOT acquire Schedule or ScheduleOccurrence ``FOR UPDATE`` here — that
+    deadlocks against Scheduler REPLACE (Schedule → Execution).
+
+    ``Schedule.owner_id`` and ``ScheduleOccurrence.schedule_id`` are immutable
+    after creation; ordinary consistent reads are sufficient. Mutable
+    Workflow/User/grant/Tool authorization remains elsewhere.
+    """
     from app.models.schedule import Schedule, ScheduleOccurrence
     from sqlalchemy import select
 
@@ -351,22 +361,24 @@ async def _assert_schedule_occurrence_lineage(
             status_code=409,
         )
 
-    occ_stmt = (
-        select(ScheduleOccurrence)
-        .where(ScheduleOccurrence.id == execution.schedule_occurrence_id)
-        .with_for_update()
-    )
-    occurrence = (await session.execute(occ_stmt)).scalar_one_or_none()
+    occurrence = (
+        await session.execute(
+            select(ScheduleOccurrence).where(
+                ScheduleOccurrence.id == execution.schedule_occurrence_id
+            )
+        )
+    ).scalar_one_or_none()
     if occurrence is None:
         raise AppError(
             code="EXECUTION_PRECONDITION_FAILED",
             message="ScheduleOccurrence not found for Execution.",
             status_code=409,
         )
-    sched_stmt = (
-        select(Schedule).where(Schedule.id == occurrence.schedule_id).with_for_update()
-    )
-    schedule = (await session.execute(sched_stmt)).scalar_one_or_none()
+    schedule = (
+        await session.execute(
+            select(Schedule).where(Schedule.id == occurrence.schedule_id)
+        )
+    ).scalar_one_or_none()
     if schedule is None:
         raise AppError(
             code="EXECUTION_PRECONDITION_FAILED",

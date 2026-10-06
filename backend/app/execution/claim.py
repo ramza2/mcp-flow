@@ -249,7 +249,7 @@ class ExecutionClaimService:
         by_key = {s.step_key: s for s in steps}
 
         if execution.source_type == ExecutionSourceType.SCHEDULE_OCCURRENCE.value:
-            await self._assert_schedule_occurrence_claimable(execution)
+            await self._lock_and_assert_occurrence_enqueued(execution)
 
         token = uuid.uuid4()
         expires_at = ts + timedelta(seconds=self._lease_seconds)
@@ -289,10 +289,14 @@ class ExecutionClaimService:
             ready_step_ids=tuple(ready_ids),
         )
 
-    async def _assert_schedule_occurrence_claimable(
+    async def _lock_and_assert_occurrence_enqueued(
         self, execution: Execution
     ) -> None:
-        """Verify SCHEDULE_OCCURRENCE claim preconditions before lease assignment."""
+        """Lock Occurrence for ENQUEUED→RUNNING; Schedule ownership is read-only.
+
+        Lock order (Execution already held): ``Execution → ScheduleOccurrence``.
+        Never ``Execution → Schedule FOR UPDATE``.
+        """
         from app.domain.enums import OccurrenceStatus
         from app.models.schedule import Schedule, ScheduleOccurrence
 
@@ -333,12 +337,11 @@ class ExecutionClaimService:
                 ),
                 status_code=409,
             )
-        sched_stmt = (
-            select(Schedule)
-            .where(Schedule.id == occurrence.schedule_id)
-            .with_for_update()
-        )
-        schedule = (await self._session.execute(sched_stmt)).scalar_one_or_none()
+        schedule = (
+            await self._session.execute(
+                select(Schedule).where(Schedule.id == occurrence.schedule_id)
+            )
+        ).scalar_one_or_none()
         if schedule is None or schedule.owner_id != execution.requester_id:
             raise AppError(
                 code="RESOURCE_CONFLICT",
@@ -352,10 +355,9 @@ class ExecutionClaimService:
         from app.models.schedule import ScheduleOccurrence
 
         assert execution.schedule_occurrence_id is not None
-        occ_stmt = (
-            select(ScheduleOccurrence)
-            .where(ScheduleOccurrence.id == execution.schedule_occurrence_id)
-            .with_for_update()
+        # Occurrence row already locked in _lock_and_assert_occurrence_enqueued.
+        occ_stmt = select(ScheduleOccurrence).where(
+            ScheduleOccurrence.id == execution.schedule_occurrence_id
         )
         occurrence = (await self._session.execute(occ_stmt)).scalar_one_or_none()
         if occurrence is None or occurrence.status != OccurrenceStatus.ENQUEUED.value:

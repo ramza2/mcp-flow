@@ -249,7 +249,9 @@ class ExecutionQueueService:
     ) -> None:
         """Atomically PLANNED → ENQUEUED for SCHEDULE_OCCURRENCE in the staging TX.
 
-        Fail closed before Outbox creation if occurrence lineage is inconsistent.
+        Lock order (Execution already held by caller):
+        ``Execution → ScheduleOccurrence``; Schedule ownership is a non-locking read.
+        Never ``Execution → Schedule FOR UPDATE``.
         """
         from app.domain.enums import OccurrenceStatus
         from app.models.schedule import Schedule, ScheduleOccurrence
@@ -294,12 +296,12 @@ class ExecutionQueueService:
                 message="ScheduleOccurrence already has another Execution.",
                 status_code=409,
             )
-        sched_stmt = (
-            select(Schedule)
-            .where(Schedule.id == occurrence.schedule_id)
-            .with_for_update()
-        )
-        schedule = (await self._session.execute(sched_stmt)).scalar_one_or_none()
+        # Non-locking Schedule ownership read (owner_id immutable after create).
+        schedule = (
+            await self._session.execute(
+                select(Schedule).where(Schedule.id == occurrence.schedule_id)
+            )
+        ).scalar_one_or_none()
         if schedule is None or schedule.owner_id != execution.requester_id:
             raise AppError(
                 code="RESOURCE_CONFLICT",
