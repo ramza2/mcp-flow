@@ -868,15 +868,37 @@ Overlap:
 ALLOW SKIP QUEUE REPLACE
 ```
 
+- `ALLOW` — prior non-terminal Execution이 있어도 새 Occurrence를 발사한다.
+- `SKIP` — prior active가 있으면 새 Occurrence를 `SKIPPED`/`OVERLAP_SKIP`한다.
+- `QUEUE` — prior active가 있으면 `PLANNED`/`OVERLAP_QUEUE_WAIT`로 대기 후 prior terminal 시 발사한다.
+- `REPLACE` — prior를 `#55` `request_internal_cancel_locked`로 취소한다. 즉시 terminal이면 교체 발사, in-flight면 prior `CANCEL_REQUESTED` + replacement `PLANNED`/`OVERLAP_REPLACE_WAIT`. `UNKNOWN_OUTCOME`은 `FAILED`로 남는다.
+
 Misfire:
 
 ```text
 SKIP RUN_ONCE CATCH_UP_LIMITED
 ```
 
+- `SKIP` — overdue tick을 모두 skip하고 다음 future `next_run_at`으로 전진.
+- `RUN_ONCE` — overdue 중 최초 1회만 발사, 나머지는 skip.
+- `CATCH_UP_LIMITED` — 최대 `max_catch_up`개 overdue를 발사, 초과분은 skip.
+
 ## FNC-SCH-005. 실행시점 검증
 
 사용자/Version/Tool/Permission을 다시 확인하고 `source_type=SCHEDULE_OCCURRENCE` Execution을 생성한다.
+
+Workflow target 자동 발사:
+
+```text
+source_type = SCHEDULE_OCCURRENCE
+trigger_type = SCHEDULE
+schedule_occurrence_id != null
+workflow_version_id = Schedule pin (exact; current_version 아님)
+agent_request_id / agent_version_id = null
+requester_id = Schedule.owner_id
+```
+
+Manual `POST /trigger`는 동일 lineage에 `trigger_type=USER`만 다르다. AGENT_VERSION Schedule 실행은 이 슬라이스에서 unsupported.
 
 ---
 

@@ -972,15 +972,15 @@ Approval `REJECTED/EXPIRED`를 Execution `REJECTED/EXPIRED` 상태로 직접 매
 | API | `tests/api/test_schedules.py` — auth/CSRF/`schedule.manage`, If-Match, list, activate/pause/resume |
 | Integration | `tests/integration/test_schedule_registry.py` — migration constraints, occurrence unique, deprecate pin |
 
-### Trigger / runtime (follow-up)
+### Trigger / runtime (implemented — PR #56)
 
-- overlap `ALLOW/SKIP/QUEUE/REPLACE` runtime
-- misfire `SKIP/RUN_ONCE/CATCH_UP_LIMITED` enqueue
-- 예약 후 Permission 회수 at fire time
-- 수동 `POST /trigger`
-- Scheduler worker + `SCHEDULE_OCCURRENCE` Execution
+| Layer | Module |
+|-------|--------|
+| Unit | `tests/unit/test_schedule_runtime.py` — misfire SKIP/RUN_ONCE/CATCH_UP_LIMITED, overlap ALLOW/SKIP/QUEUE/REPLACE, AGENT_VERSION fail-closed |
+| API | `tests/api/test_schedule_trigger.py` — `POST /trigger` auth/CSRF/idempotency |
+| Integration | `tests/integration/test_schedule_runtime.py` — due fire → SCHEDULE_OCCURRENCE Execution, queue/claim, REPLACE wait, exact WorkflowVersion pin, Approval/MRTR scheduled path |
 
-예약이 logical Agent/Workflow의 최신 version을 암묵적으로 실행하지 않는지 확인한다.
+예약이 logical Agent/Workflow의 최신 version을 암묵적으로 실행하지 않는지 확인한다. `CANCEL_REQUESTED` crash recovery는 별도 slice.
 
 ---
 

@@ -1,9 +1,9 @@
 name: mcpflow
 
 # Base Compose — local/test/pilot should layer overrides (no Compose Profiles in this baseline).
-# Canonical services in this PR: traefik, frontend, api, worker, outbox, postgres, redis,
-# object-storage, migration. Deferred (no placeholder containers): mcp-worker, factory-worker,
-# scheduler.
+# Canonical services in this PR: traefik, frontend, api, worker, outbox, scheduler,
+# postgres, redis, object-storage, migration. Deferred (no placeholder containers):
+# mcp-worker, factory-worker.
 
 x-backend-build: &backend-build
   context: .
@@ -202,6 +202,39 @@ services:
       migration:
         condition: service_completed_successfully
     command: ["python", "-m", "app.entrypoints.outbox"]
+
+  scheduler:
+    image: mcpflow-backend:${MCPFLOW_IMAGE_TAG:-local}
+    build: *backend-build
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    environment:
+      MCPFLOW_ENVIRONMENT: ${MCPFLOW_ENVIRONMENT:-development}
+      MCPFLOW_LOG_LEVEL: ${MCPFLOW_LOG_LEVEL:-INFO}
+      MCPFLOW_DB_HOST: postgres
+      MCPFLOW_DB_PORT: "5432"
+      MCPFLOW_DB_NAME: mcpflow
+      MCPFLOW_DB_USER: mcpflow_app
+      MCPFLOW_DB_PASSWORD_FILE: /run/secrets/postgres_app_password
+      MCPFLOW_SCHEDULER_POLL_INTERVAL_SECONDS: ${MCPFLOW_SCHEDULER_POLL_INTERVAL_SECONDS:-1.0}
+      MCPFLOW_SCHEDULER_BATCH_SIZE: ${MCPFLOW_SCHEDULER_BATCH_SIZE:-50}
+    secrets:
+      - postgres_app_password
+    networks:
+      - app
+      - data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migration:
+        condition: service_completed_successfully
+    command: ["python", "-m", "app.entrypoints.scheduler"]
 
   migration:
     image: mcpflow-backend:${MCPFLOW_IMAGE_TAG:-local}

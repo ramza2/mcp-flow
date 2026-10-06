@@ -199,6 +199,7 @@ class ExecutionQueueService:
                     (
                         ExecutionSourceType.AGENT_REQUEST.value,
                         ExecutionSourceType.WORKFLOW_VERSION.value,
+                        ExecutionSourceType.SCHEDULE_OCCURRENCE.value,
                     )
                 ),
             )

@@ -151,7 +151,7 @@ api            -> python -m mcpflow.entrypoints.api
 worker         -> celery -A app.infrastructure.celery_app:celery_app worker -Q execution --loglevel=INFO
 mcp-worker     -> celery -A mcpflow.infrastructure.celery worker -Q mcp_stdio
 factory-worker -> celery -A mcpflow.infrastructure.celery worker -Q factory
-scheduler      -> python -m mcpflow.entrypoints.scheduler
+scheduler      -> python -m app.entrypoints.scheduler
 outbox         -> python -m app.entrypoints.outbox
 migration      -> alembic upgrade head
 ```

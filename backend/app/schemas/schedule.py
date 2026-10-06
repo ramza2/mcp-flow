@@ -163,6 +163,11 @@ class ScheduleOccurrenceListResponse(BaseModel):
     has_next: bool
 
 
+class ScheduleTriggerResponse(BaseModel):
+    occurrence: ScheduleOccurrenceResponse
+    execution_id: uuid.UUID | None = None
+
+
 def schedule_to_response(schedule: Schedule) -> ScheduleResponse:
     target_id = schedule.agent_version_id or schedule.workflow_version_id
     if target_id is None:

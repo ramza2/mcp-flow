@@ -26,6 +26,7 @@ _CLAIMABLE_SOURCES = frozenset(
         ExecutionSourceType.AGENT_REQUEST.value,
         ExecutionSourceType.MANUAL_TOOL_TEST.value,
         ExecutionSourceType.WORKFLOW_VERSION.value,
+        ExecutionSourceType.SCHEDULE_OCCURRENCE.value,
     }
 )
 
@@ -107,11 +108,14 @@ class ExecutionClaimService:
                 code="RESOURCE_CONFLICT",
                 message=(
                     "Claim supports AGENT_REQUEST / MANUAL_TOOL_TEST / "
-                    "WORKFLOW_VERSION Executions only."
+                    "WORKFLOW_VERSION / SCHEDULE_OCCURRENCE Executions only."
                 ),
                 status_code=409,
             )
-        if execution.source_type == ExecutionSourceType.WORKFLOW_VERSION.value:
+        if execution.source_type in {
+            ExecutionSourceType.WORKFLOW_VERSION.value,
+            ExecutionSourceType.SCHEDULE_OCCURRENCE.value,
+        }:
             if (
                 execution.workflow_version_id is None
                 or execution.agent_request_id is not None
@@ -119,7 +123,21 @@ class ExecutionClaimService:
             ):
                 raise AppError(
                     code="RESOURCE_CONFLICT",
-                    message="WORKFLOW_VERSION Execution source lineage is inconsistent.",
+                    message=(
+                        f"{execution.source_type} Execution source lineage "
+                        "is inconsistent."
+                    ),
+                    status_code=409,
+                )
+            if (
+                execution.source_type == ExecutionSourceType.SCHEDULE_OCCURRENCE.value
+                and execution.schedule_occurrence_id is None
+            ):
+                raise AppError(
+                    code="RESOURCE_CONFLICT",
+                    message=(
+                        "SCHEDULE_OCCURRENCE Execution requires schedule_occurrence_id."
+                    ),
                     status_code=409,
                 )
             try:
@@ -129,13 +147,18 @@ class ExecutionClaimService:
             except Exception as exc:
                 raise AppError(
                     code="RESOURCE_CONFLICT",
-                    message="WORKFLOW_VERSION Execution plan_snapshot is invalid.",
+                    message=(
+                        f"{execution.source_type} Execution plan_snapshot is invalid."
+                    ),
                     status_code=409,
                 ) from exc
             if plan.source.type != "WORKFLOW":
                 raise AppError(
                     code="RESOURCE_CONFLICT",
-                    message="WORKFLOW_VERSION Execution plan.source.type must be WORKFLOW.",
+                    message=(
+                        f"{execution.source_type} Execution plan.source.type "
+                        "must be WORKFLOW."
+                    ),
                     status_code=409,
                 )
         if execution.queued_at is None or execution.started_at is not None:

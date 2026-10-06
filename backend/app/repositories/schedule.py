@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import uuid
+from datetime import datetime
 from typing import Any
 
 from sqlalchemy import Select, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.domain.enums import ScheduleStatus
 from app.models.schedule import Schedule
 from app.schemas.common_page import parse_sort
 
@@ -49,6 +51,28 @@ class ScheduleRepository:
         )
         result = await self._session.execute(stmt)
         return result.scalar_one_or_none()
+
+    async def list_due_active_ids(
+        self,
+        *,
+        now: datetime,
+        limit: int = 50,
+    ) -> list[uuid.UUID]:
+        """ACTIVE schedules with next_run_at <= now (partial index friendly)."""
+        bounded = max(1, min(int(limit), 500))
+        stmt = (
+            select(Schedule.id)
+            .where(
+                Schedule.deleted_at.is_(None),
+                Schedule.status == ScheduleStatus.ACTIVE.value,
+                Schedule.next_run_at.is_not(None),
+                Schedule.next_run_at <= now,
+            )
+            .order_by(Schedule.next_run_at.asc(), Schedule.id.asc())
+            .limit(bounded)
+            .with_for_update(skip_locked=True)
+        )
+        return list((await self._session.execute(stmt)).scalars().all())
 
     async def list_for_owner(
         self,
