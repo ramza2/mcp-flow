@@ -1075,7 +1075,7 @@ async def test_pg_v1_survives_v2_publish_later_v1_fire_rejected(
         v1 = await WorkflowVersionRepository(session).get(v1_id)
         assert v1 is not None
         tv_id = None
-        for step in (v1.plan_json or {}).get("steps") or []:
+        for step in (v1.plan_definition or {}).get("steps") or []:
             cfg = step.get("config") or {}
             if cfg.get("tool_version_id"):
                 tv_id = uuid.UUID(cfg["tool_version_id"])
@@ -1439,9 +1439,15 @@ async def test_pg_overlap_allow_skip_queue_replace(
         await session.commit()
         assert r1.executions_created == 1
         prior_r = await _execution_for_schedule(session, replace_id)
-        prior_r.status = ExecutionStatus.RUNNING.value
-        prior_r.started_at = now
+        # Claim so RUNNING has a valid lease (PG ck_executions_running_lease).
+        await ExecutionQueueService(session).stage_created_batch(limit=20)
+        claim = await ExecutionClaimService(session, lease_seconds=60).claim(
+            execution_id=prior_r.id, worker_id="sch-replace-imm"
+        )
         await session.commit()
+        assert claim.claimed
+        await session.refresh(prior_r)
+        assert prior_r.status == ExecutionStatus.RUNNING.value
         schedule = await ScheduleRepository(session).lock_for_update(replace_id)
         assert schedule is not None
         schedule.next_run_at = now - timedelta(minutes=20)
@@ -1726,16 +1732,33 @@ async def test_pg_manual_trigger_concurrent_same_key(
     assert sum(1 for o in outcomes if not o.replayed) == 1
 
     async with integration_session_factory() as session:
-        from app.models.outbox import OutboxEvent
-
         execs = await _executions_for_schedule(session, schedule_id)
         assert len(execs) == 1
+        assert execs[0].trigger_type == "USER"
+        assert execs[0].source_type == ExecutionSourceType.SCHEDULE_OCCURRENCE.value
+        assert execs[0].status == ExecutionStatus.CREATED.value
+        execution_id = execs[0].id
+        occs, _ = await ScheduleOccurrenceRepository(session).list_for_schedule(
+            schedule_id
+        )
+        assert len(occs) == 1
+        assert occs[0].decision_reason == reasons.MANUAL_TRIGGER
+        assert occs[0].status == OccurrenceStatus.PLANNED.value
+        # Stage CREATED batch (may include unrelated CREATED rows on shared DB).
+        staged = await ExecutionQueueService(session).stage_created_batch(limit=50)
+        await session.commit()
+        assert staged >= 1
+        execution = await ExecutionRepository(session).get(execution_id)
+        assert execution is not None
+        assert execution.status == ExecutionStatus.QUEUED.value
+        from app.models.outbox import OutboxEvent
+
         events = list(
             (
                 await session.execute(
                     select(OutboxEvent).where(
                         OutboxEvent.event_type == "EXECUTION_DISPATCH",
-                        OutboxEvent.aggregate_id == execs[0].id,
+                        OutboxEvent.aggregate_id == execution_id,
                     )
                 )
             )
@@ -1743,6 +1766,22 @@ async def test_pg_manual_trigger_concurrent_same_key(
             .all()
         )
         assert len(events) == 1
+        # Second stage must not duplicate Outbox for this Execution.
+        await ExecutionQueueService(session).stage_created_batch(limit=50)
+        await session.commit()
+        events2 = list(
+            (
+                await session.execute(
+                    select(OutboxEvent).where(
+                        OutboxEvent.event_type == "EXECUTION_DISPATCH",
+                        OutboxEvent.aggregate_id == execution_id,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert len(events2) == 1
 
 
 @pytest.mark.integration
