@@ -82,8 +82,14 @@ class AuditEvent(Base):
     # Privacy-preserving IP hashing deferred until a dedicated key contract exists.
     # Never persist raw client IP. Foundation leaves this null.
     source_ip_hash: Mapped[str | None] = mapped_column(CHAR(64), nullable=True)
-    before_data: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
-    after_data: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
-    change_set: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    before_data: Mapped[dict[str, Any] | None] = mapped_column(
+        JSONB(none_as_null=True), nullable=True
+    )
+    after_data: Mapped[dict[str, Any] | None] = mapped_column(
+        JSONB(none_as_null=True), nullable=True
+    )
+    change_set: Mapped[dict[str, Any] | None] = mapped_column(
+        JSONB(none_as_null=True), nullable=True
+    )
     reason: Mapped[str | None] = mapped_column(String(1000), nullable=True)
     integrity_hash: Mapped[str] = mapped_column(CHAR(64), nullable=False)

@@ -50,9 +50,21 @@ def upgrade() -> None:
         sa.Column("request_id", sa.String(length=128), nullable=True),
         sa.Column("trace_id", sa.String(length=128), nullable=True),
         sa.Column("source_ip_hash", sa.CHAR(length=64), nullable=True),
-        sa.Column("before_data", postgresql.JSONB(astext_type=sa.Text()), nullable=True),
-        sa.Column("after_data", postgresql.JSONB(astext_type=sa.Text()), nullable=True),
-        sa.Column("change_set", postgresql.JSONB(astext_type=sa.Text()), nullable=True),
+        sa.Column(
+            "before_data",
+            postgresql.JSONB(astext_type=sa.Text(), none_as_null=True),
+            nullable=True,
+        ),
+        sa.Column(
+            "after_data",
+            postgresql.JSONB(astext_type=sa.Text(), none_as_null=True),
+            nullable=True,
+        ),
+        sa.Column(
+            "change_set",
+            postgresql.JSONB(astext_type=sa.Text(), none_as_null=True),
+            nullable=True,
+        ),
         sa.Column("reason", sa.String(length=1000), nullable=True),
         sa.Column("integrity_hash", sa.CHAR(length=64), nullable=False),
         sa.ForeignKeyConstraint(
