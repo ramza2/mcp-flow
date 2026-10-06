@@ -732,6 +732,28 @@ class WorkflowExecutionCreationService:
             resource_id=execution.id,
             completed_at=now,
         )
+        from app.audit.writer import ACTION_EXECUTION_CREATE, AuditWriter
+        from app.domain.enums import AuditActorType, AuditResult
+
+        await AuditWriter(self._session).append(
+            actor_type=AuditActorType.USER,
+            actor_id=str(ctx["requester_id"]),
+            action=ACTION_EXECUTION_CREATE,
+            result=AuditResult.SUCCESS,
+            resource_type="EXECUTION",
+            resource_id=str(execution.id),
+            execution_id=execution.id,
+            change_set={
+                "source_type": execution.source_type,
+                "trigger_type": execution.trigger_type,
+                "agent_request_id": None,
+                "workflow_version_id": str(execution.workflow_version_id)
+                if execution.workflow_version_id
+                else None,
+                "schedule_occurrence_id": None,
+            },
+            occurred_at=now,
+        )
         return WorkflowExecutionCreationOutcome(
             result=result, http_status=201, replayed=False
         )

@@ -2,6 +2,7 @@
 
 from app.models.agent import Agent, AgentToolGrant, AgentVersion
 from app.models.approval import ApprovalDecision, ApprovalPolicy, ApprovalRequest
+from app.models.audit import AuditEvent
 from app.models.auth import (
     Permission,
     ResourceGrant,
@@ -51,6 +52,7 @@ __all__ = [
     "ApprovalDecision",
     "ApprovalPolicy",
     "ApprovalRequest",
+    "AuditEvent",
     "Execution",
     "ExecutionStep",
     "StepAttempt",

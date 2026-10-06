@@ -1795,21 +1795,26 @@ created_by, created_at, retention_until, deleted_at
 
 ```text
 id bigint identity
-event_id
-occurred_at
+event_id uuid UNIQUE
+occurred_at timestamptz
 actor_type(USER/SERVICE/SYSTEM)
-actor_id
-action
+actor_id varchar(128) nullable
+action varchar(128)          # extensible stable string — not a DB enum
 resource_type, resource_id
+execution_id uuid nullable   # REQ-AUD-002 correlation projection; FK executions ON DELETE RESTRICT
 result(SUCCESS/DENIED/FAILURE)
-request_id, trace_id
-source_ip_hash
-before_data, after_data, change_set
-reason
-integrity_hash
+request_id, trace_id         # request_id from RequestIdMiddleware; trace_id nullable pending tracing
+source_ip_hash char(64)      # reserved; foundation leaves null — never persist raw client IP
+before_data, after_data, change_set  # JSON objects only (null or jsonb object)
+reason varchar(1000)
+integrity_hash char(64)      # SHA-256 over sanitized logical fields (excludes id + integrity_hash)
 ```
 
-Application role은 일반 UPDATE/DELETE 권한을 갖지 않는다. 보존만료 정리는 별도 maintenance 절차로 수행한다.
+Application role은 일반 UPDATE/DELETE 권한을 갖지 않는다. PostgreSQL trigger/function rejects ordinary `UPDATE`/`DELETE` on `audit_events`. 보존만료 정리는 별도 privileged maintenance 절차로 수행한다 (PR #57에 미포함).
+
+Snapshots are sanitized before persist (password/secret/token/`requestState` 등 → `[REDACTED]`) and bounded (depth/keys/string/bytes → `[TRUNCATED]`).
+
+`execution_id`는 Execution 상관관계 투영이며, 모든 Audit resource가 Execution일 필요는 없다.
 
 ---
 

@@ -359,6 +359,25 @@ class ApprovalDecisionService:
             )
         # else: intermediate — remain PENDING / WAITING_APPROVAL, no Outbox
 
+        from app.audit.writer import ACTION_APPROVAL_DECISION, AuditWriter
+        from app.domain.enums import AuditActorType, AuditResult
+
+        await AuditWriter(self._session).append(
+            actor_type=AuditActorType.USER,
+            actor_id=str(actor_user_id),
+            action=ACTION_APPROVAL_DECISION,
+            result=AuditResult.SUCCESS,
+            resource_type="APPROVAL_REQUEST",
+            resource_id=str(request.id),
+            execution_id=execution.id,
+            change_set={
+                "decision": row.decision,
+                "approval_status": request.status,
+                "step_execution_id": str(step.id),
+            },
+            occurred_at=ts,
+        )
+
         # Top-level decision TX ownership: durable commit before HTTP 201.
         await self._session.commit()
 

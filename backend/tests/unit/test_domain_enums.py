@@ -17,6 +17,8 @@ from app.domain.enums import (
     ApprovalDecisionValue,
     ApprovalPolicyStatus,
     ApprovalStatus,
+    AuditActorType,
+    AuditResult,
     AuthorableStepType,
     BindingKind,
     ConversationMessageRole,
@@ -325,7 +327,14 @@ def test_authorable_step_excludes_visual_or_script_types(forbidden: str) -> None
 def test_bootstrap_permission_codes_include_tool_execute() -> None:
     assert "mcp.tool.execute" in BOOTSTRAP_PERMISSION_CODES
     assert "schedule.manage" in BOOTSTRAP_PERMISSION_CODES
+    assert "audit.read" in BOOTSTRAP_PERMISSION_CODES
+    assert "audit.export" in BOOTSTRAP_PERMISSION_CODES
     assert len(BOOTSTRAP_PERMISSION_CODES) == len(set(BOOTSTRAP_PERMISSION_CODES))
+
+
+def test_audit_actor_and_result_canonical() -> None:
+    assert _values(AuditActorType) == {"USER", "SERVICE", "SYSTEM"}
+    assert _values(AuditResult) == {"SUCCESS", "DENIED", "FAILURE"}
 
 
 def test_user_status_excludes_non_canonical() -> None:
