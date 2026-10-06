@@ -26,6 +26,7 @@ _CLAIMABLE_SOURCES = frozenset(
         ExecutionSourceType.AGENT_REQUEST.value,
         ExecutionSourceType.MANUAL_TOOL_TEST.value,
         ExecutionSourceType.WORKFLOW_VERSION.value,
+        ExecutionSourceType.SCHEDULE_OCCURRENCE.value,
     }
 )
 
@@ -107,11 +108,14 @@ class ExecutionClaimService:
                 code="RESOURCE_CONFLICT",
                 message=(
                     "Claim supports AGENT_REQUEST / MANUAL_TOOL_TEST / "
-                    "WORKFLOW_VERSION Executions only."
+                    "WORKFLOW_VERSION / SCHEDULE_OCCURRENCE Executions only."
                 ),
                 status_code=409,
             )
-        if execution.source_type == ExecutionSourceType.WORKFLOW_VERSION.value:
+        if execution.source_type in {
+            ExecutionSourceType.WORKFLOW_VERSION.value,
+            ExecutionSourceType.SCHEDULE_OCCURRENCE.value,
+        }:
             if (
                 execution.workflow_version_id is None
                 or execution.agent_request_id is not None
@@ -119,7 +123,21 @@ class ExecutionClaimService:
             ):
                 raise AppError(
                     code="RESOURCE_CONFLICT",
-                    message="WORKFLOW_VERSION Execution source lineage is inconsistent.",
+                    message=(
+                        f"{execution.source_type} Execution source lineage "
+                        "is inconsistent."
+                    ),
+                    status_code=409,
+                )
+            if (
+                execution.source_type == ExecutionSourceType.SCHEDULE_OCCURRENCE.value
+                and execution.schedule_occurrence_id is None
+            ):
+                raise AppError(
+                    code="RESOURCE_CONFLICT",
+                    message=(
+                        "SCHEDULE_OCCURRENCE Execution requires schedule_occurrence_id."
+                    ),
                     status_code=409,
                 )
             try:
@@ -129,13 +147,18 @@ class ExecutionClaimService:
             except Exception as exc:
                 raise AppError(
                     code="RESOURCE_CONFLICT",
-                    message="WORKFLOW_VERSION Execution plan_snapshot is invalid.",
+                    message=(
+                        f"{execution.source_type} Execution plan_snapshot is invalid."
+                    ),
                     status_code=409,
                 ) from exc
             if plan.source.type != "WORKFLOW":
                 raise AppError(
                     code="RESOURCE_CONFLICT",
-                    message="WORKFLOW_VERSION Execution plan.source.type must be WORKFLOW.",
+                    message=(
+                        f"{execution.source_type} Execution plan.source.type "
+                        "must be WORKFLOW."
+                    ),
                     status_code=409,
                 )
         if execution.queued_at is None or execution.started_at is not None:
@@ -225,6 +248,9 @@ class ExecutionClaimService:
         dag = validate_tool_join_dag(plan, steps)
         by_key = {s.step_key: s for s in steps}
 
+        if execution.source_type == ExecutionSourceType.SCHEDULE_OCCURRENCE.value:
+            await self._lock_and_assert_occurrence_enqueued(execution)
+
         token = uuid.uuid4()
         expires_at = ts + timedelta(seconds=self._lease_seconds)
         execution.status = ExecutionStatus.RUNNING.value
@@ -247,6 +273,10 @@ class ExecutionClaimService:
             root.lock_version += 1
             ready_ids.append(root.id)
             slots -= 1
+
+        if execution.source_type == ExecutionSourceType.SCHEDULE_OCCURRENCE.value:
+            await self._mark_occurrence_running(execution)
+
         await self._session.flush()
 
         return ExecutionClaimOutcome(
@@ -258,6 +288,85 @@ class ExecutionClaimService:
             lease_expires_at=expires_at,
             ready_step_ids=tuple(ready_ids),
         )
+
+    async def _lock_and_assert_occurrence_enqueued(
+        self, execution: Execution
+    ) -> None:
+        """Lock Occurrence for ENQUEUED→RUNNING; Schedule ownership is read-only.
+
+        Lock order (Execution already held): ``Execution → ScheduleOccurrence``.
+        Never ``Execution → Schedule FOR UPDATE``.
+        """
+        from app.domain.enums import OccurrenceStatus
+        from app.models.schedule import Schedule, ScheduleOccurrence
+
+        if execution.schedule_occurrence_id is None:
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message="SCHEDULE_OCCURRENCE Execution requires schedule_occurrence_id.",
+                status_code=409,
+            )
+        if (
+            execution.workflow_version_id is None
+            or execution.agent_request_id is not None
+            or execution.agent_version_id is not None
+            or execution.plan_validation_run_id is not None
+        ):
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message="SCHEDULE_OCCURRENCE claim lineage is inconsistent.",
+                status_code=409,
+            )
+        occ_stmt = (
+            select(ScheduleOccurrence)
+            .where(ScheduleOccurrence.id == execution.schedule_occurrence_id)
+            .with_for_update()
+        )
+        occurrence = (await self._session.execute(occ_stmt)).scalar_one_or_none()
+        if occurrence is None:
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message="ScheduleOccurrence not found for claim.",
+                status_code=409,
+            )
+        if occurrence.status != OccurrenceStatus.ENQUEUED.value:
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message=(
+                    "SCHEDULE_OCCURRENCE claim requires occurrence status ENQUEUED."
+                ),
+                status_code=409,
+            )
+        schedule = (
+            await self._session.execute(
+                select(Schedule).where(Schedule.id == occurrence.schedule_id)
+            )
+        ).scalar_one_or_none()
+        if schedule is None or schedule.owner_id != execution.requester_id:
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message="Schedule ownership lineage invalid for claim.",
+                status_code=409,
+            )
+        # Do not require Schedule.status ACTIVE — pin is on the Execution.
+
+    async def _mark_occurrence_running(self, execution: Execution) -> None:
+        from app.domain.enums import OccurrenceStatus
+        from app.models.schedule import ScheduleOccurrence
+
+        assert execution.schedule_occurrence_id is not None
+        # Occurrence row already locked in _lock_and_assert_occurrence_enqueued.
+        occ_stmt = select(ScheduleOccurrence).where(
+            ScheduleOccurrence.id == execution.schedule_occurrence_id
+        )
+        occurrence = (await self._session.execute(occ_stmt)).scalar_one_or_none()
+        if occurrence is None or occurrence.status != OccurrenceStatus.ENQUEUED.value:
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message="ScheduleOccurrence not ENQUEUED at claim transition.",
+                status_code=409,
+            )
+        occurrence.status = OccurrenceStatus.RUNNING.value
 
     async def renew_lease(
         self,

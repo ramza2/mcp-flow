@@ -34,13 +34,13 @@ def test_claim_task_retries_only_connection_level_database_errors() -> None:
 
 
 @pytest.mark.asyncio
-async def test_stager_ignores_schedule_and_factory_created_execution(
+async def test_stager_ignores_factory_created_execution(
     db_session: AsyncSession,
 ) -> None:
     execution_id, _ = await _created_execution(db_session)
     execution = await ExecutionRepository(db_session).get(execution_id)
     assert execution is not None
-    execution.source_type = ExecutionSourceType.SCHEDULE_OCCURRENCE.value
+    execution.source_type = ExecutionSourceType.FACTORY_TEST.value
     await db_session.commit()
 
     staged = await ExecutionQueueService(db_session).stage_created_batch(limit=10)
@@ -51,6 +51,29 @@ async def test_stager_ignores_schedule_and_factory_created_execution(
     assert execution is not None
     assert execution.status == ExecutionStatus.CREATED.value
     assert execution.queued_at is None
+
+
+@pytest.mark.asyncio
+async def test_stager_accepts_schedule_occurrence_created_execution(
+    db_session: AsyncSession,
+) -> None:
+    execution_id, _ = await _created_execution(db_session)
+    execution = await ExecutionRepository(db_session).get(execution_id)
+    assert execution is not None
+    execution.source_type = ExecutionSourceType.SCHEDULE_OCCURRENCE.value
+    execution.agent_request_id = None
+    execution.agent_version_id = None
+    execution.plan_validation_run_id = None
+    await db_session.commit()
+
+    staged = await ExecutionQueueService(db_session).stage_created_batch(limit=10)
+    await db_session.commit()
+
+    assert staged == 1
+    execution = await ExecutionRepository(db_session).get(execution_id)
+    assert execution is not None
+    assert execution.status == ExecutionStatus.QUEUED.value
+    assert execution.queued_at is not None
 
 
 @pytest.mark.asyncio
@@ -77,16 +100,20 @@ async def test_stager_accepts_workflow_version_created_execution(
 
 
 @pytest.mark.asyncio
-async def test_claim_rejects_schedule_queued_execution(
+async def test_claim_rejects_schedule_occurrence_without_occurrence_id(
     db_session: AsyncSession,
 ) -> None:
     execution_id, _ = await _created_execution(db_session)
-    assert await ExecutionQueueService(db_session).stage_created_batch(limit=10) == 1
-    await db_session.commit()
-
     execution = await ExecutionRepository(db_session).get(execution_id)
     assert execution is not None
     execution.source_type = ExecutionSourceType.SCHEDULE_OCCURRENCE.value
+    execution.agent_request_id = None
+    execution.agent_version_id = None
+    execution.plan_validation_run_id = None
+    execution.schedule_occurrence_id = None
+    await db_session.commit()
+
+    assert await ExecutionQueueService(db_session).stage_created_batch(limit=10) == 1
     await db_session.commit()
 
     with pytest.raises(AppError) as exc_info:

@@ -16,6 +16,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
@@ -49,6 +50,13 @@ class Execution(Base):
         Index("ix_executions_workflow_version_id", "workflow_version_id"),
         Index("ix_executions_plan_validation_run_id", "plan_validation_run_id"),
         Index("ix_executions_parent_execution_id", "parent_execution_id"),
+        Index("ix_executions_schedule_occurrence_id", "schedule_occurrence_id"),
+        Index(
+            "uq_executions_schedule_occurrence_id",
+            "schedule_occurrence_id",
+            unique=True,
+            postgresql_where=text("schedule_occurrence_id IS NOT NULL"),
+        ),
         Index(
             "ix_executions_status_lease_expires_at",
             "status",
@@ -82,7 +90,9 @@ class Execution(Base):
         nullable=True,
     )
     schedule_occurrence_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), nullable=True
+        UUID(as_uuid=True),
+        ForeignKey("schedule_occurrences.id", ondelete="RESTRICT"),
+        nullable=True,
     )
     parent_execution_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),

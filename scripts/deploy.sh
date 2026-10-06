@@ -251,7 +251,7 @@ deploy_core() {
   preflight
 
   log "Building application images"
-  compose build api worker outbox migration frontend
+  compose build api worker outbox scheduler migration frontend
 
   log "Starting stateful dependencies"
   compose up -d postgres redis object-storage
@@ -262,8 +262,8 @@ deploy_core() {
   wait_migration
 
   log "Starting MCPFlow runtime"
-  compose up -d api worker outbox frontend
-  wait_services "runtime services" api worker outbox frontend postgres redis object-storage
+  compose up -d api worker outbox scheduler frontend
+  wait_services "runtime services" api worker outbox scheduler frontend postgres redis object-storage
   smoke_test
 
   log "Deployment complete"
@@ -282,14 +282,14 @@ status() {
 
 logs() {
   [[ -f "$ENV_FILE" ]] || fail "$ENV_FILE does not exist"
-  compose logs -f --tail=200 api worker outbox migration postgres redis frontend
+  compose logs -f --tail=200 api worker outbox scheduler migration postgres redis frontend
 }
 
 restart_runtime() {
   [[ -f "$ENV_FILE" ]] || fail "$ENV_FILE does not exist"
   preflight
-  compose restart api worker outbox frontend
-  wait_services "runtime services" api worker outbox frontend postgres redis object-storage
+  compose restart api worker outbox scheduler frontend
+  wait_services "runtime services" api worker outbox scheduler frontend postgres redis object-storage
   smoke_test
 }
 

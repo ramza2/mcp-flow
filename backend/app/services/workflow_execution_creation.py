@@ -31,6 +31,7 @@ from app.domain.enums import (
 )
 from app.execution.materialize import (
     ExecutionMaterializeParams,
+    ExecutionMaterializeResult,
     ExecutionPlanMaterializer,
 )
 from app.execution.plan_inputs import normalize_plan_inputs as normalize_plan_inputs
@@ -335,6 +336,78 @@ class WorkflowExecutionCreationService:
             replayed=True,
         )
 
+    async def prepare_schedule_creation_preflight(
+        self,
+        *,
+        workflow_id: uuid.UUID,
+        version_id: uuid.UUID,
+        requester_id: uuid.UUID,
+        request_inputs: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Reusable creation-time Workflow preflight for Schedule fire/trigger.
+
+        Same strict eligibility as manual Workflow execution (ACTIVE + current
+        PUBLISHED + VALID). Does not materialize an Execution.
+        """
+        return await self._preflight(
+            workflow_id=workflow_id,
+            version_id=version_id,
+            requester_id=requester_id,
+            request_inputs=request_inputs,
+            require_current_version=True,
+        )
+
+    async def materialize_for_schedule_occurrence(
+        self,
+        *,
+        workflow_id: uuid.UUID,
+        version_id: uuid.UUID,
+        requester_id: uuid.UUID,
+        schedule_occurrence_id: uuid.UUID,
+        request_inputs: dict[str, Any],
+        trigger_type: str,
+    ) -> ExecutionMaterializeResult:
+        """Fire-time Workflow Execution for a ScheduleOccurrence (no Idempotency-Key).
+
+        New Schedule Execution creation uses the same strict creation eligibility
+        as manual Workflow execution: Workflow ACTIVE, Schedule target equals
+        Workflow.current_version_id, WorkflowVersion PUBLISHED + VALID.
+
+        After durable Execution creation, the pinned Version may later become
+        DEPRECATED and the existing Execution continues — runtime authorization
+        uses the pinned Workflow core (PUBLISHED|DEPRECATED), not this path.
+        """
+        if trigger_type not in {"SCHEDULE", "USER"}:
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message="Schedule Execution trigger_type must be SCHEDULE or USER.",
+                status_code=409,
+            )
+        ctx = await self.prepare_schedule_creation_preflight(
+            workflow_id=workflow_id,
+            version_id=version_id,
+            requester_id=requester_id,
+            request_inputs=request_inputs,
+        )
+        now = datetime.now(UTC)
+        return await ExecutionPlanMaterializer(self._session).materialize(
+            ExecutionMaterializeParams(
+                source_type=ExecutionSourceType.SCHEDULE_OCCURRENCE.value,
+                trigger_type=trigger_type,
+                requester_id=requester_id,
+                workflow_version_id=version_id,
+                agent_request_id=None,
+                agent_version_id=None,
+                schedule_occurrence_id=schedule_occurrence_id,
+                plan_validation_run_id=None,
+                plan_snapshot=dict(ctx["plan_dump"]),
+                plan_hash=ctx["plan_hash"],
+                input_snapshot=dict(ctx["input_snapshot"]),
+                policy_snapshot=dict(ctx["policy_snapshot"]),
+                requested_at=now,
+            )
+        )
+
     async def _preflight(
         self,
         *,
@@ -343,6 +416,7 @@ class WorkflowExecutionCreationService:
         requester_id: uuid.UUID,
         request_inputs: dict[str, Any],
         preloaded_input_snapshot: dict[str, Any] | None = None,
+        require_current_version: bool = True,
     ) -> dict[str, Any]:
         owned = await self._resolve_owned_version(workflow_id, version_id)
         workflow = owned["workflow"]
@@ -372,7 +446,7 @@ class WorkflowExecutionCreationService:
                 message="Workflow must be ACTIVE for manual execution.",
                 status_code=409,
             )
-        if workflow.current_version_id != version.id:
+        if require_current_version and workflow.current_version_id != version.id:
             raise AppError(
                 code="EXECUTION_PRECONDITION_FAILED",
                 message="Requested version is not the Workflow current_version_id.",

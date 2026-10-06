@@ -1647,8 +1647,9 @@ Unique `(schedule_id, scheduled_for)`로 중복 occurrence를 차단한다.
 - INTERVAL: `start_at` inclusive anchor; window는 `start_at` inclusive / `end_at` exclusive; duration overflow → `VALIDATION_ERROR`.
 - `max_catch_up` DB CHECK: `BETWEEN 1 AND 100`.
 - Occurrence list `from` inclusive / `to` exclusive; timezone-aware only.
-- Partial index `ix_schedules_active_next_run_at`는 `status='ACTIVE'` 행만 대상 (trigger slice 준비).
+- Partial index `ix_schedules_active_next_run_at`는 `status='ACTIVE'` 행만 대상 (scheduler due scan).
 - Permission bootstrap: `schedule.manage` (migration `20261002_0021`).
+- `executions.schedule_occurrence_id` → `schedule_occurrences.id` FK + unique partial index (migration `20261002_0023`). At most one Execution per Occurrence.
 
 ---
 

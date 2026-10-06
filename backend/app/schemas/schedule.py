@@ -150,6 +150,7 @@ class ScheduleOccurrenceResponse(BaseModel):
     scheduled_for: datetime
     status: OccurrenceStatus
     decision_reason: str | None = None
+    execution_id: uuid.UUID | None = None
     created_at: datetime
     enqueued_at: datetime | None = None
     finished_at: datetime | None = None
@@ -161,6 +162,11 @@ class ScheduleOccurrenceListResponse(BaseModel):
     page_size: int
     total: int
     has_next: bool
+
+
+class ScheduleTriggerResponse(BaseModel):
+    occurrence: ScheduleOccurrenceResponse
+    execution_id: uuid.UUID | None = None
 
 
 def schedule_to_response(schedule: Schedule) -> ScheduleResponse:
@@ -192,5 +198,19 @@ def schedule_to_response(schedule: Schedule) -> ScheduleResponse:
     )
 
 
-def occurrence_to_response(row: ScheduleOccurrence) -> ScheduleOccurrenceResponse:
-    return ScheduleOccurrenceResponse.model_validate(row)
+def occurrence_to_response(
+    row: ScheduleOccurrence,
+    *,
+    execution_id: uuid.UUID | None = None,
+) -> ScheduleOccurrenceResponse:
+    return ScheduleOccurrenceResponse(
+        id=row.id,
+        schedule_id=row.schedule_id,
+        scheduled_for=row.scheduled_for,
+        status=OccurrenceStatus(row.status),
+        decision_reason=row.decision_reason,
+        execution_id=execution_id,
+        created_at=row.created_at,
+        enqueued_at=row.enqueued_at,
+        finished_at=row.finished_at,
+    )

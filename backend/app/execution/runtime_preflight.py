@@ -134,7 +134,10 @@ async def assert_source_tool_executable(
             expected_policy_snapshot=expected_policy_snapshot,
             plan_timeout_seconds=plan_timeout_seconds,
         )
-    if execution.source_type == ExecutionSourceType.WORKFLOW_VERSION.value:
+    if execution.source_type in {
+        ExecutionSourceType.WORKFLOW_VERSION.value,
+        ExecutionSourceType.SCHEDULE_OCCURRENCE.value,
+    }:
         await assert_current_workflow_execution_authorized(session, execution)
         core = await _assert_common_tool_executable(
             session,
@@ -254,37 +257,151 @@ class WorkflowExecutionAuthorization:
     plan: ExecutionPlanV1
 
 
+_PINNED_WORKFLOW_SOURCES = frozenset(
+    {
+        ExecutionSourceType.WORKFLOW_VERSION.value,
+        ExecutionSourceType.SCHEDULE_OCCURRENCE.value,
+    }
+)
+_SCHEDULE_TRIGGER_TYPES = frozenset({"SCHEDULE", "USER"})
+
+
+async def assert_pinned_workflow_execution_authorized(
+    session: AsyncSession,
+    execution: Execution,
+) -> WorkflowExecutionAuthorization:
+    """Shared pinned Workflow core for WORKFLOW_VERSION and SCHEDULE_OCCURRENCE.
+
+    Creation eligibility still requires PUBLISHED + current_version_id equality
+    (and, for schedules, Schedule.target == that current version). After durable
+    Execution creation, the Execution pin is authoritative:
+
+    - pinned WorkflowVersion may be DEPRECATED (superseded) and remain valid
+    - Schedule may be PAUSED / retargeted; do NOT require Schedule.status ACTIVE
+      or Schedule.workflow_version_id == Execution.workflow_version_id
+    - Logical Workflow ACTIVE + requester grants remain mutable authorization
+
+    SCHEDULE_OCCURRENCE additionally requires schedule_occurrence_id lineage,
+    null Agent/plan-validation fields, trigger_type SCHEDULE|USER, and
+    Schedule.owner_id == Execution.requester_id.
+    """
+    if execution.source_type not in _PINNED_WORKFLOW_SOURCES:
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message=(
+                "Pinned Workflow authorization requires WORKFLOW_VERSION or "
+                "SCHEDULE_OCCURRENCE."
+            ),
+            status_code=409,
+        )
+
+    if execution.source_type == ExecutionSourceType.SCHEDULE_OCCURRENCE.value:
+        await _assert_schedule_occurrence_lineage(session, execution)
+    else:
+        if (
+            execution.workflow_version_id is None
+            or execution.agent_request_id is not None
+            or execution.agent_version_id is not None
+            or execution.schedule_occurrence_id is not None
+            or execution.plan_validation_run_id is not None
+        ):
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message="WORKFLOW_VERSION Execution source lineage is inconsistent.",
+                status_code=409,
+            )
+
+    return await _assert_pinned_workflow_core(session, execution)
+
+
 async def assert_current_workflow_execution_authorized(
     session: AsyncSession,
     execution: Execution,
 ) -> WorkflowExecutionAuthorization:
-    """Mutable + pinned Workflow source authorization for an existing Execution.
+    """Compatibility alias for pinned Workflow authorization (both sources)."""
+    return await assert_pinned_workflow_execution_authorized(session, execution)
 
-    Creation eligibility still requires PUBLISHED + current_version_id equality.
-    After Creation, a pinned WorkflowVersion may be DEPRECATED (superseded) and
-    remain valid lineage. Logical Workflow ACTIVE + grants remain mutable.
+
+async def _assert_schedule_occurrence_lineage(
+    session: AsyncSession,
+    execution: Execution,
+) -> None:
+    """Read-only ScheduleOccurrence + Schedule owner lineage.
+
+    Worker paths (ToolRunner / Approval / MRTR) already own Execution state.
+    Do NOT acquire Schedule or ScheduleOccurrence ``FOR UPDATE`` here — that
+    deadlocks against Scheduler REPLACE (Schedule → Execution).
+
+    ``Schedule.owner_id`` and ``ScheduleOccurrence.schedule_id`` are immutable
+    after creation; ordinary consistent reads are sufficient. Mutable
+    Workflow/User/grant/Tool authorization remains elsewhere.
     """
-    if execution.source_type != ExecutionSourceType.WORKFLOW_VERSION.value:
-        raise AppError(
-            code="RESOURCE_CONFLICT",
-            message="Workflow Execution authorization requires WORKFLOW_VERSION.",
-            status_code=409,
-        )
+    from app.models.schedule import Schedule, ScheduleOccurrence
+    from sqlalchemy import select
+
     if (
-        execution.workflow_version_id is None
+        execution.schedule_occurrence_id is None
+        or execution.workflow_version_id is None
         or execution.agent_request_id is not None
         or execution.agent_version_id is not None
+        or execution.plan_validation_run_id is not None
     ):
         raise AppError(
             code="RESOURCE_CONFLICT",
-            message="WORKFLOW_VERSION Execution source lineage is inconsistent.",
+            message="SCHEDULE_OCCURRENCE Execution source lineage is inconsistent.",
+            status_code=409,
+        )
+    if execution.trigger_type not in _SCHEDULE_TRIGGER_TYPES:
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message=(
+                "SCHEDULE_OCCURRENCE trigger_type must be SCHEDULE or USER "
+                f"(got {execution.trigger_type!r})."
+            ),
             status_code=409,
         )
 
+    occurrence = (
+        await session.execute(
+            select(ScheduleOccurrence).where(
+                ScheduleOccurrence.id == execution.schedule_occurrence_id
+            )
+        )
+    ).scalar_one_or_none()
+    if occurrence is None:
+        raise AppError(
+            code="EXECUTION_PRECONDITION_FAILED",
+            message="ScheduleOccurrence not found for Execution.",
+            status_code=409,
+        )
+    schedule = (
+        await session.execute(
+            select(Schedule).where(Schedule.id == occurrence.schedule_id)
+        )
+    ).scalar_one_or_none()
+    if schedule is None:
+        raise AppError(
+            code="EXECUTION_PRECONDITION_FAILED",
+            message="Schedule not found for ScheduleOccurrence.",
+            status_code=409,
+        )
+    if schedule.owner_id != execution.requester_id:
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message="Schedule.owner_id must equal Execution.requester_id.",
+            status_code=409,
+        )
+
+
+async def _assert_pinned_workflow_core(
+    session: AsyncSession,
+    execution: Execution,
+) -> WorkflowExecutionAuthorization:
     versions = WorkflowVersionRepository(session)
     workflows = WorkflowRepository(session)
     auth = AuthorizationRepository(session)
 
+    assert execution.workflow_version_id is not None
     version = await versions.get(execution.workflow_version_id)
     if version is None:
         raise AppError(

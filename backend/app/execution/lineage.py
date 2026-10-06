@@ -47,6 +47,7 @@ _LINEAGE_SOURCES = frozenset(
         ExecutionSourceType.AGENT_REQUEST.value,
         ExecutionSourceType.MANUAL_TOOL_TEST.value,
         ExecutionSourceType.WORKFLOW_VERSION.value,
+        ExecutionSourceType.SCHEDULE_OCCURRENCE.value,
     }
 )
 
@@ -131,7 +132,7 @@ def assert_tool_step_lineage(
             code="RESOURCE_CONFLICT",
             message=(
                 "Replay lineage supports AGENT_REQUEST / MANUAL_TOOL_TEST / "
-                "WORKFLOW_VERSION only."
+                "WORKFLOW_VERSION / SCHEDULE_OCCURRENCE only."
             ),
             status_code=409,
         )

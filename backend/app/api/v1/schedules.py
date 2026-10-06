@@ -6,7 +6,7 @@ import uuid
 from datetime import datetime
 from typing import Annotated
 
-from fastapi import APIRouter, Header, Query, status
+from fastapi import APIRouter, Header, Query, Response, status
 
 from app.api.dependencies import CurrentPrincipalDep, DbSessionDep
 from app.core.errors import AppError
@@ -15,11 +15,16 @@ from app.schemas.schedule import (
     ScheduleListResponse,
     ScheduleOccurrenceListResponse,
     ScheduleResponse,
+    ScheduleTriggerResponse,
     ScheduleUpdate,
     occurrence_to_response,
     schedule_to_response,
 )
 from app.services.schedule import ScheduleService
+from app.services.schedule_trigger import (
+    ScheduleTriggerService,
+    bulk_execution_ids_for_occurrences,
+)
 
 router = APIRouter(prefix="/schedules", tags=["schedules"])
 
@@ -177,6 +182,36 @@ async def resume_schedule(
     return schedule_to_response(schedule)
 
 
+@router.post(
+    "/{schedule_id}/trigger",
+    response_model=ScheduleTriggerResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def trigger_schedule(
+    session: DbSessionDep,
+    principal: CurrentPrincipalDep,
+    schedule_id: uuid.UUID,
+    response: Response,
+    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
+) -> ScheduleTriggerResponse:
+    if idempotency_key is None:
+        raise AppError(
+            code="VALIDATION_ERROR",
+            message="Idempotency-Key header is required.",
+            status_code=status.HTTP_400_BAD_REQUEST,
+        )
+    outcome = await ScheduleTriggerService(session).trigger(
+        schedule_id,
+        actor_user_id=principal.user_id,
+        idempotency_key=idempotency_key,
+    )
+    response.status_code = outcome.http_status
+    return ScheduleTriggerResponse(
+        occurrence=outcome.occurrence,
+        execution_id=outcome.execution_id,
+    )
+
+
 @router.get("/{schedule_id}/occurrences", response_model=ScheduleOccurrenceListResponse)
 async def list_schedule_occurrences(
     session: DbSessionDep,
@@ -197,8 +232,14 @@ async def list_schedule_occurrences(
         page=page,
         page_size=page_size,
     )
+    exec_map = await bulk_execution_ids_for_occurrences(
+        session, [item.id for item in items]
+    )
     return ScheduleOccurrenceListResponse(
-        items=[occurrence_to_response(item) for item in items],
+        items=[
+            occurrence_to_response(item, execution_id=exec_map.get(item.id))
+            for item in items
+        ],
         page=page,
         page_size=page_size,
         total=total,

@@ -253,9 +253,13 @@ class ApprovalResumeClaimService:
                 step=step,
                 steps=steps,
             )
-            if execution.source_type == ExecutionSourceType.WORKFLOW_VERSION.value:
+            if execution.source_type in {
+                ExecutionSourceType.WORKFLOW_VERSION.value,
+                ExecutionSourceType.SCHEDULE_OCCURRENCE.value,
+            }:
                 # Authorable APPROVAL may be terminal or followed only by local
-                # CONDITION/JOIN/LOOP — revalidate Workflow auth before lease.
+                # CONDITION/JOIN/LOOP — revalidate pinned Workflow auth before lease.
+                # Schedule PAUSED after Execution creation must NOT block resume.
                 await assert_current_workflow_execution_authorized(
                     self._session, execution
                 )
@@ -330,12 +334,14 @@ class ApprovalResumeClaimService:
             ExecutionSourceType.AGENT_REQUEST.value,
             ExecutionSourceType.MANUAL_TOOL_TEST.value,
             ExecutionSourceType.WORKFLOW_VERSION.value,
+            ExecutionSourceType.SCHEDULE_OCCURRENCE.value,
         }:
             raise AppError(
                 code="RESOURCE_CONFLICT",
                 message=(
                     "Authorable approval resume supports AGENT_REQUEST / "
-                    "MANUAL_TOOL_TEST / WORKFLOW_VERSION Executions only."
+                    "MANUAL_TOOL_TEST / WORKFLOW_VERSION / "
+                    "SCHEDULE_OCCURRENCE Executions only."
                 ),
                 status_code=409,
             )

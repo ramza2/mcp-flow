@@ -152,7 +152,10 @@ class ToolStepAttemptService:
         )
 
         if authz.confirmation_required:
-            if execution.source_type == ExecutionSourceType.WORKFLOW_VERSION.value:
+            if execution.source_type in {
+                ExecutionSourceType.WORKFLOW_VERSION.value,
+                ExecutionSourceType.SCHEDULE_OCCURRENCE.value,
+            }:
                 raise AppError(
                     code="WORKFLOW_CONFIRMATION_UNSUPPORTED",
                     message=(
@@ -352,16 +355,21 @@ class ToolStepAttemptService:
             ExecutionSourceType.AGENT_REQUEST.value,
             ExecutionSourceType.MANUAL_TOOL_TEST.value,
             ExecutionSourceType.WORKFLOW_VERSION.value,
+            ExecutionSourceType.SCHEDULE_OCCURRENCE.value,
         }:
             raise AppError(
                 code="RESOURCE_CONFLICT",
                 message=(
                     "Attempt foundation supports AGENT_REQUEST / "
-                    "MANUAL_TOOL_TEST / WORKFLOW_VERSION Executions only."
+                    "MANUAL_TOOL_TEST / WORKFLOW_VERSION / "
+                    "SCHEDULE_OCCURRENCE Executions only."
                 ),
                 status_code=409,
             )
-        if execution.source_type == ExecutionSourceType.WORKFLOW_VERSION.value:
+        if execution.source_type in {
+            ExecutionSourceType.WORKFLOW_VERSION.value,
+            ExecutionSourceType.SCHEDULE_OCCURRENCE.value,
+        }:
             if (
                 execution.workflow_version_id is None
                 or execution.agent_version_id is not None
@@ -369,7 +377,21 @@ class ToolStepAttemptService:
             ):
                 raise AppError(
                     code="RESOURCE_CONFLICT",
-                    message="WORKFLOW_VERSION Attempt source lineage is inconsistent.",
+                    message=(
+                        f"{execution.source_type} Attempt source lineage "
+                        "is inconsistent."
+                    ),
+                    status_code=409,
+                )
+            if (
+                execution.source_type == ExecutionSourceType.SCHEDULE_OCCURRENCE.value
+                and execution.schedule_occurrence_id is None
+            ):
+                raise AppError(
+                    code="RESOURCE_CONFLICT",
+                    message=(
+                        "SCHEDULE_OCCURRENCE Attempt requires schedule_occurrence_id."
+                    ),
                     status_code=409,
                 )
         elif execution.agent_version_id is None:

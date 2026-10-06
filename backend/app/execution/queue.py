@@ -199,6 +199,7 @@ class ExecutionQueueService:
                     (
                         ExecutionSourceType.AGENT_REQUEST.value,
                         ExecutionSourceType.WORKFLOW_VERSION.value,
+                        ExecutionSourceType.SCHEDULE_OCCURRENCE.value,
                     )
                 ),
             )
@@ -228,6 +229,11 @@ class ExecutionQueueService:
                     message="CREATED Execution has unexpected lease state.",
                     status_code=409,
                 )
+            if (
+                execution.source_type
+                == ExecutionSourceType.SCHEDULE_OCCURRENCE.value
+            ):
+                await self._assert_and_enqueue_occurrence(execution, now=ts)
             await self._outbox.create_execution_dispatch(
                 execution_id=execution.id,
                 created_at=ts,
@@ -237,6 +243,74 @@ class ExecutionQueueService:
             execution.lock_version += 1
         await self._session.flush()
         return len(rows)
+
+    async def _assert_and_enqueue_occurrence(
+        self, execution: Execution, *, now: datetime
+    ) -> None:
+        """Atomically PLANNED → ENQUEUED for SCHEDULE_OCCURRENCE in the staging TX.
+
+        Lock order (Execution already held by caller):
+        ``Execution → ScheduleOccurrence``; Schedule ownership is a non-locking read.
+        Never ``Execution → Schedule FOR UPDATE``.
+        """
+        from app.domain.enums import OccurrenceStatus
+        from app.models.schedule import Schedule, ScheduleOccurrence
+
+        if execution.schedule_occurrence_id is None:
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message="SCHEDULE_OCCURRENCE Execution requires schedule_occurrence_id.",
+                status_code=409,
+            )
+        occ_stmt = (
+            select(ScheduleOccurrence)
+            .where(ScheduleOccurrence.id == execution.schedule_occurrence_id)
+            .with_for_update()
+        )
+        occurrence = (await self._session.execute(occ_stmt)).scalar_one_or_none()
+        if occurrence is None:
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message="ScheduleOccurrence not found for queue staging.",
+                status_code=409,
+            )
+        if occurrence.status != OccurrenceStatus.PLANNED.value:
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message=(
+                    "SCHEDULE_OCCURRENCE queue staging requires occurrence "
+                    "status PLANNED."
+                ),
+                status_code=409,
+            )
+        # At most one Execution for this occurrence (partial unique index enforces;
+        # also verify no other Execution points here).
+        other_stmt = select(Execution.id).where(
+            Execution.schedule_occurrence_id == occurrence.id,
+            Execution.id != execution.id,
+        )
+        other = (await self._session.execute(other_stmt)).scalar_one_or_none()
+        if other is not None:
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message="ScheduleOccurrence already has another Execution.",
+                status_code=409,
+            )
+        # Non-locking Schedule ownership read (owner_id immutable after create).
+        schedule = (
+            await self._session.execute(
+                select(Schedule).where(Schedule.id == occurrence.schedule_id)
+            )
+        ).scalar_one_or_none()
+        if schedule is None or schedule.owner_id != execution.requester_id:
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message="Schedule ownership lineage invalid for queue staging.",
+                status_code=409,
+            )
+        occurrence.status = OccurrenceStatus.ENQUEUED.value
+        occurrence.enqueued_at = now
+        # Do not change decision_reason.
 
 
 class OutboxRelayService:
