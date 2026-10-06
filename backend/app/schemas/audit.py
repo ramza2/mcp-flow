@@ -72,7 +72,20 @@ def decode_audit_cursor(cursor: str) -> tuple[datetime, int]:
             message="Invalid audit cursor.",
             status_code=422,
         ) from exc
-    if not isinstance(payload, dict) or payload.get("v") != _CURSOR_VERSION:
+    if not isinstance(payload, dict):
+        raise AppError(
+            code="VALIDATION_ERROR",
+            message="Invalid audit cursor payload.",
+            status_code=422,
+        )
+    # Exact key set — extra/missing keys are rejected.
+    if set(payload.keys()) != {"v", "occurred_at", "id"}:
+        raise AppError(
+            code="VALIDATION_ERROR",
+            message="Invalid audit cursor payload keys.",
+            status_code=422,
+        )
+    if payload.get("v") != _CURSOR_VERSION:
         raise AppError(
             code="VALIDATION_ERROR",
             message="Invalid audit cursor version.",
@@ -83,6 +96,8 @@ def decode_audit_cursor(cursor: str) -> tuple[datetime, int]:
         row_id = int(payload["id"])
         if not isinstance(occurred_raw, str):
             raise TypeError("occurred_at must be string")
+        if row_id < 1:
+            raise ValueError("cursor id must be >= 1")
         occurred_at = datetime.fromisoformat(occurred_raw.replace("Z", "+00:00"))
         if occurred_at.tzinfo is None:
             raise ValueError("cursor occurred_at must be timezone-aware")

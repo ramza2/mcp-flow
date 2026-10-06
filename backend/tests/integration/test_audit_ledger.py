@@ -99,14 +99,28 @@ async def test_pg_secret_sanitizer_persists_redacted_only(
         "password": "p",
         "Authorization": "Bearer abc",
         "nested": {"accessToken": "token", "requestState": "opaque"},
+        "token": "plain-token",
+        "credential": "credential-value",
+        "secret_key": "secret-value",
+        "nested2": {"privateKey": "pem-value"},
     }
     async with integration_session_factory() as session:
-        row = await _append_event(session, change_set=dirty)
+        row = await AuditWriter(session).append(
+            actor_type=AuditActorType.USER,
+            actor_id=str(uuid.uuid4()),
+            action="auth.login",
+            result=AuditResult.SUCCESS,
+            resource_type="USER",
+            resource_id=str(uuid.uuid4()),
+            request_id="req-pg-secret",
+            change_set=dirty,
+            reason="Authorization: Bearer audit-secret",
+        )
         await session.commit()
         event_id = row.event_id
 
     async with integration_session_factory() as session:
-        raw = (
+        raw_change = (
             await session.execute(
                 text(
                     "SELECT change_set::text FROM audit_events WHERE event_id = :eid"
@@ -114,17 +128,42 @@ async def test_pg_secret_sanitizer_persists_redacted_only(
                 {"eid": event_id},
             )
         ).scalar_one()
-        assert "Bearer abc" not in raw
-        assert "opaque" not in raw
-        # token may appear inside REDACTED marker spelling — ensure plaintext gone
-        assert '"accessToken": "token"' not in raw
-        assert REDACTION_MARKER in raw
+        raw_reason = (
+            await session.execute(
+                text("SELECT reason FROM audit_events WHERE event_id = :eid"),
+                {"eid": event_id},
+            )
+        ).scalar_one()
+        raw_row = (
+            await session.execute(
+                text(
+                    "SELECT row_to_json(a)::text FROM audit_events a "
+                    "WHERE event_id = :eid"
+                ),
+                {"eid": event_id},
+            )
+        ).scalar_one()
+        combined = f"{raw_change}\n{raw_reason}\n{raw_row}"
+        for leak in (
+            "Bearer abc",
+            "opaque",
+            "plain-token",
+            "credential-value",
+            "secret-value",
+            "pem-value",
+            "audit-secret",
+        ):
+            assert leak not in combined
+        assert '"accessToken": "token"' not in raw_change
+        assert REDACTION_MARKER in raw_change
         row = await AuditRepository(session).get_by_event_id(event_id)
         assert row is not None
         assert row.change_set["password"] == REDACTION_MARKER
-        assert row.change_set["Authorization"] == REDACTION_MARKER
-        assert row.change_set["nested"]["accessToken"] == REDACTION_MARKER
-        assert row.change_set["nested"]["requestState"] == REDACTION_MARKER
+        assert row.change_set["token"] == REDACTION_MARKER
+        assert row.change_set["credential"] == REDACTION_MARKER
+        assert row.change_set["secret_key"] == REDACTION_MARKER
+        assert row.change_set["nested2"]["privateKey"] == REDACTION_MARKER
+        assert row.reason == "INVALID_REASON_REDACTED"
         assert verify_audit_event_integrity(row) is True
 
 
@@ -247,3 +286,185 @@ async def test_pg_success_mutation_audit_atomic_rollback(
             )
         ).scalars().all()
         assert audit_rows == []
+
+
+def _alembic_cfg(url: str):
+    import os
+
+    from alembic.config import Config
+    from app.core.config import get_settings
+
+    backend_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    cfg = Config(os.path.join(backend_dir, "alembic.ini"))
+    cfg.set_main_option("sqlalchemy.url", url)
+    os.environ["MCPFLOW_DATABASE_URL"] = url
+    get_settings.cache_clear()
+    return cfg
+
+
+async def _pg_fetch(url: str, sql: str, *args):
+    import asyncpg
+
+    dsn = url.replace("postgresql+asyncpg://", "postgresql://")
+    conn = await asyncpg.connect(dsn)
+    try:
+        return await conn.fetch(sql, *args)
+    finally:
+        await conn.close()
+
+
+async def _pg_execute(url: str, sql: str, *args) -> None:
+    import asyncpg
+
+    dsn = url.replace("postgresql+asyncpg://", "postgresql://")
+    conn = await asyncpg.connect(dsn)
+    try:
+        await conn.execute(sql, *args)
+    finally:
+        await conn.close()
+
+
+@pytest.mark.integration
+def test_alembic_audit_ledger_downgrade_upgrade_roundtrip(
+    integration_database_url: str,
+) -> None:
+    """0023 → upgrade 0024 → verify → downgrade 0023 → upgrade 0024 again.
+
+    Sync test so Alembic env.py may call asyncio.run() safely.
+    """
+    import asyncio
+
+    from alembic import command
+
+    cfg = _alembic_cfg(integration_database_url)
+    command.upgrade(cfg, "head")
+
+    expected_indexes = {
+        "ix_audit_events_occurred_id",
+        "ix_audit_events_actor",
+        "ix_audit_events_action",
+        "ix_audit_events_resource",
+        "ix_audit_events_result",
+        "ix_audit_events_request_id",
+        "ix_audit_events_trace_id",
+        "ix_audit_events_execution_id",
+    }
+    stale = {"ix_audit_events_occurred_at", "ix_audit_events_actor_type_actor_id"}
+    url = integration_database_url
+
+    def _verify_schema() -> None:
+        tables = {
+            r["tablename"]
+            for r in asyncio.run(
+                _pg_fetch(
+                    url,
+                    "SELECT tablename FROM pg_tables "
+                    "WHERE schemaname='public' AND tablename='audit_events'",
+                )
+            )
+        }
+        assert "audit_events" in tables
+        indexes = {
+            r["indexname"]
+            for r in asyncio.run(
+                _pg_fetch(
+                    url,
+                    "SELECT indexname FROM pg_indexes WHERE tablename='audit_events'",
+                )
+            )
+        }
+        assert expected_indexes.issubset(indexes)
+        assert stale.isdisjoint(indexes)
+        triggers = asyncio.run(
+            _pg_fetch(
+                url,
+                "SELECT tgname FROM pg_trigger t "
+                "JOIN pg_class c ON c.oid = t.tgrelid "
+                "WHERE c.relname = 'audit_events' AND NOT t.tgisinternal",
+            )
+        )
+        assert any(r["tgname"] == "trg_audit_events_append_only" for r in triggers)
+        perm_count = asyncio.run(
+            _pg_fetch(
+                url,
+                "SELECT count(*)::int AS c FROM permissions WHERE code = 'audit.export'",
+            )
+        )[0]["c"]
+        assert perm_count == 1
+
+    _verify_schema()
+
+    command.downgrade(cfg, "20261002_0023")
+    tables = {
+        r["tablename"]
+        for r in asyncio.run(
+            _pg_fetch(
+                url,
+                "SELECT tablename FROM pg_tables "
+                "WHERE schemaname='public' AND tablename='audit_events'",
+            )
+        )
+    }
+    assert "audit_events" not in tables
+    perm_count = asyncio.run(
+        _pg_fetch(
+            url,
+            "SELECT count(*)::int AS c FROM permissions WHERE code = 'audit.export'",
+        )
+    )[0]["c"]
+    assert perm_count == 0
+
+    command.upgrade(cfg, "20261006_0024")
+    _verify_schema()
+
+    event_id = uuid.uuid4()
+    asyncio.run(
+        _pg_execute(
+            url,
+            """
+            INSERT INTO audit_events (
+                event_id, occurred_at, actor_type, actor_id, action,
+                result, integrity_hash
+            ) VALUES ($1, now(), 'SYSTEM', 'scheduler', 'execution.create',
+                      'SUCCESS', $2)
+            """,
+            event_id,
+            "a" * 64,
+        )
+    )
+
+    with pytest.raises(Exception) as upd_exc:
+        asyncio.run(
+            _pg_execute(
+                url,
+                "UPDATE audit_events SET result='FAILURE' WHERE event_id=$1",
+                event_id,
+            )
+        )
+    assert "append-only" in str(upd_exc.value).lower()
+
+    with pytest.raises(Exception) as del_exc:
+        asyncio.run(
+            _pg_execute(
+                url,
+                "DELETE FROM audit_events WHERE event_id=$1",
+                event_id,
+            )
+        )
+    assert "append-only" in str(del_exc.value).lower()
+
+    kept = asyncio.run(
+        _pg_fetch(
+            url,
+            "SELECT result FROM audit_events WHERE event_id=$1",
+            event_id,
+        )
+    )
+    assert kept[0]["result"] == "SUCCESS"
+    perm_count = asyncio.run(
+        _pg_fetch(
+            url,
+            "SELECT count(*)::int AS c FROM permissions WHERE code = 'audit.export'",
+        )
+    )[0]["c"]
+    assert perm_count == 1

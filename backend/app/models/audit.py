@@ -1,7 +1,10 @@
 """SQLAlchemy ORM model for append-only audit_events (docs/05 §17).
 
 No updated_at / lock_version / deleted_at — AuditEvent is immutable.
-DESC keyset indexes are created in the Alembic migration (PostgreSQL).
+
+Index names and column projections match migration ``20261006_0024``.
+PostgreSQL retains DESC ordering in the migration; ORM uses the same names
+and columns without dialect-specific DESC (SQLite metadata compatibility).
 """
 
 from __future__ import annotations
@@ -44,14 +47,20 @@ class AuditEvent(Base):
             "length(action) BETWEEN 1 AND 128",
             name="ck_audit_events_action_length",
         ),
-        Index("ix_audit_events_occurred_at", "occurred_at"),
-        Index("ix_audit_events_actor_type_actor_id", "actor_type", "actor_id"),
-        Index("ix_audit_events_action", "action"),
-        Index("ix_audit_events_resource", "resource_type", "resource_id"),
-        Index("ix_audit_events_result", "result"),
+        # Names + columns aligned with Alembic 20261006_0024 (DESC only in PG).
+        Index("ix_audit_events_occurred_id", "occurred_at", "id"),
+        Index("ix_audit_events_actor", "actor_type", "actor_id", "occurred_at"),
+        Index("ix_audit_events_action", "action", "occurred_at"),
+        Index(
+            "ix_audit_events_resource",
+            "resource_type",
+            "resource_id",
+            "occurred_at",
+        ),
+        Index("ix_audit_events_result", "result", "occurred_at"),
         Index("ix_audit_events_request_id", "request_id"),
         Index("ix_audit_events_trace_id", "trace_id"),
-        Index("ix_audit_events_execution_id", "execution_id"),
+        Index("ix_audit_events_execution_id", "execution_id", "occurred_at"),
     )
 
     # INTEGER on SQLite (AUTOINCREMENT); BIGINT identity on PostgreSQL (migration).
@@ -73,7 +82,11 @@ class AuditEvent(Base):
     resource_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     execution_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
-        ForeignKey("executions.id", ondelete="RESTRICT"),
+        ForeignKey(
+            "executions.id",
+            ondelete="RESTRICT",
+            name="fk_audit_events_execution_id_executions",
+        ),
         nullable=True,
     )
     result: Mapped[str] = mapped_column(String(16), nullable=False)

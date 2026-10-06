@@ -222,6 +222,43 @@ async def test_create_201_and_replay(
 
 
 @pytest.mark.asyncio
+async def test_create_propagates_request_id_to_audit(
+    workflow_execute_client: AsyncClient,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from sqlalchemy import select
+
+    from app.audit.writer import ACTION_EXECUTION_CREATE
+    from app.models.audit import AuditEvent
+
+    user_id = workflow_execute_client.workflow_user_id  # type: ignore[attr-defined]
+    wf_id, ver_id = await _seed_published_workflow(db_session_factory, user_id)
+    key = f"idem-{uuid.uuid4().hex}"
+    first = await workflow_execute_client.post(
+        _exec_url(wf_id, ver_id),
+        json={"inputs": {}},
+        headers={
+            "Idempotency-Key": key,
+            "X-Request-ID": "audit-test-123",
+        },
+    )
+    assert first.status_code == 201, first.text
+    exec_id = uuid.UUID(first.json()["id"])
+
+    async with db_session_factory() as session:
+        rows = (
+            await session.execute(
+                select(AuditEvent).where(
+                    AuditEvent.action == ACTION_EXECUTION_CREATE,
+                    AuditEvent.execution_id == exec_id,
+                )
+            )
+        ).scalars().all()
+        assert len(rows) == 1
+        assert rows[0].request_id == "audit-test-123"
+
+
+@pytest.mark.asyncio
 async def test_idempotency_key_reuse_different_body_409(
     workflow_execute_client: AsyncClient,
     db_session_factory: async_sessionmaker[AsyncSession],

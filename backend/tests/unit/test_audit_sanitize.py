@@ -12,6 +12,7 @@ from app.audit.integrity import compute_integrity_hash, verify_audit_event_integ
 from app.audit.sanitize import (
     MAX_NESTING_DEPTH,
     MAX_SERIALIZED_BYTES,
+    INVALID_REASON_MARKER,
     REDACTION_MARKER,
     TRUNCATION_MARKER,
     ensure_json_object,
@@ -49,6 +50,32 @@ def test_sanitize_redacts_nested_secrets() -> None:
     assert "opaque" not in serialized
 
 
+def test_sanitize_redacts_generic_credential_keys() -> None:
+    payload = {
+        "token": "abc",
+        "credential": "xyz",
+        "credentials": {"user": "u", "password": "p"},
+        "auth_token": "aaa",
+        "bearer-token": "bbb",
+        "secret_key": "ccc",
+        "privateKey": "ddd",
+        "safe": "keep",
+    }
+    out = sanitize_audit_value(payload)
+    assert out["token"] == REDACTION_MARKER
+    assert out["credential"] == REDACTION_MARKER
+    # Entire credentials object replaced — no partial nested content.
+    assert out["credentials"] == REDACTION_MARKER
+    assert out["auth_token"] == REDACTION_MARKER
+    assert out["bearer-token"] == REDACTION_MARKER
+    assert out["secret_key"] == REDACTION_MARKER
+    assert out["privateKey"] == REDACTION_MARKER
+    assert out["safe"] == "keep"
+    serialized = str(out)
+    for leak in ("abc", "xyz", "aaa", "bbb", "ccc", "ddd", '"user": "u"'):
+        assert leak not in serialized
+
+
 def test_sanitize_bounds_depth_and_bytes() -> None:
     node: dict = {"v": "x"}
     cur = node
@@ -76,8 +103,19 @@ def test_sanitize_bounds_depth_and_bytes() -> None:
 def test_sanitize_reason_rejects_exception_objects() -> None:
     assert sanitize_reason(None) is None
     assert sanitize_reason("AUTH_INVALID_CREDENTIALS") == "AUTH_INVALID_CREDENTIALS"
-    assert sanitize_reason(ValueError("secret")) == "ValueError"
-    assert sanitize_reason({"x": 1}) == TRUNCATION_MARKER
+    assert sanitize_reason("USER_REQUEST") == "USER_REQUEST"
+    assert sanitize_reason("TARGET_PRECONDITION_FAILED") == "TARGET_PRECONDITION_FAILED"
+    # Exception message must never leak.
+    assert sanitize_reason(ValueError("secret")) == INVALID_REASON_MARKER
+    assert "secret" not in str(sanitize_reason(ValueError("secret")))
+    assert sanitize_reason({"x": 1}) == INVALID_REASON_MARKER
+    # Free-text / secret-bearing strings are not persisted.
+    assert (
+        sanitize_reason("Authorization: Bearer secret-token") == INVALID_REASON_MARKER
+    )
+    assert sanitize_reason("password=abc") == INVALID_REASON_MARKER
+    assert sanitize_reason("token=xyz") == INVALID_REASON_MARKER
+    assert sanitize_reason("lowercase-not-allowed") == INVALID_REASON_MARKER
 
 
 def test_integrity_hash_stable_and_tamper_detects() -> None:
@@ -114,6 +152,9 @@ def test_integrity_hash_stable_and_tamper_detects() -> None:
 
 
 def test_cursor_roundtrip_and_invalid() -> None:
+    import base64
+    import json
+
     ts = datetime(2026, 10, 6, 1, 2, 3, 456789, tzinfo=UTC)
     cursor = encode_audit_cursor(occurred_at=ts, row_id=42)
     back_ts, back_id = decode_audit_cursor(cursor)
@@ -124,3 +165,30 @@ def test_cursor_roundtrip_and_invalid() -> None:
         decode_audit_cursor("not-a-cursor!!!")
     assert exc.value.code == "VALIDATION_ERROR"
     assert exc.value.status_code == 422
+
+    def _encode(payload: dict) -> str:
+        raw = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
+        return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+    malformed = [
+        _encode({"v": 1, "occurred_at": ts.isoformat().replace("+00:00", "Z"), "id": 0}),
+        _encode({"v": 1, "occurred_at": ts.isoformat().replace("+00:00", "Z"), "id": -1}),
+        _encode(
+            {
+                "v": 1,
+                "occurred_at": ts.isoformat().replace("+00:00", "Z"),
+                "id": 1,
+                "extra": True,
+            }
+        ),
+        _encode({"v": 1, "occurred_at": ts.isoformat().replace("+00:00", "Z")}),
+        _encode({"v": 1, "occurred_at": "2026-10-06T01:02:03", "id": 1}),
+        _encode(
+            {"v": 99, "occurred_at": ts.isoformat().replace("+00:00", "Z"), "id": 1}
+        ),
+    ]
+    for bad in malformed:
+        with pytest.raises(AppError) as bad_exc:
+            decode_audit_cursor(bad)
+        assert bad_exc.value.code == "VALIDATION_ERROR"
+        assert bad_exc.value.status_code == 422

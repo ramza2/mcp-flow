@@ -1,16 +1,18 @@
 """Audit payload sanitization — never persist plaintext secrets (NFR-SEC-005).
 
-Applies recursively to before_data / after_data / change_set. Reason strings are
-length-bounded and never accept exception objects.
+Applies recursively to before_data / after_data / change_set. Reason values are
+stable machine-readable codes only (never free text / secrets / exceptions).
 """
 
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 REDACTION_MARKER = "[REDACTED]"
 TRUNCATION_MARKER = "[TRUNCATED]"
+INVALID_REASON_MARKER = "INVALID_REASON_REDACTED"
 
 # Conservative snapshot bounds — Audit is not an arbitrary blob store.
 MAX_NESTING_DEPTH = 8
@@ -19,13 +21,18 @@ MAX_LIST_ITEMS = 64
 MAX_STRING_LENGTH = 1_000
 MAX_SERIALIZED_BYTES = 8_192
 
-# Normalized (lowercase, strip _/-) key names that must never be persisted.
+# Stable machine-readable reason/error codes only (docs / FNC-AUD-001).
+_REASON_CODE = re.compile(r"^[A-Z0-9][A-Z0-9_.:-]{0,127}$")
+
+# Normalized (lowercase, strip _/-/space) key names that must never be persisted.
+# Entire value under a sensitive key is replaced — do not recurse into it.
 _SENSITIVE_KEYS: frozenset[str] = frozenset(
     {
         "password",
         "passwordhash",
         "secret",
         "secretvalue",
+        "secretkey",
         "apikey",
         "accesstoken",
         "refreshtoken",
@@ -40,6 +47,13 @@ _SENSITIVE_KEYS: frozenset[str] = frozenset(
         "clientsecret",
         "tokenhash",
         "csrftokenhash",
+        # Generic credential-bearing keys
+        "token",
+        "credential",
+        "credentials",
+        "authtoken",
+        "bearertoken",
+        "privatekey",
     }
 )
 
@@ -60,15 +74,26 @@ def _truncate_string(value: str) -> str:
 
 
 def sanitize_reason(reason: Any) -> str | None:
-    """Accept only stable string reason/error codes; never serialize exceptions."""
+    """Accept only stable reason/error codes; never persist free text or secrets.
+
+    Accepted shape: ``^[A-Z0-9][A-Z0-9_.:-]{0,127}$``
+
+    Exception objects never contribute their message. Non-matching strings become
+    ``INVALID_REASON_REDACTED``.
+    """
     if reason is None:
         return None
     if isinstance(reason, BaseException):
-        return type(reason).__name__[:MAX_STRING_LENGTH]
+        # Never persist exception messages (may contain secrets).
+        return INVALID_REASON_MARKER
     if not isinstance(reason, str):
-        return TRUNCATION_MARKER
-    cleaned = _truncate_string(reason.strip())
-    return cleaned or None
+        return INVALID_REASON_MARKER
+    cleaned = reason.strip()
+    if not cleaned:
+        return None
+    if _REASON_CODE.fullmatch(cleaned):
+        return cleaned
+    return INVALID_REASON_MARKER
 
 
 def sanitize_audit_value(value: Any, *, depth: int = 0) -> Any:
@@ -94,6 +119,7 @@ def sanitize_audit_value(value: Any, *, depth: int = 0) -> Any:
             key = str(raw_key)
             key = _truncate_string(key)
             if _is_sensitive_key(key):
+                # Entire value redacted — do not recurse into credential objects.
                 out[key] = REDACTION_MARKER
             else:
                 out[key] = sanitize_audit_value(raw_val, depth=depth + 1)
@@ -106,11 +132,8 @@ def sanitize_audit_value(value: Any, *, depth: int = 0) -> Any:
         ]
         if len(value) > MAX_LIST_ITEMS:
             items.append(TRUNCATION_MARKER)
-        # Top-level snapshot fields must be objects, not arrays — callers should
-        # wrap lists. Nested lists are allowed inside objects.
         return _bound_serialized(items)
 
-    # Fallback: stringify unknown objects safely.
     try:
         return _truncate_string(str(value))
     except Exception:  # noqa: BLE001
