@@ -749,6 +749,45 @@ class ScheduleRuntimeService:
         # last_run_at only when Execution successfully materialized.
         schedule.last_run_at = occurrence.scheduled_for
         schedule.lock_version = int(schedule.lock_version) + 1
+
+        from app.audit.writer import ACTION_EXECUTION_CREATE, AuditWriter
+        from app.domain.enums import AuditActorType, AuditResult
+
+        writer = AuditWriter(self._session)
+        change_set = {
+            "source_type": execution.source_type,
+            "trigger_type": execution.trigger_type,
+            "agent_request_id": None,
+            "workflow_version_id": str(execution.workflow_version_id)
+            if execution.workflow_version_id
+            else None,
+            "schedule_occurrence_id": str(occurrence.id),
+        }
+        if trigger_type == "SCHEDULE":
+            await writer.append_system(
+                actor_id="scheduler",
+                action=ACTION_EXECUTION_CREATE,
+                result=AuditResult.SUCCESS,
+                resource_type="EXECUTION",
+                resource_id=str(execution.id),
+                execution_id=execution.id,
+                change_set=change_set,
+                occurred_at=now,
+            )
+        else:
+            # Manual Schedule trigger — USER actor (Schedule owner).
+            await writer.append(
+                actor_type=AuditActorType.USER,
+                actor_id=str(schedule.owner_id),
+                action=ACTION_EXECUTION_CREATE,
+                result=AuditResult.SUCCESS,
+                resource_type="EXECUTION",
+                resource_id=str(execution.id),
+                execution_id=execution.id,
+                change_set=change_set,
+                occurred_at=now,
+            )
+
         await self._session.flush()
         return execution
 

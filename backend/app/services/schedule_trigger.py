@@ -279,6 +279,25 @@ class ScheduleTriggerService:
     ) -> ScheduleTriggerOutcome:
         body = occurrence_to_response(occurrence, execution_id=execution_id)
         try:
+            from app.audit.writer import ACTION_SCHEDULE_TRIGGER, AuditWriter
+            from app.domain.enums import AuditActorType, AuditResult
+
+            await AuditWriter(self._session).append(
+                actor_type=AuditActorType.USER,
+                actor_id=principal_key,
+                action=ACTION_SCHEDULE_TRIGGER,
+                result=AuditResult.SUCCESS,
+                resource_type="SCHEDULE",
+                resource_id=str(occurrence.schedule_id),
+                execution_id=execution_id,
+                change_set={
+                    "occurrence_id": str(occurrence.id),
+                    "occurrence_status": occurrence.status,
+                    "decision_reason": occurrence.decision_reason,
+                    "execution_created": execution_id is not None,
+                },
+                occurred_at=now,
+            )
             await self._idempotency.create_completed(
                 principal_key=principal_key,
                 operation_scope=_OPERATION_SCOPE,

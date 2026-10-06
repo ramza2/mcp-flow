@@ -337,6 +337,8 @@ Plan v1 authoring Step Type은 `TOOL`, `CONDITION`, `JOIN`, `APPROVAL`, `LOOP`�
 | `REQ-AUD-004` | 감사 조회/export를 별도 Permission으로 제한한다. | Must | 권한 밖 미노출. |
 | `REQ-AUD-005` | 보존·파기정책을 관리한다. | Should | 파기 자체도 감사. |
 
+> **Implementation boundary (PR #57):** Append-only `audit_events` ledger + `audit.read` query API are implemented for the initial instrumented actions (`auth.login`, `auth.logout`, `execution.create`, `execution.cancel`, `approval.decision`, `schedule.trigger`). Full product-wide mutation coverage and `POST /audit/exports` (Job/Object Storage) remain later slices. Do not treat `REQ-AUD-001` as complete across every registry mutation yet.
+
 ## 7.11 외부 MCP 탐색
 
 | ID | 요구사항 | 우선순위 |

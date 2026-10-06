@@ -4,6 +4,7 @@ from app.api.dependencies import require_authenticated_api_request
 from app.api.v1.agent_requests import router as agent_requests_router
 from app.api.v1.agents import router as agents_router
 from app.api.v1.approvals import router as approvals_router
+from app.api.v1.audit import router as audit_router
 from app.api.v1.auth import router as auth_router
 from app.api.v1.executions import router as executions_router
 from app.api.v1.mcp_servers import router as mcp_servers_router
@@ -26,6 +27,7 @@ protected_router = APIRouter(
 protected_router.include_router(agents_router)
 protected_router.include_router(agent_requests_router)
 protected_router.include_router(approvals_router)
+protected_router.include_router(audit_router)
 protected_router.include_router(executions_router)
 protected_router.include_router(mcp_servers_router)
 protected_router.include_router(mcp_tools_router)

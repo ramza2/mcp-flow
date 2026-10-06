@@ -690,8 +690,14 @@ Dataset은 평가 전 FROZEN하고 실행 중 정답을 변경하지 않는다.
 - pagination/filter/sort
 - Schedule occurrence uniqueness
 - Audit append-only 권한
+- Audit integrity_hash verify + secret sanitizer
+- Audit cursor pagination (no duplicate/missing across pages)
+- Audit transaction atomicity (success mutation + AuditEvent same TX)
+- Audit initial actions: auth.login/logout, execution.create/cancel, approval.decision, schedule.trigger
 
 SQLite를 PostgreSQL Integration 대체로 사용하지 않는다.
+
+> **PR #57:** PostgreSQL integration must prove ordinary `UPDATE`/`DELETE` on `audit_events` are rejected by the append-only trigger. Retention purge is out of scope.
 
 ---
 

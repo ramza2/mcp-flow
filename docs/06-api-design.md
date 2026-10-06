@@ -289,8 +289,13 @@ execution.read
 execution.cancel
 approval.decide
 audit.read
+audit.export
+schedule.manage
 ```
 
+`audit.read` — Audit query (list/detail). Privileged global reader; no ResourceGrant / own-events filter.
+
+`audit.export` — reserved for asynchronous Audit export (Job/Object Storage). `POST /audit/exports` is **not** implemented in the Audit ledger foundation slice.
 ---
 
 ## 7. Secret 및 Provider Profile API
@@ -1142,10 +1147,25 @@ GET /ops/system-health
 ```text
 GET  /audit/events
 GET  /audit/events/{event_id}
-POST /audit/exports
+POST /audit/exports          # deferred — Job/Object Storage slice; audit.export reserved
 ```
 
 수정/삭제 Endpoint는 제공하지 않는다.
+
+`GET /audit/events` filters (keyset cursor pagination, `occurred_at DESC, id DESC`):
+
+```text
+cursor?, limit (1..100, default 50)
+actor_type?, actor_id?
+action?, resource_type?, resource_id?
+result?
+request_id?, trace_id?, execution_id?
+from? (inclusive), to? (exclusive) — timezone-aware only
+```
+
+List items omit `before_data` / `after_data` / `change_set`. Detail includes those sanitized snapshots plus `source_ip_hash`.
+
+Requires ACTIVE User + `audit.read`. Audit query itself does not produce AuditEvents.
 
 ### Artifact
 

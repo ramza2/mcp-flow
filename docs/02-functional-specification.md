@@ -925,9 +925,50 @@ Manual `POST /trigger`는 동일 lineage에 `trigger_type=USER`만 다르다. AG
 
 중요 행위를 append-only event로 저장한다. 일반 앱 기능에 Update/Delete API를 제공하지 않는다.
 
+### PR #57 foundation
+
+- PostgreSQL `audit_events` ledger with trigger rejecting ordinary `UPDATE`/`DELETE`
+- Canonical `actor_type` (`USER`/`SERVICE`/`SYSTEM`) and `result` (`SUCCESS`/`DENIED`/`FAILURE`)
+- `request_id` from `RequestIdMiddleware` / `get_request_id()`; `trace_id` nullable until tracing exists
+- `execution_id` direct correlation projection (not every Audit resource is an Execution)
+- Sanitized `before_data`/`after_data`/`change_set`/`reason` (secrets redacted; snapshot bounds)
+- `source_ip_hash` reserved but always `null` until a dedicated privacy/HMAC key contract exists — raw client IP is never persisted
+- Deterministic `integrity_hash` (SHA-256 over sanitized logical fields; no hash chaining)
+- Query: `GET /audit/events`, `GET /audit/events/{event_id}` require ACTIVE User + `audit.read`
+- `audit.export` permission is seeded/reserved; export endpoint is **not** implemented here
+
+### Initial instrumented actions
+
+```text
+auth.login
+auth.logout
+execution.create
+execution.cancel
+approval.decision
+schedule.trigger
+```
+
+### Not yet comprehensively instrumented
+
+```text
+User/Role/Permission mutation
+MCP Server mutation
+MCP Tool/Policy/Verification mutation
+Agent publish/change
+Workflow publish/change
+Schedule CRUD/activate/pause/resume
+Model Profile/System Settings
+Factory/External Discovery
+```
+
+Audit is not an access log: ordinary GET / health / 404 / validation noise is not audited.
+Audit query endpoints themselves must not produce AuditEvents.
+
 ## FNC-AUD-002. Export
 
 권한이 적용된 Execution/Audit 결과를 CSV/JSONL 등으로 비동기 export하고 Object Storage에 저장한다.
+
+> **Deferred:** `POST /audit/exports` requires the Job/Object-Storage slice. `audit.export` permission is reserved in the bootstrap catalog.
 
 ---
 

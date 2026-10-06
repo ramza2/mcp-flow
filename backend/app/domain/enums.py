@@ -478,6 +478,22 @@ class ResourceGrantResourceType(StrEnum):
     MCP_TOOL = "MCP_TOOL"
 
 
+class AuditActorType(StrEnum):
+    """docs/05 audit_events.actor_type."""
+
+    USER = "USER"
+    SERVICE = "SERVICE"
+    SYSTEM = "SYSTEM"
+
+
+class AuditResult(StrEnum):
+    """docs/05 audit_events.result."""
+
+    SUCCESS = "SUCCESS"
+    DENIED = "DENIED"
+    FAILURE = "FAILURE"
+
+
 # Bootstrap permission catalog (docs/06 §6). Seeded by migration; not API-mutable.
 BOOTSTRAP_PERMISSION_CODES: tuple[str, ...] = (
     "mcp.server.read",
@@ -491,5 +507,6 @@ BOOTSTRAP_PERMISSION_CODES: tuple[str, ...] = (
     "execution.cancel",
     "approval.decide",
     "audit.read",
+    "audit.export",
     "schedule.manage",
 )

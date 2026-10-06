@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -9,6 +10,11 @@ from datetime import UTC, datetime, timedelta
 from fastapi import status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.audit.writer import (
+    ACTION_AUTH_LOGIN,
+    ACTION_AUTH_LOGOUT,
+    AuditWriter,
+)
 from app.auth.passwords import (
     MAX_PASSWORD_LENGTH,
     hash_password,
@@ -20,7 +26,7 @@ from app.auth.principal import CurrentPrincipal
 from app.auth.tokens import generate_opaque_token, sha256_hex
 from app.core.config import Settings
 from app.core.errors import AppError
-from app.domain.enums import UserStatus
+from app.domain.enums import AuditActorType, AuditResult, UserStatus
 from app.models.auth import User
 from app.models.session import Session
 from app.repositories.session import SessionRepository
@@ -32,6 +38,10 @@ def _as_utc(value: datetime) -> datetime:
     if value.tzinfo is None:
         return value.replace(tzinfo=UTC)
     return value.astimezone(UTC)
+
+
+def _username_fingerprint(username: str) -> str:
+    return hashlib.sha256(username.strip().lower().encode("utf-8")).hexdigest()
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,6 +56,7 @@ class AuthenticationService:
         self._settings = settings
         self._users = UserRepository(session)
         self._sessions = SessionRepository(session)
+        self._audit = AuditWriter(session)
 
     def _invalid_credentials(self) -> AppError:
         return AppError(
@@ -76,19 +87,35 @@ class AuthenticationService:
             expires_at=row.expires_at,
         )
 
+    async def _audit_login_failure(self, *, username: str) -> None:
+        """Rollback any partial auth state, then commit FAILURE audit alone."""
+        await self._session.rollback()
+        await self._audit.append(
+            actor_type=AuditActorType.USER,
+            actor_id=None,
+            action=ACTION_AUTH_LOGIN,
+            result=AuditResult.FAILURE,
+            reason="AUTH_INVALID_CREDENTIALS",
+            change_set={"username_fingerprint": _username_fingerprint(username)},
+        )
+        await self._session.commit()
+
     async def login(self, *, username: str, password: str) -> LoginResult:
         if len(password) > MAX_PASSWORD_LENGTH:
             verify_with_dummy(password[:MAX_PASSWORD_LENGTH])
+            await self._audit_login_failure(username=username)
             raise self._invalid_credentials()
 
         user = await self._users.get_by_username(username)
         authenticated = False
+        pending_rehash: str | None = None
         if user is None or user.password_hash is None:
             verify_with_dummy(password)
         else:
             authenticated = verify_password(password, user.password_hash)
             if authenticated and needs_rehash(user.password_hash):
-                await self._users.set_password_hash(user.id, hash_password(password))
+                # Defer rehash until success TX so failed auth leaves no mutation.
+                pending_rehash = hash_password(password)
 
         if (
             user is None
@@ -96,13 +123,15 @@ class AuthenticationService:
             or not authenticated
             or user.status != UserStatus.ACTIVE
         ):
-            await self._session.rollback()
+            await self._audit_login_failure(username=username)
             raise self._invalid_credentials()
 
         now = datetime.now(UTC)
         raw_token = generate_opaque_token()
         token_hash = sha256_hex(raw_token)
         expires_at = now + timedelta(seconds=int(self._settings.session_ttl_seconds))
+        if pending_rehash is not None:
+            await self._users.set_password_hash(user.id, pending_rehash)
         session_row = await self._sessions.create(
             user_id=user.id,
             token_hash=token_hash,
@@ -110,6 +139,16 @@ class AuthenticationService:
             expires_at=expires_at,
         )
         await self._users.set_last_login_at(user.id, when=now)
+        await self._audit.append(
+            actor_type=AuditActorType.USER,
+            actor_id=str(user.id),
+            action=ACTION_AUTH_LOGIN,
+            result=AuditResult.SUCCESS,
+            resource_type="USER",
+            resource_id=str(user.id),
+            occurred_at=now,
+        )
+        # Session + last_login_at + AuditEvent commit atomically.
         await self._session.commit()
         await self._session.refresh(session_row)
         await self._session.refresh(user)
@@ -169,4 +208,12 @@ class AuthenticationService:
         if revoked is None:
             await self._session.rollback()
             raise self._invalid_session()
+        await self._audit.append(
+            actor_type=AuditActorType.USER,
+            actor_id=str(revoked.user_id),
+            action=ACTION_AUTH_LOGOUT,
+            result=AuditResult.SUCCESS,
+            resource_type="SESSION",
+            resource_id=str(session_id),
+        )
         await self._session.commit()
