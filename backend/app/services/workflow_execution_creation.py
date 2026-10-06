@@ -336,6 +336,27 @@ class WorkflowExecutionCreationService:
             replayed=True,
         )
 
+    async def prepare_schedule_creation_preflight(
+        self,
+        *,
+        workflow_id: uuid.UUID,
+        version_id: uuid.UUID,
+        requester_id: uuid.UUID,
+        request_inputs: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Reusable creation-time Workflow preflight for Schedule fire/trigger.
+
+        Same strict eligibility as manual Workflow execution (ACTIVE + current
+        PUBLISHED + VALID). Does not materialize an Execution.
+        """
+        return await self._preflight(
+            workflow_id=workflow_id,
+            version_id=version_id,
+            requester_id=requester_id,
+            request_inputs=request_inputs,
+            require_current_version=True,
+        )
+
     async def materialize_for_schedule_occurrence(
         self,
         *,
@@ -348,8 +369,13 @@ class WorkflowExecutionCreationService:
     ) -> ExecutionMaterializeResult:
         """Fire-time Workflow Execution for a ScheduleOccurrence (no Idempotency-Key).
 
-        Pins the Schedule's exact WorkflowVersion (may differ from current_version_id).
-        Caller owns the surrounding transaction.
+        New Schedule Execution creation uses the same strict creation eligibility
+        as manual Workflow execution: Workflow ACTIVE, Schedule target equals
+        Workflow.current_version_id, WorkflowVersion PUBLISHED + VALID.
+
+        After durable Execution creation, the pinned Version may later become
+        DEPRECATED and the existing Execution continues — runtime authorization
+        uses the pinned Workflow core (PUBLISHED|DEPRECATED), not this path.
         """
         if trigger_type not in {"SCHEDULE", "USER"}:
             raise AppError(
@@ -357,12 +383,11 @@ class WorkflowExecutionCreationService:
                 message="Schedule Execution trigger_type must be SCHEDULE or USER.",
                 status_code=409,
             )
-        ctx = await self._preflight(
+        ctx = await self.prepare_schedule_creation_preflight(
             workflow_id=workflow_id,
             version_id=version_id,
             requester_id=requester_id,
             request_inputs=request_inputs,
-            require_current_version=False,
         )
         now = datetime.now(UTC)
         return await ExecutionPlanMaterializer(self._session).materialize(

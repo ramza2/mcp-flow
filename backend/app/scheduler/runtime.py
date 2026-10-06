@@ -2,6 +2,24 @@
 
 PostgreSQL polling worker owns due Schedule processing. No Celery Beat.
 Caller-owned transactions for Schedule REPLACE composition with #55 cancel.
+
+Canonical iteration order per Schedule batch:
+1. reconcile existing Execution projections
+2. release held QUEUE/REPLACE occurrences (oldest first)
+3. process new due Schedule points
+4. reconcile lifecycle / COMPLETED
+
+Occurrence lifecycle with Execution:
+- materialize → Occurrence remains PLANNED, Execution CREATED
+- queue stage → Occurrence ENQUEUED (same TX as Execution QUEUED + Outbox)
+- claim → Occurrence RUNNING (same TX as Execution RUNNING)
+- terminal Execution → COMPLETED / FAILED (preserve decision_reason)
+
+Creation vs runtime pin:
+- New Schedule Execution creation requires Schedule target == current PUBLISHED
+  WorkflowVersion (same as manual Workflow create).
+- After durable Creation, Execution.workflow_version_id is authoritative; do NOT
+  require Schedule.status ACTIVE or Schedule.workflow_version_id equality.
 """
 
 from __future__ import annotations
@@ -9,9 +27,9 @@ from __future__ import annotations
 import logging
 import uuid
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import AppError
@@ -54,7 +72,7 @@ _ACTIVE_OCCURRENCE = frozenset(
 )
 _WAIT_REASONS = frozenset(
     {
-        reasons.OVERLAP_QUEUE_WAIT,
+        reasons.OVERLAP_QUEUE,
         reasons.OVERLAP_REPLACE_WAIT,
     }
 )
@@ -67,6 +85,7 @@ _TERMINAL_EXECUTION = frozenset(
         ExecutionStatus.TIMED_OUT.value,
     }
 )
+_AUTHZ_CODES = frozenset({"FORBIDDEN", "AUTH_FORBIDDEN"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,6 +96,16 @@ class SchedulerIterationResult:
     executions_created: int
     occurrences_reconciled: int
     replace_waits: int
+
+
+@dataclass(frozen=True, slots=True)
+class _MisfirePartition:
+    """missed vs timely recurrence points relative to grace."""
+
+    missed: list[datetime]
+    timely: list[datetime]
+    next_after: datetime | None
+    scan_exhausted: bool
 
 
 def _as_utc(value: datetime) -> datetime:
@@ -92,8 +121,20 @@ def _aware_or_none(value: datetime | None) -> datetime | None:
 
 
 class ScheduleRuntimeService:
-    def __init__(self, session: AsyncSession) -> None:
+    def __init__(
+        self,
+        session: AsyncSession,
+        *,
+        misfire_grace_seconds: int = 60,
+        due_scan_limit: int = 10_000,
+    ) -> None:
+        if misfire_grace_seconds < 0:
+            raise ValueError("misfire_grace_seconds must be >= 0")
+        if due_scan_limit < 100 or due_scan_limit > 100_000:
+            raise ValueError("due_scan_limit must be in 100..100000")
         self._session = session
+        self._misfire_grace_seconds = misfire_grace_seconds
+        self._due_scan_limit = due_scan_limit
         self._schedules = ScheduleRepository(session)
         self._occurrences = ScheduleOccurrenceRepository(session)
         self._executions = ExecutionRepository(session)
@@ -108,12 +149,23 @@ class ScheduleRuntimeService:
         now: datetime | None = None,
     ) -> SchedulerIterationResult:
         ts = _as_utc(now or datetime.now(UTC))
-        due_ids = await self._schedules.list_due_active_ids(now=ts, limit=limit)
-        occurrences_created = 0
+        # 1) Reconcile existing Execution projections first.
+        reconciled = await self.reconcile_occurrence_statuses(limit=limit * 4, now=ts)
+
+        # 2) Release held QUEUE/REPLACE before processing new due points.
+        wait_ids = await self._list_waiting_occurrence_schedule_ids(limit=limit)
         occurrences_skipped = 0
         executions_created = 0
         replace_waits = 0
+        for schedule_id in wait_ids:
+            outcome = await self.process_waiting_schedule(schedule_id, now=ts)
+            executions_created += outcome.executions_created
+            occurrences_skipped += outcome.occurrences_skipped
+            replace_waits += outcome.replace_waits
 
+        # 3) Process new due Schedules.
+        due_ids = await self._schedules.list_due_active_ids(now=ts, limit=limit)
+        occurrences_created = 0
         for schedule_id in due_ids:
             outcome = await self.process_due_schedule(schedule_id, now=ts)
             occurrences_created += outcome.occurrences_created
@@ -121,17 +173,8 @@ class ScheduleRuntimeService:
             executions_created += outcome.executions_created
             replace_waits += outcome.replace_waits
 
-        # Resume QUEUE / REPLACE waits and reconcile occurrence statuses.
-        wait_ids = await self._list_waiting_occurrence_schedule_ids(limit=limit)
-        for schedule_id in wait_ids:
-            if schedule_id in due_ids:
-                continue
-            outcome = await self.process_waiting_schedule(schedule_id, now=ts)
-            executions_created += outcome.executions_created
-            occurrences_skipped += outcome.occurrences_skipped
-            replace_waits += outcome.replace_waits
-
-        reconciled = await self.reconcile_occurrence_statuses(limit=limit * 4, now=ts)
+        # 4) Final reconcile + COMPLETED lifecycle.
+        reconciled += await self.reconcile_occurrence_statuses(limit=limit * 4, now=ts)
         await self._session.flush()
         return SchedulerIterationResult(
             due_schedules=len(due_ids),
@@ -154,30 +197,40 @@ class ScheduleRuntimeService:
         if schedule.next_run_at is None or _as_utc(schedule.next_run_at) > now:
             return SchedulerIterationResult(0, 0, 0, 0, 0, 0)
 
-        missed = self._collect_missed_times(schedule, now=now)
-        fire_times, skip_times, next_after = self._apply_misfire(schedule, missed, now=now)
+        partition = self._collect_due_points(schedule, now=now)
+        if partition.scan_exhausted:
+            schedule.status = ScheduleStatus.ERROR.value
+            schedule.lock_version = int(schedule.lock_version) + 1
+            logger.error(
+                "SCHEDULE_DUE_SCAN_LIMIT_EXCEEDED schedule_id=%s limit=%s",
+                schedule.id,
+                self._due_scan_limit,
+            )
+            await self._session.flush()
+            return SchedulerIterationResult(1, 0, 0, 0, 0, 0)
+
+        fire_specs, skip_specs = self._apply_misfire(
+            schedule, partition.missed, partition.timely
+        )
 
         created = 0
         skipped = 0
         executed = 0
         replace_waits = 0
 
-        for scheduled_for in skip_times:
+        for scheduled_for, reason in skip_specs:
             occ = await self._occurrences.create_planned(schedule.id, scheduled_for)
             created += 1
             if occ.status == OccurrenceStatus.PLANNED.value:
-                reason = (
-                    reasons.MISFIRE_CATCH_UP_TRIMMED
-                    if schedule.misfire_policy
-                    == ScheduleMisfirePolicy.CATCH_UP_LIMITED.value
-                    else reasons.MISFIRE_SKIP
+                self._fail_or_skip_occurrence(
+                    occ, status=OccurrenceStatus.SKIPPED.value, reason=reason, now=now
                 )
-                self._skip_occurrence(occ, reason=reason, now=now)
                 skipped += 1
 
-        for scheduled_for in fire_times:
+        for scheduled_for, reason in fire_specs:
             occ = await self._occurrences.create_planned(schedule.id, scheduled_for)
             created += 1
+            occ.decision_reason = reason
             fire = await self._try_fire_occurrence(
                 schedule, occ, now=now, trigger_type="SCHEDULE"
             )
@@ -188,14 +241,9 @@ class ScheduleRuntimeService:
             elif fire == "REPLACE_WAIT":
                 replace_waits += 1
 
-        schedule.next_run_at = next_after
-        if fire_times:
-            schedule.last_run_at = fire_times[-1]
-        if next_after is None and schedule.schedule_type != "CRON":
-            # ONCE / exhausted INTERVAL window → COMPLETED when no future tick.
-            if schedule.schedule_type in {"ONCE", "INTERVAL"}:
-                schedule.status = ScheduleStatus.COMPLETED.value
+        schedule.next_run_at = partition.next_after
         schedule.lock_version = int(schedule.lock_version) + 1
+        await self._maybe_complete_schedule(schedule, now=now)
         await self._session.flush()
         return SchedulerIterationResult(
             due_schedules=1,
@@ -213,6 +261,7 @@ class ScheduleRuntimeService:
         now: datetime,
     ) -> SchedulerIterationResult:
         schedule = await self._schedules.lock_for_update(schedule_id)
+        # PAUSED Schedules must not release held QUEUE/REPLACE occurrences.
         if schedule is None or schedule.status != ScheduleStatus.ACTIVE.value:
             return SchedulerIterationResult(0, 0, 0, 0, 0, 0)
         waiting = await self._list_waiting_occurrences(schedule.id)
@@ -225,12 +274,14 @@ class ScheduleRuntimeService:
             )
             if fire == "EXECUTED":
                 executed += 1
-                schedule.last_run_at = occ.scheduled_for
-                schedule.lock_version = int(schedule.lock_version) + 1
             elif fire == "SKIPPED":
                 skipped += 1
             elif fire == "REPLACE_WAIT":
                 replace_waits += 1
+            elif fire == "WAIT":
+                # Still blocked — stop so older waits stay ahead of newer ones.
+                break
+        await self._maybe_complete_schedule(schedule, now=now)
         await self._session.flush()
         return SchedulerIterationResult(
             due_schedules=0,
@@ -252,6 +303,7 @@ class ScheduleRuntimeService:
             .where(
                 ScheduleOccurrence.status.in_(
                     (
+                        OccurrenceStatus.PLANNED.value,
                         OccurrenceStatus.ENQUEUED.value,
                         OccurrenceStatus.RUNNING.value,
                     )
@@ -267,52 +319,47 @@ class ScheduleRuntimeService:
             execution = await self._execution_for_occurrence(occ.id)
             if execution is None:
                 continue
-            mapped = self._map_execution_to_occurrence(execution)
-            if mapped is None:
-                if (
-                    execution.status
-                    in {
-                        ExecutionStatus.CREATED.value,
-                        ExecutionStatus.QUEUED.value,
-                    }
-                    and occ.status != OccurrenceStatus.ENQUEUED.value
-                ):
-                    occ.status = OccurrenceStatus.ENQUEUED.value
-                    if occ.enqueued_at is None:
-                        occ.enqueued_at = now
-                    updated += 1
-                elif (
-                    execution.status
-                    in {
-                        ExecutionStatus.RUNNING.value,
-                        ExecutionStatus.WAITING_INPUT.value,
-                        ExecutionStatus.WAITING_APPROVAL.value,
-                        ExecutionStatus.CANCEL_REQUESTED.value,
-                    }
-                    and occ.status != OccurrenceStatus.RUNNING.value
-                ):
-                    occ.status = OccurrenceStatus.RUNNING.value
-                    updated += 1
+            new_status = self._project_occurrence_status(execution.status)
+            if new_status is None or occ.status == new_status:
                 continue
-            status, reason = mapped
-            if occ.status != status:
-                occ.status = status
-                occ.decision_reason = reason
-                occ.finished_at = now
-                updated += 1
+            # Do not regress PLANNED→ENQUEUED here for CREATED — queue staging owns that.
+            if (
+                execution.status == ExecutionStatus.CREATED.value
+                and occ.status == OccurrenceStatus.PLANNED.value
+            ):
+                continue
+            occ.status = new_status
+            if new_status in {
+                OccurrenceStatus.COMPLETED.value,
+                OccurrenceStatus.FAILED.value,
+            }:
+                occ.finished_at = _aware_or_none(execution.finished_at) or now
+                # Preserve historical scheduler decision_reason.
+            elif (
+                new_status == OccurrenceStatus.ENQUEUED.value
+                and occ.enqueued_at is None
+            ):
+                occ.enqueued_at = _aware_or_none(execution.queued_at) or now
+            updated += 1
         return updated
 
-    def _collect_missed_times(
+    def _collect_due_points(
         self, schedule: Schedule, *, now: datetime
-    ) -> list[datetime]:
+    ) -> _MisfirePartition:
         assert schedule.next_run_at is not None
         cursor = _as_utc(schedule.next_run_at)
+        grace_boundary = now - timedelta(seconds=self._misfire_grace_seconds)
         missed: list[datetime] = []
-        # Bound scans so pathological dense intervals cannot loop forever.
-        for _ in range(10_000):
+        timely: list[datetime] = []
+        scan_exhausted = False
+        for _ in range(self._due_scan_limit):
             if cursor > now:
                 break
-            missed.append(cursor)
+            if cursor < grace_boundary:
+                missed.append(cursor)
+            else:
+                # timely: scheduled_for >= now - grace AND scheduled_for <= now
+                timely.append(cursor)
             nxt = next_scheduled_at(
                 schedule_type=schedule.schedule_type,
                 expression=schedule.schedule_expression,
@@ -323,16 +370,17 @@ class ScheduleRuntimeService:
             )
             if nxt is None:
                 break
-            cursor = _as_utc(nxt)
-        return missed
+            nxt_utc = _as_utc(nxt)
+            if nxt_utc <= cursor:
+                # Pathological recurrence — fail closed via scan limit semantics.
+                scan_exhausted = True
+                break
+            cursor = nxt_utc
+        else:
+            # Loop completed without break → bound exhausted while cursor still due.
+            if cursor <= now:
+                scan_exhausted = True
 
-    def _apply_misfire(
-        self,
-        schedule: Schedule,
-        missed: list[datetime],
-        *,
-        now: datetime,
-    ) -> tuple[list[datetime], list[datetime], datetime | None]:
         future = next_scheduled_at(
             schedule_type=schedule.schedule_type,
             expression=schedule.schedule_expression,
@@ -341,17 +389,53 @@ class ScheduleRuntimeService:
             start_at=_aware_or_none(schedule.start_at),
             end_at=_aware_or_none(schedule.end_at),
         )
-        if not missed:
-            return [], [], future
+        return _MisfirePartition(
+            missed=missed,
+            timely=timely,
+            next_after=future,
+            scan_exhausted=scan_exhausted,
+        )
+
+    def _apply_misfire(
+        self,
+        schedule: Schedule,
+        missed: list[datetime],
+        timely: list[datetime],
+    ) -> tuple[list[tuple[datetime, str]], list[tuple[datetime, str]]]:
+        """Return (fire_specs, skip_specs) with decision reasons.
+
+        Timely points always fire as DUE. Misfire policy applies only to missed.
+        """
+        fire: list[tuple[datetime, str]] = []
+        skip: list[tuple[datetime, str]] = []
 
         policy = schedule.misfire_policy
         if policy == ScheduleMisfirePolicy.SKIP.value:
-            return [], list(missed), future
-        if policy == ScheduleMisfirePolicy.RUN_ONCE.value:
-            return [missed[0]], list(missed[1:]), future
-        # CATCH_UP_LIMITED
-        limit = max(1, int(schedule.max_catch_up))
-        return list(missed[:limit]), list(missed[limit:]), future
+            for t in missed:
+                skip.append((t, reasons.MISFIRE_SKIP))
+        elif policy == ScheduleMisfirePolicy.RUN_ONCE.value:
+            if missed:
+                # Older missed → COALESCED; latest missed → RUN_ONCE.
+                for t in missed[:-1]:
+                    skip.append((t, reasons.MISFIRE_COALESCED))
+                fire.append((missed[-1], reasons.MISFIRE_RUN_ONCE))
+        else:
+            # CATCH_UP_LIMITED — most recent N missed runnable; older beyond N skipped.
+            limit = max(1, int(schedule.max_catch_up))
+            if len(missed) <= limit:
+                for t in missed:
+                    fire.append((t, reasons.MISFIRE_CATCH_UP))
+            else:
+                older = missed[:-limit]
+                newest = missed[-limit:]
+                for t in older:
+                    skip.append((t, reasons.MISFIRE_CATCH_UP_LIMIT))
+                for t in newest:
+                    fire.append((t, reasons.MISFIRE_CATCH_UP))
+
+        for t in timely:
+            fire.append((t, reasons.DUE))
+        return fire, skip
 
     async def try_fire_occurrence(
         self,
@@ -385,17 +469,25 @@ class ScheduleRuntimeService:
             return "NOOP"
 
         if schedule.target_type == ScheduleTargetType.AGENT_VERSION.value:
-            self._skip_occurrence(
-                occurrence, reason=reasons.AGENT_VERSION_UNSUPPORTED, now=now
+            self._fail_or_skip_occurrence(
+                occurrence,
+                status=OccurrenceStatus.FAILED.value,
+                reason=reasons.AGENT_SCHEDULE_EXECUTION_UNSUPPORTED,
+                now=now,
             )
             return "SKIPPED"
 
         overlap = await self._evaluate_overlap(schedule, occurrence, now=now)
         if overlap == "SKIP":
-            self._skip_occurrence(occurrence, reason=reasons.OVERLAP_SKIP, now=now)
+            self._fail_or_skip_occurrence(
+                occurrence,
+                status=OccurrenceStatus.SKIPPED.value,
+                reason=reasons.OVERLAP_SKIP,
+                now=now,
+            )
             return "SKIPPED"
         if overlap == "QUEUE_WAIT":
-            occurrence.decision_reason = reasons.OVERLAP_QUEUE_WAIT
+            occurrence.decision_reason = reasons.OVERLAP_QUEUE
             return "WAIT"
         if overlap == "REPLACE_WAIT":
             occurrence.decision_reason = reasons.OVERLAP_REPLACE_WAIT
@@ -412,8 +504,13 @@ class ScheduleRuntimeService:
                 occurrence.id,
                 exc.code,
             )
+            reason = (
+                reasons.AUTHORIZATION_REVOKED
+                if exc.code in _AUTHZ_CODES
+                else reasons.TARGET_PRECONDITION_FAILED
+            )
             occurrence.status = OccurrenceStatus.FAILED.value
-            occurrence.decision_reason = reasons.FIRE_PRECONDITION_FAILED
+            occurrence.decision_reason = reason
             occurrence.finished_at = now
             return "SKIPPED"
 
@@ -428,7 +525,6 @@ class ScheduleRuntimeService:
     ) -> str:
         """Return ALLOW | SKIP | QUEUE_WAIT | REPLACE_WAIT."""
         priors = await self._active_priors(schedule.id, before=occurrence.scheduled_for)
-        # Also treat same-schedule nonterminal executions as overlap peers.
         if not priors:
             return "ALLOW"
 
@@ -440,10 +536,21 @@ class ScheduleRuntimeService:
         if policy == ScheduleOverlapPolicy.QUEUE.value:
             return "QUEUE_WAIT"
 
-        # REPLACE — cancel priors; wait if any remain in-flight.
+        # REPLACE — supersede older unmaterialized REPLACE_WAIT first.
+        await self._supersede_older_replace_waits(
+            schedule.id, before=occurrence.scheduled_for, now=now
+        )
+        # Refresh priors after supersession.
+        priors = await self._active_priors(schedule.id, before=occurrence.scheduled_for)
+        if not priors:
+            occurrence.decision_reason = reasons.OVERLAP_REPLACE
+            return "ALLOW"
+
         still_inflight = False
         for prior_occ, prior_exec in priors:
             if prior_exec is None:
+                # Unmaterialized held peer still blocks.
+                still_inflight = True
                 continue
             if prior_exec.status in _TERMINAL_EXECUTION:
                 continue
@@ -455,15 +562,14 @@ class ScheduleRuntimeService:
             if outcome.status == ExecutionStatus.CANCEL_REQUESTED.value:
                 still_inflight = True
             elif outcome.status in _TERMINAL_EXECUTION:
-                # Reconcile prior occurrence immediately when cancel terminalized.
-                mapped = self._map_execution_to_occurrence_status(outcome.status)
+                mapped = self._project_occurrence_status(outcome.status)
                 if mapped is not None and prior_occ.status not in {
                     OccurrenceStatus.COMPLETED.value,
                     OccurrenceStatus.FAILED.value,
                     OccurrenceStatus.SKIPPED.value,
                 }:
-                    prior_occ.status = mapped[0]
-                    prior_occ.decision_reason = mapped[1]
+                    prior_occ.status = mapped
+                    # Preserve prior decision_reason; only set finished_at.
                     prior_occ.finished_at = now
             else:
                 still_inflight = True
@@ -473,6 +579,34 @@ class ScheduleRuntimeService:
         occurrence.decision_reason = reasons.OVERLAP_REPLACE
         return "ALLOW"
 
+    async def _supersede_older_replace_waits(
+        self,
+        schedule_id: uuid.UUID,
+        *,
+        before: datetime,
+        now: datetime,
+    ) -> None:
+        """Newer REPLACE candidate supersedes older unmaterialized REPLACE_WAIT."""
+        stmt = (
+            select(ScheduleOccurrence)
+            .where(
+                ScheduleOccurrence.schedule_id == schedule_id,
+                ScheduleOccurrence.scheduled_for < _as_utc(before),
+                ScheduleOccurrence.status == OccurrenceStatus.PLANNED.value,
+                ScheduleOccurrence.decision_reason == reasons.OVERLAP_REPLACE_WAIT,
+            )
+            .order_by(ScheduleOccurrence.scheduled_for.asc())
+            .with_for_update()
+        )
+        rows = list((await self._session.execute(stmt)).scalars().all())
+        for occ in rows:
+            execution = await self._execution_for_occurrence(occ.id)
+            if execution is not None:
+                continue
+            occ.status = OccurrenceStatus.SKIPPED.value
+            occ.decision_reason = reasons.REPLACE_SUPERSEDED
+            occ.finished_at = now
+
     async def _create_execution_for_occurrence(
         self,
         schedule: Schedule,
@@ -481,7 +615,18 @@ class ScheduleRuntimeService:
         now: datetime,
         trigger_type: str,
     ) -> Execution:
-        assert schedule.workflow_version_id is not None
+        if schedule.target_type != ScheduleTargetType.WORKFLOW_VERSION.value:
+            raise AppError(
+                code="EXECUTION_PRECONDITION_FAILED",
+                message="Schedule target_type must be WORKFLOW_VERSION.",
+                status_code=409,
+            )
+        if schedule.workflow_version_id is None:
+            raise AppError(
+                code="EXECUTION_PRECONDITION_FAILED",
+                message="Schedule.workflow_version_id is required.",
+                status_code=409,
+            )
         version = await self._versions.get(schedule.workflow_version_id)
         if version is None:
             raise AppError(
@@ -493,6 +638,7 @@ class ScheduleRuntimeService:
         if existing is not None:
             return existing
 
+        # Creation-time: Schedule target must equal the WorkflowVersion we pin.
         materialized = await self._workflow_exec.materialize_for_schedule_occurrence(
             workflow_id=version.workflow_id,
             version_id=version.id,
@@ -502,14 +648,22 @@ class ScheduleRuntimeService:
             trigger_type=trigger_type,
         )
         execution = materialized.execution
-        occurrence.status = OccurrenceStatus.ENQUEUED.value
-        occurrence.enqueued_at = now
-        if occurrence.decision_reason in _WAIT_REASONS:
-            # Cleared once fire proceeds; REPLACE keeps OVERLAP_REPLACE evidence.
-            if occurrence.decision_reason == reasons.OVERLAP_REPLACE_WAIT:
-                occurrence.decision_reason = reasons.OVERLAP_REPLACE
-            elif occurrence.decision_reason == reasons.OVERLAP_QUEUE_WAIT:
-                occurrence.decision_reason = None
+        if execution.workflow_version_id != schedule.workflow_version_id:
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message=(
+                    "Created Execution.workflow_version_id must equal "
+                    "Schedule.workflow_version_id at materialization."
+                ),
+                status_code=409,
+            )
+        # Occurrence remains PLANNED until queue staging. Do NOT set enqueued_at.
+        # Preserve overlap decision evidence (OVERLAP_REPLACE / MANUAL_TRIGGER / DUE).
+        if occurrence.decision_reason == reasons.OVERLAP_REPLACE_WAIT:
+            occurrence.decision_reason = reasons.OVERLAP_REPLACE
+        # last_run_at only when Execution successfully materialized.
+        schedule.last_run_at = occurrence.scheduled_for
+        schedule.lock_version = int(schedule.lock_version) + 1
         await self._session.flush()
         return execution
 
@@ -538,26 +692,23 @@ class ScheduleRuntimeService:
         rows = list((await self._session.execute(stmt)).scalars().all())
         out: list[tuple[ScheduleOccurrence, Execution | None]] = []
         for occ in rows:
-            if (
-                occ.status == OccurrenceStatus.PLANNED.value
-                and occ.decision_reason not in _WAIT_REASONS
-            ):
-                # Unrelated PLANNED (shouldn't happen ahead of fire) — ignore.
-                continue
             execution = await self._execution_for_occurrence(occ.id)
-            if execution is not None and execution.status in _TERMINAL_EXECUTION:
-                continue
+            # Linked nonterminal Execution is active regardless of occurrence lag
+            # (PLANNED+CREATED must block subsequent candidates in the same TX).
+            if execution is not None:
+                if execution.status in _TERMINAL_EXECUTION:
+                    continue
+                if execution.status in _NONTERMINAL_EXECUTION:
+                    out.append((occ, execution))
+                    continue
             if (
                 occ.status == OccurrenceStatus.PLANNED.value
                 and occ.decision_reason in _WAIT_REASONS
                 and execution is None
             ):
-                # Waiting peer without execution still blocks QUEUE/REPLACE order.
                 out.append((occ, None))
                 continue
-            if execution is not None and execution.status in _NONTERMINAL_EXECUTION:
-                out.append((occ, execution))
-            elif occ.status in _ACTIVE_OCCURRENCE:
+            if occ.status in _ACTIVE_OCCURRENCE:
                 out.append((occ, execution))
         return out
 
@@ -587,47 +738,84 @@ class ScheduleRuntimeService:
     async def _list_waiting_occurrence_schedule_ids(
         self, *, limit: int
     ) -> list[uuid.UUID]:
+        # PG-safe: GROUP BY schedule_id ORDER BY MIN(scheduled_for).
         stmt = (
             select(ScheduleOccurrence.schedule_id)
             .where(
                 ScheduleOccurrence.status == OccurrenceStatus.PLANNED.value,
                 ScheduleOccurrence.decision_reason.in_(tuple(_WAIT_REASONS)),
             )
-            .order_by(ScheduleOccurrence.scheduled_for.asc())
+            .group_by(ScheduleOccurrence.schedule_id)
+            .order_by(
+                func.min(ScheduleOccurrence.scheduled_for).asc(),
+                ScheduleOccurrence.schedule_id.asc(),
+            )
             .limit(limit)
-            .distinct()
         )
         return list((await self._session.execute(stmt)).scalars().all())
 
-    @staticmethod
-    def _skip_occurrence(
-        occurrence: ScheduleOccurrence, *, reason: str, now: datetime
+    async def _maybe_complete_schedule(
+        self, schedule: Schedule, *, now: datetime
     ) -> None:
-        occurrence.status = OccurrenceStatus.SKIPPED.value
+        """Set COMPLETED only when no future tick and no held unmaterialized waits."""
+        if schedule.status != ScheduleStatus.ACTIVE.value:
+            return
+        if schedule.next_run_at is not None:
+            return
+        held = await self._has_unmaterialized_held(schedule.id)
+        if held:
+            return
+        # ONCE / INTERVAL / CRON with exhausted end_at.
+        if schedule.schedule_type in {"ONCE", "INTERVAL", "CRON"}:
+            schedule.status = ScheduleStatus.COMPLETED.value
+            schedule.lock_version = int(schedule.lock_version) + 1
+
+    async def _has_unmaterialized_held(self, schedule_id: uuid.UUID) -> bool:
+        stmt = (
+            select(ScheduleOccurrence.id)
+            .where(
+                ScheduleOccurrence.schedule_id == schedule_id,
+                ScheduleOccurrence.status == OccurrenceStatus.PLANNED.value,
+                ScheduleOccurrence.decision_reason.in_(tuple(_WAIT_REASONS)),
+            )
+            .limit(1)
+        )
+        return (await self._session.execute(stmt)).scalar_one_or_none() is not None
+
+    @staticmethod
+    def _fail_or_skip_occurrence(
+        occurrence: ScheduleOccurrence,
+        *,
+        status: str,
+        reason: str,
+        now: datetime,
+    ) -> None:
+        occurrence.status = status
         occurrence.decision_reason = reason
         occurrence.finished_at = now
 
     @staticmethod
-    def _map_execution_to_occurrence(
-        execution: Execution,
-    ) -> tuple[str, str] | None:
-        return ScheduleRuntimeService._map_execution_to_occurrence_status(
-            execution.status
-        )
-
-    @staticmethod
-    def _map_execution_to_occurrence_status(
-        status: str,
-    ) -> tuple[str, str] | None:
-        if status in {
+    def _project_occurrence_status(execution_status: str) -> str | None:
+        if execution_status == ExecutionStatus.CREATED.value:
+            return OccurrenceStatus.PLANNED.value
+        if execution_status == ExecutionStatus.QUEUED.value:
+            return OccurrenceStatus.ENQUEUED.value
+        if execution_status in {
+            ExecutionStatus.RUNNING.value,
+            ExecutionStatus.WAITING_INPUT.value,
+            ExecutionStatus.WAITING_APPROVAL.value,
+            ExecutionStatus.CANCEL_REQUESTED.value,
+        }:
+            return OccurrenceStatus.RUNNING.value
+        if execution_status in {
             ExecutionStatus.SUCCEEDED.value,
             ExecutionStatus.PARTIALLY_SUCCEEDED.value,
         }:
-            return OccurrenceStatus.COMPLETED.value, reasons.EXECUTION_SUCCEEDED
-        if status == ExecutionStatus.CANCELLED.value:
-            return OccurrenceStatus.FAILED.value, reasons.EXECUTION_CANCELLED
-        if status == ExecutionStatus.TIMED_OUT.value:
-            return OccurrenceStatus.FAILED.value, reasons.EXECUTION_TIMED_OUT
-        if status == ExecutionStatus.FAILED.value:
-            return OccurrenceStatus.FAILED.value, reasons.EXECUTION_FAILED
+            return OccurrenceStatus.COMPLETED.value
+        if execution_status in {
+            ExecutionStatus.FAILED.value,
+            ExecutionStatus.TIMED_OUT.value,
+            ExecutionStatus.CANCELLED.value,
+        }:
+            return OccurrenceStatus.FAILED.value
         return None

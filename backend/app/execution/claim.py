@@ -248,6 +248,9 @@ class ExecutionClaimService:
         dag = validate_tool_join_dag(plan, steps)
         by_key = {s.step_key: s for s in steps}
 
+        if execution.source_type == ExecutionSourceType.SCHEDULE_OCCURRENCE.value:
+            await self._assert_schedule_occurrence_claimable(execution)
+
         token = uuid.uuid4()
         expires_at = ts + timedelta(seconds=self._lease_seconds)
         execution.status = ExecutionStatus.RUNNING.value
@@ -270,6 +273,10 @@ class ExecutionClaimService:
             root.lock_version += 1
             ready_ids.append(root.id)
             slots -= 1
+
+        if execution.source_type == ExecutionSourceType.SCHEDULE_OCCURRENCE.value:
+            await self._mark_occurrence_running(execution)
+
         await self._session.flush()
 
         return ExecutionClaimOutcome(
@@ -281,6 +288,83 @@ class ExecutionClaimService:
             lease_expires_at=expires_at,
             ready_step_ids=tuple(ready_ids),
         )
+
+    async def _assert_schedule_occurrence_claimable(
+        self, execution: Execution
+    ) -> None:
+        """Verify SCHEDULE_OCCURRENCE claim preconditions before lease assignment."""
+        from app.domain.enums import OccurrenceStatus
+        from app.models.schedule import Schedule, ScheduleOccurrence
+
+        if execution.schedule_occurrence_id is None:
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message="SCHEDULE_OCCURRENCE Execution requires schedule_occurrence_id.",
+                status_code=409,
+            )
+        if (
+            execution.workflow_version_id is None
+            or execution.agent_request_id is not None
+            or execution.agent_version_id is not None
+            or execution.plan_validation_run_id is not None
+        ):
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message="SCHEDULE_OCCURRENCE claim lineage is inconsistent.",
+                status_code=409,
+            )
+        occ_stmt = (
+            select(ScheduleOccurrence)
+            .where(ScheduleOccurrence.id == execution.schedule_occurrence_id)
+            .with_for_update()
+        )
+        occurrence = (await self._session.execute(occ_stmt)).scalar_one_or_none()
+        if occurrence is None:
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message="ScheduleOccurrence not found for claim.",
+                status_code=409,
+            )
+        if occurrence.status != OccurrenceStatus.ENQUEUED.value:
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message=(
+                    "SCHEDULE_OCCURRENCE claim requires occurrence status ENQUEUED."
+                ),
+                status_code=409,
+            )
+        sched_stmt = (
+            select(Schedule)
+            .where(Schedule.id == occurrence.schedule_id)
+            .with_for_update()
+        )
+        schedule = (await self._session.execute(sched_stmt)).scalar_one_or_none()
+        if schedule is None or schedule.owner_id != execution.requester_id:
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message="Schedule ownership lineage invalid for claim.",
+                status_code=409,
+            )
+        # Do not require Schedule.status ACTIVE — pin is on the Execution.
+
+    async def _mark_occurrence_running(self, execution: Execution) -> None:
+        from app.domain.enums import OccurrenceStatus
+        from app.models.schedule import ScheduleOccurrence
+
+        assert execution.schedule_occurrence_id is not None
+        occ_stmt = (
+            select(ScheduleOccurrence)
+            .where(ScheduleOccurrence.id == execution.schedule_occurrence_id)
+            .with_for_update()
+        )
+        occurrence = (await self._session.execute(occ_stmt)).scalar_one_or_none()
+        if occurrence is None or occurrence.status != OccurrenceStatus.ENQUEUED.value:
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message="ScheduleOccurrence not ENQUEUED at claim transition.",
+                status_code=409,
+            )
+        occurrence.status = OccurrenceStatus.RUNNING.value
 
     async def renew_lease(
         self,

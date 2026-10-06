@@ -21,7 +21,10 @@ from app.schemas.schedule import (
     schedule_to_response,
 )
 from app.services.schedule import ScheduleService
-from app.services.schedule_trigger import ScheduleTriggerService
+from app.services.schedule_trigger import (
+    ScheduleTriggerService,
+    bulk_execution_ids_for_occurrences,
+)
 
 router = APIRouter(prefix="/schedules", tags=["schedules"])
 
@@ -229,8 +232,14 @@ async def list_schedule_occurrences(
         page=page,
         page_size=page_size,
     )
+    exec_map = await bulk_execution_ids_for_occurrences(
+        session, [item.id for item in items]
+    )
     return ScheduleOccurrenceListResponse(
-        items=[occurrence_to_response(item) for item in items],
+        items=[
+            occurrence_to_response(item, execution_id=exec_map.get(item.id))
+            for item in items
+        ],
         page=page,
         page_size=page_size,
         total=total,

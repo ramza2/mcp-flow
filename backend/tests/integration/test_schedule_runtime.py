@@ -13,7 +13,10 @@ from app.domain.enums import (
     ScheduleOverlapPolicy,
 )
 from app.execution.claim import ExecutionClaimService
+from app.execution.lineage import assert_tool_step_lineage
+from app.execution.policy_selection import get_expected_tool_policy_snapshot
 from app.execution.queue import ExecutionQueueService
+from app.execution.runtime_preflight import assert_source_tool_executable
 from app.models.execution import Execution
 from app.repositories.execution import ExecutionRepository
 from app.repositories.schedule import ScheduleRepository
@@ -49,7 +52,7 @@ async def test_pg_due_fire_lineage_and_claim(
             workflow_version_id=version_id,
             misfire=ScheduleMisfirePolicy.RUN_ONCE,
             overlap=ScheduleOverlapPolicy.ALLOW,
-            next_run_at=now - timedelta(minutes=2),
+            next_run_at=now - timedelta(minutes=5),
         )
 
     async with integration_session_factory() as session:
@@ -71,22 +74,47 @@ async def test_pg_due_fire_lineage_and_claim(
         assert execution.agent_request_id is None
         assert execution.agent_version_id is None
         assert execution.requester_id == owner_id
+        assert execution.status == ExecutionStatus.CREATED.value
+
+        occ = await ScheduleOccurrenceRepository(session).get(
+            execution.schedule_occurrence_id
+        )
+        assert occ is not None
+        assert occ.status == OccurrenceStatus.PLANNED.value
+        assert occ.enqueued_at is None
 
         staged = await ExecutionQueueService(session).stage_created_batch(limit=10)
         await session.commit()
         assert staged == 1
+        await session.refresh(execution)
+        await session.refresh(occ)
+        assert execution.status == ExecutionStatus.QUEUED.value
+        assert occ.status == OccurrenceStatus.ENQUEUED.value
 
         claim = await ExecutionClaimService(session, lease_seconds=60).claim(
             execution_id=execution.id, worker_id="sch-pg"
         )
         await session.commit()
         assert claim.claimed is True
+        await session.refresh(occ)
+        assert occ.status == OccurrenceStatus.RUNNING.value
 
-        occ = await ScheduleOccurrenceRepository(session).get(
-            execution.schedule_occurrence_id
+        # Real ToolRunner gates must accept SCHEDULE_OCCURRENCE.
+        steps = await ExecutionRepository(session).list_steps(execution.id)
+        tool_steps = [s for s in steps if s.step_type == "TOOL"]
+        assert tool_steps
+        lineage = assert_tool_step_lineage(execution, tool_steps[0], steps=steps)
+        expected_policy = get_expected_tool_policy_snapshot(
+            execution,
+            plan_step_id=lineage.plan_step.id,
+            tool_version_id=lineage.tool_version_id,
         )
-        assert occ is not None
-        assert occ.status == OccurrenceStatus.ENQUEUED.value
+        await assert_source_tool_executable(
+            session,
+            execution=execution,
+            tool_version_id=lineage.tool_version_id,
+            expected_policy_snapshot=expected_policy,
+        )
 
 
 @pytest.mark.integration
@@ -122,9 +150,6 @@ async def test_pg_replace_wait_then_fire_after_prior_terminal(
             )
         ).scalar_one()
 
-        # Leave prior non-terminal without STARTED ToolCall → REPLACE cancels
-        # immediately to CANCELLED on next due. Force CANCEL_REQUESTED instead
-        # to exercise OVERLAP_REPLACE_WAIT.
         prior.status = ExecutionStatus.CANCEL_REQUESTED.value
         prior.cancel_requested_at = now
         prior.cancel_reason = "forced-inflight"
@@ -158,7 +183,71 @@ async def test_pg_replace_wait_then_fire_after_prior_terminal(
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_pg_migration_fk_rejects_unknown_occurrence(
+async def test_pg_replace_supersession(
+    integration_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with integration_session_factory() as session:
+        owner_id = await _seed_schedule_manager(session, with_workflow_execute=True)
+        _, version_id = await _seed_workflow_target(session, owner_id)
+        await _ensure_tool_execute(session, owner_id)
+        now = datetime.now(UTC).replace(microsecond=0)
+        schedule_id = await _activate_interval_schedule(
+            session,
+            owner_id=owner_id,
+            workflow_version_id=version_id,
+            misfire=ScheduleMisfirePolicy.RUN_ONCE,
+            overlap=ScheduleOverlapPolicy.REPLACE,
+            next_run_at=now - timedelta(hours=1),
+        )
+
+        runtime = ScheduleRuntimeService(session)
+        await runtime.process_due_schedule(schedule_id, now=now)
+        await session.commit()
+
+        prior = (
+            await session.execute(
+                select(Execution).where(
+                    Execution.source_type
+                    == ExecutionSourceType.SCHEDULE_OCCURRENCE.value
+                )
+            )
+        ).scalar_one()
+        prior.status = ExecutionStatus.CANCEL_REQUESTED.value
+        prior.cancel_requested_at = now
+        await session.commit()
+
+        schedule = await ScheduleRepository(session).lock_for_update(schedule_id)
+        assert schedule is not None
+        schedule.next_run_at = now - timedelta(minutes=20)
+        schedule.lock_version = int(schedule.lock_version) + 1
+        await session.commit()
+        await runtime.process_due_schedule(schedule_id, now=now)
+        await session.commit()
+
+        schedule = await ScheduleRepository(session).lock_for_update(schedule_id)
+        assert schedule is not None
+        schedule.next_run_at = now - timedelta(minutes=5)
+        schedule.lock_version = int(schedule.lock_version) + 1
+        await session.commit()
+        await runtime.process_due_schedule(schedule_id, now=now)
+        await session.commit()
+
+        occs, _ = await ScheduleOccurrenceRepository(session).list_for_schedule(
+            schedule_id
+        )
+        assert any(o.decision_reason == reasons.REPLACE_SUPERSEDED for o in occs)
+        waiting = [
+            o
+            for o in occs
+            if o.status == OccurrenceStatus.PLANNED.value
+            and o.decision_reason == reasons.OVERLAP_REPLACE_WAIT
+        ]
+        assert len(waiting) == 1
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_pg_migration_fk_and_check(
     integration_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     async with integration_session_factory() as session:
@@ -175,6 +264,24 @@ async def test_pg_migration_fk_rejects_unknown_occurrence(
                     "(SELECT id FROM users LIMIT 1), 'CREATED', '1.0', '{}'::jsonb, "
                     "repeat('a', 64), '{}'::jsonb, '{}'::jsonb, "
                     "gen_random_uuid(), now(), 1)"
+                )
+            )
+            await session.commit()
+        await session.rollback()
+
+        with pytest.raises(Exception):
+            await session.execute(
+                text(
+                    "INSERT INTO executions ("
+                    "id, source_type, trigger_type, requester_id, status, "
+                    "plan_schema_version, plan_snapshot, plan_hash, input_snapshot, "
+                    "policy_snapshot, schedule_occurrence_id, requested_at, "
+                    "lock_version"
+                    ") VALUES ("
+                    "gen_random_uuid(), 'WORKFLOW_VERSION', 'USER', "
+                    "(SELECT id FROM users LIMIT 1), 'CREATED', '1.0', '{}'::jsonb, "
+                    "repeat('b', 64), '{}'::jsonb, '{}'::jsonb, "
+                    "(SELECT id FROM schedule_occurrences LIMIT 1), now(), 1)"
                 )
             )
             await session.commit()

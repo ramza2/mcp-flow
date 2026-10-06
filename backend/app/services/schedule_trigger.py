@@ -10,6 +10,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from pydantic import ValidationError
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -20,17 +21,20 @@ from app.domain.enums import (
     ScheduleTargetType,
     UserStatus,
 )
+from app.models.execution import Execution
 from app.repositories.idempotency import IdempotencyRepository
 from app.repositories.schedule import ScheduleRepository
 from app.repositories.schedule_occurrence import ScheduleOccurrenceRepository
 from app.repositories.user import UserRepository
+from app.repositories.workflow_version import WorkflowVersionRepository
 from app.scheduler import decision_reasons as reasons
 from app.scheduler.runtime import ScheduleRuntimeService
 from app.schemas.schedule import ScheduleOccurrenceResponse, occurrence_to_response
 from app.services.authorization import AuthorizationResolver
+from app.services.workflow_execution_creation import WorkflowExecutionCreationService
 
 _SCHEDULE_MANAGE = "schedule.manage"
-_OPERATION_SCOPE = "SCHEDULE_MANUAL_TRIGGER_V1"
+_OPERATION_SCOPE = "SCHEDULE_TRIGGER_V1"
 _RESOURCE_OCCURRENCE = "SCHEDULE_OCCURRENCE"
 _IDEMPOTENCY_KEY_MAX_LEN = 128
 _IDEMPOTENCY_PK_NAME = "pk_api_idempotency_records"
@@ -44,10 +48,11 @@ class ScheduleTriggerOutcome:
     replayed: bool
 
 
-def _request_hash(*, schedule_id: uuid.UUID, scheduled_for: datetime) -> str:
+def _request_hash(*, schedule_id: uuid.UUID) -> str:
+    """Stable hash — must NOT include current time / scheduled_for."""
     payload = {
         "schedule_id": str(schedule_id),
-        "scheduled_for": scheduled_for.astimezone(UTC).isoformat(),
+        "source_type": "SCHEDULE_OCCURRENCE",
         "trigger_type": "USER",
     }
     raw = json.dumps(
@@ -87,6 +92,8 @@ class ScheduleTriggerService:
         self._authz = AuthorizationResolver(session)
         self._idempotency = IdempotencyRepository(session)
         self._runtime = ScheduleRuntimeService(session)
+        self._versions = WorkflowVersionRepository(session)
+        self._workflow_exec = WorkflowExecutionCreationService(session)
 
     async def trigger(
         self,
@@ -94,7 +101,6 @@ class ScheduleTriggerService:
         *,
         actor_user_id: uuid.UUID,
         idempotency_key: str,
-        scheduled_for: datetime | None = None,
     ) -> ScheduleTriggerOutcome:
         key = idempotency_key.strip()
         if not key:
@@ -139,12 +145,10 @@ class ScheduleTriggerService:
                 status_code=409,
             )
 
-        now = datetime.now(UTC)
-        # Truncate to seconds so Idempotency-Key + occurrence unique key stay stable.
-        fire_at = (scheduled_for or now).astimezone(UTC).replace(microsecond=0)
-        req_hash = _request_hash(schedule_id=schedule.id, scheduled_for=fire_at)
+        req_hash = _request_hash(schedule_id=schedule.id)
         principal_key = str(actor_user_id)
 
+        # Idempotency lookup BEFORE generating the new occurrence timestamp.
         existing = await self._idempotency.get(
             principal_key=principal_key,
             operation_scope=_OPERATION_SCOPE,
@@ -153,9 +157,15 @@ class ScheduleTriggerService:
         if existing is not None:
             return await self._replay(existing, req_hash)
 
+        # Preflight before creating any occurrence / Execution / idempotency row.
+        await self._preflight_workflow_creation(schedule)
+
+        now = datetime.now(UTC)
+        # Do not truncate to whole seconds — idempotency record owns replay identity.
+        fire_at = now
+
         occurrence = await self._occurrences.create_planned(schedule.id, fire_at)
         if occurrence.status != OccurrenceStatus.PLANNED.value:
-            # Prior automatic occurrence at the same second — fail closed for manual.
             raise AppError(
                 code="RESOURCE_CONFLICT",
                 message="Occurrence already exists for scheduled_for.",
@@ -169,51 +179,105 @@ class ScheduleTriggerService:
             now=now,
             trigger_type="USER",
         )
+
+        # Overlap SKIP/QUEUE/REPLACE_WAIT still return 201 with the occurrence.
+        # Preflight failures during fire should not happen after the upfront
+        # preflight, but if they do (race), automatic-style FAILED is wrong for
+        # manual — map to 403/409 and roll back occurrence by raising before
+        # idempotency persist. Runtime marks FAILED for automatic; for manual
+        # we convert and abort the TX via exception after rolling back the
+        # occurrence creation by raising before commit.
         if fire == "SKIPPED":
-            if occurrence.decision_reason == reasons.FIRE_PRECONDITION_FAILED:
+            if occurrence.status == OccurrenceStatus.FAILED.value:
+                # Unexpected post-preflight failure — surface as 409 and abort.
+                code = (
+                    "FORBIDDEN"
+                    if occurrence.decision_reason == reasons.AUTHORIZATION_REVOKED
+                    else "EXECUTION_PRECONDITION_FAILED"
+                )
+                status = (
+                    403
+                    if occurrence.decision_reason == reasons.AUTHORIZATION_REVOKED
+                    else 409
+                )
                 raise AppError(
-                    code="EXECUTION_PRECONDITION_FAILED",
+                    code=code,
                     message=(
                         "Manual trigger fire-time Workflow/Tool authorization failed."
                     ),
-                    status_code=409,
+                    status_code=status,
                 )
-            raise AppError(
-                code="RESOURCE_CONFLICT",
-                message=(
-                    "Manual trigger skipped by overlap/misfire policy "
-                    f"({occurrence.decision_reason})."
-                ),
-                status_code=409,
-            )
-        if fire in {"WAIT", "REPLACE_WAIT"}:
-            # Manual trigger still returns the waiting occurrence (no Execution yet).
-            body = occurrence_to_response(occurrence)
-            await self._idempotency.create_completed(
+            # OVERLAP_SKIP → 201 with SKIPPED occurrence, execution_id null.
+            return await self._persist_outcome(
                 principal_key=principal_key,
-                operation_scope=_OPERATION_SCOPE,
-                idempotency_key=key,
-                request_hash=req_hash,
-                response_status=202,
-                response_body={
-                    "occurrence": body.model_dump(mode="json"),
-                    "execution_id": None,
-                },
-                resource_type=_RESOURCE_OCCURRENCE,
-                resource_id=occurrence.id,
-                completed_at=now,
-            )
-            await self._session.commit()
-            return ScheduleTriggerOutcome(
-                occurrence=body,
+                key=key,
+                req_hash=req_hash,
+                occurrence=occurrence,
                 execution_id=None,
-                http_status=202,
-                replayed=False,
+                now=now,
+            )
+
+        if fire in {"WAIT", "REPLACE_WAIT"}:
+            return await self._persist_outcome(
+                principal_key=principal_key,
+                key=key,
+                req_hash=req_hash,
+                occurrence=occurrence,
+                execution_id=None,
+                now=now,
             )
 
         execution = await self._runtime.execution_for_occurrence(occurrence.id)
         execution_id = execution.id if execution is not None else None
-        body = occurrence_to_response(occurrence)
+        return await self._persist_outcome(
+            principal_key=principal_key,
+            key=key,
+            req_hash=req_hash,
+            occurrence=occurrence,
+            execution_id=execution_id,
+            now=now,
+        )
+
+    async def _preflight_workflow_creation(self, schedule: Any) -> None:
+        if schedule.target_type != ScheduleTargetType.WORKFLOW_VERSION.value:
+            raise AppError(
+                code="EXECUTION_PRECONDITION_FAILED",
+                message="Schedule target_type must be WORKFLOW_VERSION.",
+                status_code=409,
+            )
+        if schedule.workflow_version_id is None:
+            raise AppError(
+                code="EXECUTION_PRECONDITION_FAILED",
+                message="Schedule.workflow_version_id is required.",
+                status_code=409,
+            )
+        version = await self._versions.get(schedule.workflow_version_id)
+        if version is None:
+            raise AppError(
+                code="EXECUTION_PRECONDITION_FAILED",
+                message="Pinned WorkflowVersion not found.",
+                status_code=409,
+            )
+        # Reuse the same strict creation preflight as materialization.
+        # Failures raise AppError 403/409 — no occurrence / Execution / idempotency.
+        await self._workflow_exec.prepare_schedule_creation_preflight(
+            workflow_id=version.workflow_id,
+            version_id=version.id,
+            requester_id=schedule.owner_id,
+            request_inputs=dict(schedule.input_template or {}),
+        )
+
+    async def _persist_outcome(
+        self,
+        *,
+        principal_key: str,
+        key: str,
+        req_hash: str,
+        occurrence: Any,
+        execution_id: uuid.UUID | None,
+        now: datetime,
+    ) -> ScheduleTriggerOutcome:
+        body = occurrence_to_response(occurrence, execution_id=execution_id)
         try:
             await self._idempotency.create_completed(
                 principal_key=principal_key,
@@ -297,3 +361,21 @@ class ScheduleTriggerService:
             http_status=int(record.response_status),
             replayed=True,
         )
+
+
+async def bulk_execution_ids_for_occurrences(
+    session: AsyncSession,
+    occurrence_ids: list[uuid.UUID],
+) -> dict[uuid.UUID, uuid.UUID]:
+    """One query: occurrence_id → execution_id for list projections."""
+    if not occurrence_ids:
+        return {}
+    stmt = select(Execution.schedule_occurrence_id, Execution.id).where(
+        Execution.schedule_occurrence_id.in_(occurrence_ids)
+    )
+    rows = (await session.execute(stmt)).all()
+    out: dict[uuid.UUID, uuid.UUID] = {}
+    for occ_id, exec_id in rows:
+        if occ_id is not None:
+            out[occ_id] = exec_id
+    return out

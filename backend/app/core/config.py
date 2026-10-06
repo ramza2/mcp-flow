@@ -35,6 +35,8 @@ class Settings(BaseSettings):
     outbox_batch_size: int = Field(default=50, ge=1, le=500)
     scheduler_poll_interval_seconds: float = Field(default=1.0, gt=0)
     scheduler_batch_size: int = Field(default=50, ge=1, le=500)
+    scheduler_misfire_grace_seconds: int = Field(default=60, ge=0)
+    scheduler_due_scan_limit: int = Field(default=10_000, ge=100, le=100_000)
     celery_broker_connection_timeout: float = Field(default=5.0, gt=0)
     celery_publish_connect_timeout: float = Field(default=5.0, gt=0)
     celery_publish_socket_timeout: float = Field(default=5.0, gt=0)

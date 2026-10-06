@@ -95,8 +95,10 @@ async def test_trigger_creates_schedule_occurrence_execution(
     assert resp.status_code == 201, resp.text
     body = resp.json()
     assert body["execution_id"] is not None
-    assert body["occurrence"]["status"] == "ENQUEUED"
+    assert body["occurrence"]["status"] == "PLANNED"
     assert body["occurrence"]["decision_reason"] == "MANUAL_TRIGGER"
+    assert body["occurrence"]["execution_id"] == body["execution_id"]
+    assert body["occurrence"]["enqueued_at"] is None
 
     replay = await trigger_client.post(
         f"{API}/{schedule_id}/trigger",
@@ -105,6 +107,49 @@ async def test_trigger_creates_schedule_occurrence_execution(
     assert replay.status_code == 201
     assert replay.json()["execution_id"] == body["execution_id"]
     assert replay.json()["occurrence"]["id"] == body["occurrence"]["id"]
+
+
+@pytest.mark.asyncio
+async def test_trigger_idempotency_survives_clock_skew(
+    trigger_client: AsyncClient,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Same Idempotency-Key after clock advances must replay, not IDEMPOTENCY_KEY_REUSED."""
+    schedule_id = trigger_client.schedule_id  # type: ignore[attr-defined]
+    key = f"trig-clock-{uuid.uuid4()}"
+    resp1 = await trigger_client.post(
+        f"{API}/{schedule_id}/trigger",
+        headers={"Idempotency-Key": key},
+    )
+    assert resp1.status_code == 201, resp1.text
+    body1 = resp1.json()
+
+    # Advance any wall-clock notion by sleeping past a second boundary.
+    import asyncio
+
+    await asyncio.sleep(1.1)
+
+    resp2 = await trigger_client.post(
+        f"{API}/{schedule_id}/trigger",
+        headers={"Idempotency-Key": key},
+    )
+    assert resp2.status_code == 201, resp2.text
+    body2 = resp2.json()
+    assert body2["occurrence"]["id"] == body1["occurrence"]["id"]
+    assert body2["execution_id"] == body1["execution_id"]
+
+    async with db_session_factory() as session:
+        from app.models.execution import Execution
+        from sqlalchemy import func, select
+
+        count = (
+            await session.execute(
+                select(func.count())
+                .select_from(Execution)
+                .where(Execution.source_type == "SCHEDULE_OCCURRENCE")
+            )
+        ).scalar_one()
+        assert count == 1
 
 
 @pytest.mark.asyncio

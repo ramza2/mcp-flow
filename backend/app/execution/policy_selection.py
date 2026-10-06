@@ -1,8 +1,9 @@
 """Source-aware pinned ToolPolicy snapshot selection.
 
 AGENT_REQUEST keeps the existing single-TOOL ``Execution.policy_snapshot``.
-WORKFLOW_VERSION uses ``workflow_execution_policy.v1`` keyed by Plan TOOL
-template id (including LOOP body templates via ``lineage.plan_step.id``).
+WORKFLOW_VERSION and SCHEDULE_OCCURRENCE use ``workflow_execution_policy.v1``
+keyed by Plan TOOL template id (including LOOP body templates via
+``lineage.plan_step.id``). Do not introduce a separate Schedule policy schema.
 """
 
 from __future__ import annotations
@@ -33,8 +34,9 @@ def get_expected_tool_policy_snapshot(
 ) -> dict[str, Any]:
     """Return the pinned per-TOOL policy object for Attempt/B2/retry.
 
-    For WORKFLOW_VERSION, ``plan_step_id`` must be the immutable Plan TOOL
-    template id (``lineage.plan_step.id``), never a synthetic runtime step_key.
+    For WORKFLOW_VERSION / SCHEDULE_OCCURRENCE, ``plan_step_id`` must be the
+    immutable Plan TOOL template id (``lineage.plan_step.id``), never a
+    synthetic runtime step_key.
     """
     snapshot = execution.policy_snapshot
     if not isinstance(snapshot, dict):
@@ -47,7 +49,10 @@ def get_expected_tool_policy_snapshot(
     if execution.source_type == ExecutionSourceType.AGENT_REQUEST.value:
         return dict(snapshot)
 
-    if execution.source_type == ExecutionSourceType.WORKFLOW_VERSION.value:
+    if execution.source_type in {
+        ExecutionSourceType.WORKFLOW_VERSION.value,
+        ExecutionSourceType.SCHEDULE_OCCURRENCE.value,
+    }:
         return _workflow_step_policy(
             execution,
             snapshot=snapshot,
@@ -125,7 +130,10 @@ def _assert_workflow_policy_lineage(
     if execution.workflow_version_id is None:
         raise AppError(
             code="RESOURCE_CONFLICT",
-            message="WORKFLOW_VERSION Execution missing workflow_version_id.",
+            message=(
+                "Workflow-compatible Execution missing workflow_version_id "
+                f"(source_type={execution.source_type!r})."
+            ),
             status_code=409,
         )
 
