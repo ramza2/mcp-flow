@@ -730,7 +730,8 @@ class ExecutionOrchestrator:
                     plan = assert_execution_plan_lineage(execution)
                     dag = validate_tool_join_dag(plan, steps)
                 except AppError as exc:
-                    return self._fail_closed_lineage_locked(
+                    return await self._fail_closed_lineage_locked(
+                        session,
                         execution=execution,
                         by_key=by_key,
                         now=now,
@@ -781,7 +782,8 @@ class ExecutionOrchestrator:
                 try:
                     dag = validate_tool_join_dag(plan, steps)
                 except AppError as exc:
-                    return self._fail_closed_lineage_locked(
+                    return await self._fail_closed_lineage_locked(
+                        session,
                         execution=execution,
                         by_key=by_key,
                         now=now,
@@ -790,6 +792,7 @@ class ExecutionOrchestrator:
                     )
 
                 ready_ids, newly_promoted = await self._reserve_tool_wave_locked(
+                    session,
                     executions=executions,
                     execution=execution,
                     dag=dag,
@@ -809,6 +812,7 @@ class ExecutionOrchestrator:
 
     async def _reserve_tool_wave_locked(
         self,
+        session: AsyncSession,
         *,
         executions: ExecutionRepository,
         execution: Execution,
@@ -841,9 +845,14 @@ class ExecutionOrchestrator:
             locked = await executions.lock_step(step.id)
             if locked is None or locked.status != StepStatus.PENDING.value:
                 continue
+            previous_step_status = locked.status
             locked.status = StepStatus.READY.value
             locked.ready_at = now
             locked.lock_version += 1
+            from app.execution.events import ExecutionEventWriter
+            await ExecutionEventWriter(session).emit_step_status_changed(
+                locked, previous_status=previous_step_status, occurred_at=now
+            )
             promoted.append(locked)
             available -= 1
             logger.info(
@@ -915,6 +924,7 @@ class ExecutionOrchestrator:
                 locked = await executions.lock_step(step.id)
                 if locked is None or locked.status != StepStatus.PENDING.value:
                     continue
+                previous_step_status = locked.status
                 locked.status = StepStatus.SKIPPED.value
                 locked.error_code = "UPSTREAM_CONDITION_SKIPPED"
                 locked.error_message = (
@@ -924,6 +934,10 @@ class ExecutionOrchestrator:
                 locked.condition_result = False
                 locked.finished_at = now
                 locked.lock_version += 1
+                from app.execution.events import ExecutionEventWriter
+                await ExecutionEventWriter(session).emit_step_status_changed(
+                    locked, previous_status=previous_step_status, occurred_at=now
+                )
                 by_key[locked.step_key] = locked
                 changed = True
                 logger.info(
@@ -934,6 +948,7 @@ class ExecutionOrchestrator:
 
             # 1b) Flat FOR_EACH LOOP start / advance / complete.
             loop_stop = await self._reconcile_loop_steps_locked(
+                session,
                 executions=executions,
                 execution=execution,
                 plan=plan,
@@ -952,7 +967,8 @@ class ExecutionOrchestrator:
                     try:
                         dag = validate_tool_join_dag(plan, steps_ref)
                     except AppError as exc:
-                        return self._fail_closed_lineage_locked(
+                        return await self._fail_closed_lineage_locked(
+                            session,
                             execution=execution,
                             by_key=by_key,
                             now=now,
@@ -976,7 +992,8 @@ class ExecutionOrchestrator:
                 try:
                     plan_step = runtime_plan_step(locked, plan_by_id)
                 except AppError as exc:
-                    return self._fail_closed_lineage_locked(
+                    return await self._fail_closed_lineage_locked(
+                        session,
                         execution=execution,
                         by_key=by_key,
                         now=now,
@@ -985,7 +1002,8 @@ class ExecutionOrchestrator:
                     )
                 # Re-validate exact immutable snapshot before Predicate eval.
                 if plan_step.model_dump(mode="json") != locked.step_snapshot:
-                    return self._fail_closed_lineage_locked(
+                    return await self._fail_closed_lineage_locked(
+                        session,
                         execution=execution,
                         by_key=by_key,
                         now=now,
@@ -1005,7 +1023,8 @@ class ExecutionOrchestrator:
                         plan=plan,
                     )
                 except AppError as exc:
-                    return self._fail_closed_predicate(
+                    return await self._fail_closed_predicate(
+                        session,
                         execution=execution,
                         by_key=by_key,
                         step=locked,
@@ -1015,7 +1034,7 @@ class ExecutionOrchestrator:
                         error_message=exc.message,
                     )
                 if when_false:
-                    self._apply_when_false(locked, now=now)
+                    await self._apply_when_false(session, locked, now=now)
                     by_key[locked.step_key] = locked
                     changed = True
                     continue
@@ -1030,7 +1049,8 @@ class ExecutionOrchestrator:
                         plan=plan,
                     )
                 except AppError as exc:
-                    return self._fail_closed_predicate(
+                    return await self._fail_closed_predicate(
+                        session,
                         execution=execution,
                         by_key=by_key,
                         step=locked,
@@ -1040,7 +1060,8 @@ class ExecutionOrchestrator:
                         error_message=exc.message,
                     )
                 except Exception as exc:
-                    return self._fail_closed_predicate(
+                    return await self._fail_closed_predicate(
+                        session,
                         execution=execution,
                         by_key=by_key,
                         step=locked,
@@ -1050,11 +1071,22 @@ class ExecutionOrchestrator:
                         error_message=str(exc),
                     )
 
+                from app.execution.events import ExecutionEventWriter
+                _ew = ExecutionEventWriter(session)
+                prev = locked.status
                 locked.status = StepStatus.READY.value
                 locked.ready_at = now
+                await _ew.emit_step_status_changed(
+                    locked, previous_status=prev, occurred_at=now
+                )
+                prev = locked.status
                 locked.status = StepStatus.RUNNING.value
                 if locked.started_at is None:
                     locked.started_at = now
+                await _ew.emit_step_status_changed(
+                    locked, previous_status=prev, occurred_at=now
+                )
+                prev = locked.status
                 locked.status = StepStatus.SUCCEEDED.value
                 locked.condition_result = bool(result)
                 locked.result_inline = {"condition_result": bool(result)}
@@ -1062,6 +1094,9 @@ class ExecutionOrchestrator:
                 locked.error_message = None
                 locked.finished_at = now
                 locked.lock_version += 1
+                await _ew.emit_step_status_changed(
+                    locked, previous_status=prev, occurred_at=now
+                )
                 by_key[locked.step_key] = locked
                 changed = True
                 logger.info(
@@ -1103,7 +1138,8 @@ class ExecutionOrchestrator:
                 try:
                     plan_step = runtime_plan_step(step, plan_by_id)
                 except AppError as exc:
-                    return self._fail_closed_lineage_locked(
+                    return await self._fail_closed_lineage_locked(
+                        session,
                         execution=execution,
                         by_key=by_key,
                         now=now,
@@ -1116,7 +1152,8 @@ class ExecutionOrchestrator:
                 if locked is None or locked.status != StepStatus.PENDING.value:
                     continue
                 if plan_step.model_dump(mode="json") != locked.step_snapshot:
-                    return self._fail_closed_lineage_locked(
+                    return await self._fail_closed_lineage_locked(
+                        session,
                         execution=execution,
                         by_key=by_key,
                         now=now,
@@ -1136,7 +1173,8 @@ class ExecutionOrchestrator:
                         plan=plan,
                     )
                 except AppError as exc:
-                    return self._fail_closed_predicate(
+                    return await self._fail_closed_predicate(
+                        session,
                         execution=execution,
                         by_key=by_key,
                         step=locked,
@@ -1146,7 +1184,7 @@ class ExecutionOrchestrator:
                         error_message=exc.message,
                     )
                 if when_false:
-                    self._apply_when_false(locked, now=now)
+                    await self._apply_when_false(session, locked, now=now)
                     by_key[locked.step_key] = locked
                     changed = True
                 elif locked.condition_result is not True:
@@ -1169,7 +1207,8 @@ class ExecutionOrchestrator:
                 try:
                     plan_step = runtime_plan_step(locked, plan_by_id)
                 except AppError as exc:
-                    return self._fail_closed_lineage_locked(
+                    return await self._fail_closed_lineage_locked(
+                        session,
                         execution=execution,
                         by_key=by_key,
                         now=now,
@@ -1177,7 +1216,8 @@ class ExecutionOrchestrator:
                         error_message=exc.message,
                     )
                 if plan_step.model_dump(mode="json") != locked.step_snapshot:
-                    return self._fail_closed_lineage_locked(
+                    return await self._fail_closed_lineage_locked(
+                        session,
                         execution=execution,
                         by_key=by_key,
                         now=now,
@@ -1196,7 +1236,8 @@ class ExecutionOrchestrator:
                         plan=plan,
                     )
                 except AppError as exc:
-                    return self._fail_closed_predicate(
+                    return await self._fail_closed_predicate(
+                        session,
                         execution=execution,
                         by_key=by_key,
                         step=locked,
@@ -1206,7 +1247,7 @@ class ExecutionOrchestrator:
                         error_message=exc.message,
                     )
                 if when_false:
-                    self._apply_when_false(locked, now=now)
+                    await self._apply_when_false(session, locked, now=now)
                     by_key[locked.step_key] = locked
                     changed = True
                     continue
@@ -1220,11 +1261,26 @@ class ExecutionOrchestrator:
                 terminal, error_code = evaluate_join_policy(
                     policy=cfg.policy, dependency_statuses=dep_statuses
                 )
+                from app.execution.events import (
+                    ExecutionEventWriter,
+                    emit_step_transitions,
+                    snapshot_step_statuses,
+                )
+                _ew = ExecutionEventWriter(session)
+                prev = locked.status
                 locked.status = StepStatus.READY.value
                 locked.ready_at = now
+                await _ew.emit_step_status_changed(
+                    locked, previous_status=prev, occurred_at=now
+                )
+                prev = locked.status
                 locked.status = StepStatus.RUNNING.value
                 if locked.started_at is None:
                     locked.started_at = now
+                await _ew.emit_step_status_changed(
+                    locked, previous_status=prev, occurred_at=now
+                )
+                prev = locked.status
                 locked.status = terminal
                 locked.error_code = error_code
                 locked.error_message = (
@@ -1234,6 +1290,9 @@ class ExecutionOrchestrator:
                 )
                 locked.finished_at = now
                 locked.lock_version += 1
+                await _ew.emit_step_status_changed(
+                    locked, previous_status=prev, occurred_at=now
+                )
                 by_key[locked.step_key] = locked
                 changed = True
                 logger.info(
@@ -1249,8 +1308,16 @@ class ExecutionOrchestrator:
                 if on_error == "FAIL_EXECUTION" or not is_continuable_known_failure(
                     on_error=on_error, step_status=terminal
                 ):
+                    prev_steps = snapshot_step_statuses(list(by_key.values()))
+                    previous_exec = execution.status
                     skip_all_pending(by_key=by_key, now=now)
                     cancel_unused_ready_tools(by_key=by_key, now=now)
+                    await emit_step_transitions(
+                        session,
+                        previous_by_id=prev_steps,
+                        steps=list(by_key.values()),
+                        occurred_at=now,
+                    )
                     exec_status = fail_fast_execution_status(terminal)
                     execution.status = exec_status
                     execution.error_code = locked.error_code
@@ -1265,6 +1332,9 @@ class ExecutionOrchestrator:
                     execution.lease_expires_at = None
                     execution.heartbeat_at = None
                     execution.lock_version += 1
+                    await ExecutionEventWriter(session).emit_execution_status_changed(
+                        execution, previous_status=previous_exec, occurred_at=now
+                    )
                     return ProgressOutcome(
                         execution_complete=True,
                         promoted=False,
@@ -1281,6 +1351,7 @@ class ExecutionOrchestrator:
 
     async def _reconcile_loop_steps_locked(
         self,
+        session: AsyncSession,
         *,
         executions: ExecutionRepository,
         execution: Execution,
@@ -1307,7 +1378,8 @@ class ExecutionOrchestrator:
             if step.step_type != AuthorableStepType.LOOP.value:
                 continue
             if step.parent_step_id is not None:
-                return self._fail_closed_lineage_locked(
+                return await self._fail_closed_lineage_locked(
+                    session,
                     execution=execution,
                     by_key=by_key,
                     now=now,
@@ -1328,7 +1400,8 @@ class ExecutionOrchestrator:
                     plan_step = runtime_plan_step(locked, plan_by_id)
                     cfg = LoopStepConfigV1.model_validate(plan_step.config)
                 except AppError as exc:
-                    return self._fail_closed_lineage_locked(
+                    return await self._fail_closed_lineage_locked(
+                        session,
                         execution=execution,
                         by_key=by_key,
                         now=now,
@@ -1336,7 +1409,8 @@ class ExecutionOrchestrator:
                         error_message=exc.message,
                     )
                 except Exception as exc:
-                    return self._fail_closed_lineage_locked(
+                    return await self._fail_closed_lineage_locked(
+                        session,
                         execution=execution,
                         by_key=by_key,
                         now=now,
@@ -1353,7 +1427,8 @@ class ExecutionOrchestrator:
                         plan=plan,
                     )
                 except AppError as exc:
-                    return self._fail_closed_predicate(
+                    return await self._fail_closed_predicate(
+                        session,
                         execution=execution,
                         by_key=by_key,
                         step=locked,
@@ -1363,17 +1438,27 @@ class ExecutionOrchestrator:
                         error_message=exc.message,
                     )
                 if when_false:
-                    self._apply_when_false(locked, now=now)
+                    await self._apply_when_false(session, locked, now=now)
                     by_key[locked.step_key] = locked
                     changed = True
                     continue
 
+                from app.execution.events import ExecutionEventWriter
+                _ew = ExecutionEventWriter(session)
+                prev = locked.status
                 locked.status = StepStatus.READY.value
                 locked.ready_at = now
+                await _ew.emit_step_status_changed(
+                    locked, previous_status=prev, occurred_at=now
+                )
+                prev = locked.status
                 locked.status = StepStatus.RUNNING.value
                 if locked.started_at is None:
                     locked.started_at = now
                 locked.lock_version += 1
+                await _ew.emit_step_status_changed(
+                    locked, previous_status=prev, occurred_at=now
+                )
 
                 if cfg.mode == LoopMode.WHILE:
                     try:
@@ -1388,7 +1473,8 @@ class ExecutionOrchestrator:
                                 now=now,
                             )
                             by_key[locked.step_key] = locked
-                            stop = self._apply_loop_error_policy(
+                            stop = await self._apply_loop_error_policy(
+                                session,
                                 execution=execution,
                                 by_key=by_key,
                                 loop_step=locked,
@@ -1429,7 +1515,8 @@ class ExecutionOrchestrator:
                                 now=now,
                             )
                             by_key[locked.step_key] = locked
-                            stop = self._apply_loop_error_policy(
+                            stop = await self._apply_loop_error_policy(
+                                session,
                                 execution=execution,
                                 by_key=by_key,
                                 loop_step=locked,
@@ -1475,7 +1562,8 @@ class ExecutionOrchestrator:
                                 locked.finished_at = now
                                 locked.lock_version += 1
                                 by_key[locked.step_key] = locked
-                            return self._fail_closed_predicate(
+                            return await self._fail_closed_predicate(
+                                session,
                                 execution=execution,
                                 by_key=by_key,
                                 step=locked,
@@ -1491,7 +1579,8 @@ class ExecutionOrchestrator:
                             locked.finished_at = now
                             locked.lock_version += 1
                             by_key[locked.step_key] = locked
-                        return self._fail_closed_lineage_locked(
+                        return await self._fail_closed_lineage_locked(
+                            session,
                             execution=execution,
                             by_key=by_key,
                             now=now,
@@ -1524,7 +1613,8 @@ class ExecutionOrchestrator:
                             now=now,
                         )
                         by_key[locked.step_key] = locked
-                        stop = self._apply_loop_error_policy(
+                        stop = await self._apply_loop_error_policy(
+                            session,
                             execution=execution,
                             by_key=by_key,
                             loop_step=locked,
@@ -1553,7 +1643,8 @@ class ExecutionOrchestrator:
                             now=now,
                         )
                         by_key[locked.step_key] = locked
-                        stop = self._apply_loop_error_policy(
+                        stop = await self._apply_loop_error_policy(
+                            session,
                             execution=execution,
                             by_key=by_key,
                             loop_step=locked,
@@ -1572,7 +1663,8 @@ class ExecutionOrchestrator:
                         locked.finished_at = now
                         locked.lock_version += 1
                         by_key[locked.step_key] = locked
-                    return self._fail_closed_lineage_locked(
+                    return await self._fail_closed_lineage_locked(
+                        session,
                         execution=execution,
                         by_key=by_key,
                         now=now,
@@ -1623,7 +1715,8 @@ class ExecutionOrchestrator:
                 plan_step = runtime_plan_step(locked, plan_by_id)
                 cfg = LoopStepConfigV1.model_validate(plan_step.config)
             except AppError as exc:
-                return self._fail_closed_lineage_locked(
+                return await self._fail_closed_lineage_locked(
+                    session,
                     execution=execution,
                     by_key=by_key,
                     now=now,
@@ -1631,7 +1724,8 @@ class ExecutionOrchestrator:
                     error_message=exc.message,
                 )
             except Exception as exc:
-                return self._fail_closed_lineage_locked(
+                return await self._fail_closed_lineage_locked(
+                    session,
                     execution=execution,
                     by_key=by_key,
                     now=now,
@@ -1648,7 +1742,8 @@ class ExecutionOrchestrator:
                     now=now,
                 )
                 by_key[locked.step_key] = locked
-                stop = self._apply_loop_error_policy(
+                stop = await self._apply_loop_error_policy(
+                    session,
                     execution=execution,
                     by_key=by_key,
                     loop_step=locked,
@@ -1699,7 +1794,8 @@ class ExecutionOrchestrator:
                                 now=now,
                             )
                             by_key[locked.step_key] = locked
-                            stop = self._apply_loop_error_policy(
+                            stop = await self._apply_loop_error_policy(
+                                session,
                                 execution=execution,
                                 by_key=by_key,
                                 loop_step=locked,
@@ -1751,7 +1847,8 @@ class ExecutionOrchestrator:
                             now=now,
                         )
                         by_key[locked.step_key] = locked
-                        stop = self._apply_loop_error_policy(
+                        stop = await self._apply_loop_error_policy(
+                            session,
                             execution=execution,
                             by_key=by_key,
                             loop_step=locked,
@@ -1804,7 +1901,8 @@ class ExecutionOrchestrator:
                             now=now,
                         )
                         by_key[locked.step_key] = locked
-                        stop = self._apply_loop_error_policy(
+                        stop = await self._apply_loop_error_policy(
+                            session,
                             execution=execution,
                             by_key=by_key,
                             loop_step=locked,
@@ -1852,7 +1950,8 @@ class ExecutionOrchestrator:
                             locked.finished_at = now
                             locked.lock_version += 1
                             by_key[locked.step_key] = locked
-                        return self._fail_closed_predicate(
+                        return await self._fail_closed_predicate(
+                            session,
                             execution=execution,
                             by_key=by_key,
                             step=locked,
@@ -1868,7 +1967,8 @@ class ExecutionOrchestrator:
                         locked.finished_at = now
                         locked.lock_version += 1
                         by_key[locked.step_key] = locked
-                    return self._fail_closed_lineage_locked(
+                    return await self._fail_closed_lineage_locked(
+                        session,
                         execution=execution,
                         by_key=by_key,
                         now=now,
@@ -1894,7 +1994,8 @@ class ExecutionOrchestrator:
                 locked.finished_at = now
                 locked.lock_version += 1
                 by_key[locked.step_key] = locked
-                return self._fail_closed_lineage_locked(
+                return await self._fail_closed_lineage_locked(
+                    session,
                     execution=execution,
                     by_key=by_key,
                     now=now,
@@ -1940,7 +2041,8 @@ class ExecutionOrchestrator:
                     now=now,
                 )
                 by_key[locked.step_key] = locked
-                stop = self._apply_loop_error_policy(
+                stop = await self._apply_loop_error_policy(
+                    session,
                     execution=execution,
                     by_key=by_key,
                     loop_step=locked,
@@ -2001,8 +2103,9 @@ class ExecutionOrchestrator:
             )
         return None
 
-    def _apply_loop_error_policy(
+    async def _apply_loop_error_policy(
         self,
+        session: AsyncSession,
         *,
         execution: Execution,
         by_key: dict[str, ExecutionStep],
@@ -2017,12 +2120,26 @@ class ExecutionOrchestrator:
         MARK_PARTIAL cannot strand PENDING body rows while the parent is
         terminal (``_dag_naturally_ended`` deadlock).
         """
+        from app.execution.events import (
+            ExecutionEventWriter,
+            emit_step_transitions,
+            snapshot_step_statuses,
+        )
+
         try:
+            prev_children = snapshot_step_statuses(list(by_key.values()))
             stop_loop_owned_untouched_children(
                 by_key=by_key, loop_step=loop_step, now=now
             )
+            await emit_step_transitions(
+                session,
+                previous_by_id=prev_children,
+                steps=list(by_key.values()),
+                occurred_at=now,
+            )
         except AppError as exc:
-            return self._fail_closed_lineage_locked(
+            return await self._fail_closed_lineage_locked(
+                session,
                 execution=execution,
                 by_key=by_key,
                 now=now,
@@ -2034,8 +2151,16 @@ class ExecutionOrchestrator:
         if on_error == "FAIL_EXECUTION" or not is_continuable_known_failure(
             on_error=on_error, step_status=terminal
         ):
+            prev_steps = snapshot_step_statuses(list(by_key.values()))
+            previous_exec = execution.status
             skip_all_pending(by_key=by_key, now=now)
             cancel_unused_ready_tools(by_key=by_key, now=now)
+            await emit_step_transitions(
+                session,
+                previous_by_id=prev_steps,
+                steps=list(by_key.values()),
+                occurred_at=now,
+            )
             exec_status = fail_fast_execution_status(terminal)
             execution.status = exec_status
             execution.error_code = loop_step.error_code
@@ -2049,6 +2174,9 @@ class ExecutionOrchestrator:
             execution.lease_expires_at = None
             execution.heartbeat_at = None
             execution.lock_version += 1
+            await ExecutionEventWriter(session).emit_execution_status_changed(
+                execution, previous_status=previous_exec, occurred_at=now
+            )
             return ProgressOutcome(
                 execution_complete=True,
                 promoted=False,
@@ -2102,7 +2230,8 @@ class ExecutionOrchestrator:
                 continue
             plan_step = plan_by_id[locked.step_key]
             if plan_step.model_dump(mode="json") != locked.step_snapshot:
-                return self._fail_closed_lineage_locked(
+                return await self._fail_closed_lineage_locked(
+                    session,
                     execution=execution,
                     by_key=by_key,
                     now=now,
@@ -2126,7 +2255,8 @@ class ExecutionOrchestrator:
             if approved is None:
                 # READY without APPROVED evidence is unexpected for authorable
                 # APPROVAL (resume always pairs them). Fail closed.
-                return self._fail_closed_lineage_locked(
+                return await self._fail_closed_lineage_locked(
+                    session,
                     execution=execution,
                     by_key=by_key,
                     now=now,
@@ -2176,9 +2306,16 @@ class ExecutionOrchestrator:
                     step_terminal_status=StepStatus.FAILED.value,
                 )
 
+            from app.execution.events import ExecutionEventWriter
+            _ew = ExecutionEventWriter(session)
+            prev = locked.status
             locked.status = StepStatus.RUNNING.value
             if locked.started_at is None:
                 locked.started_at = now
+            await _ew.emit_step_status_changed(
+                locked, previous_status=prev, occurred_at=now
+            )
+            prev = locked.status
             locked.status = StepStatus.SUCCEEDED.value
             locked.result_inline = {
                 "approval_status": ApprovalStatus.APPROVED.value,
@@ -2189,6 +2326,9 @@ class ExecutionOrchestrator:
             locked.error_message = None
             locked.finished_at = now
             locked.lock_version += 1
+            await _ew.emit_step_status_changed(
+                locked, previous_status=prev, occurred_at=now
+            )
             by_key[locked.step_key] = locked
             changed = True
             logger.info(
@@ -2224,7 +2364,8 @@ class ExecutionOrchestrator:
                 continue
             plan_step = plan_by_id[locked.step_key]
             if plan_step.model_dump(mode="json") != locked.step_snapshot:
-                return self._fail_closed_lineage_locked(
+                return await self._fail_closed_lineage_locked(
+                    session,
                     execution=execution,
                     by_key=by_key,
                     now=now,
@@ -2243,7 +2384,8 @@ class ExecutionOrchestrator:
                     plan=plan,
                 )
             except AppError as exc:
-                return self._fail_closed_predicate(
+                return await self._fail_closed_predicate(
+                    session,
                     execution=execution,
                     by_key=by_key,
                     step=locked,
@@ -2253,7 +2395,7 @@ class ExecutionOrchestrator:
                     error_message=exc.message,
                 )
             if when_false:
-                self._apply_when_false(locked, now=now)
+                await self._apply_when_false(session, locked, now=now)
                 by_key[locked.step_key] = locked
                 changed = True
                 continue
@@ -2263,7 +2405,8 @@ class ExecutionOrchestrator:
             try:
                 cfg = ApprovalStepConfigV1.model_validate(plan_step.config)
             except Exception as exc:
-                return self._fail_closed_lineage_locked(
+                return await self._fail_closed_lineage_locked(
+                    session,
                     execution=execution,
                     by_key=by_key,
                     now=now,
@@ -2274,7 +2417,8 @@ class ExecutionOrchestrator:
                 )
             policy = await policies.get(cfg.approval_policy_id)
             if policy is None or policy.status != ApprovalPolicyStatus.ACTIVE.value:
-                return self._fail_closed_lineage_locked(
+                return await self._fail_closed_lineage_locked(
+                    session,
                     execution=execution,
                     by_key=by_key,
                     now=now,
@@ -2350,16 +2494,25 @@ class ExecutionOrchestrator:
         return not bool(result)
 
     @staticmethod
-    def _apply_when_false(step: ExecutionStep, *, now: datetime) -> None:
+    async def _apply_when_false(
+        session: AsyncSession, step: ExecutionStep, *, now: datetime
+    ) -> None:
+        from app.execution.events import ExecutionEventWriter
+
+        previous = step.status
         step.status = StepStatus.SKIPPED.value
         step.error_code = "STEP_WHEN_FALSE"
         step.error_message = "Step.when evaluated to false; Step intentionally skipped."
         step.condition_result = False
         step.finished_at = now
         step.lock_version += 1
+        await ExecutionEventWriter(session).emit_step_status_changed(
+            step, previous_status=previous, occurred_at=now
+        )
 
-    def _fail_closed_predicate(
+    async def _fail_closed_predicate(
         self,
+        session: AsyncSession,
         *,
         execution: Execution,
         by_key: dict[str, ExecutionStep],
@@ -2370,6 +2523,14 @@ class ExecutionOrchestrator:
         error_message: str,
     ) -> ProgressOutcome:
         """Mandatory-fatal Predicate failure: active Step FAILED, Execution FAILED."""
+        from app.execution.events import (
+            ExecutionEventWriter,
+            emit_step_transitions,
+            snapshot_step_statuses,
+        )
+
+        prev_steps = snapshot_step_statuses(list(by_key.values()))
+        previous_exec = execution.status
         if step.status == StepStatus.PENDING.value:
             step.status = StepStatus.FAILED.value
             step.error_code = error_code
@@ -2379,6 +2540,12 @@ class ExecutionOrchestrator:
             by_key[step.step_key] = step
         skip_all_pending(by_key=by_key, now=now)
         cancel_unused_ready_tools(by_key=by_key, now=now)
+        await emit_step_transitions(
+            session,
+            previous_by_id=prev_steps,
+            steps=list(by_key.values()),
+            occurred_at=now,
+        )
         execution.status = ExecutionStatus.FAILED.value
         execution.error_code = error_code
         execution.error_message = error_message
@@ -2393,6 +2560,9 @@ class ExecutionOrchestrator:
         execution.lease_expires_at = None
         execution.heartbeat_at = None
         execution.lock_version += 1
+        await ExecutionEventWriter(session).emit_execution_status_changed(
+            execution, previous_status=previous_exec, occurred_at=now
+        )
         return ProgressOutcome(
             execution_complete=True,
             promoted=False,
@@ -2433,7 +2603,8 @@ class ExecutionOrchestrator:
                     dag = validate_tool_join_dag(plan, steps)
                     plan_by_id = {p.id: p for p in plan.steps}
                 except AppError as exc:
-                    return self._fail_closed_lineage_locked(
+                    return await self._fail_closed_lineage_locked(
+                        session,
                         execution=execution,
                         by_key=by_key,
                         now=now,
@@ -2496,8 +2667,21 @@ class ExecutionOrchestrator:
                 stop = pick_stop_cause(causes)
                 if stop is not None:
                     # Fatal / fail-fast after wave settlement — Plan parse optional.
+                    from app.execution.events import (
+                        ExecutionEventWriter,
+                        emit_step_transitions,
+                        snapshot_step_statuses,
+                    )
+                    prev_steps = snapshot_step_statuses(list(by_key.values()))
+                    previous_exec = execution.status
                     skip_all_pending(by_key=by_key, now=now)
                     cancel_unused_ready_tools(by_key=by_key, now=now)
+                    await emit_step_transitions(
+                        session,
+                        previous_by_id=prev_steps,
+                        steps=list(by_key.values()),
+                        occurred_at=now,
+                    )
                     if stop.kind == "FATAL":
                         exec_status = ExecutionStatus.FAILED.value
                     else:
@@ -2516,6 +2700,9 @@ class ExecutionOrchestrator:
                     execution.lease_expires_at = None
                     execution.heartbeat_at = None
                     execution.lock_version += 1
+                    await ExecutionEventWriter(session).emit_execution_status_changed(
+                        execution, previous_status=previous_exec, occurred_at=now
+                    )
                     await session.flush()
                     stop_reason = stop.error_code or (
                         _REASON_EXECUTION_TIMED_OUT
@@ -2607,7 +2794,8 @@ class ExecutionOrchestrator:
                 steps = await executions.list_steps(execution.id)
                 if self._dag_naturally_ended(steps):
                     decision = aggregate_all_required(plan=plan, steps=steps)
-                    self._apply_execution_terminal(
+                    await self._apply_execution_terminal(
+                        session,
                         execution, steps, plan, decision, now
                     )
                     await session.flush()
@@ -2663,7 +2851,8 @@ class ExecutionOrchestrator:
                     plan = assert_execution_plan_lineage(execution)
                     dag = validate_tool_join_dag(plan, steps)
                 except AppError as exc:
-                    return self._fail_closed_lineage_locked(
+                    return await self._fail_closed_lineage_locked(
+                        session,
                         execution=execution,
                         by_key=by_key,
                         now=now,
@@ -2687,7 +2876,8 @@ class ExecutionOrchestrator:
                 if not self._dag_naturally_ended(steps):
                     return None
                 decision = aggregate_all_required(plan=plan, steps=steps)
-                self._apply_execution_terminal(
+                await self._apply_execution_terminal(
+                    session,
                     execution, steps, plan, decision, now
                 )
                 await session.flush()
@@ -2763,7 +2953,8 @@ class ExecutionOrchestrator:
         )
 
     @staticmethod
-    def _fail_closed_lineage_locked(
+    async def _fail_closed_lineage_locked(
+        session: AsyncSession,
         *,
         execution: Execution,
         by_key: dict[str, ExecutionStep],
@@ -2777,8 +2968,22 @@ class ExecutionOrchestrator:
         schedule new MCP work. Clears worker/lease/heartbeat even when Plan
         re-parse would fail.
         """
+        from app.execution.events import (
+            ExecutionEventWriter,
+            emit_step_transitions,
+            snapshot_step_statuses,
+        )
+
+        prev_steps = snapshot_step_statuses(list(by_key.values()))
+        previous_exec = execution.status
         skip_all_pending(by_key=by_key, now=now)
         cancel_unused_ready_tools(by_key=by_key, now=now)
+        await emit_step_transitions(
+            session,
+            previous_by_id=prev_steps,
+            steps=list(by_key.values()),
+            occurred_at=now,
+        )
         execution.status = ExecutionStatus.FAILED.value
         execution.error_code = error_code or "RESOURCE_CONFLICT"
         execution.error_message = error_message
@@ -2794,6 +2999,9 @@ class ExecutionOrchestrator:
         execution.lease_expires_at = None
         execution.heartbeat_at = None
         execution.lock_version += 1
+        await ExecutionEventWriter(session).emit_execution_status_changed(
+            execution, previous_status=previous_exec, occurred_at=now
+        )
         return ProgressOutcome(
             execution_complete=True,
             promoted=False,
@@ -2839,13 +3047,17 @@ class ExecutionOrchestrator:
         )
 
     @staticmethod
-    def _apply_execution_terminal(
+    async def _apply_execution_terminal(
+        session: AsyncSession,
         execution: Execution,
         steps: list[ExecutionStep],
         plan: ExecutionPlanV1,
         decision: Any,
         now: datetime,
     ) -> None:
+        from app.execution.events import ExecutionEventWriter
+
+        previous_status = execution.status
         execution.status = decision.status
         execution.error_code = decision.error_code
         execution.error_message = decision.error_message
@@ -2858,3 +3070,6 @@ class ExecutionOrchestrator:
         execution.lease_expires_at = None
         execution.heartbeat_at = None
         execution.lock_version += 1
+        await ExecutionEventWriter(session).emit_execution_status_changed(
+            execution, previous_status=previous_status, occurred_at=now
+        )

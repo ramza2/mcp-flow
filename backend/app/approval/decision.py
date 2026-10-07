@@ -338,6 +338,9 @@ class ApprovalDecisionService:
         )
 
         resume_enqueued = False
+        from app.execution.events import ExecutionEventWriter
+
+        event_writer = ExecutionEventWriter(self._session)
         if terminal == ApprovalStatus.APPROVED.value:
             request.status = ApprovalStatus.APPROVED.value
             request.resolved_at = ts
@@ -349,7 +352,22 @@ class ApprovalDecisionService:
                 created_at=ts,
             )
             resume_enqueued = True
+            await event_writer.emit_approval_decided(
+                execution_id=execution.id,
+                step_execution_id=step.id,
+                approval_request_id=request.id,
+                status=request.status,
+                decision=row.decision,
+                occurred_at=ts,
+            )
         elif terminal == ApprovalStatus.REJECTED.value:
+            previous_step_status = step.status
+            previous_exec_status = execution.status
+            pending_before = {
+                s.id: s.status
+                for s in all_steps
+                if s.status == StepStatus.PENDING.value
+            }
             request.status = ApprovalStatus.REJECTED.value
             request.resolved_at = ts
             request.lock_version += 1
@@ -359,6 +377,30 @@ class ApprovalDecisionService:
                 steps=all_steps,
                 now=ts,
                 authorable=is_authorable_step_context(snapshot),
+            )
+            await event_writer.emit_approval_decided(
+                execution_id=execution.id,
+                step_execution_id=step.id,
+                approval_request_id=request.id,
+                status=request.status,
+                decision=row.decision,
+                occurred_at=ts,
+            )
+            await event_writer.emit_step_status_changed(
+                step, previous_status=previous_step_status, occurred_at=ts
+            )
+            for skipped in all_steps:
+                if (
+                    skipped.id in pending_before
+                    and skipped.status == StepStatus.SKIPPED.value
+                ):
+                    await event_writer.emit_step_status_changed(
+                        skipped,
+                        previous_status=pending_before[skipped.id],
+                        occurred_at=ts,
+                    )
+            await event_writer.emit_execution_status_changed(
+                execution, previous_status=previous_exec_status, occurred_at=ts
             )
         # else: intermediate — remain PENDING / WAITING_APPROVAL, no Outbox
 
@@ -479,6 +521,11 @@ class ApprovalDecisionService:
         step: ExecutionStep,
         now: datetime,
     ) -> None:
+        from app.execution.events import ExecutionEventWriter
+
+        event_writer = ExecutionEventWriter(self._session)
+        previous_step_status = step.status
+        previous_exec_status = execution.status
         request.status = ApprovalStatus.EXPIRED.value
         request.resolved_at = now
         request.lock_version += 1
@@ -496,6 +543,11 @@ class ApprovalDecisionService:
                 )
             ).scalars().all()
         )
+        pending_before = {
+            s.id: s.status
+            for s in all_steps
+            if s.status == StepStatus.PENDING.value
+        }
         by_key = {s.step_key: s for s in all_steps}
         by_key[step.step_key] = step
         if authorable and len(all_steps) > 1:
@@ -514,4 +566,27 @@ class ApprovalDecisionService:
         execution.lease_expires_at = None
         execution.heartbeat_at = None
         execution.lock_version += 1
+        await event_writer.emit_approval_decided(
+            execution_id=execution.id,
+            step_execution_id=step.id,
+            approval_request_id=request.id,
+            status=request.status,
+            occurred_at=now,
+        )
+        await event_writer.emit_step_status_changed(
+            step, previous_status=previous_step_status, occurred_at=now
+        )
+        for skipped in by_key.values():
+            if (
+                skipped.id in pending_before
+                and skipped.status == StepStatus.SKIPPED.value
+            ):
+                await event_writer.emit_step_status_changed(
+                    skipped,
+                    previous_status=pending_before[skipped.id],
+                    occurred_at=now,
+                )
+        await event_writer.emit_execution_status_changed(
+            execution, previous_status=previous_exec_status, occurred_at=now
+        )
         await self._session.flush()

@@ -330,10 +330,16 @@ async def settle_input_required_after_cancel_locked(
     _cancel_step(step, now=now)
 
     if execution.status != ExecutionStatus.CANCEL_REQUESTED.value:
+        previous_status = execution.status
         if execution.cancel_requested_at is None:
             execution.cancel_requested_at = now
         execution.status = ExecutionStatus.CANCEL_REQUESTED.value
         execution.lock_version = int(execution.lock_version) + 1
+        from app.execution.events import ExecutionEventWriter
+
+        await ExecutionEventWriter(session).emit_execution_status_changed(
+            execution, previous_status=previous_status, occurred_at=now
+        )
 
     await session.flush()
     return await reconcile_cancel_requested_locked(session, execution, now=now)
@@ -398,7 +404,13 @@ async def apply_cancellation_locked(
             session, steps, now=now, preserve_step_ids=set()
         )
         steps = await executions.list_steps(execution.id)
+        previous_status = execution.status
         _finalize_cancelled(execution, steps, now=now)
+        from app.execution.events import ExecutionEventWriter
+
+        await ExecutionEventWriter(session).emit_execution_status_changed(
+            execution, previous_status=previous_status, occurred_at=now
+        )
         return _outcome(execution, mode=CancellationMode.IMMEDIATE)
 
     # RUNNING with at least one STARTED ToolCall → cooperative CANCEL_REQUESTED.
@@ -409,8 +421,14 @@ async def apply_cancellation_locked(
     await _cancel_safe_nonterminal_steps(
         session, steps, now=now, preserve_step_ids=preserve_ids
     )
+    previous_status = execution.status
     execution.status = ExecutionStatus.CANCEL_REQUESTED.value
     execution.lock_version = int(execution.lock_version) + 1
+    from app.execution.events import ExecutionEventWriter
+
+    await ExecutionEventWriter(session).emit_execution_status_changed(
+        execution, previous_status=previous_status, occurred_at=now
+    )
     # Preserve lease for the in-flight owner.
     return _outcome(execution, mode=CancellationMode.REQUESTED)
 
@@ -464,6 +482,7 @@ async def reconcile_cancel_requested_locked(
         )
         steps = await executions.list_steps(execution.id)
         cause = unknown[0]
+        previous_status = execution.status
         execution.status = ExecutionStatus.FAILED.value
         execution.finished_at = now
         execution.error_code = cause.error_code
@@ -474,6 +493,11 @@ async def reconcile_cancel_requested_locked(
         )
         _clear_execution_lease(execution)
         execution.lock_version = int(execution.lock_version) + 1
+        from app.execution.events import ExecutionEventWriter
+
+        await ExecutionEventWriter(session).emit_execution_status_changed(
+            execution, previous_status=previous_status, occurred_at=now
+        )
         return _outcome(execution, mode=CancellationMode.RECONCILED)
 
     await _cancel_pending_approvals(session, execution.id, now=now)
@@ -487,7 +511,13 @@ async def reconcile_cancel_requested_locked(
         session, steps, now=now, preserve_step_ids=set()
     )
     steps = await executions.list_steps(execution.id)
+    previous_status = execution.status
     _finalize_cancelled(execution, steps, now=now)
+    from app.execution.events import ExecutionEventWriter
+
+    await ExecutionEventWriter(session).emit_execution_status_changed(
+        execution, previous_status=previous_status, occurred_at=now
+    )
     return _outcome(execution, mode=CancellationMode.RECONCILED)
 
 
@@ -509,10 +539,16 @@ async def cancel_prepared_invocation_before_send(
     _cancel_step(step, now=now)
     if execution.status != ExecutionStatus.CANCEL_REQUESTED.value:
         # Unexpected RUNNING+cancel_requested_at corruption: fail closed to CANCEL_REQUESTED.
+        previous_status = execution.status
         if execution.cancel_requested_at is None:
             execution.cancel_requested_at = now
         execution.status = ExecutionStatus.CANCEL_REQUESTED.value
         execution.lock_version = int(execution.lock_version) + 1
+        from app.execution.events import ExecutionEventWriter
+
+        await ExecutionEventWriter(session).emit_execution_status_changed(
+            execution, previous_status=previous_status, occurred_at=now
+        )
     # Flush so reconcile's STARTED ToolCall query sees this cancellation.
     await session.flush()
     return await reconcile_cancel_requested_locked(session, execution, now=now)

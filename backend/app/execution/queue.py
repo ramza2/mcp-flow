@@ -238,9 +238,15 @@ class ExecutionQueueService:
                 execution_id=execution.id,
                 created_at=ts,
             )
+            previous_status = execution.status
             execution.status = ExecutionStatus.QUEUED.value
             execution.queued_at = ts
             execution.lock_version += 1
+            from app.execution.events import ExecutionEventWriter
+
+            await ExecutionEventWriter(self._session).emit_execution_status_changed(
+                execution, previous_status=previous_status, occurred_at=ts
+            )
         await self._session.flush()
         return len(rows)
 

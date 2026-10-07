@@ -245,8 +245,12 @@ class MrtrResumeClaimService:
                 reason="MRTR_RESUME_PRECONDITION_FAILED",
             )
 
+        from app.execution.events import ExecutionEventWriter
+
         lease_token = uuid.uuid4()
         lease_expires = ts + timedelta(seconds=self._lease_seconds)
+        event_writer = ExecutionEventWriter(self._session)
+        previous_exec_status = execution.status
         execution.status = ExecutionStatus.RUNNING.value
         execution.worker_id = worker
         execution.lease_token = lease_token
@@ -255,11 +259,18 @@ class MrtrResumeClaimService:
         execution.error_code = None
         execution.error_message = None
         execution.lock_version += 1
+        await event_writer.emit_execution_status_changed(
+            execution, previous_status=previous_exec_status, occurred_at=ts
+        )
 
+        previous_step_status = step.status
         step.status = StepStatus.RUNNING.value
         step.error_code = None
         step.error_message = None
         step.lock_version += 1
+        await event_writer.emit_step_status_changed(
+            step, previous_status=previous_step_status, occurred_at=ts
+        )
 
         attempt.worker_id = worker
         attempt.lease_expires_at = lease_expires
@@ -279,6 +290,9 @@ class MrtrResumeClaimService:
     async def _terminalize_precondition_failed(
         self, execution: Execution, step: ExecutionStep, ts: datetime
     ) -> None:
+        from app.execution.events import ExecutionEventWriter
+
+        event_writer = ExecutionEventWriter(self._session)
         if step.status not in {
             StepStatus.FAILED.value,
             StepStatus.SUCCEEDED.value,
@@ -286,12 +300,17 @@ class MrtrResumeClaimService:
             StepStatus.TIMED_OUT.value,
             StepStatus.UNKNOWN_OUTCOME.value,
         }:
+            previous_step_status = step.status
             step.status = StepStatus.FAILED.value
             step.error_code = "MRTR_RESUME_PRECONDITION_FAILED"
             step.error_message = "MRTR resume preflight failed."
             step.finished_at = ts
             step.lock_version += 1
+            await event_writer.emit_step_status_changed(
+                step, previous_status=previous_step_status, occurred_at=ts
+            )
         if execution.status == ExecutionStatus.WAITING_INPUT.value:
+            previous_exec_status = execution.status
             execution.status = ExecutionStatus.FAILED.value
             execution.error_code = "MRTR_RESUME_PRECONDITION_FAILED"
             execution.error_message = "MRTR resume preflight failed."
@@ -301,3 +320,6 @@ class MrtrResumeClaimService:
             execution.lease_expires_at = None
             execution.heartbeat_at = None
             execution.lock_version += 1
+            await event_writer.emit_execution_status_changed(
+                execution, previous_status=previous_exec_status, occurred_at=ts
+            )
