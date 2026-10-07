@@ -9,12 +9,12 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.domain.enums import (
+    OccurrenceStatus,
     ScheduleMisfirePolicy,
     ScheduleOverlapPolicy,
     ScheduleStatus,
     ScheduleTargetType,
     ScheduleType,
-    OccurrenceStatus,
 )
 from app.models.schedule import Schedule, ScheduleOccurrence
 

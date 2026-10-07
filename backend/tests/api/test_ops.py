@@ -2,22 +2,17 @@
 
 from __future__ import annotations
 
-import uuid
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from app.auth.passwords import hash_password
+from app.domain.enums import (
+    ExecutionStatus,
+)
+from app.repositories.user import UserRepository
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.auth.passwords import hash_password
-from app.domain.enums import (
-    ApprovalStatus,
-    ExecutionStatus,
-    MCPServerStatus,
-    MCPToolStatus,
-    ScheduleStatus,
-)
-from app.repositories.user import UserRepository
 from tests.helpers.execution_ops import seed_execution, seed_user
 
 OPS = "/api/v1/ops"

@@ -92,7 +92,10 @@ def validate_approver_scope(scope: Any) -> list[str] | None:
         if not isinstance(item, str) or not item.strip():
             raise AppError(
                 code="RESOURCE_CONFLICT",
-                message="ApprovalRequest approval_scope.role_codes contains a blank or non-string code.",
+                message=(
+                    "ApprovalRequest approval_scope.role_codes contains a "
+                    "blank or non-string code."
+                ),
                 status_code=409,
             )
         normalized.append(item.strip())

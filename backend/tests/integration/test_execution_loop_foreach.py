@@ -50,6 +50,7 @@ from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from tests.integration.test_execution_creation import _seed_ready
+
 _AV = uuid.uuid4()
 _ITEM_SCHEMA = {
     "type": "object",
@@ -603,7 +604,7 @@ async def test_f_continue_failure_partially_succeeded(
             worker_id="pg-f",
         )
     client = _FailFirstClient()
-    outcome = await _run(
+    await _run(
         integration_session_factory,
         execution_id=execution_id,
         lease=lease,

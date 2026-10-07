@@ -121,6 +121,7 @@ async def test_no_approval_required_success_regression(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from app.mcp.contracts import NormalizedToolResult
+
     from tests.unit.test_tool_runner import _StubCurrentMCPClient
 
     _install_no_side_effects(monkeypatch)
@@ -386,9 +387,8 @@ async def test_duplicate_runner_stale_lease_no_second_request(
     assert second.terminal_status == StepStatus.WAITING_APPROVAL.value
 
     async with db_session_factory() as session:
-        from sqlalchemy import func, select
-
         from app.models.approval import ApprovalRequest
+        from sqlalchemy import func, select
 
         step = (await ExecutionRepository(session).list_steps(execution_id))[0]
         count = (
@@ -465,9 +465,8 @@ async def test_one_sided_running_step_waiting_fail_closed(
 ) -> None:
     from app.core.errors import AppError
     from app.execution.tool_step_attempt import ToolStepAttemptService
-    from sqlalchemy import func, select
-
     from app.models.approval import ApprovalRequest
+    from sqlalchemy import func, select
 
     execution_id, worker_id, lease_token = await _enter_waiting(
         db_session_factory, monkeypatch
@@ -541,9 +540,8 @@ async def test_one_sided_waiting_step_ready_fail_closed(
 ) -> None:
     from app.core.errors import AppError
     from app.execution.tool_step_attempt import ToolStepAttemptService
-    from sqlalchemy import func, select
-
     from app.models.approval import ApprovalRequest
+    from sqlalchemy import func, select
 
     execution_id, worker_id, lease_token = await _enter_waiting(
         db_session_factory, monkeypatch
@@ -680,7 +678,6 @@ async def test_both_waiting_without_pending_fail_closed(
     db_session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from datetime import UTC, datetime
 
     from app.core.errors import AppError
     from app.execution.tool_step_attempt import ToolStepAttemptService

@@ -7,10 +7,6 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
-from httpx import AsyncClient
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
-
 from app.audit.writer import (
     ACTION_AUTH_LOGIN,
     ACTION_AUTH_LOGOUT,
@@ -30,6 +26,9 @@ from app.schemas.auth import (
 )
 from app.services.role import RoleService
 from app.services.user import UserService
+from httpx import AsyncClient
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 AUTH = "/api/v1/auth"
 AUDIT = "/api/v1/audit"

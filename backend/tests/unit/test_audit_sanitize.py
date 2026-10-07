@@ -7,12 +7,11 @@ from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
-
 from app.audit.integrity import compute_integrity_hash, verify_audit_event_integrity
 from app.audit.sanitize import (
+    INVALID_REASON_MARKER,
     MAX_NESTING_DEPTH,
     MAX_SERIALIZED_BYTES,
-    INVALID_REASON_MARKER,
     REDACTION_MARKER,
     TRUNCATION_MARKER,
     ensure_json_object,

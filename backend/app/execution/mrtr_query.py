@@ -10,16 +10,15 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import AppError
 from app.domain.enums import McpInputRequestStatus, UserStatus
+from app.models.auth import User
 from app.models.mcp_input_request import MCPInputRequest
 from app.repositories.execution import ExecutionRepository
 from app.repositories.mcp_input_request import MCPInputRequestRepository
-from sqlalchemy import select
-
-from app.models.auth import User
 
 
 @dataclass(frozen=True, slots=True)

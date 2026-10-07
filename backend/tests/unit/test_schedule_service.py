@@ -18,7 +18,6 @@ from app.domain.enums import (
     ScheduleTargetType,
     ScheduleType,
     UserStatus,
-    WorkflowVersionStatus,
 )
 from app.repositories.agent import AgentRepository
 from app.repositories.agent_version import AgentVersionRepository

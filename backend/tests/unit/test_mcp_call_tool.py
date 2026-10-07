@@ -384,7 +384,7 @@ async def test_valid_input_required_returns_normalized_input_required(
         ),
     ],
 )
-async def test_malformed_input_required_is_post_send_protocol_failure(
+async def test_malformed_input_required_message_includes_missing_field(
     result_body: dict[str, Any],
     message_part: str,
 ) -> None:

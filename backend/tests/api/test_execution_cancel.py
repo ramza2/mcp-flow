@@ -6,9 +6,6 @@ import uuid
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from httpx import AsyncClient
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
-
 from app.domain.enums import (
     ExecutionStatus,
     StepAttemptStatus,
@@ -29,6 +26,8 @@ from app.schemas.auth import (
 )
 from app.services.role import RoleService
 from app.services.user import UserService
+from httpx import AsyncClient
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from tests.unit.test_execution_creation import _create, _idem_key, _seed_ready
 

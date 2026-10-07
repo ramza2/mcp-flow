@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime, timedelta
-from typing import Any
 
 import pytest
 from app.domain.enums import ApprovalStatus, ExecutionStatus, StepStatus

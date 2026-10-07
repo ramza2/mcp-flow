@@ -336,8 +336,9 @@ async def _assert_schedule_occurrence_lineage(
     after creation; ordinary consistent reads are sufficient. Mutable
     Workflow/User/grant/Tool authorization remains elsewhere.
     """
-    from app.models.schedule import Schedule, ScheduleOccurrence
     from sqlalchemy import select
+
+    from app.models.schedule import Schedule, ScheduleOccurrence
 
     if (
         execution.schedule_occurrence_id is None

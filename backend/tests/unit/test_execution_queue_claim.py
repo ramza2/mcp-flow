@@ -6,17 +6,15 @@ import uuid
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
-
 from app.core.errors import AppError
 from app.domain.enums import ExecutionStatus, StepStatus
 from app.execution.claim import ExecutionClaimService
 from app.execution.queue import ExecutionQueueService, OutboxRelayService
 from app.infrastructure.celery_app import celery_app
-from app.models.execution import Execution, ExecutionStep
 from app.models.outbox import OutboxEvent
 from app.repositories.execution import ExecutionRepository
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from tests.unit.test_execution_creation import _create, _idem_key, _seed_ready
 
