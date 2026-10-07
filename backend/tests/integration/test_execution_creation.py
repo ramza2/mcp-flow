@@ -310,10 +310,19 @@ async def test_pg_requires_approval_valid_created_no_approval_request(
         execution = await ExecutionRepository(session).get(execution_id)
         assert execution is not None
         assert execution.status == ExecutionStatus.CREATED.value
-        reg = (
-            await session.execute(text("SELECT to_regclass('public.approval_requests')"))
+        # Contract: Execution creation must not pre-create ApprovalRequest rows
+        # even when ToolPolicy.requires_approval=true (wait happens at runtime).
+        # The approval_requests table exists at head — do not assert its absence.
+        approval_count = (
+            await session.execute(
+                text(
+                    "SELECT count(*)::int FROM approval_requests "
+                    "WHERE execution_id = :execution_id"
+                ),
+                {"execution_id": execution_id},
+            )
         ).scalar_one()
-        assert reg is None
+        assert approval_count == 0
 
 
 @pytest.mark.integration
