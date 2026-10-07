@@ -1071,6 +1071,11 @@ OpenAPI에서 secret field가 response schema로 노출되지 않아야 한다.
 Playwright Chromium harness: `frontend/tests/e2e/execution-sse-live.spec.ts`
 (`pnpm test:e2e:sse-live`).
 
+Component/unit verification (Fake EventSource + fake timers) remains in §19
+“Frontend implemented” and does **not** substitute for live pilot evidence.
+
+Harness contract:
+
 - `PLAYWRIGHT_BASE_URL`가 외부 HTTPS이면 `webServer`/Vite를 시작하지 않음
 - env 미설정 시 skip — CI baseline / `pnpm test:e2e` mock smoke를 깨지 않음
 - 실제 Login UI (mockAuthSession 금지); trace/video/screenshot off
@@ -1080,8 +1085,33 @@ Playwright Chromium harness: `frontend/tests/e2e/execution-sse-live.spec.ts`
   → Polling fallback → network restore → REST poll
   (3× EventSource `onerror`에 의존하지 않음; Chromium offline에서 onerror 미발화 보완)
 - Traefik buffering/idle 설정은 실측 실패 재현 전에는 변경하지 않음
-- **reconnect / fallback live PASS는 실제 배포 fixture pilot 재실행으로만 기록**
-  (PR #68 harness/product 변경만으로는 fallback live PASS로 표기하지 않음)
+
+#### Pilot live evidence (2026-10-07) — PASS
+
+| Field | Value |
+|---|---|
+| Environment | pilot (`https://mcpflow.openlink.kr`) |
+| Deployed commit | `16ad05bf2f76b46a10f3ea955609736ab1df1c21` (`main`, includes PR #68) |
+| Runner | Playwright Chromium live harness |
+| Command | `pnpm test:e2e:sse-live` |
+| Aggregate | **3 passed** (51.5s) |
+
+| # | Subtest | Result |
+|---|---|---|
+| 1 | real SSE connects Live and shows durable events | PASS (2.0s) |
+| 2 | short offline → native EventSource reconnect to Live | PASS (37.8s) |
+| 3 | active execution sustained offline → Polling fallback + REST poll | PASS (10.3s) |
+
+Verified on this pilot run:
+
+- Browser EventSource → HTTPS → Traefik → API → PostgreSQL durable SSE path
+- native reconnect on short disconnect
+- sustained browser offline grace watchdog → Polling fallback
+- REST polling after network restore
+- no Traefik buffering workaround required
+
+Credentials, cookies, session headers, fixture user, and fixture UUIDs are
+intentionally omitted from this record.
 
 Required env (placeholders only; never commit secrets):
 
@@ -1133,7 +1163,7 @@ ExecutionDetail SSE는 Fake EventSource + fake timers로 component 검증한다.
 | `E2E-007` | MCP Server→Discovery→Tool→Verification |
 | `E2E-008` | Agent/Workflow Draft→Publish→실행 |
 | `E2E-009` | 예약 occurrence→Execution |
-| `E2E-010` | SSE 단절→재연결/polling (live Traefik harness; PASS only when run) |
+| `E2E-010` | SSE 단절→재연결/polling (live Traefik harness; pilot PASS 2026-10-07) |
 | `E2E-011` | UNKNOWN_OUTCOME 운영확인 UX |
 | `E2E-012` | Role별 UI/API 권한 차이 |
 
