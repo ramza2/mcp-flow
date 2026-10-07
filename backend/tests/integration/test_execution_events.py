@@ -197,12 +197,15 @@ async def test_queue_service_emits_queued_event(
     integration_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     """CREATED → QUEUED staging appends execution.queued in the same TX."""
+    from app.domain.enums import ExecutionSourceType
+
     async with integration_session_factory() as session:
         owner = await seed_user(session)
         execution = await seed_execution(
             session,
             requester_id=owner,
             status=ExecutionStatus.CREATED.value,
+            source_type=ExecutionSourceType.WORKFLOW_VERSION.value,
         )
         # Materialize-style created event
         await ExecutionEventWriter(session).emit_execution_status_changed(

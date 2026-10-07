@@ -48,7 +48,7 @@ def parse_last_event_id(raw: str | None) -> int:
         raise AppError(
             code="VALIDATION_ERROR",
             message="Last-Event-ID must be a non-negative decimal integer.",
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
         )
     return int(value)
 
