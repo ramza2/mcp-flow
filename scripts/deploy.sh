@@ -218,6 +218,45 @@ wait_migration() {
   fail "Migration did not complete within 180 seconds"
 }
 
+# Validate /health/ready body is the API readiness JSON contract (not SPA HTML).
+# Expects: {"status":"ok","checks":{"database":"ok"}}
+readiness_json_ok() {
+  local body_file="$1"
+  python3 - "$body_file" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+try:
+    with open(path, encoding="utf-8") as handle:
+        data = json.load(handle)
+except Exception as exc:  # noqa: BLE001 — surface parse failures to deploy logs
+    print(f"readiness body is not valid JSON: {exc}", file=sys.stderr)
+    raise SystemExit(1) from exc
+
+if not isinstance(data, dict):
+    print("readiness body must be a JSON object", file=sys.stderr)
+    raise SystemExit(1)
+
+status = data.get("status")
+if status != "ok":
+    print(f"readiness status is not ok: {status!r}", file=sys.stderr)
+    raise SystemExit(1)
+
+checks = data.get("checks")
+if not isinstance(checks, dict):
+    print(f"readiness checks missing or not an object: {checks!r}", file=sys.stderr)
+    raise SystemExit(1)
+
+database = checks.get("database")
+if database != "ok":
+    print(f"readiness checks.database is not ok: {database!r}", file=sys.stderr)
+    raise SystemExit(1)
+
+raise SystemExit(0)
+PY
+}
+
 smoke_test() {
   # shellcheck disable=SC1090
   source "$ENV_FILE"
@@ -225,24 +264,54 @@ smoke_test() {
     echo "curl not installed; skipping external HTTPS smoke test"
     return 0
   fi
+  require_cmd python3
 
   local url="https://${MCPFLOW_HOST}/health/ready"
-  local i
+  local i http_code content_type body_file
+  body_file="$(mktemp)"
+  # shellcheck disable=SC2064
+  trap "rm -f '$body_file'" RETURN
+
   log "HTTPS smoke test: $url"
   for i in {1..30}; do
     # Traefik may briefly serve its default/self-signed certificate while ACME
-    # issuance or certificate reload completes. Suppress transient retry noise;
-    # a successful verified request is still required before deployment passes.
-    if curl --fail --silent --max-time 5 "$url" >/dev/null 2>&1; then
-      echo "Health check passed"
+    # issuance or certificate reload completes. HTTP 2xx alone is not enough —
+    # frontend HTML 200 must not pass when the API is down.
+    http_code="$(
+      curl --silent --show-error --max-time 5 \
+        -H 'Accept: application/json' \
+        -o "$body_file" \
+        -w '%{http_code}' \
+        "$url" 2>/dev/null || printf '000'
+    )"
+    if [[ "$http_code" == "200" ]] && readiness_json_ok "$body_file"; then
+      echo "Health check passed (readiness JSON status=ok, checks.database=ok)"
       return 0
     fi
     sleep 2
   done
 
+  content_type="$(
+    curl --silent --show-error --max-time 5 \
+      -H 'Accept: application/json' \
+      -o "$body_file" \
+      -w '%{content_type}' \
+      "$url" 2>/dev/null || printf ''
+  )"
+  http_code="$(
+    curl --silent --show-error --max-time 5 \
+      -H 'Accept: application/json' \
+      -o /dev/null \
+      -w '%{http_code}' \
+      "$url" 2>/dev/null || printf '000'
+  )"
   echo "Final HTTPS diagnostic:" >&2
-  curl --fail --silent --show-error --max-time 5 "$url" >/dev/null || true
-  fail "HTTPS readiness check failed: $url"
+  echo "  http_status=${http_code}" >&2
+  echo "  content_type=${content_type}" >&2
+  echo "  body:" >&2
+  head -c 2048 "$body_file" >&2 || true
+  echo >&2
+  fail "HTTPS readiness check failed (semantic JSON required): $url"
 }
 
 deploy_core() {
