@@ -1,185 +1,354 @@
-import { useMemo, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router';
-import { ArrowLeft, X, CheckCircle2, Loader2, Circle, AlertTriangle, Clock, ChevronRight, RefreshCw } from 'lucide-react';
-import StatusBadge, { RiskBadge } from '../../components/ui/StatusBadge';
+import {
+  ArrowLeft,
+  X,
+  CheckCircle2,
+  Loader2,
+  Circle,
+  AlertTriangle,
+  Clock,
+} from 'lucide-react';
+import StatusBadge from '../../components/ui/StatusBadge';
 import { TabBar } from '../../components/ui/Tabs';
 import Button from '../../components/ui/Button';
-import { InlineAlert } from '../../components/ui/EmptyState';
+import {
+  EmptyState,
+  ErrorState,
+  InlineAlert,
+  LoadingSkeleton,
+  PermissionDenied,
+} from '../../components/ui/EmptyState';
 import MrtrInputPanel from '../../components/MrtrInputPanel';
-import { mockExecutions } from '../../data/mock';
-import { labelExecutionSource, type ExecutionStatus, type StepStatus } from '../../domain';
 import PermissionGate from '../../components/PermissionGate';
+import {
+  cancelExecution,
+  getExecution,
+  getExecutionStep,
+  listExecutionSteps,
+  type ExecutionDetailDto,
+  type ExecutionStepDetailDto,
+  type ExecutionStepListItemDto,
+  type StepAttemptSafeDto,
+} from '../../api/executions';
+import {
+  getAuditEvent,
+  listAuditEvents,
+  type AuditEventDetailDto,
+  type AuditEventListItemDto,
+} from '../../api/audit';
+import { isAbortError, isApiError } from '../../api/client';
+import {
+  formatDurationMs,
+  formatTimestamp,
+  labelExecutionSource,
+  type ExecutionStatus,
+} from '../../domain';
 
-const UUID_RE =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const ACTIVE_STATUSES = new Set<ExecutionStatus>([
+  'CREATED',
+  'QUEUED',
+  'RUNNING',
+  'WAITING_INPUT',
+  'WAITING_APPROVAL',
+  'CANCEL_REQUESTED',
+]);
 
-type StepRow = {
-  id: string;
-  name: string;
-  type: string;
-  status: StepStatus;
-  tool: string | null;
-  version: string | null;
-  attempts: number;
-  started: string | null;
-  ended: string | null;
-  duration: string;
-  inputs: Record<string, unknown> | null;
-  outputs: Record<string, unknown> | null;
-  error: string | null;
-  runtimeInput?: {
-    server: string;
-    tool: string;
-    message: string;
-    round: number;
-    expiresIn: string;
-    responded?: boolean;
-  };
-};
+const POLL_MS = 4000;
 
-const DEFAULT_STEPS: StepRow[] = [
-  { id: 's1', name: '주간 데이터 조회', type: 'Tool', status: 'SUCCEEDED', tool: 'Search Documents', version: 'v2.1.0', attempts: 1, started: '14:30:01', ended: '14:30:08', duration: '7s', inputs: { query: '주간 보고 데이터 2026-09-02', limit: 10 }, outputs: { count: 8 }, error: null },
-  { id: 's2', name: '보고서 파일 생성', type: 'Tool', status: 'SUCCEEDED', tool: 'Generate Report', version: 'v1.0.3', attempts: 1, started: '14:30:09', ended: '14:30:35', duration: '26s', inputs: { template: 'weekly_summary' }, outputs: { filename: 'report_2026-09-02.pdf' }, error: null },
-  { id: 's3', name: '이메일 발송 승인 대기', type: 'Approval', status: 'WAITING_APPROVAL', tool: null, version: null, attempts: 0, started: '14:30:36', ended: null, duration: '–', inputs: null, outputs: null, error: null },
-  { id: 's4', name: '이메일 발송', type: 'Tool', status: 'PENDING', tool: 'Send Email', version: 'v3.0.1', attempts: 0, started: null, ended: null, duration: '–', inputs: null, outputs: null, error: null },
-];
-
-const MRTR_STEPS: StepRow[] = [
-  {
-    id: 'm1',
-    name: '보고서 생성 (MRTR)',
-    type: 'Tool',
-    status: 'WAITING_INPUT',
-    tool: 'Generate Report',
-    version: 'v1.0.3',
-    attempts: 1,
-    started: '15:00:05',
-    ended: null,
-    duration: '–',
-    inputs: null,
-    outputs: null,
-    error: null,
-    runtimeInput: {
-      server: 'Report MCP',
-      tool: 'Generate Report',
-      message: '보고서 템플릿을 선택해 주세요.',
-      round: 1,
-      expiresIn: '4분 12초',
-      responded: false,
-    },
-  },
-];
-
-const UNKNOWN_STEPS: StepRow[] = [
-  { id: 'u1', name: '외부 전송', type: 'Tool', status: 'UNKNOWN_OUTCOME', tool: 'Send Email', version: 'v3.0.1', attempts: 1, started: '11:20:01', ended: null, duration: '–', inputs: { to: '***' }, outputs: null, error: '응답 타임아웃 — 외부 전송 여부 불명' },
-];
+function JsonBlock({ title, value, note }: { title: string; value: unknown; note?: string }) {
+  return (
+    <div className="bg-white rounded-xl border border-slate-200 p-4">
+      <h3 className="text-sm font-semibold text-slate-800 mb-3">{title}</h3>
+      {note && <p className="text-xs text-slate-400 mb-2">{note}</p>}
+      <pre className="text-xs font-mono bg-slate-50 rounded-lg p-3 text-slate-700 overflow-x-auto max-h-80">
+        {value == null ? 'null' : JSON.stringify(value, null, 2)}
+      </pre>
+    </div>
+  );
+}
 
 export default function ExecutionDetail() {
   const { executionId } = useParams();
   const navigate = useNavigate();
   const [tab, setTab] = useState('overview');
-  const base = mockExecutions.find(e => e.id === executionId) ?? mockExecutions[0];
-  const [status, setStatus] = useState<ExecutionStatus>(base.status);
+  const [execution, setExecution] = useState<ExecutionDetailDto | null>(null);
+  const [steps, setSteps] = useState<ExecutionStepListItemDto[]>([]);
+  const [selectedStepId, setSelectedStepId] = useState<string | null>(null);
+  const [stepDetail, setStepDetail] = useState<ExecutionStepDetailDto | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [forbidden, setForbidden] = useState(false);
+  const [notFound, setNotFound] = useState(false);
+  const [error, setError] = useState<{ message: string; requestId?: string } | null>(null);
   const [cancelling, setCancelling] = useState(false);
-  const [mrtrResponded, setMrtrResponded] = useState(false);
-  const [mrtrRejected, setMrtrRejected] = useState(false);
-  const useLiveMrtr = Boolean(executionId && UUID_RE.test(executionId));
-  const isMrtrExecution =
-    !useLiveMrtr &&
-    (base.id === 'EXE-20260902-00126' || base.status === 'WAITING_INPUT');
+  const [cancelError, setCancelError] = useState<string | null>(null);
+  const [stepDetailLoading, setStepDetailLoading] = useState(false);
+  const pollInFlight = useRef(false);
 
-  const steps = useMemo(() => {
-    // UNKNOWN_OUTCOME demo must win over CANCELLED fallback for this fixture.
-    if (base.id === 'EXE-20260901-00119') return UNKNOWN_STEPS;
-    if (isMrtrExecution || status === 'WAITING_INPUT' || (mrtrResponded && status === 'RUNNING')) {
-      return MRTR_STEPS.map(s => s.runtimeInput
-        ? {
-          ...s,
-          runtimeInput: { ...s.runtimeInput, responded: mrtrResponded || mrtrRejected },
-          status: (mrtrRejected
-            ? 'FAILED'
-            : mrtrResponded || status === 'RUNNING'
-              ? 'RUNNING'
-              : s.status) as StepStatus,
+  const loadSnapshot = useCallback(
+    async (signal?: AbortSignal, opts?: { quiet?: boolean }) => {
+      if (!executionId) return;
+      if (!opts?.quiet) {
+        setLoading(true);
+        setError(null);
+        setForbidden(false);
+        setNotFound(false);
+      }
+      try {
+        const [detail, stepList] = await Promise.all([
+          getExecution(executionId, signal),
+          listExecutionSteps(executionId, signal),
+        ]);
+        if (signal?.aborted) return;
+        setExecution(detail);
+        setSteps(stepList.items);
+      } catch (err: unknown) {
+        if (isAbortError(err) || signal?.aborted) return;
+        if (isApiError(err) && err.status === 403) {
+          setForbidden(true);
+          setExecution(null);
+          return;
         }
-        : s);
+        if (isApiError(err) && err.status === 404) {
+          setNotFound(true);
+          setExecution(null);
+          return;
+        }
+        if (!opts?.quiet) {
+          const apiErr = isApiError(err) ? err : null;
+          setError({
+            message: apiErr?.message ?? 'Execution을 불러오지 못했습니다.',
+            requestId: apiErr?.requestId ?? undefined,
+          });
+        }
+      } finally {
+        if (!opts?.quiet && !signal?.aborted) setLoading(false);
+      }
+    },
+    [executionId],
+  );
+
+  useEffect(() => {
+    const controller = new AbortController();
+    void loadSnapshot(controller.signal);
+    return () => controller.abort();
+  }, [loadSnapshot]);
+
+  // Snapshot polling for active executions — no SSE.
+  useEffect(() => {
+    if (!executionId || !execution || !ACTIVE_STATUSES.has(execution.status)) return;
+    const controller = new AbortController();
+    const timer = window.setInterval(() => {
+      if (pollInFlight.current || controller.signal.aborted) return;
+      pollInFlight.current = true;
+      void loadSnapshot(controller.signal, { quiet: true }).finally(() => {
+        pollInFlight.current = false;
+      });
+    }, POLL_MS);
+    return () => {
+      controller.abort();
+      window.clearInterval(timer);
+    };
+  }, [executionId, execution?.status, loadSnapshot]);
+
+  useEffect(() => {
+    if (!executionId || !selectedStepId) {
+      setStepDetail(null);
+      return;
     }
-    if (base.status === 'CANCELLED' || status === 'CANCELLED' || status === 'CANCEL_REQUESTED') {
-      return DEFAULT_STEPS.map((s, i) => (i === 0 ? { ...s, status: 'SUCCEEDED' as StepStatus } : { ...s, status: (status === 'CANCELLED' ? 'CANCELLED' : s.status) as StepStatus }));
-    }
-    return DEFAULT_STEPS;
-  }, [base.id, base.status, status, mrtrResponded, mrtrRejected, isMrtrExecution]);
-
-  const [selectedStep, setSelectedStep] = useState<StepRow | null>(null);
-
-  /** Runtime MRTR mock: WAITING_INPUT → user response → Execution RUNNING. */
-  const handleMrtrRespond = () => {
-    setMrtrResponded(true);
-    setStatus('RUNNING');
-  };
-
-  const handleMrtrReject = () => {
-    setMrtrRejected(true);
-    setStatus('FAILED');
-  };
+    const controller = new AbortController();
+    setStepDetailLoading(true);
+    getExecutionStep(executionId, selectedStepId, controller.signal)
+      .then((d) => setStepDetail(d))
+      .catch((err: unknown) => {
+        if (isAbortError(err)) return;
+        setStepDetail(null);
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setStepDetailLoading(false);
+      });
+    return () => controller.abort();
+  }, [executionId, selectedStepId]);
 
   const handleCancel = async () => {
-    if (cancelling) return;
+    if (!executionId || cancelling) return;
     setCancelling(true);
-    // RUNNING → CANCEL_REQUESTED → CANCELLED (never jump straight to CANCELLED)
-    setStatus('CANCEL_REQUESTED');
-    await delay(1200);
-    setStatus('CANCELLED');
-    setCancelling(false);
+    setCancelError(null);
+    try {
+      const result = await cancelExecution(executionId);
+      setExecution((prev) =>
+        prev
+          ? {
+              ...prev,
+              status: result.status,
+              cancel_requested_at: result.cancel_requested_at,
+              finished_at: result.finished_at,
+            }
+          : prev,
+      );
+      await loadSnapshot(undefined, { quiet: true });
+    } catch (err: unknown) {
+      setCancelError(isApiError(err) ? err.message : '취소 요청에 실패했습니다.');
+    } finally {
+      setCancelling(false);
+    }
   };
 
-  const canCancel = status === 'RUNNING' || status === 'WAITING_APPROVAL' || status === 'WAITING_INPUT';
-  const showSafeRetry = base.canRetry && (status === 'FAILED' || status === 'PARTIALLY_SUCCEEDED');
-  const hasUnknown = steps.some(s => s.status === 'UNKNOWN_OUTCOME');
-  const approvalId = 'approvalId' in base ? (base as { approvalId?: string }).approvalId : undefined;
+  if (!executionId) {
+    return (
+      <div className="p-6">
+        <EmptyState title="Execution ID가 없습니다." />
+      </div>
+    );
+  }
+
+  if (loading && !execution) {
+    return (
+      <div className="p-6">
+        <LoadingSkeleton rows={8} />
+      </div>
+    );
+  }
+
+  if (forbidden) {
+    return (
+      <div className="p-6">
+        <PermissionDenied />
+      </div>
+    );
+  }
+
+  if (notFound) {
+    return (
+      <div className="p-6">
+        <EmptyState
+          title="Execution을 찾을 수 없습니다."
+          description="권한이 없거나 삭제된 실행일 수 있습니다."
+          action={{ label: '목록으로', onClick: () => navigate('/executions') }}
+        />
+      </div>
+    );
+  }
+
+  if (error && !execution) {
+    return (
+      <div className="p-6">
+        <ErrorState
+          message={error.message}
+          requestId={error.requestId}
+          onRetry={() => void loadSnapshot()}
+        />
+      </div>
+    );
+  }
+
+  if (!execution) return null;
+
+  const status = execution.status;
+  const canCancel =
+    status === 'RUNNING' ||
+    status === 'WAITING_APPROVAL' ||
+    status === 'WAITING_INPUT' ||
+    status === 'QUEUED' ||
+    status === 'CREATED';
+  const hasUnknown = steps.some((s) => s.status === 'UNKNOWN_OUTCOME');
 
   return (
     <div>
       <div className="bg-white border-b border-slate-200 px-6 py-4">
-        <button onClick={() => navigate('/executions')} className="flex items-center gap-1.5 text-sm text-slate-500 hover:text-slate-700 mb-3">
+        <button
+          onClick={() => navigate('/executions')}
+          className="flex items-center gap-1.5 text-sm text-slate-500 hover:text-slate-700 mb-3"
+        >
           <ArrowLeft size={14} /> Executions
         </button>
         <div className="flex items-start justify-between">
           <div>
             <div className="flex items-center gap-3 mb-1">
-              <h1 className="text-lg font-semibold text-slate-900 font-mono">{base.id}</h1>
+              <h1 className="text-lg font-semibold text-slate-900 font-mono">
+                {execution.id}
+              </h1>
               <StatusBadge status={status} />
             </div>
             <div className="flex flex-wrap gap-x-6 gap-y-1 text-xs text-slate-500">
-              <span>Source: <span className="text-slate-700">{labelExecutionSource(base.sourceType)}</span></span>
-              <span>Agent: <span className="text-slate-700">{base.agent ?? base.workflow ?? '–'}</span></span>
-              <span>시작자: <span className="text-slate-700">{base.user}</span></span>
-              <span>시작: <span className="text-slate-700">{base.startedAt}</span></span>
-              <span>소요시간: <span className="text-slate-700 font-mono">{base.duration}</span></span>
+              <span>
+                Source:{' '}
+                <span className="text-slate-700">
+                  {labelExecutionSource(execution.source_type)}
+                  {execution.source?.name ? ` · ${execution.source.name}` : ''}
+                </span>
+              </span>
+              <span>
+                Requester:{' '}
+                <span className="text-slate-700 font-mono">{execution.requester_id}</span>
+              </span>
+              <span>
+                Requested:{' '}
+                <span className="text-slate-700">
+                  {formatTimestamp(execution.requested_at)}
+                </span>
+              </span>
+              <span>
+                Started:{' '}
+                <span className="text-slate-700">
+                  {formatTimestamp(execution.started_at)}
+                </span>
+              </span>
+              <span>
+                Duration:{' '}
+                <span className="text-slate-700 font-mono">
+                  {formatDurationMs(execution.duration_ms)}
+                </span>
+              </span>
             </div>
           </div>
           <div className="flex gap-2 shrink-0">
             {(canCancel || status === 'CANCEL_REQUESTED') && (
               <PermissionGate permission="execution.cancel">
-                <Button variant="danger" size="sm" icon={<X size={13} />} loading={cancelling || status === 'CANCEL_REQUESTED'} onClick={handleCancel} disabled={status === 'CANCEL_REQUESTED'}>
+                <Button
+                  variant="danger"
+                  size="sm"
+                  icon={<X size={13} />}
+                  loading={cancelling || status === 'CANCEL_REQUESTED'}
+                  onClick={() => void handleCancel()}
+                  disabled={status === 'CANCEL_REQUESTED' || cancelling}
+                >
                   {status === 'CANCEL_REQUESTED' ? '취소 요청됨' : '실행 취소'}
-                </Button>
-              </PermissionGate>
-            )}
-            {showSafeRetry && !hasUnknown && (
-              <PermissionGate permission="execution.retry">
-                <Button variant="outline" size="sm" icon={<RefreshCw size={13} />} onClick={() => navigate('/executions')}>
-                  New Execution (Retry)
                 </Button>
               </PermissionGate>
             )}
           </div>
         </div>
+        {cancelError && (
+          <div className="mt-3">
+            <InlineAlert type="error" message={cancelError} />
+          </div>
+        )}
         {status === 'CANCEL_REQUESTED' && (
-          <div className="mt-3"><InlineAlert type="warning" message="Cancel requested — 진행 중 Step 정리 후 CANCELLED로 전환됩니다." /></div>
+          <div className="mt-3">
+            <InlineAlert
+              type="warning"
+              message="Cancel requested — 진행 중 Step 정리 후 CANCELLED로 전환됩니다."
+            />
+          </div>
         )}
         {hasUnknown && (
-          <div className="mt-3"><InlineAlert type="warning" message="UNKNOWN_OUTCOME Step이 있습니다. 자동 Retry CTA는 제공하지 않습니다. 외부 시스템 결과를 운영 확인하세요." /></div>
+          <div className="mt-3">
+            <InlineAlert
+              type="warning"
+              message="UNKNOWN_OUTCOME Step이 있습니다. 자동 Retry CTA는 제공하지 않습니다. 외부 시스템 결과를 운영 확인하세요."
+            />
+          </div>
+        )}
+        {execution.error_code && (
+          <div className="mt-3">
+            <InlineAlert
+              type="error"
+              message={`error_code: ${execution.error_code}${
+                execution.error_category ? ` (${execution.error_category})` : ''
+              }`}
+            />
+          </div>
         )}
       </div>
 
@@ -200,141 +369,171 @@ export default function ExecutionDetail() {
       <div className="p-6">
         {tab === 'overview' && (
           <OverviewTab
-            execution={base}
-            status={status}
-            approvalId={approvalId}
-            onOpenApproval={() => navigate(`/approvals/${approvalId ?? 'apr-001'}`)}
+            execution={execution}
             steps={steps}
-            onMrtrRespond={handleMrtrRespond}
-            onMrtrReject={handleMrtrReject}
-            liveExecutionId={useLiveMrtr ? executionId : undefined}
-            onLiveMrtrResolved={(next) => setStatus(next as ExecutionStatus)}
-            mrtrRejected={mrtrRejected}
+            onLiveMrtrResolved={() => void loadSnapshot(undefined, { quiet: true })}
           />
         )}
-        {tab === 'steps' && <StepsTab steps={steps} selectedStep={selectedStep} onSelectStep={setSelectedStep} />}
-        {tab === 'events' && <EventsTab status={status} />}
-        {tab === 'io' && <IOTab status={status} />}
-        {tab === 'audit' && <AuditTab executionId={base.id} />}
+        {tab === 'steps' && (
+          <StepsTab
+            steps={steps}
+            selectedStepId={selectedStepId}
+            onSelectStep={(id) =>
+              setSelectedStepId((prev) => (prev === id ? null : id))
+            }
+            stepDetail={stepDetail}
+            stepDetailLoading={stepDetailLoading}
+          />
+        )}
+        {tab === 'events' && <EventsTab />}
+        {tab === 'io' && <IOTab resultSummary={execution.result_summary} />}
+        {tab === 'audit' && <AuditTab executionId={execution.id} />}
       </div>
     </div>
   );
 }
 
 function OverviewTab({
-  execution, status, approvalId, onOpenApproval, steps, onMrtrRespond, onMrtrReject,
-  liveExecutionId, onLiveMrtrResolved, mrtrRejected,
+  execution,
+  steps,
+  onLiveMrtrResolved,
 }: {
-  execution: typeof mockExecutions[0];
-  status: ExecutionStatus;
-  approvalId?: string;
-  onOpenApproval: () => void;
-  steps: StepRow[];
-  onMrtrRespond: () => void;
-  onMrtrReject: () => void;
-  liveExecutionId?: string;
-  onLiveMrtrResolved?: (status: string) => void;
-  mrtrRejected: boolean;
+  execution: ExecutionDetailDto;
+  steps: ExecutionStepListItemDto[];
+  onLiveMrtrResolved: () => void;
 }) {
-  // Keep Runtime Input card visible after respond (Step may already be RUNNING).
-  const mrtr = steps.find(s => s.runtimeInput)?.runtimeInput;
-  const showMockMrtrCard =
-    !liveExecutionId &&
-    !!mrtr &&
-    (status === 'WAITING_INPUT' || !!mrtr.responded || mrtrRejected);
-
   return (
     <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 max-w-4xl">
       <div className="bg-white rounded-xl border border-slate-200 p-4">
-        <h3 className="text-sm font-semibold text-slate-800 mb-3">원본 요청</h3>
-        <p className="text-sm text-slate-700 bg-slate-50 rounded-lg p-3">{execution.name}</p>
+        <h3 className="text-sm font-semibold text-slate-800 mb-3">Source</h3>
+        <div className="space-y-1.5 text-sm text-slate-700">
+          <p>
+            Type:{' '}
+            <span className="font-medium">
+              {labelExecutionSource(execution.source_type)}
+            </span>
+          </p>
+          <p>Name: {execution.source?.name ?? '—'}</p>
+          <p className="font-mono text-xs text-slate-500">
+            version: {execution.source?.version_id ?? '—'}
+          </p>
+          <p className="font-mono text-xs text-slate-500">
+            logical: {execution.source?.logical_id ?? '—'}
+          </p>
+        </div>
       </div>
       <div className="bg-white rounded-xl border border-slate-200 p-4">
-        <h3 className="text-sm font-semibold text-slate-800 mb-3">Plan 요약</h3>
-        <div className="space-y-1.5">
-          {['주간 데이터 조회', '보고서 파일 생성', '이메일 발송'].map((s, i) => (
-            <div key={i} className="flex items-center gap-2 text-sm">
-              <span className="text-xs text-slate-400 w-4">{i + 1}.</span>
-              <span className="text-slate-700">{s}</span>
-            </div>
-          ))}
-        </div>
-        <div className="mt-3 flex gap-1.5 flex-wrap">
-          <RiskBadge risk="NON_IDEMPOTENT_WRITE" />
-        </div>
+        <h3 className="text-sm font-semibold text-slate-800 mb-3">Plan limits</h3>
+        {execution.plan_limits ? (
+          <div className="space-y-1 text-sm text-slate-700">
+            <p>max_steps: {execution.plan_limits.max_steps ?? '—'}</p>
+            <p>
+              max_duration_seconds:{' '}
+              {execution.plan_limits.max_duration_seconds ?? '—'}
+            </p>
+            <p>max_parallelism: {execution.plan_limits.max_parallelism ?? '—'}</p>
+            <p>
+              max_loop_iterations:{' '}
+              {execution.plan_limits.max_loop_iterations ?? '—'}
+            </p>
+            <p className="text-xs text-slate-400 font-mono mt-2">
+              schema {execution.plan_schema_version} · hash{' '}
+              {execution.plan_hash.slice(0, 12)}…
+            </p>
+          </div>
+        ) : (
+          <p className="text-sm text-slate-400">limits summary 없음</p>
+        )}
+        <p className="text-xs text-slate-400 mt-3">
+          Plan snapshot은 Operations API에서 노출되지 않습니다.
+        </p>
       </div>
 
-      {status === 'WAITING_APPROVAL' && (
+      <div className="bg-white rounded-xl border border-slate-200 p-4">
+        <h3 className="text-sm font-semibold text-slate-800 mb-3">Steps summary</h3>
+        <p className="text-sm text-slate-700">
+          {execution.completed_step_count} completed / {execution.step_count} total
+          {execution.failed_step_count > 0
+            ? ` · ${execution.failed_step_count} failed`
+            : ''}
+        </p>
+        <ul className="mt-2 space-y-1">
+          {steps.map((s) => (
+            <li key={s.id} className="flex items-center justify-between text-sm">
+              <span className="text-slate-700 truncate font-mono text-xs">{s.step_key}</span>
+              <StatusBadge status={s.status} size="sm" />
+            </li>
+          ))}
+        </ul>
+      </div>
+
+      {execution.status === 'WAITING_APPROVAL' && (
         <div className="col-span-full bg-amber-50 border border-amber-200 rounded-xl p-4 flex items-start gap-3">
           <AlertTriangle size={16} className="text-amber-600 shrink-0 mt-0.5" />
           <div>
-            <p className="text-sm font-semibold text-amber-800">Execution WAITING_APPROVAL</p>
-            <p className="text-sm text-amber-700 mt-0.5">이메일 발송 작업이 승인을 기다리고 있습니다. (Approval Entity Status는 PENDING)</p>
-            <button onClick={onOpenApproval} className="mt-2 text-xs text-indigo-600 hover:underline flex items-center gap-1">
-              승인 요청 보기 {approvalId && <span className="font-mono">({approvalId})</span>} <ChevronRight size={11} />
-            </button>
+            <p className="text-sm font-semibold text-amber-800">
+              Execution WAITING_APPROVAL
+            </p>
+            <p className="text-sm text-amber-700 mt-0.5">
+              승인 대기 중입니다. Approval Entity status는 PENDING과 별개입니다.
+            </p>
           </div>
         </div>
       )}
 
-      {liveExecutionId && status === 'WAITING_INPUT' && (
-        <MrtrInputPanel
-          executionId={liveExecutionId}
-          onResolved={onLiveMrtrResolved}
-        />
-      )}
-
-      {showMockMrtrCard && mrtr && (
-        <div className="col-span-full bg-amber-50 border border-amber-200 rounded-xl p-4 space-y-2">
-          <p className="text-sm font-semibold text-amber-800">
-            {mrtrRejected
-              ? 'MCP Tool input rejected — Execution FAILED'
-              : mrtr.responded
-                ? 'MCP Tool input received — Execution resumed'
-                : 'MCP Tool requests information (Runtime WAITING_INPUT)'}
-          </p>
-          <div className="text-xs text-amber-700 space-y-0.5">
-            <p>MCP Server: {mrtr.server}</p>
-            <p>Tool: <span className="font-mono">{mrtr.tool}</span></p>
-            <p>{mrtr.message}</p>
-            <p>Round: {mrtr.round} · Remaining: {mrtr.expiresIn}</p>
-          </div>
-          <p className="text-[10px] text-amber-500 font-mono">requestState is not user-visible / not editable</p>
-          {!mrtr.responded && !mrtrRejected && (
-            <div className="flex gap-2">
-              <Button size="sm" onClick={onMrtrRespond}>응답 후 Resume</Button>
-              <Button size="sm" variant="outline" onClick={onMrtrReject}>거부</Button>
-            </div>
-          )}
-          {mrtr.responded && status === 'RUNNING' && (
-            <InlineAlert type="info" message="응답 제출됨 — Execution RUNNING으로 재개" />
-          )}
-          {mrtrRejected && status === 'FAILED' && (
-            <InlineAlert type="warning" message="입력이 거부되었습니다 — Execution FAILED" />
-          )}
+      {execution.status === 'WAITING_INPUT' && (
+        <div className="col-span-full">
+          <MrtrInputPanel
+            executionId={execution.id}
+            onResolved={() => onLiveMrtrResolved()}
+          />
         </div>
       )}
     </div>
   );
 }
 
-function StepsTab({ steps, selectedStep, onSelectStep }: { steps: StepRow[]; selectedStep: StepRow | null; onSelectStep: (s: StepRow | null) => void }) {
+function StepsTab({
+  steps,
+  selectedStepId,
+  onSelectStep,
+  stepDetail,
+  stepDetailLoading,
+}: {
+  steps: ExecutionStepListItemDto[];
+  selectedStepId: string | null;
+  onSelectStep: (id: string) => void;
+  stepDetail: ExecutionStepDetailDto | null;
+  stepDetailLoading: boolean;
+}) {
+  if (steps.length === 0) {
+    return <EmptyState title="Step이 없습니다." />;
+  }
   return (
     <div className="flex gap-4 max-w-5xl">
       <div className="flex-1 bg-white rounded-xl border border-slate-200 p-6">
-        <h3 className="text-sm font-semibold text-slate-700 mb-6">Step Graph</h3>
+        <h3 className="text-sm font-semibold text-slate-700 mb-6">Steps</h3>
         <div className="flex flex-col items-center gap-0">
           {steps.map((step, i) => (
             <div key={step.id} className="flex flex-col items-center">
               <button
-                onClick={() => onSelectStep(selectedStep?.id === step.id ? null : step)}
+                onClick={() => onSelectStep(step.id)}
                 className={`flex items-center gap-3 px-4 py-3 rounded-xl border-2 transition-all w-80
-                  ${selectedStep?.id === step.id ? 'border-indigo-500 bg-indigo-50' : 'border-slate-200 bg-white hover:border-slate-300'}`}
+                  ${
+                    selectedStepId === step.id
+                      ? 'border-indigo-500 bg-indigo-50'
+                      : 'border-slate-200 bg-white hover:border-slate-300'
+                  }`}
               >
                 <StepIcon status={step.status} />
                 <div className="text-left min-w-0 flex-1">
-                  <p className="text-sm font-medium text-slate-800 truncate">{step.name}</p>
-                  <p className="text-xs text-slate-400">{step.type}{step.tool ? ` · ${step.tool}` : ''}</p>
+                  <p className="text-sm font-medium text-slate-800 truncate font-mono">
+                    {step.step_key}
+                  </p>
+                  <p className="text-xs text-slate-400">
+                    {step.step_type}
+                    {step.iteration_no != null ? ` · iter ${step.iteration_no}` : ''}
+                  </p>
                 </div>
                 <StatusBadge status={step.status} size="sm" />
               </button>
@@ -344,32 +543,55 @@ function StepsTab({ steps, selectedStep, onSelectStep }: { steps: StepRow[]; sel
         </div>
       </div>
 
-      {selectedStep && (
-        <div className="w-80 bg-white rounded-xl border border-slate-200 p-4">
+      {selectedStepId && (
+        <div className="w-96 bg-white rounded-xl border border-slate-200 p-4">
           <div className="flex items-center justify-between mb-3">
-            <p className="text-sm font-semibold text-slate-800">{selectedStep.name}</p>
-            <button onClick={() => onSelectStep(null)} className="text-slate-400 hover:text-slate-600"><X size={14} /></button>
+            <p className="text-sm font-semibold text-slate-800 font-mono">
+              {stepDetail?.step_key ?? 'Step'}
+            </p>
+            <button
+              onClick={() => onSelectStep(selectedStepId)}
+              className="text-slate-400 hover:text-slate-600"
+            >
+              <X size={14} />
+            </button>
           </div>
-          <div className="space-y-2 text-xs">
-            <Row label="Type" value={selectedStep.type} />
-            <Row label="Status"><StatusBadge status={selectedStep.status} size="sm" /></Row>
-            {selectedStep.tool && <Row label="Tool" value={selectedStep.tool} mono />}
-            {selectedStep.version && <Row label="Version" value={selectedStep.version} mono />}
-            <Row label="Attempts" value={String(selectedStep.attempts)} />
-          </div>
-          {selectedStep.status === 'UNKNOWN_OUTCOME' && (
-            <div className="mt-3 p-2.5 bg-orange-50 border border-orange-200 rounded-lg">
-              <p className="text-xs font-semibold text-orange-700 mb-1">⚠ Unknown Outcome</p>
-              <p className="text-xs text-orange-600">자동 Retry CTA 없음. 외부 시스템 결과를 운영 확인하세요.</p>
+          {stepDetailLoading && !stepDetail ? (
+            <LoadingSkeleton rows={4} />
+          ) : stepDetail ? (
+            <div className="space-y-2 text-xs">
+              <Row label="Type" value={stepDetail.step_type} />
+              <Row label="Status">
+                <StatusBadge status={stepDetail.status} size="sm" />
+              </Row>
+              <Row label="Attempts" value={String(stepDetail.attempt_count)} />
+              <Row label="Duration" value={formatDurationMs(stepDetail.duration_ms)} />
+              <Row label="Started" value={formatTimestamp(stepDetail.started_at)} />
+              <Row label="Finished" value={formatTimestamp(stepDetail.finished_at)} />
+              {stepDetail.error_code && (
+                <Row label="Error" value={stepDetail.error_code} mono />
+              )}
+              {stepDetail.status === 'UNKNOWN_OUTCOME' && (
+                <div className="mt-3 p-2.5 bg-orange-50 border border-orange-200 rounded-lg">
+                  <p className="text-xs font-semibold text-orange-700 mb-1">
+                    Unknown Outcome
+                  </p>
+                  <p className="text-xs text-orange-600">
+                    자동 Retry CTA 없음. 외부 시스템 결과를 운영 확인하세요.
+                  </p>
+                </div>
+              )}
+              <div className="mt-4 space-y-3">
+                <p className="text-xs font-semibold text-slate-600">Attempts</p>
+                {stepDetail.attempts.length === 0 ? (
+                  <p className="text-xs text-slate-400">Attempt 없음</p>
+                ) : (
+                  stepDetail.attempts.map((a) => <AttemptCard key={a.id} attempt={a} />)
+                )}
+              </div>
             </div>
-          )}
-          {selectedStep.runtimeInput && (
-            <div className="mt-3 p-2.5 bg-amber-50 border border-amber-200 rounded-lg text-xs text-amber-800 space-y-1">
-              <p className="font-semibold">Runtime Input (MRTR)</p>
-              <p>Round {selectedStep.runtimeInput.round}</p>
-              <p>{selectedStep.runtimeInput.message}</p>
-              <p>Expiry: {selectedStep.runtimeInput.expiresIn}</p>
-            </div>
+          ) : (
+            <p className="text-xs text-slate-400">상세를 불러오지 못했습니다.</p>
           )}
         </div>
       )}
@@ -377,85 +599,192 @@ function StepsTab({ steps, selectedStep, onSelectStep }: { steps: StepRow[]; sel
   );
 }
 
-function EventsTab({ status }: { status: ExecutionStatus }) {
-  const events = [
-    { time: '14:30:01', event: 'execution.started', detail: 'Execution CREATED → QUEUED → RUNNING' },
-    { time: '14:30:36', event: 'approval.requested', detail: 'Step WAITING_APPROVAL (Approval Entity = PENDING)' },
-    ...(status === 'CANCEL_REQUESTED' || status === 'CANCELLED'
-      ? [{ time: '14:31:10', event: 'execution.cancel_requested', detail: 'CANCEL_REQUESTED' },
-         ...(status === 'CANCELLED' ? [{ time: '14:31:12', event: 'execution.cancelled', detail: 'CANCELLED' }] : [])]
-      : []),
-  ];
+function AttemptCard({ attempt }: { attempt: StepAttemptSafeDto }) {
   return (
-    <div className="max-w-2xl bg-white rounded-xl border border-slate-200 overflow-hidden">
-      {events.map((ev, i) => (
-        <div key={i} className="flex gap-4 px-4 py-3 border-b border-slate-100 last:border-0">
-          <span className="font-mono text-xs text-slate-400 shrink-0 mt-0.5">{ev.time}</span>
-          <div>
-            <span className="font-mono text-xs text-indigo-600">{ev.event}</span>
-            <p className="text-sm text-slate-700">{ev.detail}</p>
-          </div>
+    <div className="border border-slate-200 rounded-lg p-2.5 space-y-1">
+      <div className="flex justify-between">
+        <span className="font-medium text-slate-700">#{attempt.attempt_no}</span>
+        <StatusBadge status={attempt.status} size="sm" />
+      </div>
+      <p className="text-slate-500">
+        {formatDurationMs(attempt.duration_ms)} · {formatTimestamp(attempt.started_at)}
+      </p>
+      {attempt.error_code && (
+        <p className="font-mono text-slate-600">{attempt.error_code}</p>
+      )}
+      {attempt.tool_calls.length > 0 && (
+        <div className="mt-1 space-y-1">
+          {attempt.tool_calls.map((tc) => (
+            <div
+              key={tc.id}
+              className="bg-slate-50 rounded px-2 py-1 text-[11px] text-slate-600"
+            >
+              <div className="flex justify-between gap-2">
+                <span>{tc.normalized_status}</span>
+                <span className="font-mono">{formatDurationMs(tc.duration_ms)}</span>
+              </div>
+              <div className="text-slate-400">
+                ttfb {formatDurationMs(tc.time_to_first_byte_ms)} · req{' '}
+                {tc.request_bytes ?? '—'}B / res {tc.response_bytes ?? '—'}B
+              </div>
+            </div>
+          ))}
         </div>
-      ))}
+      )}
     </div>
   );
 }
 
-function IOTab({ status }: { status: ExecutionStatus }) {
+function EventsTab() {
+  return (
+    <div className="max-w-2xl bg-white rounded-xl border border-slate-200 p-6">
+      <EmptyState
+        title="Events API deferred"
+        description="GET /executions/{id}/events 및 execution_events는 아직 제공되지 않습니다. SSE도 이 단계에서 구현하지 않습니다."
+      />
+    </div>
+  );
+}
+
+function IOTab({
+  resultSummary,
+}: {
+  resultSummary: ExecutionDetailDto['result_summary'];
+}) {
   return (
     <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 max-w-4xl">
-      <div className="bg-white rounded-xl border border-slate-200 p-4">
-        <h3 className="text-sm font-semibold text-slate-800 mb-3">Execution 입력</h3>
-        <pre className="text-xs font-mono bg-slate-50 rounded-lg p-3 text-slate-700">{`{
-  "request": "...",
-  "agent_version_id": "agt-002/v2"
-}`}</pre>
-      </div>
-      <div className="bg-white rounded-xl border border-slate-200 p-4">
-        <h3 className="text-sm font-semibold text-slate-800 mb-3">Execution 출력</h3>
-        <pre className="text-xs font-mono bg-slate-50 rounded-lg p-3 text-slate-700">{`{
-  "status": ${JSON.stringify(status)}
-}`}</pre>
-      </div>
+      <JsonBlock
+        title="Execution 입력"
+        note="input_snapshot / plan_snapshot은 Operations API에서 의도적으로 미노출입니다."
+        value={null}
+      />
+      <JsonBlock
+        title="result_summary (safe)"
+        note="Tool content / structured_content / metadata는 포함되지 않습니다."
+        value={resultSummary}
+      />
     </div>
   );
 }
 
 function AuditTab({ executionId }: { executionId: string }) {
+  const [items, setItems] = useState<AuditEventListItemDto[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [forbidden, setForbidden] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [expanded, setExpanded] = useState<string | null>(null);
+  const [detail, setDetail] = useState<AuditEventDetailDto | null>(null);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    setLoading(true);
+    setForbidden(false);
+    setError(null);
+    listAuditEvents({ execution_id: executionId, limit: 50, signal: controller.signal })
+      .then((data) => setItems(data.items))
+      .catch((err: unknown) => {
+        if (isAbortError(err)) return;
+        if (isApiError(err) && err.status === 403) {
+          setForbidden(true);
+          return;
+        }
+        setError(isApiError(err) ? err.message : 'Audit를 불러오지 못했습니다.');
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setLoading(false);
+      });
+    return () => controller.abort();
+  }, [executionId]);
+
+  useEffect(() => {
+    if (!expanded) {
+      setDetail(null);
+      return;
+    }
+    const controller = new AbortController();
+    getAuditEvent(expanded, controller.signal)
+      .then(setDetail)
+      .catch(() => setDetail(null));
+    return () => controller.abort();
+  }, [expanded]);
+
+  if (forbidden) return <PermissionDenied />;
+  if (loading) return <LoadingSkeleton rows={4} />;
+  if (error) return <ErrorState message={error} />;
+  if (items.length === 0) {
+    return <EmptyState title="이 Execution에 연결된 Audit event가 없습니다." />;
+  }
+
   return (
-    <div className="max-w-2xl bg-white rounded-xl border border-slate-200 overflow-hidden">
-      {[
-        { time: '14:30:01', actor: 'admin', action: 'execution.start', result: 'SUCCESS' },
-        { time: '14:30:36', actor: 'system', action: 'approval.request', result: 'SUCCESS' },
-      ].map((log, i) => (
-        <div key={i} className="flex gap-4 px-4 py-3 border-b border-slate-100 last:border-0 text-sm">
-          <span className="font-mono text-xs text-slate-400 shrink-0">{log.time}</span>
-          <span className="text-slate-600">{log.actor}</span>
-          <span className="font-mono text-xs text-indigo-600">{log.action}</span>
-          <span className="ml-auto text-xs font-medium text-green-600">{log.result}</span>
+    <div className="max-w-3xl bg-white rounded-xl border border-slate-200 overflow-hidden">
+      {items.map((log) => (
+        <div key={log.event_id} className="border-b border-slate-100 last:border-0">
+          <button
+            className="w-full flex gap-4 px-4 py-3 text-sm text-left hover:bg-slate-50"
+            onClick={() =>
+              setExpanded((prev) => (prev === log.event_id ? null : log.event_id))
+            }
+          >
+            <span className="font-mono text-xs text-slate-400 shrink-0">
+              {formatTimestamp(log.occurred_at)}
+            </span>
+            <span className="text-slate-600">{log.actor_type}</span>
+            <span className="font-mono text-xs text-indigo-600">{log.action}</span>
+            <span className="ml-auto text-xs font-medium text-slate-600">
+              {log.result}
+            </span>
+          </button>
+          {expanded === log.event_id && detail && (
+            <div className="px-4 pb-3 grid grid-cols-1 md:grid-cols-3 gap-3 text-xs">
+              <JsonBlock title="Before" value={detail.before_data} />
+              <JsonBlock title="After" value={detail.after_data} />
+              <JsonBlock title="Change set" value={detail.change_set} />
+            </div>
+          )}
         </div>
       ))}
-      <p className="px-4 py-2 text-[10px] text-slate-400">ref: {executionId}</p>
     </div>
   );
 }
 
 function StepIcon({ status }: { status: string }) {
-  if (status === 'SUCCEEDED') return <CheckCircle2 size={18} className="text-green-500 shrink-0" />;
-  if (status === 'RUNNING') return <Loader2 size={18} className="animate-spin text-indigo-500 shrink-0" />;
-  if (status === 'WAITING_APPROVAL' || status === 'WAITING_INPUT') return <Clock size={18} className="text-amber-500 shrink-0" />;
-  if (status === 'FAILED' || status === 'UNKNOWN_OUTCOME') return <AlertTriangle size={18} className="text-red-500 shrink-0" />;
-  if (status === 'CANCELLED') return <X size={18} className="text-slate-400 shrink-0" />;
+  if (status === 'SUCCEEDED') {
+    return <CheckCircle2 size={18} className="text-green-500 shrink-0" />;
+  }
+  if (status === 'RUNNING') {
+    return <Loader2 size={18} className="animate-spin text-indigo-500 shrink-0" />;
+  }
+  if (status === 'WAITING_APPROVAL' || status === 'WAITING_INPUT') {
+    return <Clock size={18} className="text-amber-500 shrink-0" />;
+  }
+  if (status === 'FAILED' || status === 'UNKNOWN_OUTCOME') {
+    return <AlertTriangle size={18} className="text-red-500 shrink-0" />;
+  }
+  if (status === 'CANCELLED') {
+    return <X size={18} className="text-slate-400 shrink-0" />;
+  }
   return <Circle size={18} className="text-slate-300 shrink-0" />;
 }
 
-function Row({ label, value, mono, children }: { label: string; value?: string; mono?: boolean; children?: React.ReactNode }) {
+function Row({
+  label,
+  value,
+  mono,
+  children,
+}: {
+  label: string;
+  value?: string;
+  mono?: boolean;
+  children?: React.ReactNode;
+}) {
   return (
     <div className="flex justify-between gap-2">
       <span className="text-slate-400 shrink-0">{label}</span>
-      {children ?? <span className={`text-slate-700 text-right ${mono ? 'font-mono' : ''}`}>{value}</span>}
+      {children ?? (
+        <span className={`text-slate-700 text-right ${mono ? 'font-mono' : ''}`}>
+          {value}
+        </span>
+      )}
     </div>
   );
 }
-
-function delay(ms: number) { return new Promise(r => setTimeout(r, ms)); }

@@ -1,5 +1,8 @@
 import type {
+  AuditActorType,
+  AuditResult,
   ExecutionSourceType,
+  ExecutionTriggerType,
   MCPAuthType,
   MCPCheckStatus,
   MCPDiscoveryMode,
@@ -17,6 +20,26 @@ export const EXECUTION_SOURCE_LABELS: Record<ExecutionSourceType, string> = {
   SCHEDULE_OCCURRENCE: 'Schedule',
   MANUAL_TOOL_TEST: 'Manual Tool Test',
   FACTORY_TEST: 'Factory Test',
+};
+
+export const EXECUTION_TRIGGER_LABELS: Record<ExecutionTriggerType, string> = {
+  USER: 'User',
+  SCHEDULE: 'Schedule',
+  RETRY: 'Retry',
+  SYSTEM: 'System',
+  TEST: 'Test',
+};
+
+export const AUDIT_ACTOR_TYPE_LABELS: Record<AuditActorType, string> = {
+  USER: 'User',
+  SERVICE: 'Service',
+  SYSTEM: 'System',
+};
+
+export const AUDIT_RESULT_LABELS: Record<AuditResult, string> = {
+  SUCCESS: 'Success',
+  DENIED: 'Denied',
+  FAILURE: 'Failure',
 };
 
 export const SCHEDULE_TARGET_LABELS: Record<ScheduleTargetType, string> = {
@@ -67,6 +90,29 @@ export const RISK_CLASS_LABELS: Record<RiskClass, string> = {
 
 export function labelExecutionSource(value: string): string {
   return EXECUTION_SOURCE_LABELS[value as ExecutionSourceType] ?? value;
+}
+
+export function labelExecutionTrigger(value: string): string {
+  return EXECUTION_TRIGGER_LABELS[value as ExecutionTriggerType] ?? value;
+}
+
+export function labelAuditActorType(value: string): string {
+  return AUDIT_ACTOR_TYPE_LABELS[value as AuditActorType] ?? value;
+}
+
+export function labelAuditResult(value: string): string {
+  return AUDIT_RESULT_LABELS[value as AuditResult] ?? value;
+}
+
+/** Format duration_ms from safe Execution/Step projections. */
+export function formatDurationMs(ms: number | null | undefined): string {
+  if (ms == null || Number.isNaN(ms) || ms < 0) return '—';
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  const seconds = ms / 1000;
+  if (seconds < 60) return `${seconds < 10 ? seconds.toFixed(1) : Math.round(seconds)}s`;
+  const minutes = Math.floor(seconds / 60);
+  const rem = Math.round(seconds % 60);
+  return `${minutes}m ${rem}s`;
 }
 
 export function labelScheduleTarget(value: string): string {

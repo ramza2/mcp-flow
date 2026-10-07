@@ -101,6 +101,24 @@ export const EXECUTION_SOURCE_TYPES = [
 ] as const;
 export type ExecutionSourceType = (typeof EXECUTION_SOURCE_TYPES)[number];
 
+/** docs/05 / docs/06 Execution.trigger_type — Retry is NOT a source type. */
+export const EXECUTION_TRIGGER_TYPES = [
+  'USER',
+  'SCHEDULE',
+  'RETRY',
+  'SYSTEM',
+  'TEST',
+] as const;
+export type ExecutionTriggerType = (typeof EXECUTION_TRIGGER_TYPES)[number];
+
+/** docs/05 audit_events.actor_type */
+export const AUDIT_ACTOR_TYPES = ['USER', 'SERVICE', 'SYSTEM'] as const;
+export type AuditActorType = (typeof AUDIT_ACTOR_TYPES)[number];
+
+/** docs/05 audit_events.result — never invent FAILED. */
+export const AUDIT_RESULTS = ['SUCCESS', 'DENIED', 'FAILURE'] as const;
+export type AuditResult = (typeof AUDIT_RESULTS)[number];
+
 export const SCHEDULE_TARGET_TYPES = ['AGENT_VERSION', 'WORKFLOW_VERSION'] as const;
 export type ScheduleTargetType = (typeof SCHEDULE_TARGET_TYPES)[number];
 
