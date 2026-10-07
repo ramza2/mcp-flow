@@ -730,15 +730,21 @@ Source
 
 # 23. SSE / Polling UX
 
-Execution 시작 후:
+`SCR-EXE-002` ExecutionDetail (frontend implemented):
 
-1. snapshot 조회
-2. SSE 연결
-3. event ID 기준 적용
-4. 단절 시 Last-Event-ID reconnect
-5. 장기 실패 시 polling fallback
+1. REST snapshot 조회 (`GET /executions/{id}` + steps)
+2. snapshot 성공 후 native `EventSource` 연결 (`GET /executions/{id}/events`)
+3. custom named SSE event 수신 → durable bigint `id`로 duplicate/stale 무시
+4. SSE payload는 UI status에 직접 적용하지 않음 — quiet REST snapshot refresh만 trigger
+   (과거 durable replay가 `CREATED` 등으로 상태를 역행시키지 않음)
+5. 단절 시 browser native reconnect + `Last-Event-ID` (EventSource 유지)
+6. 연속 실패(기본 3회) 시 EventSource close → active status만 4초 polling fallback
+7. terminal snapshot이면 polling 종료
 
-중복 event가 UI 상태를 역행시키지 않아야 한다.
+Events tab은 deferred 문구 대신 SSE timeline(최대 200건, id ASC)과
+Live / Reconnecting / Polling fallback / Disconnected·Unavailable 연결 상태를 표시한다.
+
+Traefik/browser 실네트워크 단절 E2E(`E2E-010`)는 후속.
 
 ---
 

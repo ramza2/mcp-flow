@@ -32,6 +32,17 @@ import {
   type StepAttemptSafeDto,
 } from '../../api/executions';
 import {
+  MAX_TIMELINE_EVENTS,
+  SNAPSHOT_REFRESH_DEBOUNCE_MS,
+  SSE_MAX_CONSECUTIVE_ERRORS,
+  isEventSourceAvailable,
+  openExecutionEventsStream,
+  parseSseEventId,
+  type ExecutionEventEnvelope,
+  type ExecutionEventMessage,
+  type SseConnectionState,
+} from '../../api/executionEvents';
+import {
   getAuditEvent,
   listAuditEvents,
   type AuditEventDetailDto,
@@ -55,6 +66,29 @@ const ACTIVE_STATUSES = new Set<ExecutionStatus>([
 ]);
 
 const POLL_MS = 4000;
+
+/** Timeline row: wire envelope + durable SSE bigint id (decimal string). */
+export interface ExecutionTimelineItem extends ExecutionEventEnvelope {
+  sseId: string;
+}
+
+function connectionLabel(state: SseConnectionState): string {
+  switch (state) {
+    case 'connecting':
+      return 'Connecting';
+    case 'live':
+      return 'Live';
+    case 'reconnecting':
+      return 'Reconnecting';
+    case 'polling':
+      return 'Polling fallback';
+    case 'unavailable':
+      return 'Unavailable';
+    case 'disconnected':
+    default:
+      return 'Disconnected';
+  }
+}
 
 function JsonBlock({ title, value, note }: { title: string; value: unknown; note?: string }) {
   return (
@@ -83,11 +117,31 @@ export default function ExecutionDetail() {
   const [cancelling, setCancelling] = useState(false);
   const [cancelError, setCancelError] = useState<string | null>(null);
   const [stepDetailLoading, setStepDetailLoading] = useState(false);
+  const [hasSnapshot, setHasSnapshot] = useState(false);
+  const [usePollingFallback, setUsePollingFallback] = useState(false);
+  const [connectionState, setConnectionState] =
+    useState<SseConnectionState>('disconnected');
+  const [timeline, setTimeline] = useState<ExecutionTimelineItem[]>([]);
+  const [snapshotVersion, setSnapshotVersion] = useState(0);
+
   const pollInFlight = useRef(false);
+  const snapshotSeq = useRef(0);
+  const stepDetailSeq = useRef(0);
+  const lastAcceptedSseId = useRef<bigint | null>(null);
+  const statusRef = useRef<ExecutionStatus | null>(null);
+  const refreshTimer = useRef<number | null>(null);
+  const refreshInFlight = useRef(false);
+  const refreshAgain = useRef(false);
+  const loadSnapshotRef = useRef<
+    (signal?: AbortSignal, opts?: { quiet?: boolean }) => Promise<void>
+  >(async () => undefined);
+
+  statusRef.current = execution?.status ?? null;
 
   const loadSnapshot = useCallback(
     async (signal?: AbortSignal, opts?: { quiet?: boolean }) => {
       if (!executionId) return;
+      const seq = ++snapshotSeq.current;
       if (!opts?.quiet) {
         setLoading(true);
         setError(null);
@@ -99,19 +153,23 @@ export default function ExecutionDetail() {
           getExecution(executionId, signal),
           listExecutionSteps(executionId, signal),
         ]);
-        if (signal?.aborted) return;
+        if (signal?.aborted || seq !== snapshotSeq.current) return;
         setExecution(detail);
         setSteps(stepList.items);
+        setHasSnapshot(true);
+        setSnapshotVersion((v) => v + 1);
       } catch (err: unknown) {
-        if (isAbortError(err) || signal?.aborted) return;
+        if (isAbortError(err) || signal?.aborted || seq !== snapshotSeq.current) return;
         if (isApiError(err) && err.status === 403) {
           setForbidden(true);
           setExecution(null);
+          setHasSnapshot(false);
           return;
         }
         if (isApiError(err) && err.status === 404) {
           setNotFound(true);
           setExecution(null);
+          setHasSnapshot(false);
           return;
         }
         if (!opts?.quiet) {
@@ -122,11 +180,78 @@ export default function ExecutionDetail() {
           });
         }
       } finally {
-        if (!opts?.quiet && !signal?.aborted) setLoading(false);
+        if (!opts?.quiet && !signal?.aborted && seq === snapshotSeq.current) {
+          setLoading(false);
+        }
       }
     },
     [executionId],
   );
+
+  loadSnapshotRef.current = loadSnapshot;
+
+  const runQuietRefresh = useCallback(async () => {
+    if (refreshInFlight.current) {
+      refreshAgain.current = true;
+      return;
+    }
+    refreshInFlight.current = true;
+    try {
+      do {
+        refreshAgain.current = false;
+        await loadSnapshotRef.current(undefined, { quiet: true });
+      } while (refreshAgain.current);
+    } finally {
+      refreshInFlight.current = false;
+    }
+  }, []);
+
+  const scheduleQuietRefresh = useCallback(() => {
+    if (refreshTimer.current != null) {
+      window.clearTimeout(refreshTimer.current);
+    }
+    refreshTimer.current = window.setTimeout(() => {
+      refreshTimer.current = null;
+      void runQuietRefresh();
+    }, SNAPSHOT_REFRESH_DEBOUNCE_MS);
+  }, [runQuietRefresh]);
+
+  const acceptSseEvent = useCallback(
+    (message: ExecutionEventMessage) => {
+      const id = parseSseEventId(message.sseId);
+      if (id === null) return;
+      if (lastAcceptedSseId.current !== null && id <= lastAcceptedSseId.current) {
+        return;
+      }
+      lastAcceptedSseId.current = id;
+      const item: ExecutionTimelineItem = {
+        sseId: message.sseId,
+        ...message.envelope,
+      };
+      setTimeline((prev) => {
+        if (prev.some((row) => row.sseId === item.sseId)) return prev;
+        const next = [...prev, item];
+        return next.length > MAX_TIMELINE_EVENTS
+          ? next.slice(-MAX_TIMELINE_EVENTS)
+          : next;
+      });
+      // Invalidate REST snapshot — never apply SSE payload status directly.
+      scheduleQuietRefresh();
+    },
+    [scheduleQuietRefresh],
+  );
+
+  // Reset transport/timeline when route execution changes.
+  useEffect(() => {
+    setHasSnapshot(false);
+    setUsePollingFallback(false);
+    setConnectionState('disconnected');
+    setTimeline([]);
+    lastAcceptedSseId.current = null;
+    snapshotSeq.current = 0;
+    setSelectedStepId(null);
+    setStepDetail(null);
+  }, [executionId]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -134,9 +259,66 @@ export default function ExecutionDetail() {
     return () => controller.abort();
   }, [loadSnapshot]);
 
-  // Snapshot polling for active executions — no SSE.
+  // Snapshot → SSE (native EventSource reconnect preserves Last-Event-ID).
   useEffect(() => {
-    if (!executionId || !execution || !ACTIVE_STATUSES.has(execution.status)) return;
+    if (!executionId || !hasSnapshot || usePollingFallback) return;
+
+    if (!isEventSourceAvailable()) {
+      setConnectionState('unavailable');
+      const status = statusRef.current;
+      if (status && ACTIVE_STATUSES.has(status)) {
+        setUsePollingFallback(true);
+      }
+      return;
+    }
+
+    let closed = false;
+    let consecutiveErrors = 0;
+    setConnectionState('connecting');
+
+    const stream = openExecutionEventsStream({
+      executionId,
+      onOpen: () => {
+        if (closed) return;
+        consecutiveErrors = 0;
+        setConnectionState('live');
+      },
+      onError: () => {
+        if (closed) return;
+        consecutiveErrors += 1;
+        setConnectionState('reconnecting');
+        if (consecutiveErrors >= SSE_MAX_CONSECUTIVE_ERRORS) {
+          closed = true;
+          stream.close();
+          const status = statusRef.current;
+          if (status && ACTIVE_STATUSES.has(status)) {
+            setUsePollingFallback(true);
+            setConnectionState('polling');
+          } else {
+            setConnectionState('disconnected');
+          }
+        }
+      },
+      onEvent: (message) => {
+        if (closed) return;
+        acceptSseEvent(message);
+      },
+    });
+
+    return () => {
+      closed = true;
+      stream.close();
+    };
+  }, [executionId, hasSnapshot, usePollingFallback, acceptSseEvent]);
+
+  // Polling fallback for active executions only (after sustained SSE failure).
+  useEffect(() => {
+    if (!executionId || !usePollingFallback) return;
+    if (!execution || !ACTIVE_STATUSES.has(execution.status)) {
+      setConnectionState((prev) => (prev === 'polling' ? 'disconnected' : prev));
+      return;
+    }
+    setConnectionState('polling');
     const controller = new AbortController();
     const timer = window.setInterval(() => {
       if (pollInFlight.current || controller.signal.aborted) return;
@@ -149,26 +331,42 @@ export default function ExecutionDetail() {
       controller.abort();
       window.clearInterval(timer);
     };
-  }, [executionId, execution?.status, loadSnapshot]);
+  }, [executionId, usePollingFallback, execution?.status, loadSnapshot]);
 
+  // Selected Step detail — refresh when selection or snapshot version changes.
   useEffect(() => {
     if (!executionId || !selectedStepId) {
       setStepDetail(null);
       return;
     }
+    const seq = ++stepDetailSeq.current;
     const controller = new AbortController();
     setStepDetailLoading(true);
     getExecutionStep(executionId, selectedStepId, controller.signal)
-      .then((d) => setStepDetail(d))
+      .then((d) => {
+        if (seq !== stepDetailSeq.current || controller.signal.aborted) return;
+        setStepDetail(d);
+      })
       .catch((err: unknown) => {
-        if (isAbortError(err)) return;
+        if (isAbortError(err) || seq !== stepDetailSeq.current) return;
         setStepDetail(null);
       })
       .finally(() => {
-        if (!controller.signal.aborted) setStepDetailLoading(false);
+        if (!controller.signal.aborted && seq === stepDetailSeq.current) {
+          setStepDetailLoading(false);
+        }
       });
     return () => controller.abort();
-  }, [executionId, selectedStepId]);
+  }, [executionId, selectedStepId, snapshotVersion]);
+
+  useEffect(() => {
+    return () => {
+      if (refreshTimer.current != null) {
+        window.clearTimeout(refreshTimer.current);
+        refreshTimer.current = null;
+      }
+    };
+  }, []);
 
   const handleCancel = async () => {
     if (!executionId || cancelling) return;
@@ -385,7 +583,9 @@ export default function ExecutionDetail() {
             stepDetailLoading={stepDetailLoading}
           />
         )}
-        {tab === 'events' && <EventsTab />}
+        {tab === 'events' && (
+          <EventsTab timeline={timeline} connectionState={connectionState} />
+        )}
         {tab === 'io' && <IOTab resultSummary={execution.result_summary} />}
         {tab === 'audit' && <AuditTab executionId={execution.id} />}
       </div>
@@ -635,13 +835,88 @@ function AttemptCard({ attempt }: { attempt: StepAttemptSafeDto }) {
   );
 }
 
-function EventsTab() {
+function EventsTab({
+  timeline,
+  connectionState,
+}: {
+  timeline: ExecutionTimelineItem[];
+  connectionState: SseConnectionState;
+}) {
+  const [expandedId, setExpandedId] = useState<string | null>(null);
+  // Durable id ASC (append-only increasing accepts).
+  const rows = timeline;
+
   return (
-    <div className="max-w-2xl bg-white rounded-xl border border-slate-200 p-6">
-      <EmptyState
-        title="Events API deferred"
-        description="GET /executions/{id}/events 및 execution_events는 아직 제공되지 않습니다. SSE도 이 단계에서 구현하지 않습니다."
-      />
+    <div className="max-w-3xl space-y-3">
+      <div className="flex items-center justify-between px-1">
+        <p className="text-sm text-slate-600">
+          Connection:{' '}
+          <span className="font-medium text-slate-800" data-testid="sse-connection-state">
+            {connectionLabel(connectionState)}
+          </span>
+        </p>
+        <p className="text-xs text-slate-400">
+          {rows.length} event{rows.length === 1 ? '' : 's'} (max {MAX_TIMELINE_EVENTS})
+        </p>
+      </div>
+      {rows.length === 0 ? (
+        <div className="bg-white rounded-xl border border-slate-200 p-6">
+          <EmptyState
+            title="아직 수신된 Execution Event가 없습니다."
+            description="SSE로 durable events가 도착하면 여기에 표시됩니다."
+          />
+        </div>
+      ) : (
+        <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
+          {rows.map((row) => {
+            const statusValue = row.payload.status;
+            const statusText =
+              typeof statusValue === 'string' ? statusValue : null;
+            const expanded = expandedId === row.sseId;
+            return (
+              <div
+                key={row.sseId}
+                className="border-b border-slate-100 last:border-0 px-4 py-3"
+                data-testid="execution-event-row"
+              >
+                <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm">
+                  <span className="font-mono text-xs text-slate-400">
+                    {formatTimestamp(row.occurred_at)}
+                  </span>
+                  <span className="font-mono text-xs text-indigo-600">
+                    {row.event_type}
+                  </span>
+                  <span className="font-mono text-[11px] text-slate-400">
+                    id {row.sseId}
+                  </span>
+                  {row.step_execution_id && (
+                    <span className="font-mono text-[11px] text-slate-500">
+                      step {row.step_execution_id}
+                    </span>
+                  )}
+                  {statusText && (
+                    <StatusBadge status={statusText} size="sm" />
+                  )}
+                  <button
+                    type="button"
+                    className="ml-auto text-xs text-slate-500 hover:text-slate-700"
+                    onClick={() =>
+                      setExpandedId((prev) => (prev === row.sseId ? null : row.sseId))
+                    }
+                  >
+                    {expanded ? 'Hide payload' : 'Show payload'}
+                  </button>
+                </div>
+                {expanded && (
+                  <pre className="mt-2 text-xs font-mono bg-slate-50 rounded-lg p-3 text-slate-700 overflow-x-auto max-h-64">
+                    {JSON.stringify(row.payload, null, 2)}
+                  </pre>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }

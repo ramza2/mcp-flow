@@ -444,13 +444,13 @@ describe('Ops screens real API wiring', () => {
   });
 });
 
-describe('ExecutionDetail Events/IO deferred boundaries', () => {
+describe('ExecutionDetail Events/IO boundaries', () => {
   afterEach(() => {
     vi.unstubAllGlobals();
     setCachedCsrfTokenForTests(null);
   });
 
-  it('Events tab shows deferred notice; IO shows safe result_summary only', async () => {
+  it('Events tab shows SSE timeline shell; IO shows safe result_summary only', async () => {
     const user = userEvent.setup();
     setCachedCsrfTokenForTests('csrf');
     const detail = {
@@ -478,7 +478,11 @@ describe('ExecutionDetail Events/IO deferred boundaries', () => {
 
     await screen.findByText(EXEC_ID);
     await user.click(screen.getByRole('button', { name: /^Events$/i }));
-    expect(await screen.findByText(/Events API deferred/i)).toBeInTheDocument();
+    expect(screen.queryByText(/Events API deferred/i)).not.toBeInTheDocument();
+    expect(
+      await screen.findByText(/아직 수신된 Execution Event가 없습니다/i),
+    ).toBeInTheDocument();
+    expect(screen.getByTestId('sse-connection-state')).toBeInTheDocument();
 
     await user.click(screen.getByRole('button', { name: /^Inputs \/ Outputs$/i }));
     expect(
