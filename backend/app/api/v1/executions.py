@@ -1,4 +1,4 @@
-"""Execution-scoped APIs — history read + cancel + MRTR (docs/06)."""
+"""Execution-scoped APIs — history read + cancel + MRTR + SSE (docs/06)."""
 
 from __future__ import annotations
 
@@ -6,13 +6,17 @@ import uuid
 from datetime import datetime
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, Body, Depends, Query, status
+from fastapi import APIRouter, Body, Depends, Header, Query, Request, status
+from fastapi.responses import StreamingResponse
 
 from app.api.dependencies import (
     CurrentPrincipalDep,
     DbSessionDep,
+    SseCurrentPrincipalDep,
+    SseDbSessionDep,
     require_csrf_for_unsafe_request,
 )
+from app.db.session import get_session_factory
 from app.domain.enums import ExecutionStatus
 from app.execution.mrtr_query import MrtrQueryService
 from app.execution.mrtr_reject import MrtrRejectService
@@ -32,9 +36,16 @@ from app.schemas.mrtr import (
     MrtrResponseCreateResponse,
 )
 from app.services.execution_cancellation import ExecutionCancellationService
+from app.services.execution_events_sse import (
+    ExecutionEventsSseService,
+    parse_last_event_id,
+)
 from app.services.execution_query import ExecutionListQuery, ExecutionQueryService
 
 router = APIRouter(prefix="/executions", tags=["executions"])
+# Mounted outside protected_router so request-scoped router auth cannot pin a
+# DB session across the SSE lifetime. Auth uses function-scoped deps only.
+sse_router = APIRouter(prefix="/executions", tags=["executions"])
 
 _DEFAULT_CANCEL_BODY = ExecutionCancelRequest()
 
@@ -92,6 +103,51 @@ async def get_execution(
     return await ExecutionQueryService(session).get_execution(
         actor_user_id=principal.user_id,
         execution_id=execution_id,
+    )
+
+
+@sse_router.get("/{execution_id}/events")
+async def stream_execution_events(
+    execution_id: uuid.UUID,
+    request: Request,
+    session: SseDbSessionDep,
+    principal: SseCurrentPrincipalDep,
+    last_event_id: Annotated[str | None, Header(alias="Last-Event-ID")] = None,
+) -> StreamingResponse:
+    """SSE stream of durable execution_events (docs/06 §16).
+
+    Authorization completes before the stream opens so unauthorized callers
+    receive normal JSON 404/403. ``id:`` is the bigint ``execution_events.id``.
+
+    Auth uses a function-scoped DB session so it is released when this path
+    operation returns — before StreamingResponse body consumption. Poll cycles
+    open short-lived sessions via ``session_factory`` only.
+    """
+    cursor = parse_last_event_id(last_event_id)
+    service = ExecutionEventsSseService(
+        session, session_factory=get_session_factory()
+    )
+    auth = await service.authorize(
+        actor_user_id=principal.user_id,
+        execution_id=execution_id,
+    )
+
+    async def event_stream() -> object:
+        async for frame in service.event_iterator(
+            auth=auth,
+            after_id=cursor,
+            is_disconnected=request.is_disconnected,
+        ):
+            yield frame
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
     )
 
 

@@ -253,6 +253,7 @@ class ExecutionClaimService:
 
         token = uuid.uuid4()
         expires_at = ts + timedelta(seconds=self._lease_seconds)
+        previous_exec_status = execution.status
         execution.status = ExecutionStatus.RUNNING.value
         execution.worker_id = worker
         execution.lease_token = token
@@ -261,6 +262,13 @@ class ExecutionClaimService:
         execution.started_at = ts
         execution.lock_version += 1
 
+        from app.execution.events import ExecutionEventWriter
+
+        event_writer = ExecutionEventWriter(self._session)
+        await event_writer.emit_execution_status_changed(
+            execution, previous_status=previous_exec_status, occurred_at=ts
+        )
+
         # Promote root TOOL Steps in Plan order up to max_parallelism.
         ready_ids: list = []
         slots = dag.max_parallelism
@@ -268,9 +276,13 @@ class ExecutionClaimService:
             if slots <= 0:
                 break
             root = by_key[key]
+            previous_step_status = root.status
             root.status = StepStatus.READY.value
             root.ready_at = ts
             root.lock_version += 1
+            await event_writer.emit_step_status_changed(
+                root, previous_status=previous_step_status, occurred_at=ts
+            )
             ready_ids.append(root.id)
             slots -= 1
 

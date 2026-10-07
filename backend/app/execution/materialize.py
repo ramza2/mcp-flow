@@ -128,6 +128,13 @@ class ExecutionPlanMaterializer:
             # Repository flush may have partial rows; caller must rollback.
             raise
 
+        from app.execution.events import ExecutionEventWriter
+
+        # Fresh insert only — create replay returns before materialize.
+        await ExecutionEventWriter(self._session).emit_execution_status_changed(
+            execution, previous_status=None
+        )
+
         return ExecutionMaterializeResult(execution=execution, steps=steps)
 
     def _prepare(

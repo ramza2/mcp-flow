@@ -156,6 +156,11 @@ class MrtrRejectService:
                     status_code=409,
                 )
 
+        from app.execution.events import ExecutionEventWriter
+
+        event_writer = ExecutionEventWriter(self._session)
+        previous_step_status = step.status
+        previous_exec_status = execution.status
         step.status = StepStatus.FAILED.value
         step.error_code = _MRTR_REJECTED
         step.error_message = _MRTR_REJECTED_MESSAGE
@@ -171,6 +176,12 @@ class MrtrRejectService:
         execution.lease_expires_at = None
         execution.heartbeat_at = None
         execution.lock_version += 1
+        await event_writer.emit_step_status_changed(
+            step, previous_status=previous_step_status, occurred_at=ts
+        )
+        await event_writer.emit_execution_status_changed(
+            execution, previous_status=previous_exec_status, occurred_at=ts
+        )
 
         await self._session.commit()
         return MrtrRejectOutcome(

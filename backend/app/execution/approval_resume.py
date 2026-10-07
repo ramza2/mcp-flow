@@ -182,7 +182,7 @@ class ApprovalResumeClaimService:
                 tool_config=tool_config,
             )
         except AppError:
-            self._terminalize_resume_precondition_failed(
+            await self._terminalize_resume_precondition_failed(
                 execution=execution, step=step, steps=steps, now=ts, authorable=False
             )
             await self._session.flush()
@@ -220,7 +220,7 @@ class ApprovalResumeClaimService:
                 execution=execution, step=step, request=request
             )
         except AppError:
-            self._terminalize_resume_precondition_failed(
+            await self._terminalize_resume_precondition_failed(
                 execution=execution, step=step, steps=steps, now=now, authorable=True
             )
             await self._session.flush()
@@ -264,7 +264,7 @@ class ApprovalResumeClaimService:
                     self._session, execution
                 )
         except AppError:
-            self._terminalize_resume_precondition_failed(
+            await self._terminalize_resume_precondition_failed(
                 execution=execution, step=step, steps=steps, now=now, authorable=True
             )
             await self._session.flush()
@@ -296,8 +296,12 @@ class ApprovalResumeClaimService:
         worker: str,
         now: datetime,
     ) -> ApprovalResumeClaimOutcome:
+        from app.execution.events import ExecutionEventWriter
+
         token = uuid.uuid4()
         expires_at = now + timedelta(seconds=self._lease_seconds)
+        event_writer = ExecutionEventWriter(self._session)
+        previous_exec_status = execution.status
         execution.status = ExecutionStatus.RUNNING.value
         execution.worker_id = worker
         execution.lease_token = token
@@ -305,11 +309,18 @@ class ApprovalResumeClaimService:
         execution.heartbeat_at = now
         # Preserve started_at / requested_at / queued_at / snapshots / attempt_count.
         execution.lock_version += 1
+        await event_writer.emit_execution_status_changed(
+            execution, previous_status=previous_exec_status, occurred_at=now
+        )
 
+        previous_step_status = step.status
         step.status = StepStatus.READY.value
         if step.ready_at is None:
             step.ready_at = now
         step.lock_version += 1
+        await event_writer.emit_step_status_changed(
+            step, previous_status=previous_step_status, occurred_at=now
+        )
         await self._session.flush()
 
         return ApprovalResumeClaimOutcome(
@@ -571,8 +582,8 @@ class ApprovalResumeClaimService:
             approval_policy=authz.approval_policy,
         )
 
-    @staticmethod
-    def _terminalize_resume_precondition_failed(
+    async def _terminalize_resume_precondition_failed(
+        self,
         *,
         execution: Execution,
         step: ExecutionStep,
@@ -580,7 +591,17 @@ class ApprovalResumeClaimService:
         now: datetime,
         authorable: bool,
     ) -> None:
+        from app.execution.events import (
+            ExecutionEventWriter,
+            emit_step_transitions,
+            snapshot_step_statuses,
+        )
+
         error_code = "APPROVAL_RESUME_PRECONDITION_FAILED"
+        event_writer = ExecutionEventWriter(self._session)
+        previous_step = step.status
+        previous_exec = execution.status
+        prev_steps = snapshot_step_statuses(steps)
         step.status = StepStatus.FAILED.value
         step.error_code = error_code
         step.finished_at = now
@@ -601,6 +622,18 @@ class ApprovalResumeClaimService:
         execution.worker_id = None
         execution.lease_token = None
         execution.lease_expires_at = None
+        await event_writer.emit_step_status_changed(
+            step, previous_status=previous_step, occurred_at=now
+        )
+        await emit_step_transitions(
+            self._session,
+            previous_by_id=prev_steps,
+            steps=list(by_key.values()),
+            occurred_at=now,
+        )
+        await event_writer.emit_execution_status_changed(
+            execution, previous_status=previous_exec, occurred_at=now
+        )
         execution.heartbeat_at = None
         execution.lock_version += 1
 

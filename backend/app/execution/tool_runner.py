@@ -216,7 +216,8 @@ class _PreparedCall:
     forbid_execution_wait: bool = False
 
 
-def _apply_or_defer_execution_fatal(
+async def _apply_or_defer_execution_fatal(
+    session: AsyncSession,
     execution: Execution,
     *,
     error_code: str | None,
@@ -229,6 +230,9 @@ def _apply_or_defer_execution_fatal(
         execution.heartbeat_at = now
         execution.lock_version += 1
         return
+    from app.execution.events import ExecutionEventWriter
+
+    previous_status = execution.status
     execution.status = ExecutionStatus.FAILED.value
     execution.error_code = error_code
     execution.error_message = error_message
@@ -239,6 +243,9 @@ def _apply_or_defer_execution_fatal(
     execution.lease_expires_at = None
     execution.heartbeat_at = None
     execution.lock_version += 1
+    await ExecutionEventWriter(session).emit_execution_status_changed(
+        execution, previous_status=previous_status, occurred_at=now
+    )
 
 
 def _prepared_invocation_lineage_matches(
@@ -580,8 +587,9 @@ class McpToolRunner:
         """Production no-op. Integration tests monkeypatch this to mutate DB state."""
         del prepared
 
-    def _final_gate_fail_closed_lineage_corruption(
+    async def _final_gate_fail_closed_lineage_corruption(
         self,
+        session: AsyncSession,
         *,
         execution: Execution,
         step: ExecutionStep | None,
@@ -600,11 +608,16 @@ class McpToolRunner:
         error_message = "Final pre-send invocation lineage is inconsistent."
 
         if step is not None and step.status not in _STEP_TERMINAL_STATUSES:
+            from app.execution.events import ExecutionEventWriter
+            _ee_prev_step = step.status
             step.status = StepStatus.FAILED.value
             step.error_code = error_code
             step.error_message = error_message
             step.finished_at = now
             step.lock_version += 1
+            await ExecutionEventWriter(session).emit_step_status_changed(
+                step, previous_status=_ee_prev_step, occurred_at=now
+            )
 
         if attempt is not None and attempt.status == StepAttemptStatus.STARTED.value:
             attempt.status = StepAttemptStatus.FAILED.value
@@ -621,7 +634,8 @@ class McpToolRunner:
             tool_call.normalized_status = ToolCallNormalizedStatus.FAILED.value
             tool_call.finished_at = now
 
-        _apply_or_defer_execution_fatal(
+        await _apply_or_defer_execution_fatal(
+            session,
             execution,
             error_code=error_code,
             error_message=error_message,
@@ -684,7 +698,8 @@ class McpToolRunner:
                     prepared.tool_call_id
                 )
                 if step is None or attempt is None or tool_call is None:
-                    return self._final_gate_fail_closed_lineage_corruption(
+                    return await self._final_gate_fail_closed_lineage_corruption(
+                        session,
                         execution=execution,
                         step=step,
                         attempt=attempt,
@@ -703,7 +718,8 @@ class McpToolRunner:
                     # fields, or otherwise inconsistent — never treat this as a
                     # successful Phase C completion (that would have cleared the
                     # lease). Fail closed and clear RUNNING strand.
-                    return self._final_gate_fail_closed_lineage_corruption(
+                    return await self._final_gate_fail_closed_lineage_corruption(
+                        session,
                         execution=execution,
                         step=step,
                         attempt=attempt,
@@ -987,8 +1003,16 @@ class McpToolRunner:
                     if execution.status == ExecutionStatus.RUNNING.value:
                         # Corrupted transition: cancel metadata present but status
                         # still RUNNING — fail closed without remote call.
+                        from app.execution.events import ExecutionEventWriter
+
+                        previous_exec_status = execution.status
                         execution.status = ExecutionStatus.CANCEL_REQUESTED.value
                         execution.lock_version = int(execution.lock_version) + 1
+                        await ExecutionEventWriter(session).emit_execution_status_changed(
+                            execution,
+                            previous_status=previous_exec_status,
+                            occurred_at=now,
+                        )
                     if execution.status == ExecutionStatus.CANCEL_REQUESTED.value:
                         outcome = await reconcile_cancel_requested_locked(
                             session, execution, now=now
@@ -1140,13 +1164,19 @@ class McpToolRunner:
                             )
                         )
                     if step.status not in _STEP_TERMINAL_STATUSES:
+                        from app.execution.events import ExecutionEventWriter
+                        _ee_prev_step = step.status
                         step.status = StepStatus.FAILED.value
                         step.error_code = exc.code
                         step.error_message = exc.message
                         step.finished_at = now
                         step.lock_version += 1
+                        await ExecutionEventWriter(session).emit_step_status_changed(
+                            step, previous_status=_ee_prev_step, occurred_at=now
+                        )
                     if execution.status == ExecutionStatus.RUNNING.value:
-                        _apply_or_defer_execution_fatal(
+                        await _apply_or_defer_execution_fatal(
+                            session,
                             execution,
                             error_code=exc.code,
                             error_message=exc.message,
@@ -1180,7 +1210,8 @@ class McpToolRunner:
                             step.finished_at = now
                             step.lock_version += 1
                         if execution.status == ExecutionStatus.RUNNING.value:
-                            _apply_or_defer_execution_fatal(
+                            await _apply_or_defer_execution_fatal(
+                                session,
                                 execution,
                                 error_code="DAG_WAIT_UNSUPPORTED",
                                 error_message=step.error_message,
@@ -1256,13 +1287,19 @@ class McpToolRunner:
                         )
                     except AppError as exc:
                         if step.status not in _STEP_TERMINAL_STATUSES:
+                            from app.execution.events import ExecutionEventWriter
+                            _ee_prev_step = step.status
                             step.status = StepStatus.FAILED.value
                             step.error_code = exc.code
                             step.error_message = exc.message
                             step.finished_at = now
                             step.lock_version += 1
+                            await ExecutionEventWriter(session).emit_step_status_changed(
+                                step, previous_status=_ee_prev_step, occurred_at=now
+                            )
                         if execution.status == ExecutionStatus.RUNNING.value:
-                            _apply_or_defer_execution_fatal(
+                            await _apply_or_defer_execution_fatal(
+                                session,
                                 execution,
                                 error_code=exc.code,
                                 error_message=exc.message,
@@ -1303,13 +1340,19 @@ class McpToolRunner:
                         )
                     except AppError as exc:
                         if step.status not in _STEP_TERMINAL_STATUSES:
+                            from app.execution.events import ExecutionEventWriter
+                            _ee_prev_step = step.status
                             step.status = StepStatus.FAILED.value
                             step.error_code = exc.code
                             step.error_message = exc.message
                             step.finished_at = now
                             step.lock_version += 1
+                            await ExecutionEventWriter(session).emit_step_status_changed(
+                                step, previous_status=_ee_prev_step, occurred_at=now
+                            )
                         if execution.status == ExecutionStatus.RUNNING.value:
-                            _apply_or_defer_execution_fatal(
+                            await _apply_or_defer_execution_fatal(
+                                session,
                                 execution,
                                 error_code=exc.code,
                                 error_message=exc.message,
@@ -1471,7 +1514,8 @@ class McpToolRunner:
                 )
 
                 if pre_send_failure is not None:
-                    terminal, disposition = _apply_terminal_transition(
+                    terminal, disposition = await _apply_terminal_transition(
+                        session,
                         execution=execution,
                         step=step,
                         attempt=attempt,
@@ -1752,7 +1796,8 @@ class McpToolRunner:
                 if contains_protected_plaintext(
                     mrtr.input_requests, protected
                 ) or contains_protected_plaintext(mrtr.request_state, protected):
-                    return _terminalize_mrtr_secret_echo(
+                    return await _terminalize_mrtr_secret_echo(
+                        session,
                         execution=execution,
                         step=step,
                         attempt=attempt,
@@ -1847,11 +1892,16 @@ class McpToolRunner:
                     attempt.worker_id = None
                     attempt.lease_expires_at = None
 
+                    from app.execution.events import ExecutionEventWriter
+                    _ee_prev_step = step.status
                     step.status = StepStatus.TIMED_OUT.value
                     step.error_code = "STEP_TIMEOUT"
                     step.error_message = attempt.error_message
                     step.finished_at = now
                     step.lock_version += 1
+                    await ExecutionEventWriter(session).emit_step_status_changed(
+                        step, previous_status=_ee_prev_step, occurred_at=now
+                    )
 
                     # Known TIMED_OUT — ErrorPolicy owned by orchestrator.
                     execution.heartbeat_at = now
@@ -1901,13 +1951,19 @@ class McpToolRunner:
                     attempt.worker_id = None
                     attempt.lease_expires_at = None
 
+                    from app.execution.events import ExecutionEventWriter
+                    _ee_prev_step = step.status
                     step.status = StepStatus.FAILED.value
                     step.error_code = "MAX_MRTR_ROUNDS_EXCEEDED"
                     step.error_message = max_rounds_message
                     step.finished_at = now
                     step.lock_version += 1
+                    await ExecutionEventWriter(session).emit_step_status_changed(
+                        step, previous_status=_ee_prev_step, occurred_at=now
+                    )
 
-                    _apply_or_defer_execution_fatal(
+                    await _apply_or_defer_execution_fatal(
+                        session,
                         execution,
                         error_code="MAX_MRTR_ROUNDS_EXCEEDED",
                         error_message=max_rounds_message,
@@ -1951,13 +2007,19 @@ class McpToolRunner:
                     attempt.worker_id = None
                     attempt.lease_expires_at = None
 
+                    from app.execution.events import ExecutionEventWriter
+                    _ee_prev_step = step.status
                     step.status = StepStatus.UNKNOWN_OUTCOME.value
                     step.error_code = "DAG_WAIT_UNSUPPORTED"
                     step.error_message = dag_wait_message
                     step.finished_at = now
                     step.lock_version += 1
+                    await ExecutionEventWriter(session).emit_step_status_changed(
+                        step, previous_status=_ee_prev_step, occurred_at=now
+                    )
 
-                    _apply_or_defer_execution_fatal(
+                    await _apply_or_defer_execution_fatal(
+                        session,
                         execution,
                         error_code="DAG_WAIT_UNSUPPORTED",
                         error_message=dag_wait_message,
@@ -1996,12 +2058,25 @@ class McpToolRunner:
                 attempt.lease_expires_at = None
                 # STARTED, finished_at null, no error/result — unchanged status.
 
+                from app.execution.events import ExecutionEventWriter
+
+                event_writer = ExecutionEventWriter(session)
+                previous_step_status = step.status
+                from app.execution.events import ExecutionEventWriter
+                _ee_prev_step = step.status
                 step.status = StepStatus.WAITING_INPUT.value
                 step.finished_at = None
                 step.error_code = None
                 step.error_message = None
                 step.lock_version += 1
+                await ExecutionEventWriter(session).emit_step_status_changed(
+                    step, previous_status=_ee_prev_step, occurred_at=now
+                )
+                await event_writer.emit_step_status_changed(
+                    step, previous_status=previous_step_status, occurred_at=now
+                )
 
+                previous_exec_status = execution.status
                 execution.status = ExecutionStatus.WAITING_INPUT.value
                 execution.finished_at = None
                 execution.error_code = None
@@ -2011,6 +2086,9 @@ class McpToolRunner:
                 execution.lease_expires_at = None
                 execution.heartbeat_at = None
                 execution.lock_version += 1
+                await event_writer.emit_execution_status_changed(
+                    execution, previous_status=previous_exec_status, occurred_at=now
+                )
 
                 await inputs.create(
                     execution_id=execution.id,
@@ -2139,7 +2217,8 @@ class McpToolRunner:
                         disposition=DISPOSITION_RETRY,
                     )
 
-                terminal, disposition = _apply_terminal_transition(
+                terminal, disposition = await _apply_terminal_transition(
+                    session,
                     execution=execution,
                     step=step,
                     attempt=attempt,
@@ -2207,7 +2286,8 @@ _MRTR_SECRET_ECHO_MESSAGE = (
 )
 
 
-def _terminalize_mrtr_secret_echo(
+async def _terminalize_mrtr_secret_echo(
+    session: AsyncSession,
     *,
     execution: Execution,
     step: ExecutionStep,
@@ -2240,14 +2320,20 @@ def _terminalize_mrtr_secret_echo(
     attempt.worker_id = None
     attempt.lease_expires_at = None
 
+    from app.execution.events import ExecutionEventWriter
+    _ee_prev_step = step.status
     step.status = StepStatus.FAILED.value
     step.error_code = _MRTR_SECRET_ECHO_CODE
     step.error_message = _MRTR_SECRET_ECHO_MESSAGE
     step.result_inline = None
     step.finished_at = now
     step.lock_version += 1
+    await ExecutionEventWriter(session).emit_step_status_changed(
+        step, previous_status=_ee_prev_step, occurred_at=now
+    )
 
-    _apply_or_defer_execution_fatal(
+    await _apply_or_defer_execution_fatal(
+        session,
         execution,
         error_code=_MRTR_SECRET_ECHO_CODE,
         error_message=_MRTR_SECRET_ECHO_MESSAGE,
@@ -2314,7 +2400,8 @@ def _apply_retry_checkpoint(
     return terminal
 
 
-def _apply_terminal_transition(
+async def _apply_terminal_transition(
+    session: AsyncSession,
     *,
     execution: Execution,
     step: ExecutionStep,
@@ -2401,12 +2488,19 @@ def _apply_terminal_transition(
     attempt.result_inline = result_inline
     attempt.finished_at = finished_at
 
+    from app.execution.events import ExecutionEventWriter
+
+    event_writer = ExecutionEventWriter(session)
+    previous_step_status = step.status
     step.status = terminal
     step.error_code = error_code
     step.error_message = error_message
     step.result_inline = result_inline
     step.finished_at = finished_at
     step.lock_version += 1
+    await event_writer.emit_step_status_changed(
+        step, previous_status=previous_step_status, occurred_at=finished_at
+    )
 
     if terminal == StepStatus.SUCCEEDED.value:
         # Step success is not Execution success when unfinished Steps remain.
@@ -2426,7 +2520,8 @@ def _apply_terminal_transition(
             if terminal == StepStatus.UNKNOWN_OUTCOME.value
             else error_message
         )
-        _apply_or_defer_execution_fatal(
+        await _apply_or_defer_execution_fatal(
+            session,
             execution,
             error_code=error_code,
             error_message=fatal_message,

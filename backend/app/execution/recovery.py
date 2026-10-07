@@ -267,11 +267,16 @@ class ExecutionRecoveryService:
                     " safe retry class allows a new Attempt."
                 ),
             )
+            from app.execution.events import ExecutionEventWriter
+            previous_step = step.status
             step.status = StepStatus.READY.value
             step.error_code = None
             step.error_message = None
             step.finished_at = None
             step.lock_version += 1
+            await ExecutionEventWriter(self._session).emit_step_status_changed(
+                step, previous_status=previous_step, occurred_at=ts
+            )
             await self._session.flush()
             return RecoveryOutcome(
                 execution_id=execution.id,
@@ -298,7 +303,7 @@ class ExecutionRecoveryService:
                     " max_attempts exhausted."
                 ),
             )
-            self._fail_execution_step(
+            await self._fail_execution_step(
                 execution=execution,
                 step=step,
                 now=ts,
@@ -334,6 +339,9 @@ class ExecutionRecoveryService:
                     " unsafe risk class forbids automatic re-call."
                 ),
             )
+            from app.execution.events import ExecutionEventWriter
+            event_writer = ExecutionEventWriter(self._session)
+            previous_step = step.status
             step.status = StepStatus.UNKNOWN_OUTCOME.value
             step.error_code = _ERROR_CODE_LEASE_EXPIRED
             step.error_message = (
@@ -342,6 +350,11 @@ class ExecutionRecoveryService:
             )
             step.finished_at = ts
             step.lock_version += 1
+            # UNKNOWN_OUTCOME step has no mapped SSE event type this slice.
+            await event_writer.emit_step_status_changed(
+                step, previous_status=previous_step, occurred_at=ts
+            )
+            previous_exec = execution.status
             execution.status = ExecutionStatus.FAILED.value
             execution.error_code = _ERROR_CODE_LEASE_EXPIRED
             execution.error_message = (
@@ -351,6 +364,9 @@ class ExecutionRecoveryService:
             execution.finished_at = ts
             self._clear_lease(execution)
             execution.lock_version += 1
+            await event_writer.emit_execution_status_changed(
+                execution, previous_status=previous_exec, occurred_at=ts
+            )
             await self._session.flush()
             return RecoveryOutcome(
                 execution_id=execution.id,
@@ -746,7 +762,7 @@ class ExecutionRecoveryService:
         attempt.is_retryable = is_retryable
         attempt.finished_at = now
 
-    def _fail_execution_step(
+    async def _fail_execution_step(
         self,
         *,
         execution: Execution,
@@ -755,6 +771,11 @@ class ExecutionRecoveryService:
         error_code: str,
         error_message: str,
     ) -> None:
+        from app.execution.events import ExecutionEventWriter
+
+        event_writer = ExecutionEventWriter(self._session)
+        previous_step = step.status
+        previous_exec = execution.status
         step.status = StepStatus.FAILED.value
         step.error_code = error_code
         step.error_message = error_message
@@ -766,6 +787,12 @@ class ExecutionRecoveryService:
         execution.finished_at = now
         self._clear_lease(execution)
         execution.lock_version += 1
+        await event_writer.emit_step_status_changed(
+            step, previous_status=previous_step, occurred_at=now
+        )
+        await event_writer.emit_execution_status_changed(
+            execution, previous_status=previous_exec, occurred_at=now
+        )
 
     async def _fail_inconsistent(
         self,
@@ -846,9 +873,15 @@ class ExecutionRecoveryService:
                         locked.is_retryable = False
                         locked.finished_at = now
 
+        from app.execution.events import ExecutionEventWriter
+
+        previous_exec = execution.status
         execution.status = ExecutionStatus.FAILED.value
         execution.error_code = _ERROR_CODE_INCONSISTENT
         execution.error_message = message
         execution.finished_at = now
         self._clear_lease(execution)
         execution.lock_version += 1
+        await ExecutionEventWriter(self._session).emit_execution_status_changed(
+            execution, previous_status=previous_exec, occurred_at=now
+        )

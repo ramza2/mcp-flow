@@ -282,12 +282,18 @@ class ToolStepAttemptService:
         # waits, then either sees RUNNING and replays, or still sees READY and
         # creates the Attempt. No IntegrityError reconcile / session.rollback —
         # that would abort the caller's broader transaction.
+        from app.execution.events import ExecutionEventWriter
+
+        previous_step_status = step.status
         step.status = StepStatus.RUNNING.value
         if step.started_at is None:
             step.started_at = ts
         step.attempt_count = next_attempt_no
         step.resolved_input = resolved_input
         step.lock_version += 1
+        await ExecutionEventWriter(self._session).emit_step_status_changed(
+            step, previous_status=previous_step_status, occurred_at=ts
+        )
 
         attempt = await self._executions.create_attempt(
             step_execution_id=step.id,

@@ -158,6 +158,14 @@ class ConversationMessageVisibility(StrEnum):
     INTERNAL = "INTERNAL"
 
 
+class ExecutionEventVisibility(StrEnum):
+    """docs/05 §13.8 execution_events.visibility."""
+
+    USER = "USER"
+    OPERATOR = "OPERATOR"
+    INTERNAL = "INTERNAL"
+
+
 class ExecutionStatus(StrEnum):
     CREATED = "CREATED"
     QUEUED = "QUEUED"

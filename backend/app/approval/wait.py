@@ -152,7 +152,25 @@ class ApprovalWaitService:
             requested_by=execution.requester_id,
         )
 
+        from app.execution.events import ExecutionEventWriter
+
+        event_writer = ExecutionEventWriter(self._session)
+        previous_step_status = step.status
+        previous_exec_status = execution.status
         self._apply_waiting_state(execution=execution, step=step)
+        await event_writer.emit_step_status_changed(
+            step, previous_status=previous_step_status, occurred_at=ts
+        )
+        await event_writer.emit_execution_status_changed(
+            execution, previous_status=previous_exec_status, occurred_at=ts
+        )
+        await event_writer.emit_approval_requested(
+            execution_id=execution.id,
+            step_execution_id=step.id,
+            approval_request_id=request.id,
+            status=request.status,
+            occurred_at=ts,
+        )
         # Do not set step.started_at — that marks MCP Attempt start.
         # Do not set finished_at — wait is non-terminal.
         # attempt_count remains unchanged (approval consumes no Attempt).
@@ -258,10 +276,17 @@ class ApprovalWaitService:
         expires_at = ts + timedelta(seconds=approval_policy.default_expiry_seconds)
 
         # Local READY evidence before wait (Plan checkpoint entry).
+        from app.execution.events import ExecutionEventWriter
+
+        event_writer = ExecutionEventWriter(self._session)
         if step.status == StepStatus.PENDING.value:
+            previous_step_status = step.status
             step.status = StepStatus.READY.value
             if step.ready_at is None:
                 step.ready_at = ts
+            await event_writer.emit_step_status_changed(
+                step, previous_status=previous_step_status, occurred_at=ts
+            )
 
         request = await self._requests.create_pending(
             execution_id=execution.id,
@@ -277,7 +302,22 @@ class ApprovalWaitService:
             requested_by=execution.requester_id,
         )
 
+        previous_step_status = step.status
+        previous_exec_status = execution.status
         self._apply_waiting_state(execution=execution, step=step)
+        await event_writer.emit_step_status_changed(
+            step, previous_status=previous_step_status, occurred_at=ts
+        )
+        await event_writer.emit_execution_status_changed(
+            execution, previous_status=previous_exec_status, occurred_at=ts
+        )
+        await event_writer.emit_approval_requested(
+            execution_id=execution.id,
+            step_execution_id=step.id,
+            approval_request_id=request.id,
+            status=request.status,
+            occurred_at=ts,
+        )
         step.lock_version += 1
         execution.lock_version += 1
         await self._session.flush()
