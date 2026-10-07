@@ -351,8 +351,16 @@ def _fake_row(**fields):
     return types.SimpleNamespace(**fields)
 
 
-def test_apply_terminal_transition_unknown_outcome_never_reaches_execution() -> None:
+@pytest.mark.asyncio
+async def test_apply_terminal_transition_unknown_outcome_never_reaches_execution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from unittest.mock import AsyncMock
+
+    execution_id = uuid.uuid4()
+    step_id = uuid.uuid4()
     execution = _fake_row(
+        id=execution_id,
         status=ExecutionStatus.RUNNING.value,
         error_code=None,
         error_message=None,
@@ -365,6 +373,8 @@ def test_apply_terminal_transition_unknown_outcome_never_reaches_execution() -> 
         lock_version=1,
     )
     step = _fake_row(
+        id=step_id,
+        execution_id=execution_id,
         step_key="tool-step",
         status=StepStatus.RUNNING.value,
         error_code=None,
@@ -391,7 +401,21 @@ def test_apply_terminal_transition_unknown_outcome_never_reaches_execution() -> 
     )
     exc = _tool_call_error(error_layer="TIMEOUT", outcome_unknown=True)
 
-    terminal, disposition = _apply_terminal_transition(
+    async def _noop_emit(*_a, **_k):
+        return None
+
+    monkeypatch.setattr(
+        "app.execution.events.ExecutionEventWriter.emit_step_status_changed",
+        _noop_emit,
+    )
+    monkeypatch.setattr(
+        "app.execution.events.ExecutionEventWriter.emit_execution_status_changed",
+        _noop_emit,
+    )
+
+    session = AsyncMock()
+    terminal, disposition = await _apply_terminal_transition(
+        session,
         execution=execution,
         step=step,
         attempt=attempt,
