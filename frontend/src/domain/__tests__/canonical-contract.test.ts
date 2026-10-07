@@ -8,10 +8,13 @@ import {
   AGENT_STATUSES,
   AGENT_VERSION_STATUSES,
   APPROVAL_STATUSES,
+  AUDIT_ACTOR_TYPES,
+  AUDIT_RESULTS,
   AUTHORABLE_STEP_TYPES,
   CURRENT_MCP_PROTOCOL_VERSION,
   EXECUTION_SOURCE_TYPES,
   EXECUTION_STATUSES,
+  EXECUTION_TRIGGER_TYPES,
   JOB_STATUSES,
   MCP_AUTH_TYPES,
   MCP_CHECK_STATUSES,
@@ -164,6 +167,22 @@ describe('Canonical Domain Contract (docs/04/05)', () => {
       'MANUAL_TOOL_TEST',
       'FACTORY_TEST',
     ]);
+  });
+
+  it('ExecutionTrigger', () => {
+    expectExact(EXECUTION_TRIGGER_TYPES, [
+      'USER',
+      'SCHEDULE',
+      'RETRY',
+      'SYSTEM',
+      'TEST',
+    ]);
+  });
+
+  it('AuditActorType / AuditResult', () => {
+    expectExact(AUDIT_ACTOR_TYPES, ['USER', 'SERVICE', 'SYSTEM']);
+    expectExact(AUDIT_RESULTS, ['SUCCESS', 'DENIED', 'FAILURE']);
+    expect(AUDIT_RESULTS).not.toContain('FAILED');
   });
 
   it('ScheduleTarget', () => {
