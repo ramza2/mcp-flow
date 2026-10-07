@@ -61,6 +61,8 @@ export type SseConnectionState =
   | 'unavailable';
 
 export const SSE_MAX_CONSECUTIVE_ERRORS = 3;
+/** Sustained browser `offline` grace before active executions fall back to REST polling. */
+export const SSE_OFFLINE_FALLBACK_GRACE_MS = 5000;
 export const MAX_TIMELINE_EVENTS = 200;
 export const SNAPSHOT_REFRESH_DEBOUNCE_MS = 150;
 

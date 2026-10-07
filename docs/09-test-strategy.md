@@ -1054,6 +1054,8 @@ OpenAPI에서 secret field가 response schema로 노출되지 않아야 한다.
 - SSE event → debounced quiet snapshot refresh (status 역행 없음)
 - durable bigint SSE id: malformed/blank/duplicate/lower id 무시; increasing id timeline
 - transient `onerror`는 EventSource 유지; 연속 실패 → 4s polling fallback
+- sustained browser `offline` grace(5s) on active → polling; grace 내 `online` → SSE 유지
+- terminal + sustained offline → polling 미진입; unmount clears offline watchdog
 - successful `open` → error counter reset; terminal → polling stop
 - selected Step detail refresh on snapshot; unmount closes EventSource
 - WAITING_INPUT / CANCEL_REQUESTED / terminal snapshot UX via refresh
@@ -1064,7 +1066,7 @@ OpenAPI에서 secret field가 response schema로 노출되지 않아야 한다.
 - `execution.step.progress`, `execution.step.retrying`, `artifact.created` producers
 - 권한 없는 stream 차단 (already backend; UI negative path optional)
 
-### E2E-010 live Traefik/browser harness (PR #65)
+### E2E-010 live Traefik/browser harness (PR #65 / #68)
 
 Playwright Chromium harness: `frontend/tests/e2e/execution-sse-live.spec.ts`
 (`pnpm test:e2e:sse-live`).
@@ -1074,10 +1076,12 @@ Playwright Chromium harness: `frontend/tests/e2e/execution-sse-live.spec.ts`
 - 실제 Login UI (mockAuthSession 금지); trace/video/screenshot off
 - 실경로: Browser EventSource → Traefik → `GET /api/v1/executions/{id}/events`
 - short `context.setOffline` → native reconnect → Live; timeline bigint id uniqueness
-- optional `MCPFLOW_E2E_ACTIVE_EXECUTION_ID`로 3-error → Polling fallback + REST poll
+- optional `MCPFLOW_E2E_ACTIVE_EXECUTION_ID`: sustained offline → offline grace watchdog
+  → Polling fallback → network restore → REST poll
+  (3× EventSource `onerror`에 의존하지 않음; Chromium offline에서 onerror 미발화 보완)
 - Traefik buffering/idle 설정은 실측 실패 재현 전에는 변경하지 않음
-- **reconnect / fallback live PASS는 실제 배포 fixture로 실행한 경우에만 기록**
-  (harness 추가만으로는 PASS로 표기하지 않음)
+- **reconnect / fallback live PASS는 실제 배포 fixture pilot 재실행으로만 기록**
+  (PR #68 harness/product 변경만으로는 fallback live PASS로 표기하지 않음)
 
 Required env (placeholders only; never commit secrets):
 

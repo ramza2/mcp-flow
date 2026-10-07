@@ -35,6 +35,7 @@ import {
   MAX_TIMELINE_EVENTS,
   SNAPSHOT_REFRESH_DEBOUNCE_MS,
   SSE_MAX_CONSECUTIVE_ERRORS,
+  SSE_OFFLINE_FALLBACK_GRACE_MS,
   isEventSourceAvailable,
   openExecutionEventsStream,
   parseSseEventId,
@@ -311,7 +312,49 @@ export default function ExecutionDetail() {
     };
   }, [executionId, hasSnapshot, usePollingFallback, acceptSseEvent]);
 
-  // Polling fallback for active executions only (after sustained SSE failure).
+  // Sustained browser-offline watchdog (Chromium may not fire EventSource onerror
+  // while offline). Transient offline within grace keeps native EventSource.
+  // Once polling fallback starts, online does not auto-return to SSE in this slice.
+  useEffect(() => {
+    if (!executionId || !hasSnapshot || usePollingFallback) return;
+
+    let offlineTimer: number | null = null;
+
+    const clearOfflineTimer = () => {
+      if (offlineTimer != null) {
+        window.clearTimeout(offlineTimer);
+        offlineTimer = null;
+      }
+    };
+
+    const onOffline = () => {
+      clearOfflineTimer();
+      offlineTimer = window.setTimeout(() => {
+        offlineTimer = null;
+        const status = statusRef.current;
+        if (status && ACTIVE_STATUSES.has(status)) {
+          setUsePollingFallback(true);
+          setConnectionState('polling');
+        }
+      }, SSE_OFFLINE_FALLBACK_GRACE_MS);
+    };
+
+    const onOnline = () => {
+      clearOfflineTimer();
+    };
+
+    window.addEventListener('offline', onOffline);
+    window.addEventListener('online', onOnline);
+
+    return () => {
+      clearOfflineTimer();
+      window.removeEventListener('offline', onOffline);
+      window.removeEventListener('online', onOnline);
+    };
+  }, [executionId, hasSnapshot, usePollingFallback]);
+
+  // Polling fallback for active executions only (after sustained SSE failure
+  // or offline grace).
   useEffect(() => {
     if (!executionId || !usePollingFallback) return;
     if (!execution || !ACTIVE_STATUSES.has(execution.status)) {

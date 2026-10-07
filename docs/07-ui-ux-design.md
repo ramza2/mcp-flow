@@ -738,13 +738,19 @@ Source
 4. SSE payload는 UI status에 직접 적용하지 않음 — quiet REST snapshot refresh만 trigger
    (과거 durable replay가 `CREATED` 등으로 상태를 역행시키지 않음)
 5. 단절 시 browser native reconnect + `Last-Event-ID` (EventSource 유지)
-6. 연속 실패(기본 3회) 시 EventSource close → active status만 4초 polling fallback
-7. terminal snapshot이면 polling 종료
+6. Polling fallback (active status만; 4초 REST)는 다음 중 하나로 진입:
+   - 연속 EventSource `onerror`(기본 3회) → EventSource close
+   - sustained browser `offline` grace(`SSE_OFFLINE_FALLBACK_GRACE_MS`=5s)
+     — grace 내 `online`이면 timer 취소하고 native EventSource 유지
+     — Chromium offline에서 `onerror`가 오지 않는 경우를 보완
+   - fallback 시작 후 `online`은 이 slice에서 SSE로 자동 복귀하지 않음
+7. terminal snapshot이면 polling 종료; offline watchdog도 terminal에는 적용하지 않음
 
 Events tab은 deferred 문구 대신 SSE timeline(최대 200건, id ASC)과
 Live / Reconnecting / Polling fallback / Disconnected·Unavailable 연결 상태를 표시한다.
 
-Traefik/browser 실네트워크 단절 E2E(`E2E-010`)는 후속.
+Traefik/browser 실네트워크 단절 E2E(`E2E-010`) harness는 구현됨;
+live reconnect/fallback PASS는 배포 fixture pilot 재실행으로만 기록.
 
 ---
 

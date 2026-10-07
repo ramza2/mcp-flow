@@ -5,7 +5,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import ExecutionDetail from '@/screens/work/ExecutionDetail';
-import { SNAPSHOT_REFRESH_DEBOUNCE_MS } from '@/api/executionEvents';
+import {
+  SNAPSHOT_REFRESH_DEBOUNCE_MS,
+  SSE_OFFLINE_FALLBACK_GRACE_MS,
+} from '@/api/executionEvents';
 import { renderWithRouter } from '../test-utils';
 import { setCachedCsrfTokenForTests } from '@/api/csrf';
 import { FakeEventSource, stubFakeEventSource } from '../helpers/fakeEventSource';
@@ -413,6 +416,130 @@ describe('ExecutionDetail SSE + polling fallback', () => {
     await waitFor(() => {
       expect(fetchMock.mock.calls.length).toBeGreaterThan(callsBefore);
     });
+  });
+
+  it('transient offline within grace + online keeps EventSource (no polling)', async () => {
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    mockRunningFetch();
+    renderWithRouter(<ExecutionDetail />, {
+      path: '/executions/:executionId',
+      route: `/executions/${EXEC_ID}`,
+    });
+    await screen.findByText(EXEC_ID);
+    const source = await waitForSse();
+    act(() => source.emitOpen());
+    await user.click(screen.getByRole('button', { name: /^Events$/i }));
+    expect(await screen.findByTestId('sse-connection-state')).toHaveTextContent('Live');
+
+    act(() => {
+      window.dispatchEvent(new Event('offline'));
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(SSE_OFFLINE_FALLBACK_GRACE_MS - 500);
+    });
+    act(() => {
+      window.dispatchEvent(new Event('online'));
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(SSE_OFFLINE_FALLBACK_GRACE_MS + 1000);
+    });
+
+    expect(source.isClosed).toBe(false);
+    expect(screen.getByTestId('sse-connection-state')).toHaveTextContent('Live');
+    expect(screen.queryByText('Polling fallback')).not.toBeInTheDocument();
+  });
+
+  it('sustained offline beyond grace on active execution switches to polling', async () => {
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    const { fetchMock } = mockRunningFetch();
+    renderWithRouter(<ExecutionDetail />, {
+      path: '/executions/:executionId',
+      route: `/executions/${EXEC_ID}`,
+    });
+    await screen.findByText(EXEC_ID);
+    const source = await waitForSse();
+    act(() => source.emitOpen());
+    await user.click(screen.getByRole('button', { name: /^Events$/i }));
+    expect(await screen.findByTestId('sse-connection-state')).toHaveTextContent('Live');
+
+    act(() => {
+      window.dispatchEvent(new Event('offline'));
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(SSE_OFFLINE_FALLBACK_GRACE_MS);
+    });
+
+    await waitFor(() => {
+      expect(source.isClosed).toBe(true);
+    });
+    expect(await screen.findByTestId('sse-connection-state')).toHaveTextContent(
+      'Polling fallback',
+    );
+
+    // After fallback, online must not auto-return to SSE; 4s REST polling continues.
+    act(() => {
+      window.dispatchEvent(new Event('online'));
+    });
+    const callsBefore = fetchMock.mock.calls.length;
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(4000);
+    });
+    await waitFor(() => {
+      expect(fetchMock.mock.calls.length).toBeGreaterThan(callsBefore);
+    });
+    expect(screen.getByTestId('sse-connection-state')).toHaveTextContent(
+      'Polling fallback',
+    );
+    // No new EventSource after fallback + online.
+    expect(FakeEventSource.instances.filter((s) => !s.isClosed)).toHaveLength(0);
+  });
+
+  it('terminal execution sustained offline does not enter polling fallback', async () => {
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    mockRunningFetch({ detailStatus: 'SUCCEEDED', stepStatus: 'SUCCEEDED' });
+    renderWithRouter(<ExecutionDetail />, {
+      path: '/executions/:executionId',
+      route: `/executions/${EXEC_ID}`,
+    });
+    await screen.findByText(EXEC_ID);
+    const source = await waitForSse();
+    act(() => source.emitOpen());
+    await user.click(screen.getByRole('button', { name: /^Events$/i }));
+    expect(await screen.findByTestId('sse-connection-state')).toHaveTextContent('Live');
+
+    act(() => {
+      window.dispatchEvent(new Event('offline'));
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(SSE_OFFLINE_FALLBACK_GRACE_MS + 500);
+    });
+
+    expect(source.isClosed).toBe(false);
+    expect(screen.getByTestId('sse-connection-state')).toHaveTextContent('Live');
+    expect(screen.queryByText('Polling fallback')).not.toBeInTheDocument();
+  });
+
+  it('unmount clears offline watchdog timer and listeners', async () => {
+    mockRunningFetch();
+    const { unmount } = renderWithRouter(<ExecutionDetail />, {
+      path: '/executions/:executionId',
+      route: `/executions/${EXEC_ID}`,
+    });
+    await screen.findByText(EXEC_ID);
+    const source = await waitForSse();
+    act(() => source.emitOpen());
+
+    act(() => {
+      window.dispatchEvent(new Event('offline'));
+    });
+    unmount();
+    expect(source.isClosed).toBe(true);
+
+    // Advancing past grace after unmount must not throw or open polling.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(SSE_OFFLINE_FALLBACK_GRACE_MS + 1000);
+    });
+    expect(FakeEventSource.instances.filter((s) => !s.isClosed)).toHaveLength(0);
   });
 
   it('terminal snapshot stops polling fallback', async () => {
