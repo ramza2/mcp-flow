@@ -184,6 +184,15 @@ OpenAPI/Python 입력 → 구조/보안 검증 → 격리 Build/Test → 증적 
 | `REQ-AUTH-004` | Backend API가 최종 권한검증을 수행한다. | Must | 직접 API 호출 우회 불가. |
 | `REQ-AUTH-005` | Agent/Workflow/MCP Server/Tool 자원 범위를 제한한다. | Must | 후보검색과 실행 모두 제한. |
 | `REQ-AUTH-006` | 본인 이력과 운영/감사 범위를 구분한다. | Must | 권한 밖 이력 미노출. |
+
+### REQ-AUTH-006 / REQ-OPS read-side (PR #58)
+
+- Ordinary ACTIVE User without `execution.read` may list/detail/Steps only where
+  `Execution.requester_id == principal.user_id`. Other users' IDs return `404 NOT_FOUND`.
+- ACTIVE User with `execution.read` may perform global Execution history and all
+  `/ops/*` Dashboard/stats/health reads.
+- No `execution.read.own` / `operations.read` permissions. Frontend remains mock until #59.
+- Does **not** claim full `REQ-OPS-003..008` (SSE, metrics series, export, heartbeats).
 | `REQ-AUTH-007` | 관리·승인·감사 Permission을 분리한다. | Must | 최소권한 Role 구성 가능. |
 | `REQ-AUTH-008` | 인증실패·권한거부·권한변경을 감사한다. | Must | actor/result/request ID 추적. |
 

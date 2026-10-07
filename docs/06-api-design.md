@@ -867,17 +867,17 @@ Decision:
 ## 14. Execution API
 
 ```text
-GET  /executions
-POST /executions
-GET  /executions/{execution_id}
-GET  /executions/{execution_id}/steps
-GET  /executions/{execution_id}/steps/{step_execution_id}
-GET  /executions/{execution_id}/events
-GET  /executions/{execution_id}/event-history
+GET  /executions                              # PR #58 — own vs execution.read
+POST /executions                              # not used; create via Agent/Workflow/Schedule
+GET  /executions/{execution_id}               # PR #58 safe detail
+GET  /executions/{execution_id}/steps         # PR #58
+GET  /executions/{execution_id}/steps/{step_execution_id}  # PR #58 + attempts/tool_calls
+GET  /executions/{execution_id}/events        # deferred — no durable execution_events yet
+GET  /executions/{execution_id}/event-history # deferred
 POST /executions/{execution_id}/cancel
-POST /executions/{execution_id}/retry
-GET  /executions/{execution_id}/artifacts
-GET  /executions/{execution_id}/metrics
+POST /executions/{execution_id}/retry         # deferred
+GET  /executions/{execution_id}/artifacts     # deferred
+GET  /executions/{execution_id}/metrics       # deferred
 ```
 
 ### 14.1 Execution Source
@@ -1137,10 +1137,43 @@ SKIP RUN_ONCE CATCH_UP_LIMITED
 ```text
 GET /ops/dashboard/summary
 GET /ops/execution-stats
-GET /ops/tool-stats
-GET /ops/agent-stats
+GET /ops/tool-stats          # deferred
+GET /ops/agent-stats         # deferred
 GET /ops/system-health
 ```
+
+#### PR #58 Execution history + Ops read APIs
+
+```text
+GET /executions
+GET /executions/{execution_id}
+GET /executions/{execution_id}/steps
+GET /executions/{execution_id}/steps/{step_execution_id}
+
+GET /ops/dashboard/summary
+GET /ops/execution-stats
+GET /ops/system-health
+```
+
+Authorization:
+
+- Own history (no `execution.read`): `requester_id == actor` only; cross-user → 404.
+  Foreign `requester_id` filter → 403 `AUTH_FORBIDDEN`.
+- Global Operator: ACTIVE + `execution.read` for list/detail across all Executions
+  and all `/ops/*` endpoints. Aggregate MCP/Approval/Schedule counts do **not**
+  grant `mcp.*.read` / `schedule.manage` / `approval.decide`.
+
+`GET /executions` query: `page`, `page_size` (max 100), `status` (comma-separated
+canonical), `source_type`, `trigger_type`, `requester_id`, `agent_version_id`,
+`workflow_version_id`, `schedule_occurrence_id`, `parent_execution_id`,
+`tool_version_id` (EXISTS on Steps), `error_code`, `from`/`to` (aware; inclusive/
+exclusive), `q` (≤128; id/trace_id/error_code), `sort` allowlist
+(`±requested_at|started_at|finished_at|status`, default `-requested_at`) + `id DESC`.
+
+Safe projections omit snapshots, leases, raw error_message, ToolCall meta,
+MRTR requestState, SecretRefs. Optional `error_category` is read-side only.
+`GET /executions/{id}/events`, retry, artifacts, metrics endpoints deferred.
+No Audit append on these GETs. No migration in #58 (Alembic head remains `20261006_0024`).
 
 ### Audit
 

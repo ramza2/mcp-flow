@@ -699,6 +699,18 @@ SQLite를 PostgreSQL Integration 대체로 사용하지 않는다.
 
 > **PR #57:** PostgreSQL integration must prove ordinary `UPDATE`/`DELETE` on `audit_events` are rejected by the append-only trigger. Retention purge is out of scope.
 
+추가 (Execution / Ops read APIs — PR #58):
+
+- Own history vs `execution.read` global (cross-user 404; foreign requester_id 403)
+- Execution list filters (multi-status, tool EXISTS without duplicate rows, from/to, sort allowlist)
+- Safe list/detail/Step/Attempt/ToolCall projections (no snapshots/leases/meta)
+- Dashboard window metrics: terminal_total, success_rate, avg/p95 duration
+- Approval/Schedule/MCP aggregate counts; soft-delete exclusion
+- execution-stats by_error_category + top_error_codes (no error_message)
+- system-health durable signals only (injected DB unavailable → `unavailable`)
+- No Audit append / no FOR UPDATE on read paths
+- Frontend mock screens unchanged until #59
+
 ---
 
 ## 10. Agent Request / Execution 분리 시험

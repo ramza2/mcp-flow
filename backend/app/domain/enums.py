@@ -303,6 +303,16 @@ class ExecutionSourceType(StrEnum):
     FACTORY_TEST = "FACTORY_TEST"
 
 
+class ExecutionTriggerType(StrEnum):
+    """docs/05 §13.1 Execution.trigger_type (occurrence cause)."""
+
+    USER = "USER"
+    SCHEDULE = "SCHEDULE"
+    RETRY = "RETRY"
+    SYSTEM = "SYSTEM"
+    TEST = "TEST"
+
+
 class ScheduleTargetType(StrEnum):
     AGENT_VERSION = "AGENT_VERSION"
     WORKFLOW_VERSION = "WORKFLOW_VERSION"

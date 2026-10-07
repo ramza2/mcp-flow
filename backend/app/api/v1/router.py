@@ -10,6 +10,7 @@ from app.api.v1.executions import router as executions_router
 from app.api.v1.mcp_servers import router as mcp_servers_router
 from app.api.v1.mcp_tools import router as mcp_tools_router
 from app.api.v1.model_profiles import router as model_profiles_router
+from app.api.v1.ops import router as ops_router
 from app.api.v1.permissions import router as permissions_router
 from app.api.v1.roles import router as roles_router
 from app.api.v1.schedules import router as schedules_router
@@ -32,6 +33,7 @@ protected_router.include_router(executions_router)
 protected_router.include_router(mcp_servers_router)
 protected_router.include_router(mcp_tools_router)
 protected_router.include_router(model_profiles_router)
+protected_router.include_router(ops_router)
 protected_router.include_router(workflows_router)
 protected_router.include_router(schedules_router)
 protected_router.include_router(users_router)

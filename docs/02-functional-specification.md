@@ -911,15 +911,52 @@ Manual `POST /trigger`는 동일 lineage에 `trigger_type=USER`만 다르다. AG
 - Approval/Schedule/Job 이상
 - Tool mapping 평가 요약
 
+### PR #58 foundation (`GET /ops/dashboard/summary`)
+
+- Requires ACTIVE User + `execution.read` (global Operator). Aggregate-only for
+  MCP Server/Tool, Approval, Schedule — no resource IDs/names/endpoints/secrets.
+- Default window: rolling last 24 hours (`from`/`to` override; timezone-aware).
+- Execution metrics: per-status counts, `terminal_total`, `success_rate =
+  SUCCEEDED / terminal_total` (null if 0; PARTIALLY_SUCCEEDED is not full success),
+  `avg_duration_ms` / `p95_duration_ms` over terminal rows with valid
+  `started_at`/`finished_at` (PostgreSQL `percentile_cont`).
+- Recent Executions: safe list projection, `requested_at DESC, id DESC`.
+- Approvals: `pending` / `overdue` counts only (`PENDING` + `expires_at <= now`).
+- Schedules: status counts + `overdue` (`ACTIVE` and `next_run_at < now - misfire_grace`).
+- Soft-deleted MCP/Schedule rows excluded.
+- Deferred: `GET /ops/tool-stats`, `GET /ops/agent-stats`, Job anomaly series.
+
 ## FNC-OPS-002. Execution 운영조회
 
 상태, 사용자, Agent, Workflow, Tool, 기간, 오류로 검색하고 Step/Event/Attempt를 추적한다.
+
+### PR #58 foundation
+
+- `GET /executions` — page/page_size, multi-status, source/trigger, requester,
+  version/occurrence/parent, tool EXISTS, error_code, from/to, q (id/trace/error_code),
+  sort allowlist + `id DESC` tie-break. Auth filter before COUNT/OFFSET.
+- `GET /executions/{id}` — safe detail (plan_schema_version/plan_hash/limits summary/
+  result_summary when already safe). No snapshots/leases/raw errors.
+- `GET /executions/{id}/steps` and `.../steps/{step_id}` — safe Step/Attempt/ToolCall
+  projections (latencies; no request/response meta / idempotency / worker).
+- Own history vs `execution.read` global (REQ-AUTH-006). Read APIs are side-effect free.
+- Deferred: SSE / `execution_events`, retry, artifacts, metrics detail.
 
 ## FNC-OPS-003. Health/Metric
 
 - `/health/live`, `/health/ready`
 - 업무 Dashboard 집계와 infrastructure metric 분리
 - API/Queue/Worker/LLM/MCP/Scheduler metric
+
+### PR #58 `GET /ops/system-health` + `GET /ops/execution-stats`
+
+- `execution-stats`: by_status/source/trigger, by_error_category (read-side classifier),
+  top_error_codes (max 10), duration avg/p50/p95/max. No `error_message`.
+- Error categories (presentation only): planning/auth/network/timeout/tool/output/
+  cancel/system/unknown — TIMEOUT rules before TOOL/MCP prefixes.
+- `system-health`: durable signals only — DB readiness, CREATED/QUEUED/RUNNING ages,
+  overdue/error Schedules, Outbox pending backlog. No invented Worker/Redis heartbeats.
+  Outbox has no canonical FAILED status → `failed_count` omitted.
 
 ## FNC-AUD-001. Audit
 

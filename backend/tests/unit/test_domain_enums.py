@@ -26,6 +26,7 @@ from app.domain.enums import (
     ConversationStatus,
     ExecutionSourceType,
     ExecutionStatus,
+    ExecutionTriggerType,
     JobStatus,
     JoinPolicy,
     LoopMode,
@@ -185,6 +186,10 @@ def expect_exact(enum_cls: type[Enum], expected: set[str]) -> None:
                 "MANUAL_TOOL_TEST",
                 "FACTORY_TEST",
             },
+        ),
+        (
+            ExecutionTriggerType,
+            {"USER", "SCHEDULE", "RETRY", "SYSTEM", "TEST"},
         ),
         (ScheduleTargetType, {"AGENT_VERSION", "WORKFLOW_VERSION"}),
         (ScheduleType, {"CRON", "ONCE", "INTERVAL"}),
