@@ -1059,11 +1059,38 @@ OpenAPI에서 secret field가 response schema로 노출되지 않아야 한다.
 - WAITING_INPUT / CANCEL_REQUESTED / terminal snapshot UX via refresh
 - Events tab timeline bound (200) + connection state; deferred 문구 제거
 
-### Deferred
+### Deferred producers
 
 - `execution.step.progress`, `execution.step.retrying`, `artifact.created` producers
-- E2E SSE 단절→재연결/polling (`E2E-010`) — Traefik/browser network 실측
 - 권한 없는 stream 차단 (already backend; UI negative path optional)
+
+### E2E-010 live Traefik/browser harness (PR #65)
+
+Playwright Chromium harness: `frontend/tests/e2e/execution-sse-live.spec.ts`
+(`pnpm test:e2e:sse-live`).
+
+- `PLAYWRIGHT_BASE_URL`가 외부 HTTPS이면 `webServer`/Vite를 시작하지 않음
+- env 미설정 시 skip — CI baseline / `pnpm test:e2e` mock smoke를 깨지 않음
+- 실제 Login UI (mockAuthSession 금지); trace/video/screenshot off
+- 실경로: Browser EventSource → Traefik → `GET /api/v1/executions/{id}/events`
+- short `context.setOffline` → native reconnect → Live; timeline bigint id uniqueness
+- optional `MCPFLOW_E2E_ACTIVE_EXECUTION_ID`로 3-error → Polling fallback + REST poll
+- Traefik buffering/idle 설정은 실측 실패 재현 전에는 변경하지 않음
+- **reconnect / fallback live PASS는 실제 배포 fixture로 실행한 경우에만 기록**
+  (harness 추가만으로는 PASS로 표기하지 않음)
+
+Required env (placeholders only; never commit secrets):
+
+```text
+PLAYWRIGHT_BASE_URL=https://<host>
+MCPFLOW_E2E_USERNAME=<user>
+MCPFLOW_E2E_PASSWORD=<password>
+MCPFLOW_E2E_EXECUTION_ID=<execution-uuid-with-durable-events>
+MCPFLOW_E2E_ACTIVE_EXECUTION_ID=<optional-non-terminal-execution-uuid>
+```
+
+Prefer stable active fixtures such as `WAITING_INPUT` / `WAITING_APPROVAL`
+for the fallback subtest.
 
 ---
 
@@ -1086,8 +1113,8 @@ ExecutionDetail (SSE timeline + snapshot→SSE→poll fallback)
 ```
 
 각 Component는 Loading/Empty/Error/Disabled/Permission 상태를 검증한다.
-ExecutionDetail SSE는 Fake EventSource + fake timers로 component 검증한다
-(실네트워크 E2E-010은 후속).
+ExecutionDetail SSE는 Fake EventSource + fake timers로 component 검증한다.
+실네트워크 `E2E-010`은 §19 live harness로 별도 실행한다.
 
 핵심 E2E:
 
@@ -1102,7 +1129,7 @@ ExecutionDetail SSE는 Fake EventSource + fake timers로 component 검증한다
 | `E2E-007` | MCP Server→Discovery→Tool→Verification |
 | `E2E-008` | Agent/Workflow Draft→Publish→실행 |
 | `E2E-009` | 예약 occurrence→Execution |
-| `E2E-010` | SSE 단절→재연결/polling |
+| `E2E-010` | SSE 단절→재연결/polling (live Traefik harness; PASS only when run) |
 | `E2E-011` | UNKNOWN_OUTCOME 운영확인 UX |
 | `E2E-012` | Role별 UI/API 권한 차이 |
 

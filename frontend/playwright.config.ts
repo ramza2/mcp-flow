@@ -1,7 +1,9 @@
 import { defineConfig, devices } from '@playwright/test';
 
 const PORT = process.env.PORT || '8443';
-const baseURL = process.env.PLAYWRIGHT_BASE_URL || `http://127.0.0.1:${PORT}`;
+/** When set (typically https://…), hit the deployed Traefik host — do not start Vite. */
+const externalBaseUrl = process.env.PLAYWRIGHT_BASE_URL;
+const baseURL = externalBaseUrl || `http://127.0.0.1:${PORT}`;
 
 export default defineConfig({
   testDir: './tests/e2e',
@@ -20,10 +22,12 @@ export default defineConfig({
       use: { ...devices['Desktop Chrome'] },
     },
   ],
-  webServer: {
-    command: 'pnpm dev',
-    url: baseURL,
-    reuseExistingServer: !process.env.CI,
-    timeout: 120_000,
-  },
+  webServer: externalBaseUrl
+    ? undefined
+    : {
+        command: 'pnpm dev',
+        url: baseURL,
+        reuseExistingServer: !process.env.CI,
+        timeout: 120_000,
+      },
 });
