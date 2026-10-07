@@ -21,7 +21,10 @@ from app.domain.enums import (
     UserStatus,
 )
 from app.ops.error_category import ERROR_CATEGORIES
-from app.repositories.operations import OperationsRepository, aggregate_error_categories
+from app.repositories.operations import (
+    OperationsRepository,
+    aggregate_error_category_counts,
+)
 from app.repositories.user import UserRepository
 from app.schemas.operations import (
     ApprovalOpsSummary,
@@ -181,6 +184,8 @@ class OperationsService:
         servers = await self._ops.mcp_server_counts()
         tools = await self._ops.mcp_tool_counts()
 
+        # Recent list is global latest (requested_at DESC), independent of the
+        # metrics from/to window — window scopes aggregates only.
         recent_rows = await self._ops.recent_executions(
             limit=recent_limit, from_time=None, to_time=None
         )
@@ -235,10 +240,10 @@ class OperationsService:
         for st in ExecutionTriggerType:
             by_trigger.setdefault(st.value, 0)
 
-        codes = await self._ops.error_codes_for_category(
+        code_counts = await self._ops.error_code_counts(
             from_time=window_from, to_time=window_to
         )
-        by_category = aggregate_error_categories(codes)
+        by_category = aggregate_error_category_counts(code_counts)
         for cat in ERROR_CATEGORIES:
             by_category.setdefault(cat, 0)
 

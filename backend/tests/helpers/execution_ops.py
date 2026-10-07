@@ -92,7 +92,9 @@ async def seed_execution(
     agent_request_id: uuid.UUID | None = None,
     schedule_occurrence_id: uuid.UUID | None = None,
     parent_execution_id: uuid.UUID | None = None,
+    plan_validation_run_id: uuid.UUID | None = None,
     trace_id: str | None = None,
+    result_summary: dict[str, Any] | None = None,
 ) -> Any:
     from datetime import UTC
 
@@ -105,7 +107,7 @@ async def seed_execution(
         requester_id=requester_id,
         agent_request_id=agent_request_id,
         agent_version_id=agent_version_id,
-        plan_validation_run_id=None,
+        plan_validation_run_id=plan_validation_run_id,
         status=ExecutionStatus.CREATED.value,
         plan_schema_version=EXECUTION_PLAN_SCHEMA_VERSION,
         plan_snapshot=plan,
@@ -122,6 +124,8 @@ async def seed_execution(
     row.error_code = error_code
     row.started_at = started_at
     row.finished_at = finished_at
+    if result_summary is not None:
+        row.result_summary = result_summary
     if status != ExecutionStatus.CREATED.value:
         row.queued_at = ts
     if status == ExecutionStatus.RUNNING.value:

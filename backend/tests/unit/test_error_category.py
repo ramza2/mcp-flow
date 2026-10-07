@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 from app.ops.error_category import classify_error_category
+from app.repositories.operations import (
+    aggregate_error_categories,
+    aggregate_error_category_counts,
+)
 
 
 def test_classify_timeout_before_tool_prefix() -> None:
@@ -55,3 +59,20 @@ def test_classify_error_layer_fallback() -> None:
         classify_error_category(error_code="TOOL_FAILED", error_layer="TIMEOUT")
         == "tool"
     )
+
+
+def test_aggregate_error_category_counts_weighted() -> None:
+    # One grouped NETWORK_TIMEOUT row with huge weight — not 100000 Python entries.
+    counts = aggregate_error_category_counts(
+        [
+            ("NETWORK_TIMEOUT", 100_000),
+            ("TOOL_FAILED", 3),
+            ("WEIRD_CODE_XYZ", 2),
+        ]
+    )
+    assert counts["timeout"] == 100_000
+    assert counts["tool"] == 3
+    assert counts["unknown"] == 2
+    # Null codes are never passed / never become unknown.
+    assert aggregate_error_categories([None, None, "TOOL_FAILED"]) == {"tool": 1}
+    assert "unknown" not in aggregate_error_categories([None])

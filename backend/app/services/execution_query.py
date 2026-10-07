@@ -15,6 +15,9 @@ from app.domain.enums import (
     ExecutionSourceType,
     ExecutionStatus,
     ExecutionTriggerType,
+    StepAttemptStatus,
+    StepStatus,
+    ToolCallNormalizedStatus,
     UserStatus,
 )
 from app.models.execution import Execution, ExecutionStep, StepAttempt, ToolCall
@@ -53,6 +56,27 @@ _ALLOWED_SORT = frozenset(
         "-status",
     }
 )
+
+# Actively progressing statuses may use wall-clock `now` when finished_at is null.
+# Terminal rows with missing finished_at must not fabricate an increasing duration.
+_EXECUTION_ACTIVE_FOR_DURATION = frozenset(
+    {
+        ExecutionStatus.RUNNING.value,
+        ExecutionStatus.WAITING_INPUT.value,
+        ExecutionStatus.WAITING_APPROVAL.value,
+        ExecutionStatus.CANCEL_REQUESTED.value,
+    }
+)
+_STEP_ACTIVE_FOR_DURATION = frozenset(
+    {
+        StepStatus.READY.value,
+        StepStatus.RUNNING.value,
+        StepStatus.WAITING_INPUT.value,
+        StepStatus.WAITING_APPROVAL.value,
+    }
+)
+_ATTEMPT_ACTIVE_FOR_DURATION = frozenset({StepAttemptStatus.STARTED.value})
+_TOOL_CALL_ACTIVE_FOR_DURATION = frozenset({ToolCallNormalizedStatus.STARTED.value})
 
 
 @dataclass(frozen=True, slots=True)
@@ -178,6 +202,12 @@ class ExecutionQueryService:
             )
         from_time = self._require_aware(query.from_time, field="from")
         to_time = self._require_aware(query.to_time, field="to")
+        if from_time is not None and to_time is not None and from_time >= to_time:
+            raise AppError(
+                code="VALIDATION_ERROR",
+                message="from must be earlier than to.",
+                status_code=422,
+            )
         q = query.q.strip() if isinstance(query.q, str) else None
         if q == "":
             q = None
@@ -230,26 +260,61 @@ class ExecutionQueryService:
         )
 
     @staticmethod
+    def _aware(value: datetime) -> datetime:
+        # SQLite may round-trip timezone-aware columns as naive UTC.
+        if value.tzinfo is None:
+            return value.replace(tzinfo=UTC)
+        return value
+
+    @classmethod
     def duration_ms(
+        cls,
         started_at: datetime | None,
         finished_at: datetime | None,
         *,
         now: datetime,
+        status: str | None = None,
+        active_statuses: frozenset[str] | None = None,
     ) -> int | None:
+        """Elapsed ms from started_at → finished_at (or now when actively progressing).
+
+        Terminal / non-active rows with missing ``finished_at`` return null so
+        corrupt evidence does not fabricate a continuously increasing duration.
+        Never returns a negative value.
+        """
         if started_at is None:
             return None
-        end = finished_at if finished_at is not None else now
+        if finished_at is not None:
+            end: datetime | None = finished_at
+        elif (
+            status is not None
+            and active_statuses is not None
+            and status in active_statuses
+        ):
+            end = now
+        else:
+            return None
 
-        def _aware(value: datetime) -> datetime:
-            # SQLite may round-trip timezone-aware columns as naive UTC.
-            if value.tzinfo is None:
-                return value.replace(tzinfo=UTC)
-            return value
+        start = cls._aware(started_at)
+        end_a = cls._aware(end)
+        ms = int((end_a - start).total_seconds() * 1000)
+        if ms < 0:
+            return None
+        return ms
 
-        start = _aware(started_at)
-        end_a = _aware(end)
-        delta = end_a - start
-        ms = int(delta.total_seconds() * 1000)
+    @classmethod
+    def time_to_first_byte_ms(
+        cls,
+        started_at: datetime | None,
+        first_byte_at: datetime | None,
+    ) -> int | None:
+        if started_at is None or first_byte_at is None:
+            return None
+        start = cls._aware(started_at)
+        first = cls._aware(first_byte_at)
+        if first < start:
+            return None
+        ms = int((first - start).total_seconds() * 1000)
         if ms < 0:
             return None
         return ms
@@ -287,7 +352,11 @@ class ExecutionQueryService:
             completed_step_count=completed_step_count,
             failed_step_count=failed_step_count,
             duration_ms=self.duration_ms(
-                row.started_at, row.finished_at, now=now
+                row.started_at,
+                row.finished_at,
+                now=now,
+                status=row.status,
+                active_statuses=_EXECUTION_ACTIVE_FOR_DURATION,
             ),
             source=source,
         )
@@ -369,7 +438,12 @@ class ExecutionQueryService:
         ts = now or datetime.now(UTC)
         items = await self._project_items([row], now=ts)
         base = items[0]
-        # result_summary is already a safe builder (status/step_keys only).
+        # Operations boundary: expose only the existing minimal Execution.result_summary
+        # (status / step_keys / step_count / step_statuses / response_steps status
+        # metadata from build_result_summary). Do NOT project result_inline, Tool
+        # content, structured_content, Tool metadata, input_snapshot, policy_snapshot,
+        # or plan_snapshot. If runtime result_summary semantics change, re-review
+        # this Operations response rather than auto-exposing arbitrary JSON.
         return ExecutionDetail(
             **base.model_dump(),
             plan_schema_version=row.plan_schema_version,
@@ -400,7 +474,11 @@ class ExecutionQueryService:
             error_code=step.error_code,
             error_category=classify_error_category(error_code=step.error_code),
             duration_ms=self.duration_ms(
-                step.started_at, step.finished_at, now=now
+                step.started_at,
+                step.finished_at,
+                now=now,
+                status=step.status,
+                active_statuses=_STEP_ACTIVE_FOR_DURATION,
             ),
         )
 
@@ -419,13 +497,15 @@ class ExecutionQueryService:
             first_byte_at=tc.first_byte_at,
             finished_at=tc.finished_at,
             duration_ms=self.duration_ms(
-                tc.started_at, tc.finished_at, now=now
+                tc.started_at,
+                tc.finished_at,
+                now=now,
+                status=tc.normalized_status,
+                active_statuses=_TOOL_CALL_ACTIVE_FOR_DURATION,
             ),
-            time_to_first_byte_ms=self.duration_ms(
-                tc.started_at, tc.first_byte_at, now=now
-            )
-            if tc.first_byte_at is not None
-            else None,
+            time_to_first_byte_ms=self.time_to_first_byte_ms(
+                tc.started_at, tc.first_byte_at
+            ),
         )
 
     def _to_attempt(
@@ -449,7 +529,11 @@ class ExecutionQueryService:
             started_at=attempt.started_at,
             finished_at=attempt.finished_at,
             duration_ms=self.duration_ms(
-                attempt.started_at, attempt.finished_at, now=now
+                attempt.started_at,
+                attempt.finished_at,
+                now=now,
+                status=attempt.status,
+                active_statuses=_ATTEMPT_ACTIVE_FOR_DURATION,
             ),
             tool_calls=[self._to_tool_call(tc, now=now) for tc in tool_calls],
         )

@@ -702,12 +702,18 @@ SQLite를 PostgreSQL Integration 대체로 사용하지 않는다.
 추가 (Execution / Ops read APIs — PR #58):
 
 - Own history vs `execution.read` global (cross-user 404; foreign requester_id 403)
-- Execution list filters (multi-status, tool EXISTS without duplicate rows, from/to, sort allowlist)
-- Safe list/detail/Step/Attempt/ToolCall projections (no snapshots/leases/meta)
-- Dashboard window metrics: terminal_total, success_rate, avg/p95 duration
+- Execution list filters (source/trigger/requester/version/occurrence/parent/tool/
+  error_code; multi-status; from/to with `from < to` → 422; literal `q` wildcard escape)
+- Nullable sort `NULLS LAST` for `±started_at`/`±finished_at`
+- Duration fail-closed: active statuses may use `now`; terminal missing `finished_at` → null
+- Safe list/detail/Step/Attempt/ToolCall projections (no snapshots/leases/meta/Tool content)
+- Source projection for AGENT_REQUEST / WORKFLOW_VERSION / SCHEDULE_OCCURRENCE (no Plan JSON)
+- Dashboard exact status counts + exact avg/p50/p95/max in isolated windows
 - Approval/Schedule/MCP aggregate counts; soft-delete exclusion
-- execution-stats by_error_category + top_error_codes (no error_message)
-- system-health durable signals only (injected DB unavailable → `unavailable`)
+- execution-stats DB-grouped error_code → weighted by_error_category + top_error_codes
+- system-health durable signals only (injected DB unavailable → `unavailable`);
+  `/health/ready` remains public readiness authority
+- Recent Executions global (not metrics-window-scoped)
 - No Audit append / no FOR UPDATE on read paths
 - Frontend mock screens unchanged until #59
 

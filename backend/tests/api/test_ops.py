@@ -137,8 +137,9 @@ async def test_dashboard_and_stats_window(
     assert body["executions"]["waiting_approval"] == 1
     assert body["terminal_total"] == 5
     assert body["success_rate"] == pytest.approx(1 / 5)
-    assert body["avg_duration_ms"] is not None
-    assert body["p95_duration_ms"] is not None
+    # SQLite fallback percentile matches continuous interpolation for 10..50s
+    assert body["avg_duration_ms"] == pytest.approx(30_000.0)
+    assert body["p95_duration_ms"] == pytest.approx(48_000.0)
     # Aggregate-only — no nested resource IDs/names beyond recent execution list
     assert set(body["approvals"].keys()) == {"pending", "overdue"}
     assert set(body["schedules"].keys()) == {
@@ -160,11 +161,14 @@ async def test_dashboard_and_stats_window(
     )
     assert stats.status_code == 200, stats.text
     s = stats.json()
-    assert s["by_status"]["FAILED"] >= 1
-    assert s["by_error_category"]["tool"] >= 1
-    assert s["by_error_category"]["unknown"] >= 0
+    assert s["by_status"]["FAILED"] == 1
+    assert s["by_error_category"]["tool"] == 1
+    assert s["by_error_category"]["unknown"] == 0
     assert "error_message" not in str(s)
-    assert s["duration"]["p95_ms"] is not None
+    assert s["duration"]["avg_ms"] == pytest.approx(30_000.0)
+    assert s["duration"]["p50_ms"] == pytest.approx(30_000.0)
+    assert s["duration"]["p95_ms"] == pytest.approx(48_000.0)
+    assert s["duration"]["max_ms"] == pytest.approx(50_000.0)
 
     health = await client.get(f"{OPS}/system-health")
     assert health.status_code == 200

@@ -231,15 +231,21 @@ class OperationsRepository:
         rows = (await self._session.execute(stmt)).all()
         return [(str(code), int(count)) for code, count in rows]
 
-    async def error_codes_for_category(
+    async def error_code_counts(
         self, *, from_time: datetime, to_time: datetime
-    ) -> list[str | None]:
-        """Return error_code values in window for category aggregation in Python."""
-        stmt = select(Execution.error_code).where(
-            Execution.requested_at >= from_time,
-            Execution.requested_at < to_time,
+    ) -> list[tuple[str, int]]:
+        """Grouped non-null error_code counts — O(distinct codes), not O(rows)."""
+        stmt = (
+            select(Execution.error_code, func.count())
+            .where(
+                Execution.requested_at >= from_time,
+                Execution.requested_at < to_time,
+                Execution.error_code.is_not(None),
+            )
+            .group_by(Execution.error_code)
         )
-        return [row[0] for row in (await self._session.execute(stmt)).all()]
+        rows = (await self._session.execute(stmt)).all()
+        return [(str(code), int(count)) for code, count in rows]
 
     async def queue_health(self, *, now: datetime) -> dict[str, Any]:
         counts = (
@@ -341,11 +347,28 @@ def _percentile(sorted_values: list[float], p: float) -> float:
     return sorted_values[f] + (sorted_values[c] - sorted_values[f]) * (k - f)
 
 
-def aggregate_error_categories(codes: list[str | None]) -> dict[str, int]:
+def aggregate_error_category_counts(
+    code_counts: list[tuple[str, int]],
+) -> dict[str, int]:
+    """Map grouped (error_code, count) → category totals.
+
+    Null error_code rows are never passed here — ``unknown`` means a non-null
+    stable code with no known mapping, not a successful Execution.
+    """
     out: dict[str, int] = {}
+    for code, count in code_counts:
+        if not code or count <= 0:
+            continue
+        cat = classify_error_category(error_code=code) or "unknown"
+        out[cat] = out.get(cat, 0) + int(count)
+    return out
+
+
+# Back-compat alias for older imports/tests.
+def aggregate_error_categories(codes: list[str | None]) -> dict[str, int]:
+    weighted: list[tuple[str, int]] = []
     for code in codes:
         if code is None:
             continue
-        cat = classify_error_category(error_code=code) or "unknown"
-        out[cat] = out.get(cat, 0) + 1
-    return out
+        weighted.append((code, 1))
+    return aggregate_error_category_counts(weighted)

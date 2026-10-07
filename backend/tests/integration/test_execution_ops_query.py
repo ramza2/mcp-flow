@@ -160,35 +160,6 @@ async def test_pg_dashboard_metrics_and_aggregates(
         owner = await _seed_schedule_manager(session, with_workflow_execute=True)
         _wf, version_id = await _seed_workflow_target(session, owner)
 
-        for status, seconds in (
-            (ExecutionStatus.SUCCEEDED.value, 10),
-            (ExecutionStatus.PARTIALLY_SUCCEEDED.value, 20),
-            (ExecutionStatus.FAILED.value, 30),
-            (ExecutionStatus.CANCELLED.value, 40),
-            (ExecutionStatus.TIMED_OUT.value, 50),
-            (ExecutionStatus.RUNNING.value, None),
-            (ExecutionStatus.WAITING_INPUT.value, None),
-            (ExecutionStatus.WAITING_APPROVAL.value, None),
-        ):
-            started = window_from + timedelta(hours=2)
-            finished = (
-                started + timedelta(seconds=seconds) if seconds is not None else None
-            )
-            await seed_execution(
-                session,
-                requester_id=operator,
-                status=status,
-                source_type=ExecutionSourceType.WORKFLOW_VERSION.value,
-                trigger_type=ExecutionTriggerType.USER.value,
-                workflow_version_id=version_id,
-                requested_at=window_from + timedelta(hours=1),
-                started_at=started,
-                finished_at=finished,
-                error_code=(
-                    "NETWORK_BLIP" if status == ExecutionStatus.FAILED.value else None
-                ),
-            )
-
         for st in (
             MCPServerStatus.ACTIVE,
             MCPServerStatus.INACTIVE,
@@ -323,21 +294,61 @@ async def test_pg_dashboard_metrics_and_aggregates(
 
         await session.commit()
 
+        # Unique far-future window so shared PG fixture rows cannot satisfy asserts.
+        iso_now = datetime(2099, 6, 15, 18, 0, 0, tzinfo=UTC)
+        iso_from = iso_now - timedelta(hours=24)
+        for status, seconds in (
+            (ExecutionStatus.SUCCEEDED.value, 10),
+            (ExecutionStatus.PARTIALLY_SUCCEEDED.value, 20),
+            (ExecutionStatus.FAILED.value, 30),
+            (ExecutionStatus.CANCELLED.value, 40),
+            (ExecutionStatus.TIMED_OUT.value, 50),
+            (ExecutionStatus.RUNNING.value, None),
+            (ExecutionStatus.WAITING_INPUT.value, None),
+            (ExecutionStatus.WAITING_APPROVAL.value, None),
+        ):
+            started = iso_from + timedelta(hours=2)
+            finished = (
+                started + timedelta(seconds=seconds) if seconds is not None else None
+            )
+            await seed_execution(
+                session,
+                requester_id=operator,
+                status=status,
+                source_type=ExecutionSourceType.WORKFLOW_VERSION.value,
+                trigger_type=ExecutionTriggerType.USER.value,
+                workflow_version_id=version_id,
+                requested_at=iso_from + timedelta(hours=1),
+                started_at=started,
+                finished_at=finished,
+                error_code=(
+                    "NETWORK_BLIP" if status == ExecutionStatus.FAILED.value else None
+                ),
+            )
+        await session.commit()
+
         summary = await OperationsService(session).dashboard_summary(
             actor_user_id=operator,
-            from_time=window_from,
-            to_time=now,
+            from_time=iso_from,
+            to_time=iso_now,
             recent_limit=5,
-            now=now,
+            now=iso_now,
         )
-        assert summary.executions.total >= 8
-        assert summary.executions.succeeded >= 1
-        assert summary.executions.partially_succeeded >= 1
-        assert summary.executions.failed >= 1
-        assert summary.terminal_total >= 5
-        assert summary.success_rate is not None
-        assert summary.avg_duration_ms is not None
-        assert summary.p95_duration_ms is not None
+        assert summary.executions.total == 8
+        assert summary.executions.succeeded == 1
+        assert summary.executions.partially_succeeded == 1
+        assert summary.executions.failed == 1
+        assert summary.executions.cancelled == 1
+        assert summary.executions.timed_out == 1
+        assert summary.executions.running == 1
+        assert summary.executions.waiting_input == 1
+        assert summary.executions.waiting_approval == 1
+        assert summary.terminal_total == 5
+        assert summary.success_rate == pytest.approx(1 / 5)
+        # Deterministic 10s..50s → avg=30000; p50=30000;
+        # PG percentile_cont(0.95): pos=1+0.95*4=4.8 → 40000+0.8*10000=48000; max=50000
+        assert summary.avg_duration_ms == pytest.approx(30_000.0)
+        assert summary.p95_duration_ms == pytest.approx(48_000.0)
         assert summary.approvals.pending >= 2
         assert summary.approvals.overdue >= 1
         assert summary.schedules.active >= 1
@@ -351,20 +362,22 @@ async def test_pg_dashboard_metrics_and_aggregates(
 
         stats = await OperationsService(session).execution_stats(
             actor_user_id=operator,
-            from_time=window_from,
-            to_time=now,
-            now=now,
+            from_time=iso_from,
+            to_time=iso_now,
+            now=iso_now,
         )
-        assert stats.by_error_category.get("network", 0) >= 1
-        assert stats.duration.p50_ms is not None
-        assert stats.duration.max_ms is not None
+        assert stats.by_error_category.get("network", 0) == 1
+        assert stats.duration.avg_ms == pytest.approx(30_000.0)
+        assert stats.duration.p50_ms == pytest.approx(30_000.0)
+        assert stats.duration.p95_ms == pytest.approx(48_000.0)
+        assert stats.duration.max_ms == pytest.approx(50_000.0)
 
         async def _ping_ok() -> bool:
             return True
 
         health = await OperationsService(
             session, database_ping=_ping_ok
-        ).system_health(actor_user_id=operator, now=now)
+        ).system_health(actor_user_id=operator, now=iso_now)
         assert health.database.status == "ok"
         assert health.scheduler.error_schedule_count >= 1
         assert health.scheduler.overdue_schedule_count >= 1
@@ -375,5 +388,188 @@ async def test_pg_dashboard_metrics_and_aggregates(
 
         unhealthy = await OperationsService(
             session, database_ping=_ping_fail
-        ).system_health(actor_user_id=operator, now=now)
+        ).system_health(actor_user_id=operator, now=iso_now)
         assert unhealthy.database.status == "unavailable"
+
+
+@pytest.mark.asyncio
+async def test_pg_nulls_last_sort_and_source_projection(
+    integration_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from app.repositories.agent import AgentRepository
+    from app.repositories.agent_version import AgentVersionRepository
+    from app.repositories.schedule_occurrence import ScheduleOccurrenceRepository
+    from app.repositories.workflow import WorkflowRepository
+    from tests.integration.test_execution_creation import _create, _seed_ready
+
+    t0 = datetime(2098, 3, 1, 12, 0, 0, tzinfo=UTC)
+    t1 = t0 + timedelta(hours=1)
+    t2 = t0 + timedelta(hours=2)
+
+    async with integration_session_factory() as session:
+        operator = await seed_user(session, with_execution_read=True)
+        owner = await _seed_schedule_manager(session, with_workflow_execute=True)
+        wf_id, wv_id = await _seed_workflow_target(session, owner)
+        wf = await WorkflowRepository(session).get(wf_id)
+        assert wf is not None
+
+        # Nullable started_at / finished_at ordering
+        e_null = await seed_execution(
+            session,
+            requester_id=operator,
+            status=ExecutionStatus.CREATED.value,
+            requested_at=t0,
+            started_at=None,
+            finished_at=None,
+        )
+        e_t1 = await seed_execution(
+            session,
+            requester_id=operator,
+            status=ExecutionStatus.SUCCEEDED.value,
+            requested_at=t0 + timedelta(seconds=1),
+            started_at=t1,
+            finished_at=t1 + timedelta(seconds=5),
+        )
+        e_t2 = await seed_execution(
+            session,
+            requester_id=operator,
+            status=ExecutionStatus.SUCCEEDED.value,
+            requested_at=t0 + timedelta(seconds=2),
+            started_at=t2,
+            finished_at=t2 + timedelta(seconds=5),
+        )
+
+        # WORKFLOW_VERSION source
+        wf_exec = await seed_execution(
+            session,
+            requester_id=operator,
+            source_type=ExecutionSourceType.WORKFLOW_VERSION.value,
+            trigger_type=ExecutionTriggerType.USER.value,
+            workflow_version_id=wv_id,
+            requested_at=t0 + timedelta(seconds=3),
+        )
+
+        # SCHEDULE_OCCURRENCE (workflow-backed)
+        body = _schedule_body(
+            target_type=ScheduleTargetType.WORKFLOW_VERSION,
+            target_id=wv_id,
+            schedule_type=ScheduleType.INTERVAL,
+            schedule_expression="PT1H",
+            timezone="UTC",
+            misfire_policy=ScheduleMisfirePolicy.SKIP,
+            overlap_policy=ScheduleOverlapPolicy.ALLOW,
+        )
+        sch = await ScheduleService(session).create(body, owner_id=owner)
+        occ = await ScheduleOccurrenceRepository(session).create_planned(sch.id, t0)
+        sched_exec = await seed_execution(
+            session,
+            requester_id=operator,
+            source_type=ExecutionSourceType.SCHEDULE_OCCURRENCE.value,
+            trigger_type=ExecutionTriggerType.SCHEDULE.value,
+            workflow_version_id=wv_id,
+            schedule_occurrence_id=occ.id,
+            requested_at=t0 + timedelta(seconds=4),
+        )
+
+        # AGENT_REQUEST via full creation path (satisfies PG lineage CHECKs)
+        seeded = await _seed_ready(session)
+        outcome = await _create(session, seeded)
+        agent_exec_id = outcome.result.id
+        agent_row = await ExecutionRepository(session).get(agent_exec_id)
+        assert agent_row is not None
+        agent_version = await AgentVersionRepository(session).get(
+            agent_row.agent_version_id
+        )
+        assert agent_version is not None
+        agent = await AgentRepository(session).get(agent_version.agent_id)
+        assert agent is not None
+
+        await session.commit()
+
+        desc = await ExecutionQueryService(session).list_executions(
+            actor_user_id=operator,
+            query=ExecutionListQuery(
+                sort="-started_at",
+                page_size=50,
+                from_time=t0,
+                to_time=t0 + timedelta(minutes=1),
+            ),
+        )
+        # Window only includes null/t1/t2/wf/sched (agent_exec has wall-clock requested_at)
+        started_sorted = [
+            i.id
+            for i in desc.items
+            if i.id in {e_null.id, e_t1.id, e_t2.id}
+        ]
+        assert started_sorted == [e_t2.id, e_t1.id, e_null.id]
+
+        asc = await ExecutionQueryService(session).list_executions(
+            actor_user_id=operator,
+            query=ExecutionListQuery(
+                sort="started_at",
+                page_size=50,
+                from_time=t0,
+                to_time=t0 + timedelta(minutes=1),
+            ),
+        )
+        started_asc = [
+            i.id for i in asc.items if i.id in {e_null.id, e_t1.id, e_t2.id}
+        ]
+        assert started_asc == [e_t1.id, e_t2.id, e_null.id]
+
+        fin_desc = await ExecutionQueryService(session).list_executions(
+            actor_user_id=operator,
+            query=ExecutionListQuery(
+                sort="-finished_at",
+                page_size=50,
+                from_time=t0,
+                to_time=t0 + timedelta(minutes=1),
+            ),
+        )
+        finished_sorted = [
+            i.id
+            for i in fin_desc.items
+            if i.id in {e_null.id, e_t1.id, e_t2.id}
+        ]
+        assert finished_sorted == [e_t2.id, e_t1.id, e_null.id]
+
+        fin_asc = await ExecutionQueryService(session).list_executions(
+            actor_user_id=operator,
+            query=ExecutionListQuery(
+                sort="finished_at",
+                page_size=50,
+                from_time=t0,
+                to_time=t0 + timedelta(minutes=1),
+            ),
+        )
+        finished_asc = [
+            i.id for i in fin_asc.items if i.id in {e_null.id, e_t1.id, e_t2.id}
+        ]
+        assert finished_asc == [e_t1.id, e_t2.id, e_null.id]
+
+        wf_detail = await ExecutionQueryService(session).get_execution(
+            actor_user_id=operator, execution_id=wf_exec.id
+        )
+        assert wf_detail.source is not None
+        assert wf_detail.source.type == ExecutionSourceType.WORKFLOW_VERSION
+        assert wf_detail.source.version_id == wv_id
+        assert wf_detail.source.logical_id == wf_id
+        assert wf_detail.source.name == wf.name
+
+        sch_detail = await ExecutionQueryService(session).get_execution(
+            actor_user_id=operator, execution_id=sched_exec.id
+        )
+        assert sch_detail.source is not None
+        assert sch_detail.source.type == ExecutionSourceType.SCHEDULE_OCCURRENCE
+        assert sch_detail.source.version_id == wv_id
+        assert sch_detail.source.logical_id == wf_id
+        assert sch_detail.source.name == wf.name
+
+        ag_detail = await ExecutionQueryService(session).get_execution(
+            actor_user_id=operator, execution_id=agent_exec_id
+        )
+        assert ag_detail.source is not None
+        assert ag_detail.source.type == ExecutionSourceType.AGENT_REQUEST
+        assert ag_detail.source.version_id == agent_row.agent_version_id
+        assert ag_detail.source.logical_id == agent.id
+        assert ag_detail.source.name == agent.name

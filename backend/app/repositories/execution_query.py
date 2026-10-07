@@ -33,6 +33,7 @@ _SORT_COLUMNS = {
     "finished_at": Execution.finished_at,
     "status": Execution.status,
 }
+_NULLABLE_SORT = frozenset({"started_at", "finished_at"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,14 +120,18 @@ class ExecutionQueryRepository:
             )
             stmt = stmt.where(tool_exists)
         if filters.q:
+            # Literal substring — escape LIKE wildcards so q=% is not "match all".
             q = filters.q.strip()
-            like = f"%{q}%"
+            escaped = (
+                q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            )
+            like = f"%{escaped}%"
             id_text = cast(Execution.id, String)
             stmt = stmt.where(
                 or_(
-                    id_text.ilike(like),
-                    Execution.trace_id.ilike(like),
-                    Execution.error_code.ilike(like),
+                    id_text.ilike(like, escape="\\"),
+                    Execution.trace_id.ilike(like, escape="\\"),
+                    Execution.error_code.ilike(like, escape="\\"),
                 )
             )
         return stmt
@@ -136,6 +141,10 @@ class ExecutionQueryRepository:
         key = sort[1:] if desc else sort
         col = _SORT_COLUMNS[key]
         primary = col.desc() if desc else col.asc()
+        # Nullable started_at/finished_at: NULLS LAST for ASC and DESC so
+        # unfinished rows do not float ahead of real timestamps under DESC.
+        if key in _NULLABLE_SORT:
+            primary = primary.nulls_last()
         # Deterministic tie-break on id DESC (stable UUID ordering).
         return stmt.order_by(primary, Execution.id.desc())
 

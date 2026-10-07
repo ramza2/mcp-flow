@@ -1166,12 +1166,23 @@ Authorization:
 `GET /executions` query: `page`, `page_size` (max 100), `status` (comma-separated
 canonical), `source_type`, `trigger_type`, `requester_id`, `agent_version_id`,
 `workflow_version_id`, `schedule_occurrence_id`, `parent_execution_id`,
-`tool_version_id` (EXISTS on Steps), `error_code`, `from`/`to` (aware; inclusive/
-exclusive), `q` (≤128; id/trace_id/error_code), `sort` allowlist
-(`±requested_at|started_at|finished_at|status`, default `-requested_at`) + `id DESC`.
+`tool_version_id` (EXISTS on Steps), `error_code`, `from`/`to` (timezone-aware;
+`from < to` when both set; inclusive/exclusive), `q` (≤128 literal substring;
+`%`/`_`/`\` escaped for ILIKE; id/trace_id/error_code), `sort` allowlist
+(`±requested_at|started_at|finished_at|status`, default `-requested_at`) with
+`NULLS LAST` on nullable `started_at`/`finished_at` + `id DESC` tie-break.
+
+`GET /ops/dashboard/summary`: metrics use `from`/`to`; `recent_executions` is
+the latest global list (not window-scoped).
+
+`GET /ops/system-health`: authenticated DB-backed operational projection
+(database / execution queue / scheduler durable state / outbox durable state).
+Public readiness remains `GET /health/ready`.
 
 Safe projections omit snapshots, leases, raw error_message, ToolCall meta,
-MRTR requestState, SecretRefs. Optional `error_category` is read-side only.
+MRTR requestState, SecretRefs, `result_inline`, Tool content/structured_content.
+Detail may include existing minimal `result_summary` only — re-review if runtime
+semantics change. Optional `error_category` is read-side only.
 `GET /executions/{id}/events`, retry, artifacts, metrics endpoints deferred.
 No Audit append on these GETs. No migration in #58 (Alembic head remains `20261006_0024`).
 
