@@ -217,7 +217,7 @@ test.describe('E2E-010 live Traefik SSE', () => {
     const lastAcceptedId = idsBefore[idsBefore.length - 1];
     const requestsBefore = sseRequests.length;
 
-    // Brief offline: allow Reconnecting UI, recover before 3 consecutive SSE errors.
+    // Brief offline (< offline grace 5s): allow Reconnecting UI; keep native EventSource.
     await context.setOffline(true);
     await expect(page.getByTestId('sse-connection-state')).toHaveText(
       /Reconnecting|Live|Polling fallback/,
@@ -300,7 +300,9 @@ test.describe('E2E-010 live Traefik SSE', () => {
     await openEventsTab(page);
     await waitForLive(page);
 
-    // Stay offline long enough for native reconnect attempts → 3 consecutive onerror.
+    // Sustained browser offline → offline grace watchdog (5s) → Polling fallback.
+    // Does not depend on receiving 3 EventSource onerror callbacks (Chromium may
+    // keep EventSource "Live" while offline without firing onerror).
     await context.setOffline(true);
     await expect(page.getByTestId('sse-connection-state')).toHaveText(
       'Polling fallback',
@@ -308,6 +310,7 @@ test.describe('E2E-010 live Traefik SSE', () => {
     );
 
     const detailCountAtFallback = detailGets.length;
+    // Network restore: REST polling remains authoritative (no auto SSE return).
     await context.setOffline(false);
 
     // Polling interval is 4s; allow a couple of cycles once network returns.
