@@ -1036,17 +1036,33 @@ OpenAPI에서 secret field가 response schema로 노출되지 않아야 한다.
 
 ## 19. SSE 시험
 
-- 연결/초기 event
-- Last-Event-ID 재연결
-- 중복 event 무시
-- status 역행 없음
-- terminal event
+### Backend implemented (PR #63)
+
+- durable `execution_events` migration / FK / CHECK / `(execution_id, id)` index
+- same-TX append with status transition; rollback drops events
+- created → queued → started durable ordering; `id > Last-Event-ID` cursor
+- owner connect; foreign → 404; `execution.read` OPERATOR stream; INTERNAL 미노출
+- malformed Last-Event-ID → 422; SSE `id:` = bigint; heartbeat comment framing
+- disconnect 종료; secret/snapshot/`requestState` payload 미노출
+- lifecycle producers: Execution/Step/Approval (USER); cancel/approval idempotent
+  re-entry does not duplicate events
+
+### Deferred producers / frontend
+
+- `execution.step.progress`, `execution.step.retrying`, `artifact.created` producers
+- frontend SSE wiring / polling fallback UI
+- E2E SSE 단절→재연결/polling (`E2E-010`)
+
+### Still required when UI lands
+
+- 연결/초기 event (browser)
+- Last-Event-ID 재연결 (UI)
+- 중복 event 무시 / status 역행 없음 (UI reducer)
+- terminal event UX
 - polling fallback
-- 권한 없는 stream 차단
-- `execution.waiting_input`
-- `execution.waiting_approval`
-- `execution.cancel_requested`
-- `execution.partially_succeeded`
+- 권한 없는 stream 차단 (already backend)
+- `execution.waiting_input` / `waiting_approval` / `cancel_requested` /
+  `partially_succeeded` (backend coverage + UI)
 
 ---
 

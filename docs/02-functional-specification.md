@@ -947,7 +947,10 @@ Manual `POST /trigger`는 동일 lineage에 `trigger_type=USER`만 다르다. AG
   projections (latencies fail-closed for terminal missing `finished_at`; no
   request/response meta / idempotency / worker).
 - Own history vs `execution.read` global (REQ-AUTH-006). Read APIs are side-effect free.
-- Deferred: SSE / `execution_events`, retry, artifacts, metrics detail.
+- PR #63: durable PostgreSQL `execution_events` + `GET /executions/{id}/events` SSE
+  backend (bigint `Last-Event-ID` cursor; USER/OPERATOR visibility; INTERNAL never
+  on the wire). Redis Pub/Sub is not the durable source.
+- Deferred: frontend SSE wiring / polling fallback UI, retry API, artifacts, metrics detail.
 
 ## FNC-OPS-003. Health/Metric
 

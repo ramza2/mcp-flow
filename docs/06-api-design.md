@@ -872,7 +872,7 @@ POST /executions                              # not used; create via Agent/Workf
 GET  /executions/{execution_id}               # PR #58 safe detail
 GET  /executions/{execution_id}/steps         # PR #58
 GET  /executions/{execution_id}/steps/{step_execution_id}  # PR #58 + attempts/tool_calls
-GET  /executions/{execution_id}/events        # deferred — no durable execution_events yet
+GET  /executions/{execution_id}/events        # SSE — durable execution_events (PR #63)
 GET  /executions/{execution_id}/event-history # deferred
 POST /executions/{execution_id}/cancel
 POST /executions/{execution_id}/retry         # deferred
@@ -1036,7 +1036,32 @@ Accept: text/event-stream
 Last-Event-ID: 10293
 ```
 
-표준 event:
+`Last-Event-ID`는 durable bigint `execution_events.id` cursor이다 (UUID `event_id`가 아님).
+Absent → `0`부터 replay. Negative/malformed → `422 VALIDATION_ERROR`. Query는
+`execution_id` scope + `id > cursor` + `id ASC` bounded batch.
+
+Wire:
+
+```text
+id: <execution_events.id>
+event: <event_type>
+data: <compact JSON envelope>
+```
+
+Envelope (visibility 미노출): `event_id`, `execution_id`, `step_execution_id`,
+`event_type`, `payload`, `payload_version`, `occurred_at`. Lifecycle payload는
+최소 status 정보만 (plan/input/policy snapshot, resolved_input, raw errors,
+ToolCall meta/content, MRTR `requestState`, secrets, Approval context/comment 금지).
+
+Auth (PR #58 history와 동일):
+
+- ordinary ACTIVE owner → 자기 Execution의 **USER** events만
+- foreign Execution → `404 NOT_FOUND`
+- ACTIVE + `execution.read` → USER + OPERATOR
+- **INTERNAL**은 외부 SSE에 절대 미노출
+- long-lived stream은 poll cycle마다 ACTIVE / visibility를 재확인
+
+표준 event catalog:
 
 ```text
 execution.created
@@ -1064,7 +1089,12 @@ approval.decided
 artifact.created
 ```
 
-PostgreSQL durable `execution_events`를 기준으로 누락 event를 재전송한다. SSE 불가 시 polling fallback을 사용한다.
+PR #63 backend producers: lifecycle Execution/Step/Approval 위 목록 중
+`execution.step.progress`, `execution.step.retrying`, `artifact.created`는 deferred.
+Step `TIMED_OUT` / `CANCELLED` / `UNKNOWN_OUTCOME`용 신규 event type은 발명하지 않음.
+
+PostgreSQL durable `execution_events`를 기준으로 누락 event를 재전송한다. SSE 불가 시
+frontend polling fallback은 deferred.
 
 ---
 
@@ -1183,7 +1213,7 @@ Safe projections omit snapshots, leases, raw error_message, ToolCall meta,
 MRTR requestState, SecretRefs, `result_inline`, Tool content/structured_content.
 Detail may include existing minimal `result_summary` only — re-review if runtime
 semantics change. Optional `error_category` is read-side only.
-`GET /executions/{id}/events`, retry, artifacts, metrics endpoints deferred.
+`GET /executions/{id}/events` SSE backend (PR #63). Retry, artifacts, metrics deferred.
 No Audit append on these GETs. No migration in #58 (Alembic head remains `20261006_0024`).
 
 ### Audit

@@ -24,6 +24,7 @@ from app.domain.enums import (
     ConversationMessageRole,
     ConversationMessageVisibility,
     ConversationStatus,
+    ExecutionEventVisibility,
     ExecutionSourceType,
     ExecutionStatus,
     ExecutionTriggerType,
@@ -120,6 +121,10 @@ def expect_exact(enum_cls: type[Enum], expected: set[str]) -> None:
         ),
         (
             ConversationMessageVisibility,
+            {"USER", "OPERATOR", "INTERNAL"},
+        ),
+        (
+            ExecutionEventVisibility,
             {"USER", "OPERATOR", "INTERNAL"},
         ),
         (
