@@ -45,7 +45,7 @@ export default function AuditLogs() {
   const [cursorIndex, setCursorIndex] = useState(0);
   const [resultFilter, setResultFilter] = useState('');
   const [actorTypeFilter, setActorTypeFilter] = useState('');
-  const [actionFilter, setActionFilter] = useState('');
+  const [qFilter, setQFilter] = useState('');
   const [loading, setLoading] = useState(true);
   const [forbidden, setForbidden] = useState(false);
   const [error, setError] = useState<{ message: string; requestId?: string } | null>(null);
@@ -66,9 +66,9 @@ export default function AuditLogs() {
     listAuditEvents({
       cursor: currentCursor ?? undefined,
       limit: PAGE_LIMIT,
+      q: qFilter || undefined,
       result: resultFilter || undefined,
       actor_type: actorTypeFilter || undefined,
-      action: actionFilter || undefined,
       signal: controller.signal,
     })
       .then((data) => {
@@ -100,7 +100,7 @@ export default function AuditLogs() {
       cancelled = true;
       controller.abort();
     };
-  }, [currentCursor, resultFilter, actorTypeFilter, actionFilter]);
+  }, [currentCursor, resultFilter, actorTypeFilter, qFilter]);
 
   useEffect(() => load(), [load]);
 
@@ -158,9 +158,9 @@ export default function AuditLogs() {
       <div className="p-6 space-y-4">
         <FilterBar
           search
-          searchPlaceholder="Action (exact/substring as supported)..."
+          searchPlaceholder="Actor, Action, Resource, Request ID 검색..."
           onSearch={(q) => {
-            setActionFilter(q.trim());
+            setQFilter(q.trim());
             resetPagination();
           }}
           filters={[

@@ -38,8 +38,10 @@ export interface AuditEventListDto {
 export interface AuditEventListParams {
   cursor?: string;
   limit?: number;
+  q?: string;
   actor_type?: AuditActorType | string;
   actor_id?: string;
+  /** Exact action filter (API contract). Free-text search uses `q`. */
   action?: string;
   resource_type?: string;
   resource_id?: string;
@@ -57,6 +59,7 @@ export function listAuditEvents(params: AuditEventListParams = {}) {
     query: {
       cursor: params.cursor,
       limit: params.limit ?? 50,
+      q: params.q,
       actor_type: params.actor_type,
       actor_id: params.actor_id,
       action: params.action,

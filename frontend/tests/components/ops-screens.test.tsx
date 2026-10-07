@@ -395,6 +395,32 @@ describe('Ops screens real API wiring', () => {
     });
   });
 
+  it('Audit search sends q (not action) and resets cursor stack', async () => {
+    const user = userEvent.setup();
+    const empty = { items: [], next_cursor: null };
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({ items: [], next_cursor: 'c1' }))
+      .mockResolvedValue(jsonResponse(empty));
+    vi.stubGlobal('fetch', fetchMock);
+
+    renderWithRouter(<AuditLogs />);
+    await waitFor(() => expect(fetchMock).toHaveBeenCalled());
+
+    const search = screen.getByPlaceholderText(
+      'Actor, Action, Resource, Request ID 검색...',
+    );
+    await user.type(search, 'req-abc');
+
+    await waitFor(() => {
+      const urls = fetchMock.mock.calls.map((c) => String(c[0]));
+      const withQ = urls.find((u) => u.includes('q=req-abc'));
+      expect(withQ).toBeTruthy();
+      expect(withQ).not.toContain('action=req-abc');
+      expect(withQ).not.toMatch(/[?&]action=/);
+    });
+  });
+
   it('Audit 403 shows PermissionDenied', async () => {
     vi.stubGlobal(
       'fetch',

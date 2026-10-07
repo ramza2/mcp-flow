@@ -165,8 +165,10 @@ describe('Execution / Ops / Audit API contracts', () => {
     await listAuditEvents({
       cursor: 'c1',
       limit: 50,
+      q: 'execution.create',
       result: 'SUCCESS',
       actor_type: 'USER',
+      action: 'execution.cancel',
       execution_id: '11111111-1111-4111-8111-111111111111',
     });
     await getAuditEvent('33333333-3333-4333-8333-333333333333');
@@ -174,8 +176,10 @@ describe('Execution / Ops / Audit API contracts', () => {
     const listUrl = String(fetchMock.mock.calls[0][0]);
     expect(listUrl).toContain('/api/v1/audit/events?');
     expect(listUrl).toContain('cursor=c1');
+    expect(listUrl).toContain('q=execution.create');
     expect(listUrl).toContain('result=SUCCESS');
     expect(listUrl).toContain('actor_type=USER');
+    expect(listUrl).toContain('action=execution.cancel');
     expect(listUrl).toContain(
       'execution_id=11111111-1111-4111-8111-111111111111',
     );
