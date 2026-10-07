@@ -85,15 +85,20 @@ async function waitForLive(page: Page, timeoutMs = 45_000): Promise<void> {
 }
 
 async function collectTimelineSseIds(page: Page): Promise<string[]> {
-  return page.locator('[data-testid="execution-event-row"]').evaluateAll((rows) =>
-    rows
-      .map((row) => {
-        const text = row.textContent ?? '';
-        const match = text.match(/\bid\s+(\d+)\b/);
-        return match?.[1] ?? null;
-      })
-      .filter((id): id is string => id != null),
-  );
+  // Prefer the dedicated "id <decimal>" child text. Whole-row textContent can
+  // concatenate adjacent spans without whitespace (e.g. "execution.createdid 1"),
+  // which breaks /\bid\s+(\d+)\b/.
+  const rows = page.getByTestId('execution-event-row');
+  const count = await rows.count();
+  const ids: string[] = [];
+
+  for (let i = 0; i < count; i += 1) {
+    const label = await rows.nth(i).getByText(/^id \d+$/).textContent();
+    const match = label?.match(/^id (\d+)$/);
+    if (match) ids.push(match[1]);
+  }
+
+  return ids;
 }
 
 async function readHeaderStatus(
