@@ -450,6 +450,10 @@ GET /health/ready
 최소 DB 접근, migration compatibility 등 traffic 수신 필수조건을 확인한다.
 데이터베이스가 실제로 도달 불가능할 때 공개 readiness의 권위는 `/health/ready`이다.
 
+External deploy smoke (`scripts/deploy.sh`) must validate the readiness **JSON**
+contract (`status=ok` and `checks.database=ok`), not merely HTTP 2xx — a frontend
+SPA 200 while the API is unavailable must fail the deploy.
+
 인증된 `/api/v1/ops/system-health`는 DB-backed operational projection
 (database / execution queue / scheduler durable state / outbox durable state)이다.
 Worker/Redis heartbeat를 주장하지 않으며, authentication DB와 독립적으로
