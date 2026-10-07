@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -39,7 +40,6 @@ from tests.unit.test_execution_creation import (
 )
 from tests.unit.test_plan_validator import _seed_validating
 from tests.unit.test_tool_runner_security import _unimplemented_resolver_factory
-
 
 # ---------------------------------------------------------------------------
 # Decision helper

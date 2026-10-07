@@ -8,17 +8,9 @@ from datetime import UTC, datetime
 from typing import Any
 
 import pytest
-from sqlalchemy import select, text
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
-
 from app.audit.integrity import verify_audit_event_integrity
 from app.audit.sanitize import REDACTION_MARKER
 from app.audit.writer import (
-    ACTION_APPROVAL_DECISION,
-    ACTION_AUTH_LOGIN,
-    ACTION_EXECUTION_CANCEL,
-    ACTION_EXECUTION_CREATE,
-    ACTION_SCHEDULE_TRIGGER,
     AuditWriter,
 )
 from app.bootstrap.permissions import permission_seed_id
@@ -26,6 +18,8 @@ from app.domain.enums import AuditActorType, AuditResult
 from app.models.audit import AuditEvent
 from app.models.auth import Permission
 from app.repositories.audit import AuditRepository
+from sqlalchemy import select, text
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 pytestmark = pytest.mark.integration
 
@@ -252,7 +246,9 @@ async def test_pg_success_mutation_audit_atomic_rollback(
             email=f"{marker}@example.com",
             status=UserStatus.ACTIVE,
         )
-        with pytest.raises(Exception):
+        from sqlalchemy.exc import DBAPIError, IntegrityError
+
+        with pytest.raises((IntegrityError, DBAPIError, ValueError)):
             await AuditRepository(session).append(
                 event_id=uuid.uuid4(),
                 occurred_at=datetime.now(UTC),

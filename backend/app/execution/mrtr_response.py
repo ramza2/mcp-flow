@@ -14,7 +14,6 @@ from app.core.errors import AppError
 from app.domain.enums import (
     ExecutionStatus,
     McpInputRequestStatus,
-    StepStatus,
     UserStatus,
 )
 from app.execution.claim import _as_utc

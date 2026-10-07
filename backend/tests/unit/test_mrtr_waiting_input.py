@@ -21,8 +21,8 @@ from app.domain.enums import (
     ApprovalStatus,
     ExecutionStatus,
     MCPAuthType,
-    MCPProtocolEra,
     McpInputRequestStatus,
+    MCPProtocolEra,
     ParameterProvenance,
     RiskClass,
     StepAttemptStatus,
@@ -41,12 +41,14 @@ from tests.unit.test_approval_decision_resume import _create_approver, _enter_wa
 from tests.unit.test_execution_creation import _install_no_side_effects
 from tests.unit.test_safe_transient_retry import (
     _CONNECT_ERR,
-    _FailThenSucceedClient,
     _claim_with_policy,
+    _FailThenSucceedClient,
 )
 from tests.unit.test_tool_runner import _claim_ready_execution, _resolver_factory
 from tests.unit.test_tool_runner_security import (
     _claim_ready_execution as _claim_ready_security,
+)
+from tests.unit.test_tool_runner_security import (
     _random_master_key,
     _seed_secret_record,
     _unimplemented_resolver_factory,

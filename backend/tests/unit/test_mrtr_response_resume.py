@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import uuid
 from datetime import UTC, datetime
 from typing import Any
@@ -23,7 +22,6 @@ from app.execution.queue import (
     OutboxRelayService,
     validate_execution_mrtr_resume_event,
 )
-from app.execution.tool_runner import McpToolRunner
 from app.mcp.contracts import NormalizedInputRequired, NormalizedToolResult
 from app.models.outbox import OutboxEvent
 from app.repositories.execution import ExecutionRepository
@@ -35,11 +33,11 @@ from tests.unit.test_execution_creation import _install_no_side_effects
 from tests.unit.test_mrtr_waiting_input import (
     _CANARY,
     _INPUT_REQUESTS,
-    _MrtrClient,
     _assert_canary_absent,
+    _MrtrClient,
     _runner,
 )
-from tests.unit.test_tool_runner import _claim_ready_execution, _resolver_factory
+from tests.unit.test_tool_runner import _claim_ready_execution
 
 
 class _SequenceClient:

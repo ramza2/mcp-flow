@@ -6,17 +6,16 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-import pytest
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
-
 import app.execution.queue as queue_module
+import pytest
 from app.core.config import get_settings
 from app.domain.enums import ExecutionStatus
 from app.execution.queue import ExecutionQueueService, OutboxRelayService
 from app.infrastructure.celery_app import celery_app
 from app.infrastructure.queue import CeleryExecutionQueuePublisher
 from app.models.outbox import OutboxEvent
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from tests.unit.test_execution_creation import _create, _idem_key, _seed_ready
 
@@ -52,7 +51,7 @@ def test_execution_publisher_uses_producer_scoped_timeouts_and_retry_policy(
     captured: dict[str, Any] = {}
 
     class FakeConnection:
-        def __enter__(self) -> "FakeConnection":
+        def __enter__(self) -> FakeConnection:
             return self
 
         def __exit__(self, *args: object) -> None:

@@ -6,9 +6,6 @@ import asyncio
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from sqlalchemy import func, select, update
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
-
 from app.core.errors import AppError
 from app.domain.enums import ExecutionStatus, StepStatus
 from app.execution.claim import ExecutionClaimService
@@ -17,6 +14,8 @@ from app.models.execution import Execution
 from app.models.outbox import OutboxEvent
 from app.repositories.execution import ExecutionRepository
 from app.services.execution_creation import ExecutionCreationService
+from sqlalchemy import func, select, update
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from tests.integration.test_execution_creation import _create, _idem_key, _seed_ready
 

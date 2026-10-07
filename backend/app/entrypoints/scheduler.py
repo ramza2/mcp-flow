@@ -8,7 +8,7 @@ import signal
 
 from app.core.config import Settings, get_settings
 from app.db.session import dispose_db, init_db, session_scope
-from app.scheduler.runtime import ScheduleRuntimeService, SchedulerIterationResult
+from app.scheduler.runtime import SchedulerIterationResult, ScheduleRuntimeService
 
 logger = logging.getLogger(__name__)
 

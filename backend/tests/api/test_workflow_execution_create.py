@@ -226,10 +226,9 @@ async def test_create_propagates_request_id_to_audit(
     workflow_execute_client: AsyncClient,
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    from sqlalchemy import select
-
     from app.audit.writer import ACTION_EXECUTION_CREATE
     from app.models.audit import AuditEvent
+    from sqlalchemy import select
 
     user_id = workflow_execute_client.workflow_user_id  # type: ignore[attr-defined]
     wf_id, ver_id = await _seed_published_workflow(db_session_factory, user_id)

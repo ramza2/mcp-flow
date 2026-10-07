@@ -4,15 +4,14 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime, timedelta
-from typing import Any
 
 import pytest
-from httpx import AsyncClient
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
-
 from app.auth.passwords import hash_password
 from app.domain.enums import ExecutionStatus, ExecutionTriggerType
 from app.repositories.user import UserRepository
+from httpx import AsyncClient
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
 from tests.helpers.execution_ops import seed_execution, seed_user
 
 API = "/api/v1/executions"
@@ -180,7 +179,10 @@ async def test_list_filters_sort_and_validation(
         API, params={"status": "FAILED,TIMED_OUT", "page_size": 50}
     )
     assert multi.status_code == 200
-    statuses = {i["status"] for i in multi.json()["items"] if i["id"] in {str(e1.id), str(e2.id), str(e3.id)}}
+    target_ids = {str(e1.id), str(e2.id), str(e3.id)}
+    statuses = {
+        i["status"] for i in multi.json()["items"] if i["id"] in target_ids
+    }
     assert statuses == {"FAILED", "TIMED_OUT"}
 
     bad_status = await client.get(API, params={"status": "FAILED,NOPE"})
@@ -431,6 +433,7 @@ async def test_full_filter_contract_and_invalid_enums(
     from app.repositories.schedule_occurrence import ScheduleOccurrenceRepository
     from app.repositories.workflow import WorkflowRepository
     from app.services.schedule import ScheduleService
+
     from tests.unit.test_schedule_service import (
         _schedule_body,
         _seed_schedule_manager,

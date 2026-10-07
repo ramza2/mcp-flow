@@ -6,8 +6,6 @@ import uuid
 from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy.ext.asyncio import AsyncSession
-
 from app.domain.enums import (
     ExecutionSourceType,
     ExecutionStatus,
@@ -28,6 +26,7 @@ from app.schemas.execution_plan import (
 )
 from app.services.role import RoleService
 from app.services.user import UserService
+from sqlalchemy.ext.asyncio import AsyncSession
 
 
 def _minimal_plan() -> dict[str, Any]:

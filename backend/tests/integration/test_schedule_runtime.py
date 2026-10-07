@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
-from typing import Any, Callable
+from typing import Any
 
 import pytest
 from app.core.secrets import UnimplementedSecretResolver
@@ -57,7 +58,6 @@ from tests.unit.test_workflow_registry import (
     _create_workflow,
     _tool,
 )
-
 
 _MRTR_INPUT_REQUESTS = {
     "city": {"type": "string", "description": "City"},
@@ -769,7 +769,9 @@ async def test_pg_migration_fk_and_check(
     integration_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     async with integration_session_factory() as session:
-        with pytest.raises(Exception):
+        from sqlalchemy.exc import DBAPIError, IntegrityError
+
+        with pytest.raises((IntegrityError, DBAPIError)):
             await session.execute(
                 text(
                     "INSERT INTO executions ("
@@ -787,7 +789,7 @@ async def test_pg_migration_fk_and_check(
             await session.commit()
         await session.rollback()
 
-        with pytest.raises(Exception):
+        with pytest.raises((IntegrityError, DBAPIError)):
             await session.execute(
                 text(
                     "INSERT INTO executions ("

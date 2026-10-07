@@ -17,7 +17,6 @@ from typing import Any
 
 import pytest
 from app.agent.plan_validator import PlanValidatorService
-from app.core.errors import AppError
 from app.core.secret_crypto import encrypt_secret_payload
 from app.core.secrets import DatabaseSecretResolver, UnimplementedSecretResolver
 from app.domain.enums import (

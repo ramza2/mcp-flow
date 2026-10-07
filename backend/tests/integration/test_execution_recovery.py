@@ -8,9 +8,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
-from sqlalchemy import select, update
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
-
+from app.agent.plan_validator import PlanValidatorService
 from app.core.errors import AppError
 from app.domain.enums import (
     CURRENT_MCP_PROTOCOL_VERSION,
@@ -33,7 +31,8 @@ from app.repositories.execution import ExecutionRepository
 from app.repositories.mcp_server import MCPServerRepository
 from app.repositories.mcp_tool import MCPToolRepository
 from app.repositories.mcp_tool_policy import MCPToolPolicyRepository
-from app.agent.plan_validator import PlanValidatorService
+from sqlalchemy import select, update
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from tests.integration.test_execution_creation import _create, _idem_key, _seed_ready
 from tests.integration.test_execution_creation import _seed_validating as _seed_validating_pg

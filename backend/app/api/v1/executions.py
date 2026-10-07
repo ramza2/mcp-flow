@@ -36,6 +36,8 @@ from app.services.execution_query import ExecutionListQuery, ExecutionQueryServi
 
 router = APIRouter(prefix="/executions", tags=["executions"])
 
+_DEFAULT_CANCEL_BODY = ExecutionCancelRequest()
+
 
 @router.get("", response_model=ExecutionListResponse)
 async def list_executions(
@@ -136,7 +138,7 @@ async def cancel_execution(
     execution_id: uuid.UUID,
     session: DbSessionDep,
     principal: CurrentPrincipalDep,
-    body: Annotated[ExecutionCancelRequest, Body()] = ExecutionCancelRequest(),
+    body: Annotated[ExecutionCancelRequest, Body()] = _DEFAULT_CANCEL_BODY,
 ) -> ExecutionCancelResult:
     outcome = await ExecutionCancellationService(session).request_user_cancel(
         execution_id,

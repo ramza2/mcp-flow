@@ -14,9 +14,6 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
-
 from app.core.secret_crypto import encrypt_secret_payload
 from app.core.secrets import DatabaseSecretResolver, UnimplementedSecretResolver
 from app.domain.enums import (
@@ -45,6 +42,8 @@ from app.repositories.mcp_server import MCPServerRepository
 from app.repositories.mcp_tool import MCPToolRepository
 from app.repositories.mcp_tool_policy import MCPToolPolicyRepository
 from app.repositories.secret import SecretRecordRepository
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from tests.unit.test_execution_creation import (
     _create,
@@ -53,9 +52,9 @@ from tests.unit.test_execution_creation import (
     _seed_ready,
 )
 from tests.unit.test_tool_runner import (
+    _claim_ready_execution,
     _NeverCalledMCPClient,
     _StubCurrentMCPClient,
-    _claim_ready_execution,
 )
 
 Mutator = Callable[[AsyncSession, _PreparedCall], Awaitable[None]]

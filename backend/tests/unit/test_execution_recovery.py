@@ -6,8 +6,6 @@ import uuid
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from sqlalchemy.ext.asyncio import AsyncSession
-
 from app.core.errors import AppError
 from app.domain.enums import (
     ExecutionStatus,
@@ -28,6 +26,7 @@ from app.execution.recovery import (
 from app.execution.tool_step_attempt import ToolStepAttemptService
 from app.repositories.execution import ExecutionRepository
 from app.repositories.mcp_tool_policy import MCPToolPolicyRepository
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from tests.unit.test_execution_creation import _create, _idem_key, _seed_ready
 
