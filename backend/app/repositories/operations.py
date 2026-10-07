@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import func, select
@@ -77,9 +77,21 @@ class OperationsRepository:
                 "max_ms": _f(row[3]),
             }
 
-        # SQLite fallback for unit tests — compute in Python over bounded set.
-        stmt = select(duration_ms).where(*where)
-        values = [float(v) for (v,) in (await self._session.execute(stmt)).all() if v is not None]
+        # SQLite fallback for unit/API tests — epoch extract on datetime
+        # differences is unreliable; compute durations in Python.
+        stmt = select(Execution.started_at, Execution.finished_at).where(*where)
+        values: list[float] = []
+        for started, finished in (await self._session.execute(stmt)).all():
+            if started is None or finished is None:
+                continue
+            if started.tzinfo is None:
+                started = started.replace(tzinfo=UTC)
+            if finished.tzinfo is None:
+                finished = finished.replace(tzinfo=UTC)
+            ms = (finished - started).total_seconds() * 1000.0
+            if ms < 0:
+                continue
+            values.append(ms)
         if not values:
             return {"avg_ms": None, "p50_ms": None, "p95_ms": None, "max_ms": None}
         values.sort()

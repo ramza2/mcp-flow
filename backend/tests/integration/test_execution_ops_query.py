@@ -294,9 +294,11 @@ async def test_pg_dashboard_metrics_and_aggregates(
 
         await session.commit()
 
-        # Unique far-future window so shared PG fixture rows cannot satisfy asserts.
-        iso_now = datetime(2099, 6, 15, 18, 0, 0, tzinfo=UTC)
-        iso_from = iso_now - timedelta(hours=24)
+        # Unique window per run so shared PG rows from prior tests cannot collide.
+        # Encode entropy in the minute/second fields (stable within the hour span).
+        nonce = uuid.uuid4().int % 10_000_000
+        iso_from = datetime(2100, 1, 1, tzinfo=UTC) + timedelta(seconds=nonce * 3600)
+        iso_now = iso_from + timedelta(hours=24)
         for status, seconds in (
             (ExecutionStatus.SUCCEEDED.value, 10),
             (ExecutionStatus.PARTIALLY_SUCCEEDED.value, 20),
@@ -402,7 +404,8 @@ async def test_pg_nulls_last_sort_and_source_projection(
     from app.repositories.workflow import WorkflowRepository
     from tests.integration.test_execution_creation import _create, _seed_ready
 
-    t0 = datetime(2098, 3, 1, 12, 0, 0, tzinfo=UTC)
+    nonce = uuid.uuid4().int % 10_000_000
+    t0 = datetime(2101, 1, 1, tzinfo=UTC) + timedelta(seconds=nonce * 3600)
     t1 = t0 + timedelta(hours=1)
     t2 = t0 + timedelta(hours=2)
 
