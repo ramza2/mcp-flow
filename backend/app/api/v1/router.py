@@ -7,6 +7,7 @@ from app.api.v1.approvals import router as approvals_router
 from app.api.v1.audit import router as audit_router
 from app.api.v1.auth import router as auth_router
 from app.api.v1.executions import router as executions_router
+from app.api.v1.executions import sse_router as executions_sse_router
 from app.api.v1.mcp_servers import router as mcp_servers_router
 from app.api.v1.mcp_tools import router as mcp_tools_router
 from app.api.v1.model_profiles import router as model_profiles_router
@@ -41,3 +42,7 @@ protected_router.include_router(roles_router)
 protected_router.include_router(permissions_router)
 
 api_v1_router.include_router(protected_router)
+# SSE auth is function-scoped on the route itself; keep it off protected_router
+# so request-scoped require_authenticated_api_request cannot leak a DB session
+# across the stream lifetime.
+api_v1_router.include_router(executions_sse_router)

@@ -12,6 +12,8 @@ from fastapi.responses import StreamingResponse
 from app.api.dependencies import (
     CurrentPrincipalDep,
     DbSessionDep,
+    SseCurrentPrincipalDep,
+    SseDbSessionDep,
     require_csrf_for_unsafe_request,
 )
 from app.db.session import get_session_factory
@@ -41,6 +43,9 @@ from app.services.execution_events_sse import (
 from app.services.execution_query import ExecutionListQuery, ExecutionQueryService
 
 router = APIRouter(prefix="/executions", tags=["executions"])
+# Mounted outside protected_router so request-scoped router auth cannot pin a
+# DB session across the SSE lifetime. Auth uses function-scoped deps only.
+sse_router = APIRouter(prefix="/executions", tags=["executions"])
 
 _DEFAULT_CANCEL_BODY = ExecutionCancelRequest()
 
@@ -101,18 +106,22 @@ async def get_execution(
     )
 
 
-@router.get("/{execution_id}/events")
+@sse_router.get("/{execution_id}/events")
 async def stream_execution_events(
     execution_id: uuid.UUID,
     request: Request,
-    session: DbSessionDep,
-    principal: CurrentPrincipalDep,
+    session: SseDbSessionDep,
+    principal: SseCurrentPrincipalDep,
     last_event_id: Annotated[str | None, Header(alias="Last-Event-ID")] = None,
 ) -> StreamingResponse:
     """SSE stream of durable execution_events (docs/06 §16).
 
     Authorization completes before the stream opens so unauthorized callers
     receive normal JSON 404/403. ``id:`` is the bigint ``execution_events.id``.
+
+    Auth uses a function-scoped DB session so it is released when this path
+    operation returns — before StreamingResponse body consumption. Poll cycles
+    open short-lived sessions via ``session_factory`` only.
     """
     cursor = parse_last_event_id(last_event_id)
     service = ExecutionEventsSseService(

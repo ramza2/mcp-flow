@@ -1,7 +1,8 @@
 """SSE read path for durable execution_events (docs/06 §16).
 
-Authorization runs before StreamingResponse. The stream uses short-lived DB
-sessions per poll cycle — never holds one connection across sleep.
+Authorization runs before StreamingResponse on a function-scoped auth session
+that is released when the path operation returns. The stream uses short-lived
+DB sessions per poll cycle — never holds one connection across sleep.
 """
 
 from __future__ import annotations

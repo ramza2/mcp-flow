@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from collections.abc import AsyncIterator
 
 import pytest
+from app.api.dependencies import get_db_session
 from app.auth.passwords import hash_password
 from app.domain.enums import ExecutionEventVisibility
 from app.execution.events import ExecutionEventWriter
@@ -244,6 +246,76 @@ async def test_last_event_id_skips_prior(
     assert "execution.created" not in body
     assert "execution.queued" in body
     assert f"id: {second_id}" in body
+
+
+@pytest.mark.asyncio
+async def test_sse_auth_db_session_released_before_stream_body(
+    db_app,
+    unauthenticated_db_client: AsyncClient,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pre-stream auth DB session must close before StreamingResponse body.
+
+    Poll cycles use ``session_factory`` directly (not ``get_db_session``), so
+    tracking ``get_db_session`` cleanup isolates the auth session lifetime.
+    """
+    import app.db.session as session_module
+
+    # ASGITransport does not always run lifespan; pin factory for poll cycles.
+    monkeypatch.setattr(session_module, "_session_factory", db_session_factory)
+
+    auth_session_closed = {"flag": False}
+
+    async def tracking_get_db() -> AsyncIterator[AsyncSession]:
+        async with db_session_factory() as session:
+            try:
+                yield session
+            finally:
+                auth_session_closed["flag"] = True
+
+    db_app.dependency_overrides[get_db_session] = tracking_get_db
+
+    client, owner_id = await _login(
+        unauthenticated_db_client, db_session_factory, with_execution_read=False
+    )
+    async with db_session_factory() as session:
+        own = await seed_execution(session, requester_id=owner_id)
+        writer = ExecutionEventWriter(session)
+        await writer.append(
+            execution_id=own.id,
+            event_type="execution.created",
+            payload={"execution_id": str(own.id), "status": "CREATED"},
+            visibility=ExecutionEventVisibility.USER.value,
+        )
+        await session.commit()
+        own_id = own.id
+
+    auth_session_closed["flag"] = False
+    closed_at_first_body_chunk = {"flag": None}
+
+    # Keep the HTTP stream finite so ASGITransport can complete. The body
+    # generator samples auth-session cleanup — function scope closes before
+    # the first yield; request scope would still be open here.
+    def _finite_iterator(self, **_kwargs):  # noqa: ANN001
+        async def _gen():
+            closed_at_first_body_chunk["flag"] = auth_session_closed["flag"]
+            yield ": keep-alive\n\n"
+
+        return _gen()
+
+    monkeypatch.setattr(
+        ExecutionEventsSseService, "event_iterator", _finite_iterator
+    )
+
+    response = await client.get(
+        f"{API}/{own_id}/events",
+        headers={"Accept": "text/event-stream"},
+    )
+    assert response.status_code == 200
+    assert b"keep-alive" in response.content
+    assert closed_at_first_body_chunk["flag"] is True
+    assert auth_session_closed["flag"] is True
 
 
 @pytest.mark.asyncio

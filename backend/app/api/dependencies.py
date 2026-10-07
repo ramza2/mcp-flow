@@ -25,6 +25,12 @@ SettingsDep = Annotated[Settings, Depends(get_app_settings)]
 RequestIdDep = Annotated[str, Depends(get_request_id_dep)]
 DbSessionDep = Annotated[AsyncSession, Depends(get_db_session)]
 
+# SSE-only: release the auth DB session after the path operation returns and
+# before StreamingResponse body consumption. Do not use for ordinary REST.
+SseDbSessionDep = Annotated[
+    AsyncSession, Depends(get_db_session, scope="function")
+]
+
 
 async def get_database_ping() -> DatabasePing:
     """Default readiness DB ping — override in tests."""
@@ -64,6 +70,21 @@ async def require_authenticated_session(
 
 CurrentPrincipalDep = Annotated[
     CurrentPrincipal, Depends(require_authenticated_session)
+]
+
+
+async def get_sse_current_principal(
+    request: Request,
+    session: SseDbSessionDep,
+    settings: SettingsDep,
+) -> CurrentPrincipal:
+    """SSE-only principal resolve using a function-scoped DB session."""
+    raw = request.cookies.get(settings.session_cookie_name)
+    return await AuthenticationService(session, settings).resolve_principal(raw)
+
+
+SseCurrentPrincipalDep = Annotated[
+    CurrentPrincipal, Depends(get_sse_current_principal)
 ]
 
 
