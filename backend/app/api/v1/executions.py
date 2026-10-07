@@ -1,8 +1,9 @@
-"""Execution-scoped APIs — cancel (docs/06 §14.4) + MRTR Input (docs/06 §15)."""
+"""Execution-scoped APIs — history read + cancel + MRTR (docs/06)."""
 
 from __future__ import annotations
 
 import uuid
+from datetime import datetime
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Body, Depends, Query, status
@@ -17,6 +18,12 @@ from app.execution.mrtr_query import MrtrQueryService
 from app.execution.mrtr_reject import MrtrRejectService
 from app.execution.mrtr_response import MrtrResponseService
 from app.schemas.execution_cancel import ExecutionCancelRequest, ExecutionCancelResult
+from app.schemas.execution_query import (
+    ExecutionDetail,
+    ExecutionListResponse,
+    ExecutionStepDetail,
+    ExecutionStepListResponse,
+)
 from app.schemas.mrtr import (
     MrtrInputRequestItem,
     MrtrInputRequestListResponse,
@@ -25,8 +32,94 @@ from app.schemas.mrtr import (
     MrtrResponseCreateResponse,
 )
 from app.services.execution_cancellation import ExecutionCancellationService
+from app.services.execution_query import ExecutionListQuery, ExecutionQueryService
 
 router = APIRouter(prefix="/executions", tags=["executions"])
+
+
+@router.get("", response_model=ExecutionListResponse)
+async def list_executions(
+    session: DbSessionDep,
+    principal: CurrentPrincipalDep,
+    page: Annotated[int, Query(ge=1)] = 1,
+    page_size: Annotated[int, Query(ge=1, le=100)] = 20,
+    status_filter: Annotated[str | None, Query(alias="status")] = None,
+    source_type: Annotated[str | None, Query()] = None,
+    trigger_type: Annotated[str | None, Query()] = None,
+    requester_id: Annotated[uuid.UUID | None, Query()] = None,
+    agent_version_id: Annotated[uuid.UUID | None, Query()] = None,
+    workflow_version_id: Annotated[uuid.UUID | None, Query()] = None,
+    schedule_occurrence_id: Annotated[uuid.UUID | None, Query()] = None,
+    parent_execution_id: Annotated[uuid.UUID | None, Query()] = None,
+    tool_version_id: Annotated[uuid.UUID | None, Query()] = None,
+    error_code: Annotated[str | None, Query()] = None,
+    from_time: Annotated[datetime | None, Query(alias="from")] = None,
+    to_time: Annotated[datetime | None, Query(alias="to")] = None,
+    q: Annotated[str | None, Query(max_length=128)] = None,
+    sort: Annotated[str, Query()] = "-requested_at",
+) -> ExecutionListResponse:
+    return await ExecutionQueryService(session).list_executions(
+        actor_user_id=principal.user_id,
+        query=ExecutionListQuery(
+            page=page,
+            page_size=page_size,
+            status=status_filter,
+            source_type=source_type,
+            trigger_type=trigger_type,
+            requester_id=requester_id,
+            agent_version_id=agent_version_id,
+            workflow_version_id=workflow_version_id,
+            schedule_occurrence_id=schedule_occurrence_id,
+            parent_execution_id=parent_execution_id,
+            tool_version_id=tool_version_id,
+            error_code=error_code,
+            from_time=from_time,
+            to_time=to_time,
+            q=q,
+            sort=sort,
+        ),
+    )
+
+
+@router.get("/{execution_id}", response_model=ExecutionDetail)
+async def get_execution(
+    execution_id: uuid.UUID,
+    session: DbSessionDep,
+    principal: CurrentPrincipalDep,
+) -> ExecutionDetail:
+    return await ExecutionQueryService(session).get_execution(
+        actor_user_id=principal.user_id,
+        execution_id=execution_id,
+    )
+
+
+@router.get("/{execution_id}/steps", response_model=ExecutionStepListResponse)
+async def list_execution_steps(
+    execution_id: uuid.UUID,
+    session: DbSessionDep,
+    principal: CurrentPrincipalDep,
+) -> ExecutionStepListResponse:
+    return await ExecutionQueryService(session).list_steps(
+        actor_user_id=principal.user_id,
+        execution_id=execution_id,
+    )
+
+
+@router.get(
+    "/{execution_id}/steps/{step_execution_id}",
+    response_model=ExecutionStepDetail,
+)
+async def get_execution_step(
+    execution_id: uuid.UUID,
+    step_execution_id: uuid.UUID,
+    session: DbSessionDep,
+    principal: CurrentPrincipalDep,
+) -> ExecutionStepDetail:
+    return await ExecutionQueryService(session).get_step(
+        actor_user_id=principal.user_id,
+        execution_id=execution_id,
+        step_execution_id=step_execution_id,
+    )
 
 MrtrStatusQuery = Literal[
     "OPEN", "ANSWERED", "REJECTED", "EXPIRED", "UNSUPPORTED"
