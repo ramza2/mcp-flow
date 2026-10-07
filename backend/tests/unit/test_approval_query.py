@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime, timedelta
-from typing import Any
 
 import pytest
 from app.approval.decision import ApprovalDecisionService
@@ -19,11 +18,7 @@ from app.domain.enums import ApprovalStatus, UserStatus
 from app.repositories.approval_decision import ApprovalDecisionRepository
 from app.repositories.approval_request import ApprovalRequestRepository
 from app.repositories.execution import ExecutionRepository
-from app.repositories.outbox import OutboxRepository
 from app.repositories.role import (
-    PermissionRepository,
-    RolePermissionRepository,
-    RoleRepository,
     UserRoleRepository,
 )
 from app.repositories.user import UserRepository
@@ -594,8 +589,8 @@ async def test_get_list_no_mutation(
         decisions_before = await ApprovalDecisionRepository(session).list_for_request(
             approval_id
         )
-        from sqlalchemy import select
         from app.models.outbox import OutboxEvent
+        from sqlalchemy import select
 
         outbox_before = list(
             (await session.execute(select(OutboxEvent))).scalars().all()

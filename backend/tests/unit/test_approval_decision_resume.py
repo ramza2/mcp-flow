@@ -12,7 +12,6 @@ from app.approval.decision import (
     aggregate_decision,
     validate_approver_scope,
 )
-from app.approval.evidence import find_valid_approved_evidence
 from app.approval.expiry import ApprovalExpiryService
 from app.core.errors import AppError
 from app.domain.enums import (
@@ -25,13 +24,11 @@ from app.domain.enums import (
 from app.execution.approval_resume import ApprovalResumeClaimService
 from app.execution.queue import OutboxRelayService, validate_execution_approval_resume_event
 from app.execution.tool_runner import McpToolRunner
-from app.models.approval import ApprovalDecision
 from app.models.outbox import OutboxEvent
 from app.repositories.approval_decision import ApprovalDecisionRepository
 from app.repositories.approval_policy import ApprovalPolicyRepository
 from app.repositories.approval_request import ApprovalRequestRepository
 from app.repositories.execution import ExecutionRepository
-from app.repositories.outbox import OutboxRepository
 from app.repositories.role import (
     PermissionRepository,
     RolePermissionRepository,
@@ -926,6 +923,7 @@ async def test_approved_safe_retry_same_context(
     from app.execution.queue import ExecutionQueueService
     from app.repositories.agent_request import AgentRequestRepository
     from app.repositories.mcp_tool_policy import MCPToolPolicyRepository
+
     from tests.unit.test_execution_creation import _create, _idem_key
     from tests.unit.test_plan_validator import _seed_validating
     from tests.unit.test_safe_transient_retry import (

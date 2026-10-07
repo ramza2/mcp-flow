@@ -6,6 +6,7 @@ Aggregate-only projections — no resource IDs, names, endpoints, or secrets.
 from __future__ import annotations
 
 from datetime import datetime
+
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.schemas.execution_query import ExecutionListItem

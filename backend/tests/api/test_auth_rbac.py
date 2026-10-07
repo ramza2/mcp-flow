@@ -479,12 +479,14 @@ async def test_resource_grant_existence_and_workflow_fail_closed(
         )
         assert response.status_code == 422, response.text
 
+    # WORKFLOW grants are implemented — missing workflow fails closed as 422,
+    # same validation semantics as AGENT / MCP_SERVER / MCP_TOOL.
     workflow = await db_client.post(
         f"{USERS}/{user['id']}/resource-grants",
         json={"resource_type": "WORKFLOW", "resource_id": missing},
     )
-    assert workflow.status_code == 409
-    assert "not implemented" in workflow.json()["error"]["message"].lower()
+    assert workflow.status_code == 422, workflow.text
+    assert "does not exist" in workflow.json()["error"]["message"].lower()
 
     agent_id = await _seed_agent(db_client)
     tool_id, server_id = await _seed_mcp_tool(db_session_factory)

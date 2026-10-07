@@ -8,12 +8,6 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from app.domain.enums import ApprovalStatus
 from app.repositories.approval_request import ApprovalRequestRepository
-from app.repositories.role import (
-    PermissionRepository,
-    RolePermissionRepository,
-    RoleRepository,
-    UserRoleRepository,
-)
 from app.repositories.user import UserRepository
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -23,9 +17,8 @@ from tests.api.test_approval_decisions import (
     _grant_decide,
     _login_as,
 )
-from tests.api.test_auth_session import PASSWORD, _provision_user
+from tests.api.test_auth_session import PASSWORD
 from tests.unit.test_approval_decision_resume import _create_approver, _enter_waiting
-from tests.unit.test_execution_creation import _install_no_side_effects
 
 
 @pytest.mark.asyncio
@@ -108,8 +101,8 @@ async def test_get_approval_detail_masking_and_idor(
     async with db_session_factory() as session:
         match = await _create_approver(session, role_code="ROLE_DETAIL_A")
         mismatch = await _create_approver(session, role_code="ROLE_DETAIL_B")
-        from app.auth.passwords import hash_password
         from app.approval.context import compute_approval_context_hash
+        from app.auth.passwords import hash_password
 
         await UserRepository(session).set_password_hash(
             match, hash_password(PASSWORD)

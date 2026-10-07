@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-from sqlalchemy import BigInteger, CHAR, Integer, String
-from sqlalchemy.dialects.postgresql import JSONB, UUID
-
 from app.models.audit import AuditEvent
+from sqlalchemy import CHAR, BigInteger, Integer
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 
 
 def test_audit_event_has_no_mutable_fields() -> None:

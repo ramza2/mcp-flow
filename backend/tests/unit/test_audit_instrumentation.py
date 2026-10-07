@@ -6,9 +6,6 @@ import uuid
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
-
 from app.audit.writer import (
     ACTION_APPROVAL_DECISION,
     ACTION_EXECUTION_CANCEL,
@@ -32,6 +29,8 @@ from app.services.execution_cancellation import ExecutionCancellationService
 from app.services.execution_creation import ExecutionCreationService
 from app.services.schedule_trigger import ScheduleTriggerService
 from app.services.workflow_execution_creation import WorkflowExecutionCreationService
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from tests.unit.test_execution_cancellation import _grant_execution_cancel
 from tests.unit.test_execution_creation import _create, _idem_key, _seed_ready
@@ -192,6 +191,7 @@ async def test_approval_decision_audits_once_on_duplicate(
 ) -> None:
     from app.approval.decision import ApprovalDecisionService
     from app.domain.enums import ApprovalStatus, StepStatus
+
     from tests.unit.test_approval_decision_resume import (
         _create_approver,
         _enter_waiting,

@@ -56,7 +56,8 @@ async def _claim_once(
             event = await OutboxRepository(session).get(outbox_event_id)
             if event is None:
                 logger.warning(
-                    "discarding execution claim with missing outbox evidence execution_id=%s outbox_event_id=%s",
+                    "discarding execution claim with missing outbox evidence "
+                    "execution_id=%s outbox_event_id=%s",
                     execution_id,
                     outbox_event_id,
                 )
@@ -65,13 +66,15 @@ async def _claim_once(
                 evidenced_execution_id = validate_execution_dispatch_event(event)
             except AppError:
                 logger.error(
-                    "discarding execution claim with corrupt outbox evidence outbox_event_id=%s",
+                    "discarding execution claim with corrupt outbox evidence "
+                    "outbox_event_id=%s",
                     outbox_event_id,
                 )
                 return
             if evidenced_execution_id != execution_id:
                 logger.error(
-                    "discarding execution claim with mismatched outbox lineage outbox_event_id=%s",
+                    "discarding execution claim with mismatched outbox lineage "
+                    "outbox_event_id=%s",
                     outbox_event_id,
                 )
                 return
@@ -86,7 +89,8 @@ async def _claim_once(
             )
             await session.commit()
             logger.info(
-                "execution claim handled execution_id=%s outbox_event_id=%s worker_id=%s claimed=%s reason=%s",
+                "execution claim handled execution_id=%s outbox_event_id=%s "
+                "worker_id=%s claimed=%s reason=%s",
                 execution_id,
                 outbox_event_id,
                 worker_id,
@@ -159,7 +163,8 @@ async def _run_mcp_tool_step(
                 lease_token=lease_token,
             )
             logger.info(
-                "MCP Tool Runner finished execution_id=%s mcp_called=%s terminal_status=%s reason=%s",
+                "MCP Tool Runner finished execution_id=%s mcp_called=%s "
+                "terminal_status=%s reason=%s",
                 execution_id,
                 result.mcp_called,
                 result.terminal_status,
@@ -219,7 +224,8 @@ def claim_execution_task(
         # Durable state/schema conflicts are not transient queue failures.  Do not
         # poison-loop them through Celery retry; an operator must repair evidence.
         logger.error(
-            "discarding execution claim due durable conflict execution_id=%s outbox_event_id=%s code=%s",
+            "discarding execution claim due durable conflict "
+            "execution_id=%s outbox_event_id=%s code=%s",
             execution_uuid,
             event_uuid,
             exc.code,
@@ -234,7 +240,8 @@ def claim_execution_task(
             _CLAIM_DB_RETRY_MAX_SECONDS,
         )
         logger.warning(
-            "retrying execution claim after transient database failure execution_id=%s outbox_event_id=%s retry=%s",
+            "retrying execution claim after transient database failure "
+            "execution_id=%s outbox_event_id=%s retry=%s",
             execution_uuid,
             outbox_event_id,
             retry_count + 1,

@@ -7,7 +7,7 @@ Unsupported without inventing transport_config contracts: fail-closed.
 from __future__ import annotations
 
 import base64
-from typing import Mapping
+from collections.abc import Mapping
 
 from app.core.errors import AppError
 from app.core.secrets import ResolvedSecret
@@ -45,7 +45,7 @@ def build_mcp_auth_headers(
             )
         username = resolved.material["username"]
         password = resolved.material["password"]
-        raw = f"{username}:{password}".encode("utf-8")
+        raw = f"{username}:{password}".encode()
         return {"Authorization": f"Basic {base64.b64encode(raw).decode('ascii')}"}
 
     # API_KEY_HEADER / CUSTOM_HEADERS / OAUTH2 / STDIO_ENV need canonical

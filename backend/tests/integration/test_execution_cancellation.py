@@ -4,24 +4,21 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
-
 from app.core.secrets import UnimplementedSecretResolver
 from app.domain.enums import (
+    CURRENT_MCP_PROTOCOL_VERSION,
     ApprovalStatus,
     AuthorableStepType,
     BindingKind,
-    CURRENT_MCP_PROTOCOL_VERSION,
     ExecutionSourceType,
     ExecutionStatus,
+    McpInputRequestStatus,
     MCPProtocolEra,
     MCPTransportType,
-    McpInputRequestStatus,
     RiskClass,
     StepAttemptStatus,
     StepStatus,
@@ -62,6 +59,8 @@ from app.services.execution_cancellation import ExecutionCancellationService
 from app.services.policy_snapshot import build_safe_tool_policy_snapshot
 from app.services.role import RoleService
 from app.services.user import UserService
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from tests.integration.test_execution_creation import _create, _idem_key, _seed_ready
 from tests.integration.test_execution_recovery import (
@@ -1399,10 +1398,14 @@ async def test_pg_foreach_cancel_before_next_iteration(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from tests.integration.test_execution_loop_foreach import (
-        _loop,
-        _materialize_claim as _loop_materialize,
-        _tool as _loop_tool,
         _child,
+        _loop,
+    )
+    from tests.integration.test_execution_loop_foreach import (
+        _materialize_claim as _loop_materialize,
+    )
+    from tests.integration.test_execution_loop_foreach import (
+        _tool as _loop_tool,
     )
 
     async with integration_session_factory() as session:

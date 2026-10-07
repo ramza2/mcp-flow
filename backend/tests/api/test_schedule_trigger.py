@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime, timedelta
 
 import pytest
 from httpx import AsyncClient
@@ -30,7 +29,6 @@ async def trigger_client(
         ScheduleOverlapPolicy,
         ScheduleTargetType,
         ScheduleType,
-        UserStatus,
     )
     from app.repositories.user import UserRepository
     from app.services.schedule import ScheduleService

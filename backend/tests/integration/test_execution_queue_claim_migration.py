@@ -195,4 +195,7 @@ async def test_execution_queue_claim_schema_constraints(
             for row in indexes
             if row.indexname == "ix_outbox_events_unpublished_created_at"
         )
-        assert "WHERE (published_at IS NULL)" in unpublished or "WHERE published_at IS NULL" in unpublished
+        assert (
+            "WHERE (published_at IS NULL)" in unpublished
+            or "WHERE published_at IS NULL" in unpublished
+        )

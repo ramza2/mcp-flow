@@ -164,7 +164,7 @@ async def test_running_started_toolcall_becomes_cancel_requested(
     execution_id, _ = await _created_execution(db_session)
     assert await ExecutionQueueService(db_session).stage_created_batch(limit=10) == 1
     await db_session.commit()
-    claim = await ExecutionClaimService(db_session, lease_seconds=60).claim(
+    await ExecutionClaimService(db_session, lease_seconds=60).claim(
         execution_id=execution_id, worker_id="w1"
     )
     await db_session.commit()
@@ -236,7 +236,7 @@ async def test_cancel_requested_idempotent_preserves_reason(
     execution_id, _ = await _created_execution(db_session)
     assert await ExecutionQueueService(db_session).stage_created_batch(limit=10) == 1
     await db_session.commit()
-    claim = await ExecutionClaimService(db_session, lease_seconds=60).claim(
+    await ExecutionClaimService(db_session, lease_seconds=60).claim(
         execution_id=execution_id, worker_id="w1"
     )
     await db_session.commit()
@@ -365,7 +365,7 @@ async def test_reconcile_cancel_requested_without_started_toolcall(
     execution_id, _ = await _created_execution(db_session)
     assert await ExecutionQueueService(db_session).stage_created_batch(limit=10) == 1
     await db_session.commit()
-    claim = await ExecutionClaimService(db_session, lease_seconds=60).claim(
+    await ExecutionClaimService(db_session, lease_seconds=60).claim(
         execution_id=execution_id, worker_id="w1"
     )
     await db_session.commit()
@@ -390,7 +390,7 @@ async def test_settle_input_required_after_cancel_no_mir(
     execution_id, _ = await _created_execution(db_session)
     assert await ExecutionQueueService(db_session).stage_created_batch(limit=10) == 1
     await db_session.commit()
-    claim = await ExecutionClaimService(db_session, lease_seconds=60).claim(
+    await ExecutionClaimService(db_session, lease_seconds=60).claim(
         execution_id=execution_id, worker_id="w1"
     )
     await db_session.commit()

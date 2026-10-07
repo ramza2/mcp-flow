@@ -6,11 +6,8 @@ import uuid
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
-
 from app.core.errors import AppError
 from app.domain.enums import (
-    ApprovalStatus,
     ExecutionSourceType,
     ExecutionStatus,
     ExecutionTriggerType,
@@ -32,6 +29,8 @@ from app.repositories.schedule import ScheduleRepository
 from app.services.execution_query import ExecutionListQuery, ExecutionQueryService
 from app.services.operations import OperationsService
 from app.services.schedule import ScheduleService
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
 from tests.helpers.execution_ops import seed_execution, seed_user
 from tests.unit.test_schedule_service import (
     _schedule_body,
@@ -402,6 +401,7 @@ async def test_pg_nulls_last_sort_and_source_projection(
     from app.repositories.agent_version import AgentVersionRepository
     from app.repositories.schedule_occurrence import ScheduleOccurrenceRepository
     from app.repositories.workflow import WorkflowRepository
+
     from tests.integration.test_execution_creation import _create, _seed_ready
 
     nonce = uuid.uuid4().int % 10_000_000

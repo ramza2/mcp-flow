@@ -1384,7 +1384,8 @@ async def test_collection_wrong_type_max_iterations_expanded_steps_timeout(
             if s.step_key == "loop1"
         )
         assert loop.error_code == LOOP_MAX_ITERATIONS_EXCEEDED
-        assert all(s.parent_step_id is None for s in await ExecutionRepository(session).list_steps(execution_id2))
+        remaining = await ExecutionRepository(session).list_steps(execution_id2)
+        assert all(s.parent_step_id is None for s in remaining)
 
     # Expanded projected steps exceed limits.max_steps.
     client3 = _OkClient()
@@ -1664,7 +1665,7 @@ async def test_same_and_cross_iteration_step_output(
         execution = await ExecutionRepository(session).get(execution_id)
         assert execution is not None
         steps = await ExecutionRepository(session).list_steps(execution_id)
-        loop = next(s for s in steps if s.step_key == "loop1")
+        assert any(s.step_key == "loop1" for s in steps)
         a1 = _child_by_template(steps, template_id="a", iteration_no=1)
         a2 = _child_by_template(steps, template_id="a", iteration_no=2)
         b2 = _child_by_template(steps, template_id="b", iteration_no=2)
@@ -1709,7 +1710,8 @@ async def test_same_and_cross_iteration_step_output(
                 plan=plan_obj,
                 ancestors=ancestors,
             )
-        assert "missing" in cross.value.message.lower() or "iteration" in cross.value.message.lower()
+        msg = cross.value.message.lower()
+        assert "missing" in msg or "iteration" in msg
 
 
 def test_top_level_plan_steps_and_ownership_helpers() -> None:

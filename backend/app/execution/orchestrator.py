@@ -685,6 +685,7 @@ class ExecutionOrchestrator:
                     if s.step_type == AuthorableStepType.TOOL.value
                     and s.status == StepStatus.RUNNING.value
                 ]
+                single_tool = is_single_tool_execution(steps)
                 if running_tools:
                     in_flight = False
                     for rt in running_tools:
@@ -703,6 +704,20 @@ class ExecutionOrchestrator:
                         if in_flight:
                             break
                     if in_flight:
+                        # Multi-TOOL mid-wave: do not start a competing wave.
+                        # Single-TOOL: hand off to the runner so it can report
+                        # TOOL_CALL_ALREADY_STARTED without reissuing MCP.
+                        if single_tool and len(running_tools) == 1:
+                            execution.heartbeat_at = now
+                            execution.lock_version += 1
+                            await session.flush()
+                            return ProgressOutcome(
+                                execution_complete=False,
+                                promoted=False,
+                                reason="WAVE_READY",
+                                ready_step_ids=(running_tools[0].id,),
+                                single_tool=True,
+                            )
                         return ProgressOutcome(
                             execution_complete=False,
                             promoted=False,
@@ -723,7 +738,6 @@ class ExecutionOrchestrator:
                         error_message=exc.message,
                     )
 
-                single_tool = is_single_tool_execution(steps)
                 if running_tools:
                     # Resume RUNNING TOOLs (no STARTED ToolCall) as this wave.
                     resume_ids = [

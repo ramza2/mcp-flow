@@ -14,8 +14,8 @@ from datetime import datetime
 from typing import Any
 
 from sqlalchemy import (
-    BigInteger,
     CHAR,
+    BigInteger,
     CheckConstraint,
     DateTime,
     ForeignKey,
