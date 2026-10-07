@@ -1328,6 +1328,14 @@ Factory security
 Pilot acceptance
 ```
 
+### Baseline (implemented)
+
+GitHub Actions `.github/workflows/ci.yml` on `pull_request` / `push` to `main` (and `workflow_dispatch`):
+
+- Backend non-integration: `ruff check` + `pytest` (integration excluded by addopts)
+- Frontend: `pnpm check` (`tsc` + vitest + build)
+- PostgreSQL integration: `pgvector/pgvector` service, Alembic single-head + `upgrade head`, `pytest -m integration` with `TEST_DATABASE_URL`
+
 ---
 
 ## 30. Coverage 및 결함
