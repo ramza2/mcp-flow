@@ -1047,22 +1047,23 @@ OpenAPI에서 secret field가 response schema로 노출되지 않아야 한다.
 - lifecycle producers: Execution/Step/Approval (USER); cancel/approval idempotent
   re-entry does not duplicate events
 
-### Deferred producers / frontend
+### Frontend implemented (PR #64) — component / API unit
+
+- ExecutionDetail: snapshot → EventSource connect (correct `/events` URL)
+- custom named event listeners (`onmessage` 미사용); catalog registration
+- SSE event → debounced quiet snapshot refresh (status 역행 없음)
+- durable bigint SSE id: malformed/blank/duplicate/lower id 무시; increasing id timeline
+- transient `onerror`는 EventSource 유지; 연속 실패 → 4s polling fallback
+- successful `open` → error counter reset; terminal → polling stop
+- selected Step detail refresh on snapshot; unmount closes EventSource
+- WAITING_INPUT / CANCEL_REQUESTED / terminal snapshot UX via refresh
+- Events tab timeline bound (200) + connection state; deferred 문구 제거
+
+### Deferred
 
 - `execution.step.progress`, `execution.step.retrying`, `artifact.created` producers
-- frontend SSE wiring / polling fallback UI
-- E2E SSE 단절→재연결/polling (`E2E-010`)
-
-### Still required when UI lands
-
-- 연결/초기 event (browser)
-- Last-Event-ID 재연결 (UI)
-- 중복 event 무시 / status 역행 없음 (UI reducer)
-- terminal event UX
-- polling fallback
-- 권한 없는 stream 차단 (already backend)
-- `execution.waiting_input` / `waiting_approval` / `cancel_requested` /
-  `partially_succeeded` (backend coverage + UI)
+- E2E SSE 단절→재연결/polling (`E2E-010`) — Traefik/browser network 실측
+- 권한 없는 stream 차단 (already backend; UI negative path optional)
 
 ---
 
@@ -1081,9 +1082,12 @@ RuntimeInputPanel
 ApprovalPanel
 AsyncJobStatus
 ConflictBanner
+ExecutionDetail (SSE timeline + snapshot→SSE→poll fallback)
 ```
 
 각 Component는 Loading/Empty/Error/Disabled/Permission 상태를 검증한다.
+ExecutionDetail SSE는 Fake EventSource + fake timers로 component 검증한다
+(실네트워크 E2E-010은 후속).
 
 핵심 E2E:
 
