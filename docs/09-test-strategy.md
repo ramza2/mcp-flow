@@ -1199,6 +1199,25 @@ ExecutionDetail SSE는 Fake EventSource + fake timers로 component 검증한다.
 - OpenAPI remote ref
 - Python Factory forbidden file/network/process
 
+### External MCP Discovery foundation (PR #70)
+
+Backend foundation coverage (unit / API / PostgreSQL migration):
+
+- source disabled rejection; fake provider SUCCEEDED search
+- unavailable provider → durable FAILED search
+  (`EXTERNAL_DISCOVERY_PROVIDER_UNAVAILABLE`; no outbound HTTP)
+- candidate field bounds; provider contract excludes install/credential fields
+- latest review determines `APPROVED` / `REJECTED`; re-review append-only
+- import requires APPROVE; creates DRAFT only; no connection/discovery/activation
+- duplicate import idempotent; STDIO import fail-closed
+- API: Session + CSRF; `mcp.server.read` / `mcp.server.manage`; `extra=forbid`;
+  404 unknown; FAILED search resource safely returned
+- migration 0025↔0026; CHECKs/FKs/uniques/indexes
+
+Security boundary: all external metadata untrusted; repository/homepage URLs are
+display-only (never fetched by Discovery service). Live public registry adapter
+and full SSRF/registry integration remain pending follow-up (with frontend wiring).
+
 ### Secret
 
 평문 credential이 없어야 하는 위치:

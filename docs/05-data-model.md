@@ -1822,13 +1822,106 @@ Snapshots are sanitized before persist (password/secret/token/`requestState` 등
 
 ### External Discovery
 
+Durable resources (backend foundation):
+
 ```text
 external_mcp_sources
+external_mcp_searches
 external_mcp_candidates
 external_mcp_reviews
 ```
 
-후보 승인만으로 자동 활성화하지 않고 `mcp_servers.DRAFT` 생성 후 연결검증·Tool Discovery·검증 절차를 다시 수행한다.
+Local discovery lifecycle values (not product-wide MCP/Execution states):
+
+```text
+source_type: REGISTRY | ALLOWLIST_URL
+search.status: RUNNING | SUCCEEDED | FAILED
+review.decision: APPROVE | REJECT
+candidate effective review_state (API projection): UNREVIEWED | APPROVED | REJECTED
+```
+
+`IMPORTED` is **not** a review state. Import linkage is `candidate.imported_mcp_server_id`.
+
+#### `external_mcp_sources`
+
+Deployment/provider configuration (no create/update API in the foundation slice).
+
+```text
+id
+code (unique, non-empty)
+name
+source_type (REGISTRY / ALLOWLIST_URL)
+provider_key (non-empty)
+base_url nullable
+enabled (default true)
+created_at, updated_at
+```
+
+No credentials or auth headers.
+
+#### `external_mcp_searches`
+
+```text
+id
+source_id → external_mcp_sources (ON DELETE RESTRICT)
+query (non-empty; API-bounded)
+status (RUNNING / SUCCEEDED / FAILED)
+requested_limit (1..50)
+candidate_count (>= 0)
+error_code nullable
+error_message nullable (bounded)
+requested_by → users (ON DELETE RESTRICT)
+started_at
+finished_at nullable
+```
+
+Indexes: `(source_id, started_at DESC)`, `(requested_by, started_at DESC)`.
+
+#### `external_mcp_candidates`
+
+```text
+id
+search_id → external_mcp_searches (ON DELETE CASCADE)
+source_id → external_mcp_sources (ON DELETE RESTRICT)
+external_key (non-empty)
+name (non-empty)
+description nullable
+version nullable
+license nullable
+repository_url nullable (display metadata only; never fetched by Discovery service)
+homepage_url nullable (display metadata only)
+transport_type nullable
+endpoint_url nullable
+imported_mcp_server_id nullable → mcp_servers (ON DELETE RESTRICT)
+discovered_at
+```
+
+Unique: `(search_id, external_key)`.
+
+Do **not** persist install shell commands, scripts, arbitrary executable args,
+credentials, auth headers/tokens, or raw registry blobs.
+
+#### `external_mcp_reviews`
+
+Immutable history; latest review determines effective `review_state`.
+
+```text
+id
+candidate_id → external_mcp_candidates (ON DELETE CASCADE)
+decision (APPROVE / REJECT)
+comment nullable (max 1000)
+reviewed_by → users (ON DELETE RESTRICT)
+reviewed_at
+```
+
+Index: `(candidate_id, reviewed_at DESC, id DESC)`.
+
+Import rules:
+
+- requires latest review `APPROVE`
+- creates `mcp_servers` with status `DRAFT` only
+- never auto connection-test / MCP Tool Discovery / activation
+- STDIO import from external candidates is fail-closed (must map to operator-approved `stdio_manifest_id` in a later slice)
 
 ### Tool Factory
 

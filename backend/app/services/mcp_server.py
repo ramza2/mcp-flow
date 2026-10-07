@@ -111,7 +111,14 @@ class MCPServerService:
             status_code=status.HTTP_409_CONFLICT,
         )
 
-    async def create(self, data: MCPServerCreate) -> MCPServer:
+    async def create_draft_uncommitted(
+        self,
+        data: MCPServerCreate,
+        *,
+        created_by: uuid.UUID | None = None,
+    ) -> MCPServer:
+        """Create a DRAFT MCP Server without committing (for composing callers)."""
+
         endpoint = self._validate_transport_auth(
             transport_type=data.transport_type,
             endpoint_url=data.endpoint_url,
@@ -125,7 +132,7 @@ class MCPServerService:
         if await self._servers.get_by_code(code) is not None:
             code = _generate_server_code(data.name)
 
-        server = await self._servers.create(
+        return await self._servers.create(
             code=code,
             name=data.name,
             description=data.description,
@@ -141,7 +148,11 @@ class MCPServerService:
             connect_timeout_ms=data.connect_timeout_ms,
             call_timeout_ms=data.call_timeout_ms,
             max_concurrency=data.max_concurrency,
+            created_by=created_by,
         )
+
+    async def create(self, data: MCPServerCreate) -> MCPServer:
+        server = await self.create_draft_uncommitted(data)
         await self._session.commit()
         await self._session.refresh(server)
         return server

@@ -1031,13 +1031,27 @@ Audit query endpoints themselves must not produce AuditEvents.
 
 Registry/허용 URL에서 metadata 후보를 수집하되 검색결과를 내부 Tool로 자동 등록하지 않는다.
 
+**Backend foundation (PR #70):** durable `external_mcp_sources` / `searches` /
+`candidates` + provider abstraction. Default runtime provider is unavailable
+(no outbound HTTP); a real public Registry adapter is a follow-up. Frontend
+`ExternalDiscovery` remains on mock data in this slice.
+
 ## FNC-DISC-002. 보안 검토
 
 출처, version, license, repository, install/connection hint를 표시하고 외부 문구/스크립트를 untrusted로 처리한다.
 
+**Backend foundation (PR #70):** immutable `external_mcp_reviews` (APPROVE/REJECT);
+effective review state is the latest decision. Review does not connect, install,
+discover Tools, or activate. Install commands/credentials are never persisted.
+
 ## FNC-DISC-003. Import
 
 검토된 후보를 `mcp_servers.DRAFT`로만 가져온다. 이후 일반 MCP 연결검증/Discovery/Tool 검증을 수행한다.
+
+**Backend foundation (PR #70):** import requires latest APPROVE; creates DRAFT only
+(`STREAMABLE_HTTP` / `LEGACY_HTTP_SSE` + existing endpoint URL validation);
+idempotent via `imported_mcp_server_id`; STDIO import fail-closed. Does **not**
+claim full `REQ-DISC` complete (live registry + frontend wiring remain follow-up).
 
 ---
 
