@@ -1226,8 +1226,24 @@ Official MCP Registry provider (PR #71):
 - bootstrap source `official-mcp-registry` (migration 0027)
 
 Security boundary: all external metadata untrusted; repository/homepage URLs are
-display-only (never fetched). Frontend wiring and additional registries
-(Glama / awesome lists) remain follow-up.
+display-only (never fetched). Additional registries (Glama / awesome lists)
+remain follow-up.
+
+### External MCP Discovery frontend (PR #72)
+
+Frontend unit/component coverage (Vitest; MCPFlow backend boundary mocked only):
+
+- source load / 403 PermissionDenied / 500 ErrorState+retry
+- search POST body (`source_id` / trimmed `q` / limit); SUCCEEDED candidate render
+- durable FAILED search (HTTP 200) surfaces `error_code` / `error_message`
+- empty search; APPROVE / REJECT / re-review without re-search
+- import gating; package/local-only non-importable; import success + idempotent
+  `created=false`; import failure does not mark imported
+- unsafe `javascript:` / `data:` repository/homepage not clickable
+- stale search response cannot overwrite newer results
+
+Do **not** call the live Official MCP Registry from normal CI. Deploy/live browser
+verification against the real registry is a separate follow-up.
 
 ### Secret
 

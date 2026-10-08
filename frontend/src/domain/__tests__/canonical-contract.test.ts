@@ -15,6 +15,10 @@ import {
   EXECUTION_SOURCE_TYPES,
   EXECUTION_STATUSES,
   EXECUTION_TRIGGER_TYPES,
+  EXTERNAL_MCP_REVIEW_DECISIONS,
+  EXTERNAL_MCP_REVIEW_STATES,
+  EXTERNAL_MCP_SEARCH_STATUSES,
+  EXTERNAL_MCP_SOURCE_TYPES,
   JOB_STATUSES,
   MCP_AUTH_TYPES,
   MCP_CHECK_STATUSES,
@@ -229,6 +233,22 @@ describe('Canonical Domain Contract (docs/04/05)', () => {
     expectExact(MCP_CHECK_STATUSES, ['SUCCEEDED', 'FAILED', 'TIMED_OUT']);
   });
 
+  it('ExternalMCPSourceType', () => {
+    expectExact(EXTERNAL_MCP_SOURCE_TYPES, ['REGISTRY', 'ALLOWLIST_URL']);
+  });
+
+  it('ExternalMCPSearchStatus', () => {
+    expectExact(EXTERNAL_MCP_SEARCH_STATUSES, ['RUNNING', 'SUCCEEDED', 'FAILED']);
+  });
+
+  it('ExternalMCPReviewState', () => {
+    expectExact(EXTERNAL_MCP_REVIEW_STATES, ['UNREVIEWED', 'APPROVED', 'REJECTED']);
+  });
+
+  it('ExternalMCPReviewDecision', () => {
+    expectExact(EXTERNAL_MCP_REVIEW_DECISIONS, ['APPROVE', 'REJECT']);
+  });
+
   it('Current MCP protocol version', () => {
     expect(CURRENT_MCP_PROTOCOL_VERSION).toBe('2026-07-28');
   });
@@ -272,6 +292,12 @@ describe('Negative Canonical Contract — forbidden Domain values', () => {
     }
     expect(MCP_TRANSPORT_TYPES).not.toContain('Streamable HTTP');
     expect(MCP_TRANSPORT_TYPES).not.toContain('CONNECTED');
+  });
+
+  it('External Discovery review must not use legacy mock trust states', () => {
+    for (const bad of ['CANDIDATE', 'UNDER_REVIEW', 'REVIEWED'] as const) {
+      expect(EXTERNAL_MCP_REVIEW_STATES).not.toContain(bad);
+    }
   });
 });
 

@@ -158,6 +158,22 @@ export type MCPCheckType = (typeof MCP_CHECK_TYPES)[number];
 export const MCP_CHECK_STATUSES = ['SUCCEEDED', 'FAILED', 'TIMED_OUT'] as const;
 export type MCPCheckStatus = (typeof MCP_CHECK_STATUSES)[number];
 
+/** docs/05 external_mcp_sources.source_type */
+export const EXTERNAL_MCP_SOURCE_TYPES = ['REGISTRY', 'ALLOWLIST_URL'] as const;
+export type ExternalMCPSourceType = (typeof EXTERNAL_MCP_SOURCE_TYPES)[number];
+
+/** docs/05 external_mcp_searches.status */
+export const EXTERNAL_MCP_SEARCH_STATUSES = ['RUNNING', 'SUCCEEDED', 'FAILED'] as const;
+export type ExternalMCPSearchStatus = (typeof EXTERNAL_MCP_SEARCH_STATUSES)[number];
+
+/** docs/05 external_mcp_candidates.review_state */
+export const EXTERNAL_MCP_REVIEW_STATES = ['UNREVIEWED', 'APPROVED', 'REJECTED'] as const;
+export type ExternalMCPReviewState = (typeof EXTERNAL_MCP_REVIEW_STATES)[number];
+
+/** docs/05 external_mcp_reviews.decision */
+export const EXTERNAL_MCP_REVIEW_DECISIONS = ['APPROVE', 'REJECT'] as const;
+export type ExternalMCPReviewDecision = (typeof EXTERNAL_MCP_REVIEW_DECISIONS)[number];
+
 /** Authorable Execution Plan v1 Step Types (docs/04). Visual PARALLEL/END are not persisted. */
 export const AUTHORABLE_STEP_TYPES = ['TOOL', 'CONDITION', 'JOIN', 'APPROVAL', 'LOOP'] as const;
 export type AuthorableStepType = (typeof AUTHORABLE_STEP_TYPES)[number];

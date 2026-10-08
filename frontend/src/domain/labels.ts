@@ -3,6 +3,7 @@ import type {
   AuditResult,
   ExecutionSourceType,
   ExecutionTriggerType,
+  ExternalMCPReviewState,
   MCPAuthType,
   MCPCheckStatus,
   MCPDiscoveryMode,
@@ -79,6 +80,16 @@ export const MCP_CHECK_STATUS_LABELS: Record<MCPCheckStatus, string> = {
   FAILED: 'Failed',
   TIMED_OUT: 'Timed Out',
 };
+
+export const EXTERNAL_MCP_REVIEW_STATE_LABELS: Record<ExternalMCPReviewState, string> = {
+  UNREVIEWED: 'Unreviewed',
+  APPROVED: 'Approved',
+  REJECTED: 'Rejected',
+};
+
+export function labelExternalMCPReviewState(value: string): string {
+  return EXTERNAL_MCP_REVIEW_STATE_LABELS[value as ExternalMCPReviewState] ?? value;
+}
 
 export const RISK_CLASS_LABELS: Record<RiskClass, string> = {
   READ_ONLY: 'Read only',
