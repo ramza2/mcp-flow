@@ -197,7 +197,7 @@ def upgrade() -> None:
         sa.ForeignKeyConstraint(
             ["evidence_artifact_id"],
             ["tool_factory_artifacts.id"],
-            name="fk_tool_factory_test_results_evidence_artifact_id_tool_factory_artifacts",
+            name="fk_tf_test_results_evidence_artifact",
             ondelete="RESTRICT",
         ),
         sa.CheckConstraint(
