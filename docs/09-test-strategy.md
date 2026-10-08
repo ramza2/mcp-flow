@@ -1478,13 +1478,17 @@ boundary (no network, no filesystem, no migration/API):
 - OpenAPI 3.0 JSON / 3.1 YAML parse
 - deterministic `source_sha256` and operation ordering
 - request/response schema extraction; missing `operationId`
-- malformed JSON/YAML; non-object root; missing `openapi`; Swagger 2.0 rejected
+- path/query/header/cookie parameter merge/override and internal parameter `$ref`
+- malformed JSON/YAML; non-object root; missing `openapi` / `info`; Swagger 2.0 rejected
 - source size / paths / operations / `$ref` depth bounds
-- external http and file `$ref` rejected (zero network activity)
-- unresolved internal `$ref` and cycle detection
+- document-wide external http/file `$ref` rejected even when unused (zero network activity)
+- Path Item internal `$ref` resolution; Path Item external `$ref` rejected
+- unresolved internal `$ref` (including outside request/response) and cycle detection
+- YAML alias/recursive structures cannot unbound traversal
 - invalid server scheme / userinfo / templated URLs
-- `x-*` and credential-like examples not copied into analysis output
-- error messages omit raw source and secrets
+- success response prefers explicit `2xx` over `default`
+- `x-*` and credential-like examples/defaults not copied into analysis output
+- error messages omit raw source, ref URLs, and secrets
 
 Later Factory Job/API/worker/sandbox/E2E coverage remains out of scope for this slice.
 

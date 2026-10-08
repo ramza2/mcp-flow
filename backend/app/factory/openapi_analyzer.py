@@ -18,6 +18,8 @@ from app.factory.contracts import (
     FactoryAnalysisIssue,
     FactoryOpenAPIAnalysis,
     FactoryOperationCandidate,
+    FactoryParameterCandidate,
+    FactoryParameterLocation,
     FactoryServerCandidate,
     FactorySourceFormat,
 )
@@ -39,6 +41,7 @@ MAX_PATHS = 500
 MAX_OPERATIONS = 2000
 MAX_SERVERS = 50
 MAX_TAGS_PER_OPERATION = 32
+MAX_PARAMETERS_PER_OPERATION = 128
 MAX_STRING_LEN = 2000
 MAX_REF_DEPTH = 32
 MAX_SCHEMA_NODES = 5_000
@@ -53,6 +56,8 @@ _HTTP_METHODS = (
     "patch",
     "trace",
 )
+_PARAM_LOCATIONS = frozenset({"path", "query", "header", "cookie"})
+_PARAM_LOCATION_ORDER = {"path": 0, "query": 1, "header": 2, "cookie": 3}
 _SUPPORTED_OPENAPI = re.compile(r"^3\.(0|1)(\.\d+)?$")
 _STRIP_SCHEMA_KEYS = frozenset(
     {
@@ -94,6 +99,8 @@ def analyze_openapi(
         )
 
     openapi_version = _require_supported_version(document)
+    # Document-wide $ref policy before any extraction.
+    _validate_document_refs(document)
     title, api_version = _parse_info(document)
     servers = _parse_servers(document.get("servers"))
     operations, issues = _parse_operations(document)
@@ -202,17 +209,90 @@ def _require_supported_version(document: dict[str, Any]) -> str:
     return normalized
 
 
-def _parse_info(document: dict[str, Any]) -> tuple[str | None, str | None]:
+def _validate_document_refs(document: dict[str, Any]) -> None:
+    """Reject every external $ref and require every internal $ref target exists.
+
+    Traversal is bounded and identity-aware so YAML aliases / recursive objects
+    cannot cause unbounded walks. Ref string values are never echoed in errors.
+    """
+
+    resolver = _RefResolver(document)
+    visited: set[int] = set()
+    nodes = 0
+
+    def walk(node: Any) -> None:
+        nonlocal nodes
+        if isinstance(node, (dict, list)):
+            node_id = id(node)
+            if node_id in visited:
+                return
+            visited.add(node_id)
+
+        nodes += 1
+        if nodes > MAX_SCHEMA_NODES:
+            raise FactoryAnalysisError(
+                FACTORY_ANALYSIS_LIMIT_EXCEEDED,
+                f"OpenAPI document traversal exceeds maximum of {MAX_SCHEMA_NODES} nodes.",
+            )
+
+        if isinstance(node, dict):
+            if "$ref" in node:
+                _assert_ref_policy(node.get("$ref"), resolver)
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            if len(node) > MAX_SCHEMA_NODES:
+                raise FactoryAnalysisError(
+                    FACTORY_ANALYSIS_LIMIT_EXCEEDED,
+                    "OpenAPI document list exceeds analyzer limits.",
+                )
+            for item in node:
+                walk(item)
+
+    walk(document)
+
+
+def _assert_ref_policy(ref: Any, resolver: _RefResolver) -> None:
+    if not isinstance(ref, str) or not ref.strip():
+        raise FactoryAnalysisError(
+            FACTORY_OPENAPI_STRUCTURE_INVALID,
+            "OpenAPI $ref must be a non-empty string.",
+        )
+    normalized = ref.strip()
+    if not normalized.startswith("#/"):
+        raise FactoryAnalysisError(
+            FACTORY_EXTERNAL_REF_REJECTED,
+            "External or non-document OpenAPI $ref values are rejected.",
+        )
+    # Existence check only — do not fetch; never echo the pointer.
+    resolver.lookup(normalized)
+
+
+def _parse_info(document: dict[str, Any]) -> tuple[str, str]:
     info = document.get("info")
     if info is None:
-        return None, None
+        raise FactoryAnalysisError(
+            FACTORY_OPENAPI_STRUCTURE_INVALID,
+            "OpenAPI document requires an info object.",
+        )
     if not isinstance(info, dict):
         raise FactoryAnalysisError(
             FACTORY_OPENAPI_STRUCTURE_INVALID,
-            "OpenAPI info must be an object when present.",
+            "OpenAPI info must be an object.",
         )
+    # OpenAPI 3.x requires info.title and info.version.
     title = _bound_str(info.get("title"))
     version = _bound_str(info.get("version"), max_len=128)
+    if title is None:
+        raise FactoryAnalysisError(
+            FACTORY_OPENAPI_STRUCTURE_INVALID,
+            "OpenAPI info.title is required.",
+        )
+    if version is None:
+        raise FactoryAnalysisError(
+            FACTORY_OPENAPI_STRUCTURE_INVALID,
+            "OpenAPI info.version is required.",
+        )
     return title, version
 
 
@@ -330,8 +410,16 @@ def _parse_operations(
                 "OpenAPI path items must be objects.",
             )
 
-        # Path-level parameters are ignored for request schema in this slice
-        # except when merged via operation.parameters (handled below).
+        # Resolve Path Item $ref (internal only; external already rejected).
+        item = resolver.resolve_path_item(item)
+        if not isinstance(item, dict):
+            raise FactoryAnalysisError(
+                FACTORY_OPENAPI_STRUCTURE_INVALID,
+                "OpenAPI path items must resolve to objects.",
+            )
+
+        path_parameters = item.get("parameters")
+
         for method in _HTTP_METHODS:
             if method not in item:
                 continue
@@ -354,9 +442,15 @@ def _parse_operations(
             operation_id = _bound_str(op.get("operationId"), max_len=256)
             tags = _parse_tags(op.get("tags"))
 
+            parameters: list[FactoryParameterCandidate] = []
             request_schema: dict[str, Any] | None = None
             response_schema: dict[str, Any] | None = None
             try:
+                parameters = _extract_parameters(
+                    path_parameters,
+                    op.get("parameters"),
+                    resolver,
+                )
                 request_schema = _extract_request_schema(op, resolver)
                 response_schema = _extract_response_schema(op, resolver)
             except FactoryAnalysisError as exc:
@@ -364,6 +458,7 @@ def _parse_operations(
                     FACTORY_EXTERNAL_REF_REJECTED,
                     FACTORY_ANALYSIS_LIMIT_EXCEEDED,
                     FACTORY_OPENAPI_STRUCTURE_INVALID,
+                    FACTORY_SERVER_URL_INVALID,
                 }:
                     raise
                 issues.append(
@@ -385,6 +480,7 @@ def _parse_operations(
                     description=_bound_str(op.get("description")),
                     tags=tags,
                     deprecated=bool(op.get("deprecated", False)),
+                    parameters=parameters,
                     request_schema=request_schema,
                     response_schema=response_schema,
                 )
@@ -414,6 +510,105 @@ def _parse_tags(raw: Any) -> list[str]:
         if bound:
             tags.append(bound)
     return tags
+
+
+def _extract_parameters(
+    path_parameters: Any,
+    operation_parameters: Any,
+    resolver: _RefResolver,
+) -> list[FactoryParameterCandidate]:
+    merged: dict[tuple[str, FactoryParameterLocation], FactoryParameterCandidate] = {}
+    for candidate in _normalize_parameter_list(path_parameters, resolver):
+        merged[(candidate.name, candidate.location)] = candidate
+    for candidate in _normalize_parameter_list(operation_parameters, resolver):
+        # Operation-level same (name, in) overrides path-level (OpenAPI).
+        merged[(candidate.name, candidate.location)] = candidate
+
+    if len(merged) > MAX_PARAMETERS_PER_OPERATION:
+        raise FactoryAnalysisError(
+            FACTORY_ANALYSIS_LIMIT_EXCEEDED,
+            f"OpenAPI operation parameters exceed maximum of {MAX_PARAMETERS_PER_OPERATION}.",
+        )
+
+    return sorted(
+        merged.values(),
+        key=lambda p: (_PARAM_LOCATION_ORDER[p.location], p.name),
+    )
+
+
+def _normalize_parameter_list(
+    raw: Any,
+    resolver: _RefResolver,
+) -> list[FactoryParameterCandidate]:
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        raise FactoryAnalysisError(
+            FACTORY_OPENAPI_STRUCTURE_INVALID,
+            "OpenAPI parameters must be a list when present.",
+        )
+    if len(raw) > MAX_PARAMETERS_PER_OPERATION:
+        raise FactoryAnalysisError(
+            FACTORY_ANALYSIS_LIMIT_EXCEEDED,
+            f"OpenAPI parameters exceed maximum of {MAX_PARAMETERS_PER_OPERATION}.",
+        )
+
+    out: list[FactoryParameterCandidate] = []
+    for entry in raw:
+        out.append(_normalize_parameter(entry, resolver))
+    return out
+
+
+def _normalize_parameter(
+    entry: Any,
+    resolver: _RefResolver,
+) -> FactoryParameterCandidate:
+    if not isinstance(entry, dict):
+        raise FactoryAnalysisError(
+            FACTORY_OPENAPI_STRUCTURE_INVALID,
+            "OpenAPI parameter entries must be objects.",
+        )
+    resolved = resolver.resolve_node(entry, context="parameter")
+    if not isinstance(resolved, dict):
+        raise FactoryAnalysisError(
+            FACTORY_OPENAPI_STRUCTURE_INVALID,
+            "OpenAPI parameter $ref must resolve to an object.",
+        )
+
+    name = _bound_str(resolved.get("name"), max_len=256)
+    if name is None:
+        raise FactoryAnalysisError(
+            FACTORY_OPENAPI_STRUCTURE_INVALID,
+            "OpenAPI parameter name is required.",
+        )
+
+    location_raw = resolved.get("in")
+    if not isinstance(location_raw, str) or location_raw not in _PARAM_LOCATIONS:
+        raise FactoryAnalysisError(
+            FACTORY_OPENAPI_STRUCTURE_INVALID,
+            "OpenAPI parameter in must be path, query, header, or cookie.",
+        )
+    location: FactoryParameterLocation = location_raw  # type: ignore[assignment]
+
+    required_raw = resolved.get("required", False)
+    if required_raw is not None and not isinstance(required_raw, bool):
+        raise FactoryAnalysisError(
+            FACTORY_OPENAPI_STRUCTURE_INVALID,
+            "OpenAPI parameter required must be a boolean when present.",
+        )
+    # Path parameters are always required per OpenAPI.
+    required = True if location == "path" else bool(required_raw)
+
+    schema_obj: dict[str, Any] | None = None
+    if "schema" in resolved and resolved["schema"] is not None:
+        schema_obj = resolver.normalize_schema(resolved["schema"])
+
+    return FactoryParameterCandidate(
+        name=name,
+        location=location,
+        required=required,
+        schema=schema_obj,
+    )
 
 
 def _extract_request_schema(
@@ -452,25 +647,30 @@ def _extract_response_schema(
     if not isinstance(responses, dict) or not responses:
         return None
 
-    # Prefer 200, then 201, then default, then first 2xx in sorted order.
-    preferred_keys = ["200", "201", "default"]
-    selected_key: str | None = None
-    for key in preferred_keys:
-        if key in responses:
-            selected_key = key
-            break
-    if selected_key is None:
-        two_xx = sorted(
-            str(k)
-            for k in responses.keys()
-            if isinstance(k, str) and len(k) == 3 and k.startswith("2")
-        )
-        if two_xx:
-            selected_key = two_xx[0]
-        else:
-            return None
+    # Successful responses only: 200, 201, then remaining explicit 2xx.
+    # Never treat `default` as a successful response schema.
+    ordered_keys: list[str] = []
+    for preferred in ("200", "201"):
+        if preferred in responses:
+            ordered_keys.append(preferred)
+    other_2xx = sorted(
+        str(k)
+        for k in responses.keys()
+        if isinstance(k, str)
+        and len(k) == 3
+        and k.startswith("2")
+        and k not in {"200", "201"}
+    )
+    ordered_keys.extend(other_2xx)
 
-    response = responses.get(selected_key)
+    for selected_key in ordered_keys:
+        schema = _schema_from_response(responses.get(selected_key), resolver)
+        if schema is not None:
+            return schema
+    return None
+
+
+def _schema_from_response(response: Any, resolver: _RefResolver) -> dict[str, Any] | None:
     response_obj = resolver.resolve_node(response, context="response")
     if not isinstance(response_obj, dict):
         return None
@@ -498,8 +698,25 @@ class _RefResolver:
         self._document = document
         self._nodes_seen = 0
 
+    def lookup(self, ref: str) -> Any:
+        return self._lookup(ref)
+
     def resolve_node(self, node: Any, *, context: str) -> Any:
         return self._resolve(node, stack=(), context=context)
+
+    def resolve_path_item(self, item: dict[str, Any]) -> dict[str, Any]:
+        """Resolve Path Item `$ref` chains with cycle/depth bounds."""
+
+        if "$ref" not in item:
+            return item
+        resolved = self._resolve(item, stack=(), context="pathItem")
+        if not isinstance(resolved, dict):
+            raise FactoryAnalysisError(
+                FACTORY_OPENAPI_STRUCTURE_INVALID,
+                "OpenAPI path item $ref must resolve to an object.",
+            )
+        # If the target itself is still a Path Item with $ref, _resolve already chained.
+        return resolved
 
     def normalize_schema(self, schema: Any) -> dict[str, Any]:
         resolved = self._resolve(schema, stack=(), context="schema")

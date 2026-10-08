@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 FactorySourceFormat = Literal["JSON", "YAML"]
 FactoryIssueSeverity = Literal["ERROR", "WARNING"]
+FactoryParameterLocation = Literal["path", "query", "header", "cookie"]
 
 
 class FactoryAnalysisIssue(BaseModel):
@@ -29,6 +30,15 @@ class FactoryServerCandidate(BaseModel):
     description: str | None = None
 
 
+class FactoryParameterCandidate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    location: FactoryParameterLocation
+    required: bool
+    schema: dict[str, Any] | None = None
+
+
 class FactoryOperationCandidate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -40,6 +50,7 @@ class FactoryOperationCandidate(BaseModel):
     description: str | None = None
     tags: list[str] = Field(default_factory=list)
     deprecated: bool = False
+    parameters: list[FactoryParameterCandidate] = Field(default_factory=list)
     request_schema: dict[str, Any] | None = None
     response_schema: dict[str, Any] | None = None
 

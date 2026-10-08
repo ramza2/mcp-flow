@@ -1077,11 +1077,15 @@ Pure in-process OpenAPI **3.0.x / 3.1.x** analyzer at
 `backend/app/factory/openapi_analyzer.py` (`analyze_openapi(source: bytes)`).
 
 - Deterministic SHA-256 of exact source bytes; JSON or safe YAML (`yaml.safe_load` only)
-- Hard bounds: 2 MiB source; 500 paths; 2000 operations; `$ref` depth 32; 5000 schema nodes
-- Internal document `$ref` (`#/...`) only — external/file/http(s) refs rejected with **zero** network/filesystem access
+- Hard bounds: 2 MiB source; 500 paths; 2000 operations; `$ref` depth 32; 5000 schema/document nodes
+- **Document-wide** `$ref` validation: every `$ref` in the parsed document is inspected; only internal `#/...` refs allowed; every internal target must exist; external/file/http(s) refs rejected with **zero** network/filesystem access (including unused components)
+- Path Item internal `$ref` resolved before operation extraction (external Path Item `$ref` rejected; chains cycle/depth bounded)
+- Required `info` object with `title` and `version` (OpenAPI 3.x)
+- Operation `parameters` retained (path/query/header/cookie): Path Item + Operation merge with operation `(name, in)` override; sanitized schemas only
+- Successful response schema selection: `200` → `201` → remaining explicit `2xx` (never `default`)
 - Server URLs: explicit `http`/`https` with hostname; reject userinfo; templated/`variables` URLs fail-closed (no DNS, no connect)
-- Credential/raw-source safety: no source body in results; strip `example`/`examples`/`default`/`x-*`; never treat examples as executable credentials
-- Factory-local analysis contracts/errors only — not new canonical Execution/Job statuses
+- Credential/raw-source safety: no source body in results; strip `example`/`examples`/`default`/`x-*`; never treat examples/defaults as executable credentials
+- Factory-local analysis contracts/errors only — not new canonical Execution/Job statuses; no Job/API/persistence/generation/worker in this slice
 
 Analysis success ≠ generated Tool ≠ verified Tool ≠ activated Tool.
 
