@@ -8,11 +8,11 @@ from typing import Any
 
 import httpx
 import pytest
+from app.discovery import official_registry as official_registry_mod
 from app.discovery.errors import (
     EXTERNAL_DISCOVERY_PROVIDER_UNAVAILABLE,
     ExternalDiscoveryProviderError,
 )
-from app.discovery import official_registry as official_registry_mod
 from app.discovery.official_registry import (
     EXTERNAL_DISCOVERY_REGISTRY_HTTP_ERROR,
     EXTERNAL_DISCOVERY_REGISTRY_INVALID_RESPONSE,
