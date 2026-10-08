@@ -264,7 +264,7 @@ test.describe('E2E-013 live External MCP Discovery', () => {
     await expect(page.getByText('데이터를 불러오지 못했습니다')).toHaveCount(0);
     await expect(page.getByText('접근 권한이 없습니다')).toHaveCount(0);
 
-    const pageText = await page.locator('main, body').innerText();
+    const pageText = await page.getByRole('main').innerText();
     assertNoSensitiveCandidateLeak(pageText);
 
     // Do not follow external repository/homepage links.

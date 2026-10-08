@@ -1166,7 +1166,7 @@ ExecutionDetail SSE는 Fake EventSource + fake timers로 component 검증한다.
 | `E2E-010` | SSE 단절→재연결/polling (live Traefik harness; pilot PASS 2026-10-07) |
 | `E2E-011` | UNKNOWN_OUTCOME 운영확인 UX |
 | `E2E-012` | Role별 UI/API 권한 차이 |
-| `E2E-013` | External MCP Discovery real Registry → Source → Search → Review → DRAFT Import (live harness; read-only automated / mutation one-time pilot) |
+| `E2E-013` | External MCP Discovery real Registry → Source → Search → Review → DRAFT Import (live pilot PASS on `a0936f…`; controlled mutation PASS; CI must not call Registry; no repeating auto-mutation) |
 
 ---
 
@@ -1248,10 +1248,15 @@ Frontend unit/component coverage (Vitest; MCPFlow backend boundary mocked only):
 
 Do **not** call the live Official MCP Registry from normal CI.
 
-### E2E-013 live External MCP Discovery harness (PR #73 / #74)
+### E2E-013 live External MCP Discovery harness (PR #73 / #74 / #75)
 
 Playwright Chromium harness: `frontend/tests/e2e/external-discovery-live.spec.ts`
 (`pnpm test:e2e:discovery-live`).
+
+**Pilot evidence (deployed `a0936f1650168d9386e7a68addf896db565e5ea3`):** live
+read-only Search **PASS**; one-time controlled mutation **PASS**. Details:
+`docs/pilot/external-discovery-live.md`. Normal CI still must not call the real
+Official Registry. Repeating automated APPROVE/Import remains prohibited.
 
 Two layers — keep them separate:
 
