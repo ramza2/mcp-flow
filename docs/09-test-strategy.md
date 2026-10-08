@@ -1215,10 +1215,13 @@ Backend foundation coverage (unit / API / PostgreSQL migration):
   404 unknown; FAILED search resource safely returned
 - migration 0025↔0026; CHECKs/FKs/uniques/indexes
 
-Official MCP Registry provider (PR #71):
+Official MCP Registry provider (PR #71 / latency hardening PR #74):
 
 - `search` + `version=latest` query mapping; cursor pagination; result ≤ limit
 - malformed JSON / oversized response / timeout / redirect → stable error codes
+- connect timeout 5s / read timeout 20s; TimeoutException retries once only
+  (max 2 attempts, bounded delay); no retry for redirect / HTTP 4xx /
+  malformed JSON / oversized response
 - hostile `source.base_url` cannot change allowlisted host
 - duplicate `external_key` deduped; package/local-only discoverable without
   fabricated endpoint; remote HTTP candidate can import as DRAFT
@@ -1245,7 +1248,7 @@ Frontend unit/component coverage (Vitest; MCPFlow backend boundary mocked only):
 
 Do **not** call the live Official MCP Registry from normal CI.
 
-### E2E-013 live External MCP Discovery harness (PR #73)
+### E2E-013 live External MCP Discovery harness (PR #73 / #74)
 
 Playwright Chromium harness: `frontend/tests/e2e/external-discovery-live.spec.ts`
 (`pnpm test:e2e:discovery-live`).
@@ -1264,6 +1267,7 @@ Read-only harness contract:
 - env 미설정 시 skip — `pnpm test` / GitHub CI / mock e2e smoke를 깨지 않음
 - 실제 Login UI; `page.route()` / discovery API mock 금지
 - trace / video / screenshot off (credentials must not be captured)
+- early fail if PermissionDenied or source-load ErrorState before source select
 - network observation: pathname + method + status only (no cookies/headers dumps)
 - expects `GET /api/v1/mcp-discovery/sources` 200 and
   `POST /api/v1/mcp-discovery/searches` 200 with terminal `SUCCEEDED`
@@ -1271,6 +1275,8 @@ Read-only harness contract:
 - asserts candidate UI does not expose install commands, env/auth headers,
   credentials, or raw Registry JSON
 - does not follow repository/homepage links
+- Official Registry transient timeout retry is provider-side and bounded to one
+  retry (max 2 attempts); normal CI still must not call the real Registry
 
 Mutation (APPROVE / Import) must **not** be an automatically repeating Playwright
 test: each fresh search creates durable candidates, and import idempotence is

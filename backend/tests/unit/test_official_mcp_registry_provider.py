@@ -297,8 +297,11 @@ async def test_package_only_candidate_has_no_fabricated_endpoint() -> None:
 
 
 @pytest.mark.asyncio
-async def test_malformed_json_rejected() -> None:
+async def test_malformed_json_rejected_no_retry() -> None:
+    calls = {"n": 0}
+
     def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
         return httpx.Response(200, content=b"not-json{")
 
     transport = httpx.MockTransport(handler)
@@ -309,11 +312,15 @@ async def test_malformed_json_rejected() -> None:
         with pytest.raises(ExternalDiscoveryProviderError) as exc:
             await provider.search(_source(), "x", 5)
     assert exc.value.code == EXTERNAL_DISCOVERY_REGISTRY_INVALID_RESPONSE
+    assert calls["n"] == 1
 
 
 @pytest.mark.asyncio
-async def test_oversized_response_rejected() -> None:
+async def test_oversized_response_rejected_no_retry() -> None:
+    calls = {"n": 0}
+
     def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
         return httpx.Response(
             200,
             content=b"{" + b"a" * (official_registry_mod._MAX_RESPONSE_BYTES + 10),
@@ -327,11 +334,69 @@ async def test_oversized_response_rejected() -> None:
         with pytest.raises(ExternalDiscoveryProviderError) as exc:
             await provider.search(_source(), "x", 5)
     assert exc.value.code == EXTERNAL_DISCOVERY_REGISTRY_RESPONSE_TOO_LARGE
+    assert calls["n"] == 1
 
 
 @pytest.mark.asyncio
-async def test_timeout_maps_to_stable_code() -> None:
+async def test_timeout_then_success_retries_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = {"n": 0}
+    sleeps = {"n": 0}
+
+    async def _no_sleep() -> None:
+        sleeps["n"] += 1
+
+    monkeypatch.setattr(official_registry_mod, "_sleep_before_retry", _no_sleep)
+
     def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise httpx.ReadTimeout("slow")
+        return httpx.Response(
+            200,
+            json={
+                "servers": [
+                    _server_entry(
+                        name="io.example/retry-ok",
+                        title="Retry OK",
+                        remotes=[
+                            {
+                                "type": "streamable-http",
+                                "url": "https://ok.example/mcp",
+                            }
+                        ],
+                    )
+                ],
+                "metadata": {"count": 1},
+            },
+        )
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(
+        transport=transport, follow_redirects=False
+    ) as http:
+        provider = OfficialMCPRegistryProvider(http=http)
+        results = await provider.search(_source(), "retry", 5)
+
+    assert calls["n"] == 2
+    assert sleeps["n"] == 1
+    assert len(results) == 1
+    assert results[0].external_key == "io.example/retry-ok"
+    assert results[0].name == "Retry OK"
+
+
+@pytest.mark.asyncio
+async def test_timeout_twice_maps_to_stable_code(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = {"n": 0}
+
+    async def _no_sleep() -> None:
+        return None
+
+    monkeypatch.setattr(official_registry_mod, "_sleep_before_retry", _no_sleep)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
         raise httpx.ReadTimeout("slow")
 
     transport = httpx.MockTransport(handler)
@@ -342,11 +407,16 @@ async def test_timeout_maps_to_stable_code() -> None:
         with pytest.raises(ExternalDiscoveryProviderError) as exc:
             await provider.search(_source(), "x", 5)
     assert exc.value.code == EXTERNAL_DISCOVERY_REGISTRY_TIMEOUT
+    assert exc.value.message == "Official MCP Registry request timed out."
+    assert calls["n"] == official_registry_mod._MAX_GET_ATTEMPTS == 2
 
 
 @pytest.mark.asyncio
-async def test_redirect_rejected() -> None:
+async def test_redirect_rejected_no_retry() -> None:
+    calls = {"n": 0}
+
     def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
         return httpx.Response(
             302, headers={"Location": "https://evil.example/steal"}
         )
@@ -359,6 +429,27 @@ async def test_redirect_rejected() -> None:
         with pytest.raises(ExternalDiscoveryProviderError) as exc:
             await provider.search(_source(), "x", 5)
     assert exc.value.code == EXTERNAL_DISCOVERY_REGISTRY_REDIRECT_REJECTED
+    assert calls["n"] == 1
+
+
+@pytest.mark.asyncio
+async def test_http_4xx_not_retried() -> None:
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        return httpx.Response(404, json={"error": "missing"})
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(
+        transport=transport, follow_redirects=False
+    ) as http:
+        provider = OfficialMCPRegistryProvider(http=http)
+        with pytest.raises(ExternalDiscoveryProviderError) as exc:
+            await provider.search(_source(), "x", 5)
+    assert exc.value.code == EXTERNAL_DISCOVERY_REGISTRY_HTTP_ERROR
+    assert "404" in exc.value.message
+    assert calls["n"] == 1
 
 
 @pytest.mark.asyncio
