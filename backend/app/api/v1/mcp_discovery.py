@@ -10,7 +10,7 @@ from fastapi import APIRouter, Depends
 from app.api.dependencies import CurrentPrincipalDep, DbSessionDep
 from app.discovery.provider import (
     ExternalMCPDiscoveryProvider,
-    UnavailableExternalMCPProvider,
+    RoutedExternalMCPDiscoveryProvider,
 )
 from app.schemas.external_discovery import (
     ExternalMCPCandidateResponse,
@@ -27,8 +27,8 @@ router = APIRouter(prefix="/mcp-discovery", tags=["mcp-discovery"])
 
 
 def get_external_discovery_provider() -> ExternalMCPDiscoveryProvider:
-    """Default: no outbound registry adapter (follow-up slice)."""
-    return UnavailableExternalMCPProvider()
+    """Route by source.provider_key; Official MCP Registry is allowlisted HTTPS."""
+    return RoutedExternalMCPDiscoveryProvider()
 
 
 ExternalDiscoveryProviderDep = Annotated[

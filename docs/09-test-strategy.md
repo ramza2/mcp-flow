@@ -1199,13 +1199,13 @@ ExecutionDetail SSE는 Fake EventSource + fake timers로 component 검증한다.
 - OpenAPI remote ref
 - Python Factory forbidden file/network/process
 
-### External MCP Discovery foundation (PR #70)
+### External MCP Discovery foundation (PR #70 / #71)
 
 Backend foundation coverage (unit / API / PostgreSQL migration):
 
 - source disabled rejection; fake provider SUCCEEDED search
-- unavailable provider → durable FAILED search
-  (`EXTERNAL_DISCOVERY_PROVIDER_UNAVAILABLE`; no outbound HTTP)
+- unavailable / unknown `provider_key` → durable FAILED search
+  (`EXTERNAL_DISCOVERY_PROVIDER_UNAVAILABLE`)
 - candidate field bounds; provider contract excludes install/credential fields
 - latest review determines `APPROVED` / `REJECTED`; re-review append-only
 - import requires APPROVE; creates DRAFT only; no connection/discovery/activation
@@ -1214,9 +1214,20 @@ Backend foundation coverage (unit / API / PostgreSQL migration):
   404 unknown; FAILED search resource safely returned
 - migration 0025↔0026; CHECKs/FKs/uniques/indexes
 
+Official MCP Registry provider (PR #71):
+
+- `search` + `version=latest` query mapping; cursor pagination; result ≤ limit
+- malformed JSON / oversized response / timeout / redirect → stable error codes
+- hostile `source.base_url` cannot change allowlisted host
+- duplicate `external_key` deduped; package/local-only discoverable without
+  fabricated endpoint; remote HTTP candidate can import as DRAFT
+- no repository/homepage secondary fetch; no install-command persistence;
+  registry remote headers/secrets never enter candidate contract
+- bootstrap source `official-mcp-registry` (migration 0027)
+
 Security boundary: all external metadata untrusted; repository/homepage URLs are
-display-only (never fetched by Discovery service). Live public registry adapter
-and full SSRF/registry integration remain pending follow-up (with frontend wiring).
+display-only (never fetched). Frontend wiring and additional registries
+(Glama / awesome lists) remain follow-up.
 
 ### Secret
 

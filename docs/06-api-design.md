@@ -1284,9 +1284,18 @@ then finishes SUCCEEDED (candidates) or FAILED (stable `error_code`, bounded
 `error_message`). Provider failure returns the durable FAILED Search resource
 (HTTP 200) — not a 500 — when failure evidence was recorded.
 
-Default provider in PR #70: unavailable / no outbound HTTP
-(`EXTERNAL_DISCOVERY_PROVIDER_UNAVAILABLE`). Public registry adapters are not
-in this slice.
+Provider routing (PR #71):
+
+- `provider_key=official.mcp.registry` → Official MCP Registry adapter
+  (`https://registry.modelcontextprotocol.io`, allowlisted HTTPS only)
+- unknown `provider_key` → unavailable / fail-closed
+  (`EXTERNAL_DISCOVERY_PROVIDER_UNAVAILABLE`)
+- `source.base_url` must not redirect outbound calls to arbitrary hosts
+
+Official Registry search uses `GET /v0.1/servers` with `search`, `version=latest`,
+bounded `limit`, and cursor pagination. Redirects fail closed; response size /
+timeouts are bounded. Package/local-only records remain discoverable without
+fabricated `endpoint_url` (import still fails closed under #70 rules).
 
 ### Candidate / review
 
