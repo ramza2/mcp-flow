@@ -1166,6 +1166,7 @@ ExecutionDetail SSE는 Fake EventSource + fake timers로 component 검증한다.
 | `E2E-010` | SSE 단절→재연결/polling (live Traefik harness; pilot PASS 2026-10-07) |
 | `E2E-011` | UNKNOWN_OUTCOME 운영확인 UX |
 | `E2E-012` | Role별 UI/API 권한 차이 |
+| `E2E-013` | External MCP Discovery real Registry → Source → Search → Review → DRAFT Import (live harness; read-only automated / mutation one-time pilot) |
 
 ---
 
@@ -1242,8 +1243,50 @@ Frontend unit/component coverage (Vitest; MCPFlow backend boundary mocked only):
 - unsafe `javascript:` / `data:` repository/homepage not clickable
 - stale search response cannot overwrite newer results
 
-Do **not** call the live Official MCP Registry from normal CI. Deploy/live browser
-verification against the real registry is a separate follow-up.
+Do **not** call the live Official MCP Registry from normal CI.
+
+### E2E-013 live External MCP Discovery harness (PR #73)
+
+Playwright Chromium harness: `frontend/tests/e2e/external-discovery-live.spec.ts`
+(`pnpm test:e2e:discovery-live`).
+
+Two layers — keep them separate:
+
+| Layer | What | Repeatable in automation? |
+|---|---|---|
+| Read-only live Search | Login → `/mcp/discovery` → Official Registry source → UI search → candidates rendered | Yes (env-gated; skips without env) |
+| Mutation pilot | Operator APPROVE → Import → DRAFT Server detail (no auto Connection Test / Discovery / Activation) | **No** — one-time controlled procedure only |
+
+Read-only harness contract:
+
+- requires `PLAYWRIGHT_BASE_URL`, `MCPFLOW_E2E_USERNAME`, `MCPFLOW_E2E_PASSWORD`,
+  `MCPFLOW_E2E_DISCOVERY_QUERY`
+- env 미설정 시 skip — `pnpm test` / GitHub CI / mock e2e smoke를 깨지 않음
+- 실제 Login UI; `page.route()` / discovery API mock 금지
+- trace / video / screenshot off (credentials must not be captured)
+- network observation: pathname + method + status only (no cookies/headers dumps)
+- expects `GET /api/v1/mcp-discovery/sources` 200 and
+  `POST /api/v1/mcp-discovery/searches` 200 with terminal `SUCCEEDED`
+- `FAILED` fails the live test using safe `error_code` / `error_message` only
+- asserts candidate UI does not expose install commands, env/auth headers,
+  credentials, or raw Registry JSON
+- does not follow repository/homepage links
+
+Mutation (APPROVE / Import) must **not** be an automatically repeating Playwright
+test: each fresh search creates durable candidates, and import idempotence is
+candidate-scoped — repeated auto-import can create duplicate Draft servers.
+
+One-time operator procedure + evidence template:
+`docs/pilot/external-discovery-live.md`
+
+Required env (placeholders only; never commit secrets):
+
+```text
+PLAYWRIGHT_BASE_URL=https://<host>
+MCPFLOW_E2E_USERNAME=<user>
+MCPFLOW_E2E_PASSWORD=<password>
+MCPFLOW_E2E_DISCOVERY_QUERY=<registry-search-query>
+```
 
 ### Secret
 

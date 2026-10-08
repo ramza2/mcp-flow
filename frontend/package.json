@@ -15,6 +15,7 @@
     "test:e2e": "playwright test",
     "test:e2e:ui": "playwright test --ui",
     "test:e2e:sse-live": "playwright test tests/e2e/execution-sse-live.spec.ts --project=chromium",
+    "test:e2e:discovery-live": "playwright test tests/e2e/external-discovery-live.spec.ts --project=chromium",
     "check": "pnpm exec tsc --noEmit && pnpm test && pnpm build"
   },
   "dependencies": {
