@@ -1035,7 +1035,12 @@ Registry/허용 URL에서 metadata 후보를 수집하되 검색결과를 내부
 `candidates` + provider abstraction. PR #71 adds the allowlisted Official MCP
 Registry provider (`official.mcp.registry` →
 `https://registry.modelcontextprotocol.io`). Unknown provider keys remain
-unavailable. Frontend `ExternalDiscovery` remains on mock data in this slice.
+unavailable.
+
+**Frontend wiring (PR #72):** `ExternalDiscovery` calls real
+`/api/v1/mcp-discovery` APIs (Source → Search → Review → DRAFT Import). Mock
+candidate lists are no longer used on this screen. Import still never runs
+Connection Test / Tool Discovery / activation.
 
 ## FNC-DISC-002. 보안 검토
 
@@ -1051,8 +1056,12 @@ discover Tools, or activate. Install commands/credentials are never persisted.
 
 **Backend foundation (PR #70):** import requires latest APPROVE; creates DRAFT only
 (`STREAMABLE_HTTP` / `LEGACY_HTTP_SSE` + existing endpoint URL validation);
-idempotent via `imported_mcp_server_id`; STDIO import fail-closed. Does **not**
-claim full `REQ-DISC` complete (live registry + frontend wiring remain follow-up).
+idempotent via `imported_mcp_server_id`; STDIO import fail-closed.
+
+**Frontend wiring (PR #72):** Import CTA is gated on latest `APPROVED` + supported
+remote transport/endpoint; success navigates handoff to Draft MCP Server detail.
+Live browser verification against the Official Registry remains a deploy follow-up;
+additional sources (Glama / awesome lists) remain later slices.
 
 ---
 

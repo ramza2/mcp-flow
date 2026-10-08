@@ -712,6 +712,37 @@ Secret 원문은 표시하지 않는다.
 
 External MCP 후보는 “설치 가능한 신뢰 Tool”이 아니라 **검토 후보**로 표현한다.
 
+## SCR-DISC-001 External Discovery (real API, PR #72)
+
+Route: `/mcp/discovery`
+
+Admin flow:
+
+```text
+Source (GET /mcp-discovery/sources)
+→ Search Official MCP Registry (POST /mcp-discovery/searches)
+→ Candidate review (APPROVE / REJECT)
+→ APPROVED candidate Import (POST …/import)
+→ MCP Server DRAFT
+→ open Draft Server → Connection Test → Tool Discovery → Verification → Activation
+```
+
+UI states / actions:
+
+| Area | Behavior |
+|---|---|
+| Source load | LoadingSkeleton; 403 → PermissionDenied; other errors → ErrorState + retry |
+| Source select | API sources; default first **enabled**; disabled sources visible but not searchable |
+| Search | trimmed `q`, limit 20; Enter/button; no mock filter; no polling (sync terminal response); a new search aborts/supersedes an in-flight request (monotonic seq ignores stale responses) |
+| Search SUCCEEDED | render candidates + `candidate_count` |
+| Search FAILED (HTTP 200) | InlineAlert with `error_message` + technical `error_code`; empty candidates |
+| Candidate card | name/description/version/license/source/transport/endpoint; `review_state` UNREVIEWED / APPROVED / REJECTED |
+| Links | repository/homepage clickable only for `http:` / `https:`; `target=_blank` + `rel=noopener noreferrer` |
+| Review | Dialog + optional comment ≤1000; re-review allowed; does not connect/install/activate |
+| Import gate | enabled only when APPROVED + not imported + endpoint + STREAMABLE_HTTP \| LEGACY_HTTP_SSE |
+| Package/local-only | visible; Import disabled; no fabricated endpoint / STDIO conversion |
+| Import success | `created` true/false both success; “DRAFT 생성 완료” + Draft Server 보기 → `/mcp/servers/{id}` |
+
 Factory 흐름:
 
 ```text

@@ -4,6 +4,10 @@
  */
 
 import type {
+  ExternalMCPReviewDecision,
+  ExternalMCPReviewState,
+  ExternalMCPSearchStatus,
+  ExternalMCPSourceType,
   MCPAuthType,
   MCPCheckStatus,
   MCPCheckType,
@@ -16,6 +20,13 @@ import type {
   ToolVerificationStatus,
   ToolVersionValidationStatus,
 } from '../domain/types';
+
+export type {
+  ExternalMCPReviewDecision,
+  ExternalMCPReviewState,
+  ExternalMCPSearchStatus,
+  ExternalMCPSourceType,
+};
 
 /** Arbitrary JSON value — ToolVersion schemas may be malformed remote payloads. */
 export type JsonValue =
@@ -238,4 +249,84 @@ export interface ListParams {
   transport_type?: string;
   mcp_server_id?: string;
   signal?: AbortSignal;
+}
+
+/** External MCP Discovery — backend/app/schemas/external_discovery.py (docs/06 §19). */
+
+export interface ExternalMCPSourceDto {
+  id: string;
+  code: string;
+  name: string;
+  source_type: ExternalMCPSourceType;
+  provider_key: string;
+  base_url: string | null;
+  enabled: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ExternalMCPSourceListDto {
+  items: ExternalMCPSourceDto[];
+}
+
+export interface ExternalMCPSearchCreateRequest {
+  source_id: string;
+  q: string;
+  limit?: number;
+}
+
+export interface ExternalMCPCandidateDto {
+  id: string;
+  search_id: string;
+  source_id: string;
+  external_key: string;
+  name: string;
+  description: string | null;
+  version: string | null;
+  license: string | null;
+  repository_url: string | null;
+  homepage_url: string | null;
+  transport_type: string | null;
+  endpoint_url: string | null;
+  review_state: ExternalMCPReviewState;
+  imported_mcp_server_id: string | null;
+  discovered_at: string;
+}
+
+export interface ExternalMCPSearchDto {
+  id: string;
+  source_id: string;
+  query: string;
+  status: ExternalMCPSearchStatus;
+  requested_limit: number;
+  candidate_count: number;
+  error_code: string | null;
+  error_message: string | null;
+  requested_by: string;
+  started_at: string;
+  finished_at: string | null;
+  candidates: ExternalMCPCandidateDto[];
+}
+
+export interface ExternalMCPReviewCreateRequest {
+  decision: ExternalMCPReviewDecision;
+  comment?: string | null;
+}
+
+export interface ExternalMCPReviewDto {
+  id: string;
+  candidate_id: string;
+  decision: ExternalMCPReviewDecision;
+  comment: string | null;
+  reviewed_by: string;
+  reviewed_at: string;
+  review_state: ExternalMCPReviewState;
+}
+
+export interface ExternalMCPImportDto {
+  candidate_id: string;
+  mcp_server_id: string;
+  created: boolean;
+  server_status: MCPServerStatus;
+  transport_type: MCPTransportType | null;
 }
