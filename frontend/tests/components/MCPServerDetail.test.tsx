@@ -53,6 +53,47 @@ describe('MCPServerDetail — API detail', () => {
     expect(screen.getByText('2026-07-28')).toBeInTheDocument();
   });
 
+  it('keeps full long endpoint readable with wrapping classes', async () => {
+    const longEndpoint =
+      `https://mcp.example.com/${'segment/'.repeat(40)}streamable-http-endpoint`;
+    const longEndpointServer = { ...activeServer, endpoint_url: longEndpoint };
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo, init?: RequestInit) => {
+        const url = typeof input === 'string' ? input : input.url;
+        if (
+          url.includes(`/mcp/servers/${longEndpointServer.id}`)
+          && !url.includes('/tools')
+          && !url.includes('/discoveries')
+          && !url.includes('/connection-tests')
+          && !url.includes('/activate')
+          && !url.includes('/deactivate')
+        ) {
+          return Promise.resolve(jsonResponse(longEndpointServer));
+        }
+        if (url.includes('/tools')) return Promise.resolve(jsonResponse(toolList));
+        if (url.includes('/discoveries') && init?.method !== 'POST') {
+          return Promise.resolve(jsonResponse(discoveryList));
+        }
+        return Promise.resolve(new Response('Not found', { status: 404 }));
+      }),
+    );
+
+    renderWithRouter(<MCPServerDetail />, {
+      path: '/mcp/servers/:serverId',
+      route: `/mcp/servers/${longEndpointServer.id}`,
+    });
+
+    const endpointValue = await screen.findByText(longEndpoint);
+    expect(endpointValue).toBeInTheDocument();
+    expect(endpointValue.className).toMatch(/\bmin-w-0\b/);
+    expect(endpointValue.className).toMatch(/\bflex-1\b/);
+    expect(endpointValue.className).toMatch(/\bbreak-all\b/);
+    expect(endpointValue.className).not.toMatch(/\btruncate\b/);
+    expect(endpointValue.className).not.toMatch(/\bellipsis\b/);
+  });
+
   it('shows 404 error state for missing server', async () => {
     vi.stubGlobal(
       'fetch',

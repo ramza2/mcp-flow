@@ -673,7 +673,13 @@ function Row({ label, children, mono }: { label: string; children: React.ReactNo
   return (
     <div className="flex gap-4">
       <span className="text-slate-400 w-24 shrink-0 text-xs">{label}</span>
-      <span className={`text-slate-700 ${mono ? 'font-mono text-xs' : ''}`}>{children}</span>
+      <span
+        className={`min-w-0 flex-1 text-slate-700 ${
+          mono ? 'font-mono text-xs break-all' : 'break-words'
+        }`}
+      >
+        {children}
+      </span>
     </div>
   );
 }
