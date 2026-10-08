@@ -198,11 +198,16 @@ async def test_factory_job_status_and_artifact_unique(
                   content_sha256, size_bytes, inline_payload
                 ) VALUES (
                   :id, :job_id, 'OPENAPI_ANALYSIS', 'application/json',
-                  :sha, 2, '{"ok":true}'::jsonb
+                  :sha, 2, CAST(:payload AS jsonb)
                 )
                 """
             ),
-            {"id": art_id, "job_id": job_id, "sha": "c" * 64},
+            {
+                "id": art_id,
+                "job_id": job_id,
+                "sha": "c" * 64,
+                "payload": '{"ok": true}',
+            },
         )
         await session.commit()
 
@@ -215,11 +220,16 @@ async def test_factory_job_status_and_artifact_unique(
                       content_sha256, size_bytes, inline_payload
                     ) VALUES (
                       :id, :job_id, 'OPENAPI_ANALYSIS', 'application/json',
-                      :sha, 2, '{"ok":false}'::jsonb
+                      :sha, 2, CAST(:payload AS jsonb)
                     )
                     """
                 ),
-                {"id": uuid.uuid4(), "job_id": job_id, "sha": "d" * 64},
+                {
+                    "id": uuid.uuid4(),
+                    "job_id": job_id,
+                    "sha": "d" * 64,
+                    "payload": '{"ok": false}',
+                },
             )
             await session.flush()
         await session.rollback()
@@ -231,11 +241,16 @@ async def test_factory_job_status_and_artifact_unique(
                 INSERT INTO tool_factory_test_results (
                   id, job_id, test_name, passed, evidence_artifact_id, duration_ms
                 ) VALUES (
-                  :id, :job_id, 'smoke', true, :art, 10
+                  :id, :job_id, 'smoke', CAST(:passed AS boolean), :art, 10
                 )
                 """
             ),
-            {"id": uuid.uuid4(), "job_id": job_id, "art": art_id},
+            {
+                "id": uuid.uuid4(),
+                "job_id": job_id,
+                "art": art_id,
+                "passed": True,
+            },
         )
         await session.commit()
 
@@ -247,11 +262,16 @@ async def test_factory_job_status_and_artifact_unique(
                     INSERT INTO tool_factory_test_results (
                       id, job_id, test_name, passed, evidence_artifact_id
                     ) VALUES (
-                      :id, :job_id, 'missing', false, :art
+                      :id, :job_id, 'missing', CAST(:passed AS boolean), :art
                     )
                     """
                 ),
-                {"id": uuid.uuid4(), "job_id": job_id, "art": uuid.uuid4()},
+                {
+                    "id": uuid.uuid4(),
+                    "job_id": job_id,
+                    "art": uuid.uuid4(),
+                    "passed": False,
+                },
             )
             await session.flush()
         await session.rollback()
