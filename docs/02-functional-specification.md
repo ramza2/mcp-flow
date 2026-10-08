@@ -1071,6 +1071,32 @@ additional sources (Glama / awesome lists) remain later slices.
 
 OpenAPI JSON/YAML 또는 제한된 Python source를 입력받아 구조, URL, ref, operation, dependency를 검증한다.
 
+### Tool Factory OpenAPI analyzer foundation (implemented slice)
+
+Pure in-process OpenAPI **3.0.x / 3.1.x** analyzer at
+`backend/app/factory/openapi_analyzer.py` (`analyze_openapi(source: bytes)`).
+
+- Deterministic SHA-256 of exact source bytes; JSON or safe YAML (`yaml.safe_load` only)
+- Hard bounds: 2 MiB source; 500 paths; 2000 operations; `$ref` depth 32; 5000 schema nodes
+- Internal document `$ref` (`#/...`) only — external/file/http(s) refs rejected with **zero** network/filesystem access
+- Server URLs: explicit `http`/`https` with hostname; reject userinfo; templated/`variables` URLs fail-closed (no DNS, no connect)
+- Credential/raw-source safety: no source body in results; strip `example`/`examples`/`default`/`x-*`; never treat examples as executable credentials
+- Factory-local analysis contracts/errors only — not new canonical Execution/Job statuses
+
+Analysis success ≠ generated Tool ≠ verified Tool ≠ activated Tool.
+
+**Not implemented yet (REQ-FAC-001..012 remain open):**
+
+- file upload endpoint / allowlisted URL fetch
+- `tool_factory_jobs` / artifacts / test_results persistence
+- Object Storage handoff
+- operation selection API
+- code generation / Python source support
+- `factory-worker` / sandbox Build/Test
+- administrator approval / DRAFT MCP Server handoff
+- version/archive/restore
+- frontend real API wiring
+
 ## FNC-FAC-002. 생성
 
 선택 operation을 Tool로 생성하고 credential은 Secret reference placeholder로만 표현한다.

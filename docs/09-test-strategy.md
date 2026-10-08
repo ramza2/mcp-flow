@@ -1470,6 +1470,24 @@ Accuracy = Correct Top-1 / Valid Evaluation Cases × 100
 - rollback
 - host Docker socket 미노출
 
+### Tool Factory OpenAPI analyzer foundation (unit)
+
+`backend/tests/unit/test_factory_openapi_analyzer.py` covers the pure analyzer
+boundary (no network, no filesystem, no migration/API):
+
+- OpenAPI 3.0 JSON / 3.1 YAML parse
+- deterministic `source_sha256` and operation ordering
+- request/response schema extraction; missing `operationId`
+- malformed JSON/YAML; non-object root; missing `openapi`; Swagger 2.0 rejected
+- source size / paths / operations / `$ref` depth bounds
+- external http and file `$ref` rejected (zero network activity)
+- unresolved internal `$ref` and cycle detection
+- invalid server scheme / userinfo / templated URLs
+- `x-*` and credential-like examples not copied into analysis output
+- error messages omit raw source and secrets
+
+Later Factory Job/API/worker/sandbox/E2E coverage remains out of scope for this slice.
+
 ---
 
 ## 29. CI Quality Gate
