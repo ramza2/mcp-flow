@@ -6,6 +6,7 @@ Read API: GET /v0.1/servers?search=&version=latest&limit=&cursor=
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from typing import Any
@@ -26,10 +27,21 @@ OFFICIAL_MCP_REGISTRY_BASE_URL = "https://registry.modelcontextprotocol.io"
 OFFICIAL_MCP_REGISTRY_API_PATH = "/v0.1/servers"
 
 _CONNECT_TIMEOUT_S = 5.0
-_READ_TIMEOUT_S = 10.0
+_READ_TIMEOUT_S = 20.0
+_WRITE_TIMEOUT_S = 5.0
+_POOL_TIMEOUT_S = 5.0
+_MAX_GET_ATTEMPTS = 2
+_RETRY_DELAY_S = 0.25
 _MAX_RESPONSE_BYTES = 1_048_576  # 1 MiB
 _MAX_PAGE_SIZE = 50
 _MAX_PAGES = 5
+
+
+async def _sleep_before_retry() -> None:
+    """Bounded delay between timeout retries (monkeypatched in unit tests)."""
+
+    await asyncio.sleep(_RETRY_DELAY_S)
+
 
 EXTERNAL_DISCOVERY_REGISTRY_TIMEOUT = "EXTERNAL_DISCOVERY_REGISTRY_TIMEOUT"
 EXTERNAL_DISCOVERY_REGISTRY_HTTP_ERROR = "EXTERNAL_DISCOVERY_REGISTRY_HTTP_ERROR"
@@ -73,8 +85,8 @@ class OfficialMCPRegistryProvider:
                 timeout=httpx.Timeout(
                     connect=_CONNECT_TIMEOUT_S,
                     read=_READ_TIMEOUT_S,
-                    write=_CONNECT_TIMEOUT_S,
-                    pool=_CONNECT_TIMEOUT_S,
+                    write=_WRITE_TIMEOUT_S,
+                    pool=_POOL_TIMEOUT_S,
                 ),
             )
             self._owns_http = True
@@ -114,49 +126,75 @@ class OfficialMCPRegistryProvider:
     async def _get_json(self, url: str) -> dict[str, Any]:
         self._assert_allowlisted_url(url)
         client = await self._client()
-        try:
-            response = await client.get(url)
-        except httpx.TimeoutException as exc:
-            raise ExternalDiscoveryProviderError(
-                EXTERNAL_DISCOVERY_REGISTRY_TIMEOUT,
-                "Official MCP Registry request timed out.",
-            ) from exc
-        except httpx.HTTPError as exc:
-            raise ExternalDiscoveryProviderError(
-                EXTERNAL_DISCOVERY_REGISTRY_HTTP_ERROR,
-                "Official MCP Registry network request failed.",
-            ) from exc
+        last_timeout: httpx.TimeoutException | None = None
 
-        if response.is_redirect or response.status_code in {301, 302, 303, 307, 308}:
-            raise ExternalDiscoveryProviderError(
-                EXTERNAL_DISCOVERY_REGISTRY_REDIRECT_REJECTED,
-                "Official MCP Registry redirects are rejected.",
-            )
-        if response.status_code >= 400:
-            raise ExternalDiscoveryProviderError(
-                EXTERNAL_DISCOVERY_REGISTRY_HTTP_ERROR,
-                f"Official MCP Registry returned HTTP {response.status_code}.",
-            )
+        for attempt in range(1, _MAX_GET_ATTEMPTS + 1):
+            try:
+                response = await client.get(url)
+            except httpx.TimeoutException as exc:
+                # Timeout-only retry: at most one retry (2 attempts total).
+                last_timeout = exc
+                if attempt < _MAX_GET_ATTEMPTS:
+                    logger.info(
+                        "official_mcp_registry_timeout_retry attempt=%s max_attempts=%s",
+                        attempt,
+                        _MAX_GET_ATTEMPTS,
+                    )
+                    await _sleep_before_retry()
+                    continue
+                raise ExternalDiscoveryProviderError(
+                    EXTERNAL_DISCOVERY_REGISTRY_TIMEOUT,
+                    "Official MCP Registry request timed out.",
+                ) from exc
+            except httpx.HTTPError as exc:
+                raise ExternalDiscoveryProviderError(
+                    EXTERNAL_DISCOVERY_REGISTRY_HTTP_ERROR,
+                    "Official MCP Registry network request failed.",
+                ) from exc
 
-        content = response.content
-        if len(content) > _MAX_RESPONSE_BYTES:
-            raise ExternalDiscoveryProviderError(
-                EXTERNAL_DISCOVERY_REGISTRY_RESPONSE_TOO_LARGE,
-                "Official MCP Registry response exceeds size limit.",
-            )
-        try:
-            payload = json.loads(content.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise ExternalDiscoveryProviderError(
-                EXTERNAL_DISCOVERY_REGISTRY_INVALID_RESPONSE,
-                "Official MCP Registry returned invalid JSON.",
-            ) from exc
-        if not isinstance(payload, dict):
-            raise ExternalDiscoveryProviderError(
-                EXTERNAL_DISCOVERY_REGISTRY_INVALID_RESPONSE,
-                "Official MCP Registry JSON root must be an object.",
-            )
-        return payload
+            # Non-timeout outcomes are never retried.
+            if response.is_redirect or response.status_code in {
+                301,
+                302,
+                303,
+                307,
+                308,
+            }:
+                raise ExternalDiscoveryProviderError(
+                    EXTERNAL_DISCOVERY_REGISTRY_REDIRECT_REJECTED,
+                    "Official MCP Registry redirects are rejected.",
+                )
+            if response.status_code >= 400:
+                raise ExternalDiscoveryProviderError(
+                    EXTERNAL_DISCOVERY_REGISTRY_HTTP_ERROR,
+                    f"Official MCP Registry returned HTTP {response.status_code}.",
+                )
+
+            content = response.content
+            if len(content) > _MAX_RESPONSE_BYTES:
+                raise ExternalDiscoveryProviderError(
+                    EXTERNAL_DISCOVERY_REGISTRY_RESPONSE_TOO_LARGE,
+                    "Official MCP Registry response exceeds size limit.",
+                )
+            try:
+                payload = json.loads(content.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise ExternalDiscoveryProviderError(
+                    EXTERNAL_DISCOVERY_REGISTRY_INVALID_RESPONSE,
+                    "Official MCP Registry returned invalid JSON.",
+                ) from exc
+            if not isinstance(payload, dict):
+                raise ExternalDiscoveryProviderError(
+                    EXTERNAL_DISCOVERY_REGISTRY_INVALID_RESPONSE,
+                    "Official MCP Registry JSON root must be an object.",
+                )
+            return payload
+
+        # Unreachable: loop either returns or raises. Keep mypy satisfied.
+        raise ExternalDiscoveryProviderError(
+            EXTERNAL_DISCOVERY_REGISTRY_TIMEOUT,
+            "Official MCP Registry request timed out.",
+        ) from last_timeout
 
     @staticmethod
     def _bound_str(value: Any, *, max_len: int) -> str | None:

@@ -173,7 +173,24 @@ test.describe('E2E-013 live External MCP Discovery', () => {
     ).toBeVisible({ timeout: 30_000 });
 
     const sourceSelect = page.locator('#discovery-source');
-    await expect(sourceSelect).toBeVisible({ timeout: 30_000 });
+    const permissionDenied = page.getByText('접근 권한이 없습니다');
+    const sourceLoadError = page.getByText('데이터를 불러오지 못했습니다');
+
+    // Fail fast with concise diagnostics before waiting on the source select.
+    await Promise.race([
+      sourceSelect.waitFor({ state: 'visible', timeout: 30_000 }),
+      permissionDenied.waitFor({ state: 'visible', timeout: 30_000 }).then(() => {
+        throw new Error(
+          'External Discovery PermissionDenied: E2E user needs mcp.server.read and mcp.server.manage',
+        );
+      }),
+      sourceLoadError.waitFor({ state: 'visible', timeout: 30_000 }).then(() => {
+        throw new Error(
+          'External Discovery source load failed before source select appeared',
+        );
+      }),
+    ]);
+
     await expect(sourceSelect).toContainText('Official MCP Registry');
     const selectedOption = sourceSelect.locator('option:checked');
     await expect(selectedOption).toHaveText(/Official MCP Registry/);
