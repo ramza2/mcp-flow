@@ -961,3 +961,132 @@ def test_success_response_prefers_202_over_default() -> None:
     assert schema is not None
     assert "accepted" in schema["properties"]
     assert "fallback" not in schema["properties"]
+
+
+def test_yaml_unquoted_200_response_schema_extracted() -> None:
+    yaml_src = """\
+openapi: "3.0.0"
+info:
+  title: YAML Status
+  version: "1"
+paths:
+  /ping:
+    get:
+      responses:
+        200:
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+"""
+    result = analyze_openapi(yaml_src.encode("utf-8"), filename="status.yaml")
+    schema = result.operations[0].response_schema
+    assert schema is not None
+    assert schema["type"] == "object"
+    assert "ok" in schema["properties"]
+
+
+def test_yaml_unquoted_202_beats_default() -> None:
+    yaml_src = """\
+openapi: "3.0.0"
+info:
+  title: YAML Status
+  version: "1"
+paths:
+  /async:
+    post:
+      responses:
+        default:
+          description: fallback
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  fallback:
+                    type: boolean
+        202:
+          description: accepted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  accepted:
+                    type: boolean
+"""
+    result = analyze_openapi(yaml_src.encode("utf-8"), filename="status.yaml")
+    schema = result.operations[0].response_schema
+    assert schema is not None
+    assert "accepted" in schema["properties"]
+    assert "fallback" not in schema["properties"]
+
+
+def test_string_status_keys_still_work() -> None:
+    doc = {
+        "openapi": "3.0.0",
+        "info": {"title": "t", "version": "1"},
+        "paths": {
+            "/x": {
+                "get": {
+                    "responses": {
+                        "200": {
+                            "description": "ok",
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "object",
+                                        "properties": {"s": {"type": "string"}},
+                                    }
+                                }
+                            },
+                        }
+                    }
+                }
+            }
+        },
+    }
+    result = analyze_openapi(_json_bytes(doc))
+    assert result.operations[0].response_schema is not None
+    assert "s" in result.operations[0].response_schema["properties"]
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://[bad",
+        "https://api.example.com:abc/v1",
+        "https://api.example.com:99999/v1",
+        "https://api.example.com:0/v1",
+        "https://api example.com/v1",
+        "https://api.example.com/\x01v1",
+        "https://user:secret@api.example.com/v1",
+    ],
+)
+def test_malformed_server_urls_rejected_safely(url: str) -> None:
+    doc = {
+        "openapi": "3.0.0",
+        "info": {"title": "t", "version": "1"},
+        "servers": [{"url": url}],
+        "paths": {},
+    }
+    with pytest.raises(FactoryAnalysisError) as exc:
+        analyze_openapi(_json_bytes(doc))
+    assert exc.value.code == FACTORY_SERVER_URL_INVALID
+    assert url not in exc.value.message
+    assert "secret" not in exc.value.message
+
+
+def test_valid_explicit_numeric_port_accepted() -> None:
+    doc = {
+        "openapi": "3.0.0",
+        "info": {"title": "t", "version": "1"},
+        "servers": [{"url": "https://api.example.com:8443/v1"}],
+        "paths": {},
+    }
+    result = analyze_openapi(_json_bytes(doc))
+    assert result.servers[0].url == "https://api.example.com:8443/v1"

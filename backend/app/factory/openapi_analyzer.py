@@ -351,7 +351,24 @@ def _validate_server_url(url: str) -> str:
             FACTORY_SERVER_URL_INVALID,
             "OpenAPI server URL templates with variables are not supported.",
         )
-    parsed = urlparse(url)
+    # Reject whitespace / control characters anywhere in the URL text.
+    if any(ch.isspace() or ord(ch) < 32 for ch in url):
+        raise FactoryAnalysisError(
+            FACTORY_SERVER_URL_INVALID,
+            "OpenAPI server url contains invalid whitespace or control characters.",
+        )
+
+    try:
+        parsed = urlparse(url)
+        # `.hostname` / `.port` may raise ValueError for malformed authority/port.
+        hostname = parsed.hostname
+        port = parsed.port
+    except ValueError:
+        raise FactoryAnalysisError(
+            FACTORY_SERVER_URL_INVALID,
+            "OpenAPI server url is malformed.",
+        ) from None
+
     if parsed.scheme.lower() not in {"http", "https"}:
         raise FactoryAnalysisError(
             FACTORY_SERVER_URL_INVALID,
@@ -362,10 +379,20 @@ def _validate_server_url(url: str) -> str:
             FACTORY_SERVER_URL_INVALID,
             "OpenAPI server url must not include userinfo.",
         )
-    if not parsed.hostname:
+    if not hostname:
         raise FactoryAnalysisError(
             FACTORY_SERVER_URL_INVALID,
             "OpenAPI server url must include a valid hostname.",
+        )
+    if any(ch.isspace() or ord(ch) < 32 for ch in hostname):
+        raise FactoryAnalysisError(
+            FACTORY_SERVER_URL_INVALID,
+            "OpenAPI server url hostname contains invalid characters.",
+        )
+    if port is not None and not (1 <= port <= 65535):
+        raise FactoryAnalysisError(
+            FACTORY_SERVER_URL_INVALID,
+            "OpenAPI server url port is invalid.",
         )
     return url
 
@@ -639,6 +666,26 @@ def _extract_request_schema(
     return resolver.normalize_schema(schema)
 
 
+def _canonical_http_status(key: Any) -> str | None:
+    """Normalize response map keys to canonical decimal status strings.
+
+    Supports string keys (\"200\") and YAML integer keys (200 from safe_load).
+    Returns None for non-status keys such as \"default\" or wildcards.
+    """
+
+    if isinstance(key, bool):
+        return None
+    if isinstance(key, int):
+        if 100 <= key <= 599:
+            return str(key)
+        return None
+    if isinstance(key, str) and key.isdigit():
+        code = int(key)
+        if 100 <= code <= 599 and str(code) == key:
+            return key
+    return None
+
+
 def _extract_response_schema(
     operation: dict[str, Any],
     resolver: _RefResolver,
@@ -647,24 +694,30 @@ def _extract_response_schema(
     if not isinstance(responses, dict) or not responses:
         return None
 
+    # Map canonical status string -> response object (first occurrence wins).
+    # Supports YAML integer keys (200) and string keys ("200") without mutating source.
+    by_status: dict[str, Any] = {}
+    for key, value in responses.items():
+        canonical = _canonical_http_status(key)
+        if canonical is None or canonical in by_status:
+            continue
+        by_status[canonical] = value
+
     # Successful responses only: 200, 201, then remaining explicit 2xx.
     # Never treat `default` as a successful response schema.
-    ordered_keys: list[str] = []
+    ordered_status: list[str] = []
     for preferred in ("200", "201"):
-        if preferred in responses:
-            ordered_keys.append(preferred)
+        if preferred in by_status:
+            ordered_status.append(preferred)
     other_2xx = sorted(
-        str(k)
-        for k in responses.keys()
-        if isinstance(k, str)
-        and len(k) == 3
-        and k.startswith("2")
-        and k not in {"200", "201"}
+        status
+        for status in by_status
+        if status.startswith("2") and status not in {"200", "201"}
     )
-    ordered_keys.extend(other_2xx)
+    ordered_status.extend(other_2xx)
 
-    for selected_key in ordered_keys:
-        schema = _schema_from_response(responses.get(selected_key), resolver)
+    for status in ordered_status:
+        schema = _schema_from_response(by_status[status], resolver)
         if schema is not None:
             return schema
     return None
