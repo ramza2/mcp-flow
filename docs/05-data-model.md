@@ -1947,6 +1947,12 @@ tool_factory_test_results
 
 생성 artifact hash, generator version, sandbox policy, 시험 결과를 보존한다. 운영 활성화는 관리자 승인 후 별도 MCP Server 등록 흐름을 사용한다.
 
+**Current slice note:** the OpenAPI analyzer foundation
+(`backend/app/factory/`) produces in-memory analysis contracts only. It creates
+**no** durable Factory rows, migrations, or Job status values. Persistence of
+`tool_factory_*` tables remains a later PR. Do not duplicate product-wide
+`JobStatus` with Factory-local analysis issue severities.
+
 ---
 
 ## 19. Evaluation 모델
