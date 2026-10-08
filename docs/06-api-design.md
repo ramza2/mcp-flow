@@ -1263,7 +1263,54 @@ POST /mcp-discovery/candidates/{candidate_id}/reviews
 POST /mcp-discovery/candidates/{candidate_id}/import
 ```
 
-`import`는 Draft MCP Server 생성이며 자동 활성화가 아니다.
+### Permissions
+
+| Operation | Permission |
+|---|---|
+| GET sources / searches / candidates | `mcp.server.read` |
+| POST searches / reviews / import | `mcp.server.manage` |
+
+No ResourceGrant on candidates (not yet `MCP_SERVER` resources). Missing → 404;
+unauthorized → 403 `AUTH_FORBIDDEN`.
+
+### Search
+
+```text
+POST body: { source_id, q (1..128), limit (1..50, default 20) }  # extra=forbid
+```
+
+Persists RUNNING search, calls injected provider outside the DB transaction,
+then finishes SUCCEEDED (candidates) or FAILED (stable `error_code`, bounded
+`error_message`). Provider failure returns the durable FAILED Search resource
+(HTTP 200) — not a 500 — when failure evidence was recorded.
+
+Default provider in PR #70: unavailable / no outbound HTTP
+(`EXTERNAL_DISCOVERY_PROVIDER_UNAVAILABLE`). Public registry adapters are not
+in this slice.
+
+### Candidate / review
+
+Candidate responses expose typed safe metadata + effective `review_state`
+(`UNREVIEWED` / `APPROVED` / `REJECTED` from latest immutable review).
+`IMPORTED` is not a review state; use `imported_mcp_server_id`.
+
+```text
+POST review: { decision: APPROVE|REJECT, comment?: max 1000 }  # extra=forbid
+```
+
+Re-review appends history; latest decision is authoritative.
+
+### Import
+
+Requires latest review APPROVE. Idempotent: existing `imported_mcp_server_id`
+returns `created=false`. Creates `mcp_servers` **DRAFT** only
+(`STREAMABLE_HTTP` / `LEGACY_HTTP_SSE`, `auth_type=NONE`, endpoint URL via
+existing MCP URL validation). Never auto connection-test / Tool Discovery /
+activation. STDIO → 422 `EXTERNAL_DISCOVERY_STDIO_IMPORT_UNSUPPORTED`.
+
+```text
+import response: { candidate_id, mcp_server_id, created, server_status: DRAFT }
+```
 
 ---
 

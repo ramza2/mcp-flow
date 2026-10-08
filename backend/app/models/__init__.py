@@ -14,6 +14,12 @@ from app.models.auth import (
 from app.models.conversation import AgentRequest, Conversation, ConversationMessage
 from app.models.execution import Execution, ExecutionStep, StepAttempt, ToolCall
 from app.models.execution_event import ExecutionEvent
+from app.models.external_discovery import (
+    ExternalMCPCandidate,
+    ExternalMCPReview,
+    ExternalMCPSearch,
+    ExternalMCPSource,
+)
 from app.models.idempotency import ApiIdempotencyRecord
 from app.models.mcp import (
     MCPServer,
@@ -57,6 +63,10 @@ __all__ = [
     "Execution",
     "ExecutionEvent",
     "ExecutionStep",
+    "ExternalMCPCandidate",
+    "ExternalMCPReview",
+    "ExternalMCPSearch",
+    "ExternalMCPSource",
     "StepAttempt",
     "ToolCall",
     "Schedule",

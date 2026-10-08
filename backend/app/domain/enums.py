@@ -396,6 +396,36 @@ class MCPAuthType(StrEnum):
     STDIO_ENV = "STDIO_ENV"
 
 
+class ExternalMCPSourceType(StrEnum):
+    """docs/05 external_mcp_sources.source_type."""
+
+    REGISTRY = "REGISTRY"
+    ALLOWLIST_URL = "ALLOWLIST_URL"
+
+
+class ExternalMCPSearchStatus(StrEnum):
+    """docs/05 external_mcp_searches.status."""
+
+    RUNNING = "RUNNING"
+    SUCCEEDED = "SUCCEEDED"
+    FAILED = "FAILED"
+
+
+class ExternalMCPReviewDecision(StrEnum):
+    """docs/05 external_mcp_reviews.decision."""
+
+    APPROVE = "APPROVE"
+    REJECT = "REJECT"
+
+
+class ExternalMCPCandidateReviewState(StrEnum):
+    """API-effective candidate review state (latest review; not persisted)."""
+
+    UNREVIEWED = "UNREVIEWED"
+    APPROVED = "APPROVED"
+    REJECTED = "REJECTED"
+
+
 class AuthorableStepType(StrEnum):
     """Persisted Execution Plan v1 step types. Visual PARALLEL/END are not authorable."""
 
