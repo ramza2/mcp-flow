@@ -1859,6 +1859,20 @@ created_at, updated_at
 
 No credentials or auth headers.
 
+Bootstrap source (PR #71, deployment configuration — no Source CRUD):
+
+```text
+code: official-mcp-registry
+name: Official MCP Registry
+source_type: REGISTRY
+provider_key: official.mcp.registry
+base_url: https://registry.modelcontextprotocol.io
+enabled: true
+```
+
+`provider_key` selects the allowlisted Official Registry adapter. `base_url` is
+informational; outbound calls must not follow arbitrary DB host overrides.
+
 #### `external_mcp_searches`
 
 ```text

@@ -10,9 +10,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import AppError
 from app.discovery.contracts import ExternalMCPProviderCandidate
-from app.discovery.provider import (
+from app.discovery.errors import (
     EXTERNAL_DISCOVERY_PROVIDER_UNAVAILABLE,
     ExternalDiscoveryProviderError,
+)
+from app.discovery.provider import (
     ExternalMCPDiscoveryProvider,
     UnavailableExternalMCPProvider,
 )

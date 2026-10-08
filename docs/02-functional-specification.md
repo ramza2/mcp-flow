@@ -1031,10 +1031,11 @@ Audit query endpoints themselves must not produce AuditEvents.
 
 Registry/허용 URL에서 metadata 후보를 수집하되 검색결과를 내부 Tool로 자동 등록하지 않는다.
 
-**Backend foundation (PR #70):** durable `external_mcp_sources` / `searches` /
-`candidates` + provider abstraction. Default runtime provider is unavailable
-(no outbound HTTP); a real public Registry adapter is a follow-up. Frontend
-`ExternalDiscovery` remains on mock data in this slice.
+**Backend foundation (PR #70 / #71):** durable `external_mcp_sources` / `searches` /
+`candidates` + provider abstraction. PR #71 adds the allowlisted Official MCP
+Registry provider (`official.mcp.registry` →
+`https://registry.modelcontextprotocol.io`). Unknown provider keys remain
+unavailable. Frontend `ExternalDiscovery` remains on mock data in this slice.
 
 ## FNC-DISC-002. 보안 검토
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import concurrent.futures
 import os
 import uuid
 
@@ -43,9 +44,64 @@ def test_alembic_external_discovery_downgrade_upgrade(
 ) -> None:
     cfg = _cfg(integration_database_url)
     command.upgrade(cfg, "head")
+    command.downgrade(cfg, "20261007_0026")
+    command.upgrade(cfg, "20261008_0027")
     command.downgrade(cfg, "20261007_0025")
-    command.upgrade(cfg, "20261007_0026")
-    command.downgrade(cfg, "20261007_0025")
+    command.upgrade(cfg, "head")
+
+
+@pytest.mark.integration
+def test_official_mcp_registry_source_bootstrap(
+    integration_database_url: str,
+) -> None:
+    """Assert migration 0027 itself seeds the Official Registry source.
+
+    Autouse isolation TRUNCATE clears application rows after ``upgrade head``,
+    so this test re-applies 0026→0027 and asserts immediately (does not rely on
+    migration-seeded rows surviving isolation).
+    """
+
+    import asyncio
+
+    from sqlalchemy.ext.asyncio import create_async_engine
+    from sqlalchemy.pool import NullPool
+
+    cfg = _cfg(integration_database_url)
+    command.upgrade(cfg, "head")
+    command.downgrade(cfg, "20261007_0026")
+    command.upgrade(cfg, "20261008_0027")
+
+    async def _fetch_official_source() -> tuple:
+        engine = create_async_engine(integration_database_url, poolclass=NullPool)
+        try:
+            async with engine.connect() as conn:
+                result = await conn.execute(
+                    text(
+                        """
+                        SELECT code, name, source_type, provider_key, base_url, enabled
+                        FROM external_mcp_sources
+                        WHERE code = 'official-mcp-registry'
+                        """
+                    )
+                )
+                return result.one()
+        finally:
+            await engine.dispose()
+
+    def _runner() -> tuple:
+        return asyncio.run(_fetch_official_source())
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        row = pool.submit(_runner).result()
+
+    assert row.code == "official-mcp-registry"
+    assert row.name == "Official MCP Registry"
+    assert row.source_type == "REGISTRY"
+    assert row.provider_key == "official.mcp.registry"
+    assert row.base_url == "https://registry.modelcontextprotocol.io"
+    assert row.enabled is True
+
+    # Leave DB at head; autouse recover truncates afterward.
     command.upgrade(cfg, "head")
 
 
