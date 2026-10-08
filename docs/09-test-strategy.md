@@ -1490,7 +1490,18 @@ boundary (no network, no filesystem, no migration/API):
 - `x-*` and credential-like examples/defaults not copied into analysis output
 - error messages omit raw source, ref URLs, and secrets
 
-Later Factory Job/API/worker/sandbox/E2E coverage remains out of scope for this slice.
+### Tool Factory durable OpenAPI analysis Job/API (unit/API/integration)
+
+- `backend/tests/unit/test_factory_service.py` — SUCCEEDED/FAILED Jobs, artifact
+  hash, permissions, idempotency replay/conflict, oversize fail-closed, no raw
+  source persistence
+- `backend/tests/api/test_factory.py` — auth/CSRF, multipart JSON/YAML, empty/
+  oversize/extension, list/detail, 404, idempotency
+- `backend/tests/integration/test_factory_migration.py` — Alembic 0027↔0028,
+  JobStatus CHECK, unique analysis artifact, test_result evidence FK, no raw
+  source column
+
+Async queue / factory-worker / sandbox / frontend wiring remain out of scope.
 
 ---
 
