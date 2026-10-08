@@ -8,6 +8,7 @@ from app.api.v1.audit import router as audit_router
 from app.api.v1.auth import router as auth_router
 from app.api.v1.executions import router as executions_router
 from app.api.v1.executions import sse_router as executions_sse_router
+from app.api.v1.factory import router as factory_router
 from app.api.v1.mcp_discovery import router as mcp_discovery_router
 from app.api.v1.mcp_servers import router as mcp_servers_router
 from app.api.v1.mcp_tools import router as mcp_tools_router
@@ -35,6 +36,7 @@ protected_router.include_router(executions_router)
 protected_router.include_router(mcp_servers_router)
 protected_router.include_router(mcp_tools_router)
 protected_router.include_router(mcp_discovery_router)
+protected_router.include_router(factory_router)
 protected_router.include_router(model_profiles_router)
 protected_router.include_router(ops_router)
 protected_router.include_router(workflows_router)

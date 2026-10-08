@@ -1325,6 +1325,24 @@ import response: { candidate_id, mcp_server_id, created, server_status: DRAFT }
 
 ## 20. Tool Factory API
 
+### Implemented foundation — durable OpenAPI analysis Jobs
+
+```text
+POST /factory/jobs
+GET  /factory/jobs
+GET  /factory/jobs/{job_id}
+```
+
+- `POST` multipart field `source` (`.json` / `.yaml` / `.yml`) + required
+  `Idempotency-Key` (`FACTORY_OPENAPI_ANALYZE_V1`)
+- Auth: Session + CSRF; `mcp.server.manage` to create; `mcp.server.read` to list/detail
+- Response exposes safe Job metadata only (never raw OpenAPI source)
+- Detail may include sanitized `analysis` + `analysis_artifact` summary
+- Expected analyzer failures → durable Job `status=FAILED` with HTTP 201
+- Oversize source → `413 FACTORY_SOURCE_TOO_LARGE` (no Job row)
+
+### Aspirational (not implemented by this slice)
+
 ```text
 GET  /factory/projects
 POST /factory/projects
@@ -1339,6 +1357,7 @@ POST /factory/builds/{build_id}/rollback
 ```
 
 Python source를 API/일반 Worker process에서 직접 import/exec하지 않는다.
+Generic product-wide `/jobs` API is also not implemented here.
 
 ---
 
