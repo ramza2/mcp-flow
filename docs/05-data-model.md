@@ -1947,11 +1947,18 @@ tool_factory_test_results
 
 생성 artifact hash, generator version, sandbox policy, 시험 결과를 보존한다. 운영 활성화는 관리자 승인 후 별도 MCP Server 등록 흐름을 사용한다.
 
-**Current slice note:** the OpenAPI analyzer foundation
-(`backend/app/factory/`) produces in-memory analysis contracts only. It creates
-**no** durable Factory rows, migrations, or Job status values. Persistence of
-`tool_factory_*` tables remains a later PR. Do not duplicate product-wide
-`JobStatus` with Factory-local analysis issue severities.
+**Implemented durable foundation (migration `20261008_0028`):**
+
+- `tool_factory_jobs` — OpenAPI analysis Jobs; canonical `JobStatus` CHECK;
+  **no** raw source/body column; stores `source_sha256`, `analyzer_version`,
+  counts, progress, safe error fields, `requested_by`
+- `tool_factory_artifacts` — current slice uses `artifact_type=OPENAPI_ANALYSIS`
+  with sanitized JSON `inline_payload` only; unique `(job_id, artifact_type)`
+- `tool_factory_test_results` — forward-compatible evidence table (unused by
+  the analysis flow in this slice)
+
+Do not duplicate product-wide `JobStatus` with Factory-local analysis issue
+severities. Object Storage linkage / generated packages remain later.
 
 ---
 

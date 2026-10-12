@@ -20,6 +20,11 @@ from app.models.external_discovery import (
     ExternalMCPSearch,
     ExternalMCPSource,
 )
+from app.models.factory import (
+    ToolFactoryArtifact,
+    ToolFactoryJob,
+    ToolFactoryTestResult,
+)
 from app.models.idempotency import ApiIdempotencyRecord
 from app.models.mcp import (
     MCPServer,
@@ -67,6 +72,9 @@ __all__ = [
     "ExternalMCPReview",
     "ExternalMCPSearch",
     "ExternalMCPSource",
+    "ToolFactoryArtifact",
+    "ToolFactoryJob",
+    "ToolFactoryTestResult",
     "StepAttempt",
     "ToolCall",
     "Schedule",

@@ -1071,35 +1071,57 @@ additional sources (Glama / awesome lists) remain later slices.
 
 OpenAPI JSON/YAML 또는 제한된 Python source를 입력받아 구조, URL, ref, operation, dependency를 검증한다.
 
-### Tool Factory OpenAPI analyzer foundation (implemented slice)
+### Tool Factory OpenAPI analyzer foundation
 
 Pure in-process OpenAPI **3.0.x / 3.1.x** analyzer at
 `backend/app/factory/openapi_analyzer.py` (`analyze_openapi(source: bytes)`).
 
 - Deterministic SHA-256 of exact source bytes; JSON or safe YAML (`yaml.safe_load` only)
 - Hard bounds: 2 MiB source; 500 paths; 2000 operations; `$ref` depth 32; 5000 schema/document nodes
-- **Document-wide** `$ref` validation: every `$ref` in the parsed document is inspected; only internal `#/...` refs allowed; every internal target must exist; external/file/http(s) refs rejected with **zero** network/filesystem access (including unused components)
-- Path Item internal `$ref` resolved before operation extraction (external Path Item `$ref` rejected; chains cycle/depth bounded)
-- Required `info` object with `title` and `version` (OpenAPI 3.x)
-- Operation `parameters` retained (path/query/header/cookie): Path Item + Operation merge with operation `(name, in)` override; sanitized schemas only
-- Successful response schema selection: `200` → `201` → remaining explicit `2xx` (never `default`)
-- Server URLs: explicit `http`/`https` with hostname; reject userinfo; templated/`variables` URLs fail-closed (no DNS, no connect)
-- Credential/raw-source safety: no source body in results; strip `example`/`examples`/`default`/`x-*`; never treat examples/defaults as executable credentials
-- Factory-local analysis contracts/errors only — not new canonical Execution/Job statuses; no Job/API/persistence/generation/worker in this slice
+- Document-wide `$ref` validation; Path Item `$ref` resolution; required `info.title`/`info.version`
+- Operation parameters (path/query/header/cookie) with Path Item + Operation merge
+- Credential/raw-source safety: strip `example`/`examples`/`default`/`x-*`
+
+### Tool Factory durable OpenAPI analysis foundation (implemented slice)
+
+Authenticated admin file upload → durable `ToolFactoryJob` → bounded synchronous
+analyzer → safe normalized `OPENAPI_ANALYSIS` artifact → list/detail API.
+
+```text
+POST /api/v1/factory/jobs   (multipart source + Idempotency-Key)
+GET  /api/v1/factory/jobs
+GET  /api/v1/factory/jobs/{job_id}
+```
+
+- Permissions: `mcp.server.manage` (create), `mcp.server.read` (list/detail); ACTIVE user
+- Canonical `JobStatus` only (`PENDING`/`QUEUED` unused in this sync slice)
+- `job_type=OPENAPI_ANALYZE`; analyzer_version=`openapi-analyzer-v1`
+- No raw OpenAPI source column; artifact `inline_payload` is sanitized analysis JSON only
+- Expected analyzer failures persist `FAILED` Job (HTTP 201) with safe error_code/message
+- Oversize/empty/auth failures do not create Jobs or consume Idempotency-Key
+- Idempotency scope `FACTORY_OPENAPI_ANALYZE_V1`; resource_type `TOOL_FACTORY_JOB`
 
 Analysis success ≠ generated Tool ≠ verified Tool ≠ activated Tool.
 
-**Not implemented yet (REQ-FAC-001..012 remain open):**
+**Partial requirement coverage (not complete):**
 
-- file upload endpoint / allowlisted URL fetch
-- `tool_factory_jobs` / artifacts / test_results persistence
+- REQ-FAC-001: OpenAPI **file** input only (allowlisted URL later)
+- REQ-FAC-009: durable Job resource (synchronous; no queue/Celery yet)
+- REQ-FAC-012: source/analyzer/analysis-artifact hashes only
+
+**Not implemented yet:**
+
+- allowlisted URL source fetch
+- generic `/jobs` API
+- async queue / Celery / `factory-worker`
+- sandbox build/test / generated MCP code/package
+- Python source analysis / dependency install
 - Object Storage handoff
-- operation selection API
-- code generation / Python source support
-- `factory-worker` / sandbox Build/Test
-- administrator approval / DRAFT MCP Server handoff
+- administrator Publish approval / DRAFT MCP Server creation
+- Connection Test / Discovery / activation
 - version/archive/restore
 - frontend real API wiring
+- aspirational `/factory/projects` and `/factory/builds` routes (not implemented by this slice)
 
 ## FNC-FAC-002. 생성
 
