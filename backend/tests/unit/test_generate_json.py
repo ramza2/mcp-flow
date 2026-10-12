@@ -83,7 +83,11 @@ async def test_generate_json_request_contract_and_bearer() -> None:
         ),
     )
     result = await client.generate_json(
-        _target(credential_secret_id=secret_id, base_url="https://llm.test"),
+        _target(
+            credential_secret_id=secret_id,
+            base_url="https://llm.test",
+            model="gateway-model-alias",
+        ),
         messages=[{"role": "user", "content": "hi"}],
         parameters={"temperature": 0.2, "max_tokens": 128},
     )
@@ -92,7 +96,7 @@ async def test_generate_json_request_contract_and_bearer() -> None:
     assert str(calls[0].url) == "https://llm.test/v1/chat/completions"
     assert calls[0].headers.get("authorization") == "Bearer secret-token"
     body = json.loads(calls[0].content)
-    assert body["model"] == "gpt-test"
+    assert body["model"] == "gateway-model-alias"
     assert body["stream"] is False
     assert body["response_format"] == {"type": "json_object"}
     assert body["messages"] == [{"role": "user", "content": "hi"}]
@@ -103,6 +107,32 @@ async def test_generate_json_request_contract_and_bearer() -> None:
     assert "functions" not in body
     assert "function_call" not in body
     await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_generate_json_strips_leading_qwen_think_block() -> None:
+    hidden_reasoning = "internal reasoning must not be returned"
+    content = (
+        f"<think>{hidden_reasoning}</think>\n"
+        '{"intent":"ok","value":1}'
+    )
+
+    adapter = OpenAICompatibleAdapter(
+        http=httpx.AsyncClient(
+            transport=httpx.MockTransport(
+                lambda _r: httpx.Response(200, json=_chat_response(content))
+            ),
+            follow_redirects=False,
+        )
+    )
+    result = await adapter.generate_json(
+        base_url="https://llm.test",
+        model="gateway-model-alias",
+        messages=[{"role": "user", "content": "hi"}],
+    )
+    assert result == {"intent": "ok", "value": 1}
+    assert hidden_reasoning not in json.dumps(result)
+    await adapter.aclose()
 
 
 @pytest.mark.asyncio
@@ -156,6 +186,7 @@ async def test_reserved_profile_parameters_rejected() -> None:
         {"choices": [{"message": {"content": ""}}]},
         {"choices": [{"message": {"content": [1, 2]}}]},
         _chat_response("not-json"),
+        _chat_response("<think>unterminated"),
         _chat_response("[1, 2]"),
         _chat_response("```json\n{}\n```"),
     ],
