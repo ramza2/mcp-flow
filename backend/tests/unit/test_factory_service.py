@@ -344,29 +344,20 @@ async def test_failed_replay_does_not_reanalyze(db_session: AsyncSession) -> Non
 
 
 @pytest.mark.asyncio
-async def test_concurrent_idempotency_race(db_session: AsyncSession) -> None:
-    """Two concurrent same-key creates must not yield two jobs."""
+async def test_idempotency_replay_keeps_single_job(db_session: AsyncSession) -> None:
+    """Sequential same-key replay keeps a single Job (not a concurrency race)."""
 
     user_id = await _seed_user_with_perms(db_session, codes=["mcp.server.manage"])
     key = f"race-{uuid.uuid4().hex}"
 
-    async def _one() -> uuid.UUID:
-        # Separate session-bound service on the same AsyncSession is not safe;
-        # use sequential flush race via IntegrityError path by pre-inserting
-        # a completed idempotency record mid-flight is hard on SQLite.
-        # Instead: create once, then simulate race reconcile by calling again.
-        svc = FactoryService(db_session)
-        outcome = await svc.create_openapi_analyze_job(
-            actor_user_id=user_id,
-            source_bytes=MINIMAL_JSON,
-            filename="race.json",
-            idempotency_key=key,
-        )
-        return outcome.result.id
-
-    first_id = await _one()
-    # Second call must replay.
     svc = FactoryService(db_session)
+    first = await svc.create_openapi_analyze_job(
+        actor_user_id=user_id,
+        source_bytes=MINIMAL_JSON,
+        filename="race.json",
+        idempotency_key=key,
+    )
+    first_id = first.result.id
     replay = await svc.create_openapi_analyze_job(
         actor_user_id=user_id,
         source_bytes=MINIMAL_JSON,
@@ -375,12 +366,15 @@ async def test_concurrent_idempotency_race(db_session: AsyncSession) -> None:
     )
     assert replay.replayed is True
     assert replay.result.id == first_id
-    # Ensure idempotency row exists.
     row = (
         await db_session.execute(select(ApiIdempotencyRecord).limit(1))
     ).scalar_one()
     assert row.resource_type == "TOOL_FACTORY_JOB"
     assert row.resource_id == first_id
+    jobs = (
+        await db_session.execute(select(func.count()).select_from(ToolFactoryJob))
+    ).scalar_one()
+    assert int(jobs) == 1
 
 
 @pytest.mark.asyncio

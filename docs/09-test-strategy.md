@@ -1500,6 +1500,10 @@ boundary (no network, no filesystem, no migration/API):
 - `backend/tests/integration/test_factory_migration.py` — Alembic 0027↔0028,
   JobStatus CHECK, unique analysis artifact, test_result evidence FK, no raw
   source column
+- `backend/tests/integration/test_factory_persistence.py` — real PostgreSQL
+  concurrent same-key create (barrier on `IdempotencyRepository.create_completed`):
+  same source → one Job + one replay; different source → one Job +
+  `IDEMPOTENCY_KEY_REUSED`
 
 Async queue / factory-worker / sandbox / frontend wiring remain out of scope.
 
