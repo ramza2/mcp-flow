@@ -134,6 +134,30 @@ migration
 | `object-storage` | result/export/artifact/evidence | 필수 |
 | `migration` | Alembic one-shot | 없음 |
 
+### 5.1 Model Runtime Gateway
+
+LLM/Embedding outbound runtime은 `LLMProfile` / `EmbeddingProfile`의
+OpenAI-compatible 설정으로 연결한다. Provider host나 upstream의 실제 served
+model name을 Compose, image, source code에 하드코딩하지 않는다.
+
+Gateway 연계 시 공개 가능한 예시는 다음처럼 placeholder만 사용한다.
+
+```text
+provider=OPENAI_COMPATIBLE
+base_url=https://<model-gateway-host>
+LLM model=<chat-model-alias>
+Embedding model=<embedding-model-alias>
+```
+
+Model Provider adapter는 Profile의 `model` 값을 요청에 그대로 전달하고,
+Gateway가 alias → served model name 해석을 담당한다. Embedding은 기존
+Profile의 `dimension` 계약을 유지하며, generation field 변경 시 기존
+stale/re-embedding 보호 동작을 그대로 따른다.
+
+현재 MCPFlow Backend에는 VLM/image-content 전용 호출 경로가 없다. 실제
+consumer가 추가되기 전에는 사용하지 않는 VLM endpoint나 환경변수를
+별도로 추가하지 않는다.
+
 ---
 
 ## 6. Backend Image
