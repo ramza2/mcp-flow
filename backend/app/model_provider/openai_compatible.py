@@ -501,9 +501,21 @@ class OpenAICompatibleAdapter:
                 message="Chat completion content must be a non-empty string.",
                 retryable=False,
             )
-        # Strict JSON only — do not strip markdown fences or repair malformed content.
+        # Qwen-family OpenAI-compatible runtimes may prepend hidden reasoning in
+        # <think>...</think>. Drop only leading think blocks; keep the existing
+        # strict JSON contract for the actual assistant payload.
+        json_content = content.lstrip()
+        while json_content.startswith("<think>"):
+            closing = json_content.find("</think>")
+            if closing < 0:
+                raise ModelProviderError(
+                    error_code=PROTOCOL,
+                    message="Chat completion reasoning block is not terminated.",
+                    retryable=False,
+                )
+            json_content = json_content[closing + len("</think>") :].lstrip()
         try:
-            parsed = json.loads(content)
+            parsed = json.loads(json_content)
         except ValueError as exc:
             raise ModelProviderError(
                 error_code=PROTOCOL,
