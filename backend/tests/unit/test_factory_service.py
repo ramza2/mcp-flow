@@ -21,10 +21,10 @@ from app.factory.errors import (
     FACTORY_SOURCE_PARSE_ERROR,
 )
 from app.factory.openapi_analyzer import MAX_SOURCE_BYTES
-from app.infrastructure.factory_queue import RecordingFactoryQueuePublisher
 from app.infrastructure.object_storage import InMemoryObjectStorage
 from app.models.factory import ToolFactoryArtifact, ToolFactoryJob
 from app.models.idempotency import ApiIdempotencyRecord
+from app.models.outbox import OutboxEvent
 from app.repositories.role import PermissionRepository
 from app.schemas.auth import (
     RoleCreate,
@@ -113,11 +113,9 @@ def _svc(
     session: AsyncSession,
     *,
     storage: InMemoryObjectStorage | None = None,
-    queue: RecordingFactoryQueuePublisher | None = None,
-) -> tuple[FactoryService, InMemoryObjectStorage, RecordingFactoryQueuePublisher]:
+) -> tuple[FactoryService, InMemoryObjectStorage]:
     store = storage or InMemoryObjectStorage()
-    q = queue or RecordingFactoryQueuePublisher()
-    return FactoryService(session, storage=store, queue=q), store, q
+    return FactoryService(session, storage=store), store
 
 
 async def _run_worker(
@@ -139,7 +137,7 @@ async def test_create_returns_queued_without_inline_analysis(
     user_id = await _seed_user_with_perms(
         db_session, codes=["mcp.server.manage", "mcp.server.read"]
     )
-    svc, store, queue = _svc(db_session)
+    svc, store = _svc(db_session)
     outcome = await svc.create_openapi_analyze_job(
         actor_user_id=user_id,
         source_bytes=MINIMAL_JSON,
@@ -156,7 +154,6 @@ async def test_create_returns_queued_without_inline_analysis(
     assert job.source_sha256 == hashlib.sha256(MINIMAL_JSON).hexdigest()
     assert job.operation_count == 0
     assert job.progress_current == 0
-    assert queue.published == [job.id]
 
     job_row = await db_session.get(ToolFactoryJob, job.id)
     assert job_row is not None
@@ -168,6 +165,17 @@ async def test_create_returns_queued_without_inline_analysis(
         bucket=job_row.source_bucket,
         object_key=job_row.source_object_key,
     )
+    outbox = (
+        await db_session.execute(
+            select(OutboxEvent).where(
+                OutboxEvent.event_type == "FACTORY_JOB_DISPATCH",
+                OutboxEvent.aggregate_id == job.id,
+            )
+        )
+    ).scalar_one()
+    assert outbox.published_at is None
+    assert outbox.dedupe_key == f"factory_job:{job.id}:openapi_analyze"
+    assert outbox.payload == {"job_id": str(job.id)}
     arts = (
         await db_session.execute(
             select(func.count()).where(ToolFactoryArtifact.job_id == job.id)
@@ -179,7 +187,7 @@ async def test_create_returns_queued_without_inline_analysis(
 @pytest.mark.asyncio
 async def test_worker_completes_openapi_30_analysis(db_session: AsyncSession) -> None:
     user_id = await _seed_user_with_perms(db_session, codes=["mcp.server.manage"])
-    svc, store, _queue = _svc(db_session)
+    svc, store = _svc(db_session)
     outcome = await svc.create_openapi_analyze_job(
         actor_user_id=user_id,
         source_bytes=MINIMAL_JSON,
@@ -211,7 +219,7 @@ async def test_worker_completes_openapi_30_analysis(db_session: AsyncSession) ->
 @pytest.mark.asyncio
 async def test_worker_yaml_analysis_source_format(db_session: AsyncSession) -> None:
     user_id = await _seed_user_with_perms(db_session, codes=["mcp.server.manage"])
-    svc, store, _q = _svc(db_session)
+    svc, store = _svc(db_session)
     outcome = await svc.create_openapi_analyze_job(
         actor_user_id=user_id,
         source_bytes=MINIMAL_YAML,
@@ -229,7 +237,7 @@ async def test_worker_yaml_analysis_source_format(db_session: AsyncSession) -> N
 async def test_worker_malformed_source_durable_failed(db_session: AsyncSession) -> None:
     user_id = await _seed_user_with_perms(db_session, codes=["mcp.server.manage"])
     bad = b"{not-json"
-    svc, store, _q = _svc(db_session)
+    svc, store = _svc(db_session)
     outcome = await svc.create_openapi_analyze_job(
         actor_user_id=user_id,
         source_bytes=bad,
@@ -254,7 +262,7 @@ async def test_worker_malformed_source_durable_failed(db_session: AsyncSession) 
 @pytest.mark.asyncio
 async def test_worker_missing_object_fails_safely(db_session: AsyncSession) -> None:
     user_id = await _seed_user_with_perms(db_session, codes=["mcp.server.manage"])
-    svc, store, _q = _svc(db_session)
+    svc, store = _svc(db_session)
     outcome = await svc.create_openapi_analyze_job(
         actor_user_id=user_id,
         source_bytes=MINIMAL_JSON,
@@ -277,7 +285,7 @@ async def test_worker_missing_object_fails_safely(db_session: AsyncSession) -> N
 @pytest.mark.asyncio
 async def test_worker_corrupt_object_fails_safely(db_session: AsyncSession) -> None:
     user_id = await _seed_user_with_perms(db_session, codes=["mcp.server.manage"])
-    svc, store, _q = _svc(db_session)
+    svc, store = _svc(db_session)
     outcome = await svc.create_openapi_analyze_job(
         actor_user_id=user_id,
         source_bytes=MINIMAL_JSON,
@@ -304,7 +312,7 @@ async def test_worker_restart_reconstructs_from_object(
     db_session: AsyncSession,
 ) -> None:
     user_id = await _seed_user_with_perms(db_session, codes=["mcp.server.manage"])
-    svc, store, _q = _svc(db_session)
+    svc, store = _svc(db_session)
     outcome = await svc.create_openapi_analyze_job(
         actor_user_id=user_id,
         source_bytes=MINIMAL_JSON,
@@ -338,7 +346,7 @@ async def test_worker_restart_reconstructs_from_object(
 async def test_artifact_hash_deterministic(db_session: AsyncSession) -> None:
     user_id = await _seed_user_with_perms(db_session, codes=["mcp.server.manage"])
     store = InMemoryObjectStorage()
-    svc, _, _q = _svc(db_session, storage=store)
+    svc, store = _svc(db_session, storage=store)
     a = await svc.create_openapi_analyze_job(
         actor_user_id=user_id,
         source_bytes=MINIMAL_JSON,
@@ -373,7 +381,7 @@ async def test_permission_separation(db_session: AsyncSession) -> None:
         db_session, codes=["mcp.server.manage", "mcp.server.read"]
     )
     store = InMemoryObjectStorage()
-    svc, _, q = _svc(db_session, storage=store)
+    svc, store = _svc(db_session, storage=store)
     with pytest.raises(AppError) as exc:
         await svc.create_openapi_analyze_job(
             actor_user_id=reader,
@@ -393,7 +401,6 @@ async def test_permission_separation(db_session: AsyncSession) -> None:
     detail = await svc.get_job(reader, created.result.id)
     assert detail.status == JobStatus.SUCCEEDED
     assert detail.analysis is not None
-    assert q.published == [created.result.id]
 
 
 @pytest.mark.asyncio
@@ -403,7 +410,7 @@ async def test_inactive_user_rejected(db_session: AsyncSession) -> None:
         codes=["mcp.server.manage"],
         status=UserStatus.INACTIVE,
     )
-    svc, _, _q = _svc(db_session)
+    svc, _store = _svc(db_session)
     with pytest.raises(AppError) as exc:
         await svc.create_openapi_analyze_job(
             actor_user_id=user_id,
@@ -417,7 +424,7 @@ async def test_inactive_user_rejected(db_session: AsyncSession) -> None:
 @pytest.mark.asyncio
 async def test_idempotency_replay_same_source(db_session: AsyncSession) -> None:
     user_id = await _seed_user_with_perms(db_session, codes=["mcp.server.manage"])
-    svc, store, _q = _svc(db_session)
+    svc, store = _svc(db_session)
     key = f"idem-{uuid.uuid4().hex}"
     first = await svc.create_openapi_analyze_job(
         actor_user_id=user_id,
@@ -444,7 +451,7 @@ async def test_idempotency_replay_same_source(db_session: AsyncSession) -> None:
 @pytest.mark.asyncio
 async def test_idempotency_conflict_changed_source(db_session: AsyncSession) -> None:
     user_id = await _seed_user_with_perms(db_session, codes=["mcp.server.manage"])
-    svc, store, _q = _svc(db_session)
+    svc, store = _svc(db_session)
     key = f"idem-{uuid.uuid4().hex}"
     await svc.create_openapi_analyze_job(
         actor_user_id=user_id,
@@ -479,7 +486,7 @@ async def test_idempotency_replay_keeps_single_job(db_session: AsyncSession) -> 
 
     user_id = await _seed_user_with_perms(db_session, codes=["mcp.server.manage"])
     key = f"race-{uuid.uuid4().hex}"
-    svc, store, _q = _svc(db_session)
+    svc, store = _svc(db_session)
     first = await svc.create_openapi_analyze_job(
         actor_user_id=user_id,
         source_bytes=MINIMAL_JSON,
@@ -511,7 +518,7 @@ async def test_idempotency_replay_keeps_single_job(db_session: AsyncSession) -> 
 async def test_oversize_rejected_without_job(db_session: AsyncSession) -> None:
     user_id = await _seed_user_with_perms(db_session, codes=["mcp.server.manage"])
     huge = b"{" + (b"a" * (MAX_SOURCE_BYTES + 1))
-    svc, store, _q = _svc(db_session)
+    svc, store = _svc(db_session)
     with pytest.raises(AppError) as exc:
         await svc.create_openapi_analyze_job(
             actor_user_id=user_id,
@@ -543,7 +550,7 @@ def test_normalize_source_name_strips_paths_and_controls() -> None:
 @pytest.mark.asyncio
 async def test_no_raw_source_in_idempotency_snapshot(db_session: AsyncSession) -> None:
     user_id = await _seed_user_with_perms(db_session, codes=["mcp.server.manage"])
-    svc, _, _q = _svc(db_session)
+    svc, _store = _svc(db_session)
     await svc.create_openapi_analyze_job(
         actor_user_id=user_id,
         source_bytes=MINIMAL_JSON,

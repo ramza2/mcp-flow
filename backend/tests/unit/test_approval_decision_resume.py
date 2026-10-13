@@ -721,6 +721,9 @@ async def test_broker_publish_failure_leaves_unpublished_outbox(
             def publish_mrtr_resume(self, **_kwargs: Any) -> None:
                 raise AssertionError("mrtr resume unexpected")
 
+            def publish_factory_job(self, **_kwargs: Any) -> None:
+                raise AssertionError("factory dispatch unexpected")
+
         result = await OutboxRelayService(session).publish_batch(
             publisher=BadPublisher(), limit=10
         )
@@ -756,6 +759,9 @@ async def test_broker_publish_failure_leaves_unpublished_outbox(
 
             def publish_mrtr_resume(self, **_kwargs: Any) -> None:
                 raise AssertionError("mrtr resume unexpected")
+
+            def publish_factory_job(self, **_kwargs: Any) -> None:
+                raise AssertionError("factory dispatch unexpected")
 
         good = GoodPublisher()
         result2 = await OutboxRelayService(session).publish_batch(

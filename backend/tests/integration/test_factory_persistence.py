@@ -16,7 +16,6 @@ from app.factory.errors import (
     FACTORY_SOURCE_OBJECT_CORRUPT,
     FACTORY_SOURCE_OBJECT_MISSING,
 )
-from app.infrastructure.factory_queue import RecordingFactoryQueuePublisher
 from app.infrastructure.object_storage import InMemoryObjectStorage
 from app.repositories.idempotency import IdempotencyRepository
 from app.repositories.role import PermissionRepository
@@ -127,14 +126,13 @@ async def test_pg_concurrent_same_source_idempotency_one_job(
     key = f"fac-race-{uuid.uuid4().hex}"
     filename = "race.json"
     storage = InMemoryObjectStorage()
-    queue = RecordingFactoryQueuePublisher()
     _install_create_completed_barrier(monkeypatch, parties=2)
 
     async def _run() -> Any:
         async with integration_session_factory() as session:
             try:
                 return await FactoryService(
-                    session, storage=storage, queue=queue
+                    session, storage=storage
                 ).create_openapi_analyze_job(
                     actor_user_id=user_id,
                     source_bytes=MINIMAL_JSON,
@@ -156,7 +154,6 @@ async def test_pg_concurrent_same_source_idempotency_one_job(
     surviving_id = next(iter(job_ids))
     # Exactly one durable source object remains (loser deleted orphan upload).
     assert storage.object_count() == 1
-    assert queue.published.count(surviving_id) >= 1
 
     async with integration_session_factory() as session:
         job_count = (
@@ -215,6 +212,20 @@ async def test_pg_concurrent_same_source_idempotency_one_job(
         assert idemp_rows[0][0] == _RESOURCE_TYPE
         assert idemp_rows[0][1] == str(surviving_id)
 
+        outbox_count = (
+            await session.execute(
+                text(
+                    """
+                    SELECT count(*) FROM outbox_events
+                    WHERE event_type = 'FACTORY_JOB_DISPATCH'
+                      AND aggregate_id = :jid
+                    """
+                ),
+                {"jid": str(surviving_id)},
+            )
+        ).scalar_one()
+        assert int(outbox_count) == 1
+
 
 @pytest.mark.integration
 @pytest.mark.asyncio
@@ -228,14 +239,13 @@ async def test_pg_concurrent_same_key_different_source_one_job(
     key = f"fac-diff-{uuid.uuid4().hex}"
     filename = "race.json"
     storage = InMemoryObjectStorage()
-    queue = RecordingFactoryQueuePublisher()
     _install_create_completed_barrier(monkeypatch, parties=2)
 
     async def _run(source: bytes) -> Any:
         async with integration_session_factory() as session:
             try:
                 return await FactoryService(
-                    session, storage=storage, queue=queue
+                    session, storage=storage
                 ).create_openapi_analyze_job(
                     actor_user_id=user_id,
                     source_bytes=source,
@@ -272,11 +282,10 @@ async def test_pg_worker_restart_reconstructs_from_object(
     integration_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     storage = InMemoryObjectStorage()
-    queue = RecordingFactoryQueuePublisher()
     async with integration_session_factory() as session:
         user_id = await _seed_manage_user(session)
         outcome = await FactoryService(
-            session, storage=storage, queue=queue
+            session, storage=storage
         ).create_openapi_analyze_job(
             actor_user_id=user_id,
             source_bytes=MINIMAL_JSON,
@@ -345,11 +354,10 @@ async def test_pg_missing_and_corrupt_object_fail_job(
     integration_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     storage = InMemoryObjectStorage()
-    queue = RecordingFactoryQueuePublisher()
     async with integration_session_factory() as session:
         user_id = await _seed_manage_user(session)
         missing = await FactoryService(
-            session, storage=storage, queue=queue
+            session, storage=storage
         ).create_openapi_analyze_job(
             actor_user_id=user_id,
             source_bytes=MINIMAL_JSON,
@@ -357,7 +365,7 @@ async def test_pg_missing_and_corrupt_object_fail_job(
             idempotency_key=f"k-m-{uuid.uuid4().hex}",
         )
         corrupt = await FactoryService(
-            session, storage=storage, queue=queue
+            session, storage=storage
         ).create_openapi_analyze_job(
             actor_user_id=user_id,
             source_bytes=MINIMAL_JSON,
@@ -421,3 +429,106 @@ async def test_pg_missing_and_corrupt_object_fail_job(
             FACTORY_SOURCE_OBJECT_CORRUPT,
             FACTORY_SOURCE_OBJECT_MISSING,
         }
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_pg_outbox_publish_failure_then_recovery_one_analysis(
+    integration_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Broker publish failure leaves unpublished Outbox; relay + worker → one outcome."""
+
+    from app.execution.queue import OutboxRelayService
+
+    class _Pub:
+        def __init__(self) -> None:
+            self.fail_once = True
+            self.calls: list[uuid.UUID] = []
+
+        def publish_execution(self, **_k: Any) -> None:
+            raise AssertionError("unexpected")
+
+        def publish_approval_resume(self, **_k: Any) -> None:
+            raise AssertionError("unexpected")
+
+        def publish_mrtr_resume(self, **_k: Any) -> None:
+            raise AssertionError("unexpected")
+
+        def publish_factory_job(
+            self, *, job_id: uuid.UUID, outbox_event_id: uuid.UUID
+        ) -> None:
+            del outbox_event_id
+            if self.fail_once:
+                self.fail_once = False
+                raise ConnectionError("broker down")
+            self.calls.append(job_id)
+
+    storage = InMemoryObjectStorage()
+    async with integration_session_factory() as session:
+        user_id = await _seed_manage_user(session)
+        outcome = await FactoryService(
+            session, storage=storage
+        ).create_openapi_analyze_job(
+            actor_user_id=user_id,
+            source_bytes=MINIMAL_JSON,
+            filename="recover.json",
+            idempotency_key=f"k-{uuid.uuid4().hex}",
+        )
+        job_id = outcome.result.id
+        await session.commit()
+
+    pub = _Pub()
+    async with integration_session_factory() as session:
+        first = await OutboxRelayService(session).publish_batch(publisher=pub, limit=10)
+        await session.commit()
+        assert first.failed == 1
+        assert first.published == 0
+        unpublished = (
+            await session.execute(
+                text(
+                    "SELECT published_at IS NULL, last_error_code "
+                    "FROM outbox_events WHERE aggregate_id = :jid "
+                    "AND event_type = 'FACTORY_JOB_DISPATCH'"
+                ),
+                {"jid": str(job_id)},
+            )
+        ).one()
+        assert unpublished[0] is True
+        assert unpublished[1] == "PUBLISH_FAILED"
+
+    async with integration_session_factory() as session:
+        second = await OutboxRelayService(session).publish_batch(publisher=pub, limit=10)
+        await session.commit()
+        assert second.published == 1
+        assert pub.calls == [job_id]
+
+    async with integration_session_factory() as session:
+        worker = FactoryWorkerService(session, storage=storage, worker_id="pg-ob")
+        result = await worker.process_job(job_id=job_id)
+        await session.commit()
+        assert result.claimed is True
+        assert result.status == JobStatus.SUCCEEDED.value
+
+    async with integration_session_factory() as session:
+        # Duplicate delivery / recovery republish is a no-op after terminal.
+        worker = FactoryWorkerService(session, storage=storage, worker_id="pg-ob-2")
+        again = await worker.process_job(job_id=job_id)
+        await session.commit()
+        assert again.claimed is False
+        art = (
+            await session.execute(
+                text(
+                    "SELECT count(*) FROM tool_factory_artifacts "
+                    "WHERE job_id = :jid AND artifact_type = :atype"
+                ),
+                {"jid": str(job_id), "atype": ARTIFACT_TYPE_OPENAPI_ANALYSIS},
+            )
+        ).scalar_one()
+        assert int(art) == 1
+        jobs = (
+            await session.execute(
+                text("SELECT count(*) FROM tool_factory_jobs WHERE id = :jid"),
+                {"jid": str(job_id)},
+            )
+        ).scalar_one()
+        assert int(jobs) == 1

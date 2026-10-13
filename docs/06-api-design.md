@@ -1337,7 +1337,8 @@ GET  /factory/jobs/{job_id}
   `Idempotency-Key` (`FACTORY_OPENAPI_ANALYZE_V1`)
 - Auth: Session + CSRF; `mcp.server.manage` to create; `mcp.server.read` to list/detail
 - Create path: bounded upload → Object Storage put → durable Job `QUEUED` +
-  idempotency → enqueue `mcpflow.factory.analyze_openapi` (returns before analysis)
+  idempotency + `FACTORY_JOB_DISPATCH` Outbox (same TX); outbox relay enqueues
+  `mcpflow.factory.analyze_openapi` (returns before analysis)
 - Response exposes safe Job metadata only (never raw OpenAPI source / object keys)
 - Detail may include sanitized `analysis` + `analysis_artifact` summary after worker completion
 - Analyzer / missing-object / corrupt-object failures → durable Job `FAILED`

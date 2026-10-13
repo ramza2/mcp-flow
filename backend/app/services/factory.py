@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import logging
 import re
 import uuid
 from dataclasses import dataclass
@@ -31,10 +30,6 @@ from app.factory.errors import (
     FACTORY_SOURCE_OBJECT_STORE_FAILED,
 )
 from app.factory.openapi_analyzer import MAX_SOURCE_BYTES
-from app.infrastructure.factory_queue import (
-    CeleryFactoryQueuePublisher,
-    FactoryQueuePublisher,
-)
 from app.infrastructure.object_storage import (
     ObjectStorageClient,
     ObjectStorageError,
@@ -42,6 +37,7 @@ from app.infrastructure.object_storage import (
 )
 from app.repositories.factory import FactoryRepository
 from app.repositories.idempotency import IdempotencyRepository
+from app.repositories.outbox import OutboxRepository
 from app.repositories.user import UserRepository
 from app.schemas.factory import (
     FactoryArtifactSummary,
@@ -50,8 +46,6 @@ from app.schemas.factory import (
     FactoryJobResponse,
 )
 from app.services.authorization import AuthorizationResolver
-
-logger = logging.getLogger(__name__)
 
 _MCP_SERVER_READ = "mcp.server.read"
 _MCP_SERVER_MANAGE = "mcp.server.manage"
@@ -185,31 +179,19 @@ class FactoryService:
         session: AsyncSession,
         *,
         storage: ObjectStorageClient | None = None,
-        queue: FactoryQueuePublisher | None = None,
     ) -> None:
         self._session = session
         self._repo = FactoryRepository(session)
         self._users = UserRepository(session)
         self._authz = AuthorizationResolver(session)
         self._idempotency = IdempotencyRepository(session)
+        self._outbox = OutboxRepository(session)
         self._storage = storage
-        self._queue = queue
 
     def _storage_client(self) -> ObjectStorageClient:
         if self._storage is not None:
             return self._storage
         return get_object_storage()
-
-    def _queue_publisher(self) -> FactoryQueuePublisher:
-        if self._queue is not None:
-            return self._queue
-        settings = get_settings()
-        # Unit/API tests and memory-backend local runs must not require Redis.
-        if settings.environment == "test" or settings.object_storage_backend == "memory":
-            from app.infrastructure.factory_queue import NoopFactoryQueuePublisher
-
-            return NoopFactoryQueuePublisher()
-        return CeleryFactoryQueuePublisher()
 
     async def _assert_active(self, actor_user_id: uuid.UUID) -> None:
         user = await self._users.get(actor_user_id)
@@ -341,6 +323,8 @@ class FactoryService:
                 idempotency_key=key,
                 request_hash=req_hash,
             )
+            # Durable Outbox is written in the same TX. Broker publish is the
+            # outbox poller's responsibility — never SoT for Job status.
             await self._session.commit()
         except IntegrityError as exc:
             await self._session.rollback()
@@ -364,16 +348,6 @@ class FactoryService:
             await self._session.rollback()
             await storage.delete_object(bucket=bucket, object_key=object_key)
             raise
-
-        # Enqueue after durable commit. Broker is delivery only — Job stays QUEUED
-        # even if publish fails; a later retry / worker recovery can rediscover it.
-        try:
-            self._queue_publisher().publish_analyze(job_id=outcome.result.id)
-        except Exception:  # noqa: BLE001
-            logger.warning(
-                "factory analyze publish failed job_id=%s (Job remains QUEUED)",
-                outcome.result.id,
-            )
         return outcome
 
     async def _persist_queued_job(
@@ -408,6 +382,10 @@ class FactoryService:
             progress_total=1,
             current_phase=PHASE_ANALYZE,
             queued_at=now,
+        )
+        await self._outbox.create_factory_job_dispatch(
+            job_id=job.id,
+            created_at=now,
         )
         response = self._job_to_response(job)
         await self._idempotency.create_completed(

@@ -1722,10 +1722,29 @@ dedupe_key     = execution:{execution_id}:mrtr:{input_request_id}:resume
 payload        = {"execution_id": "...", "input_request_id": "..."}
 ```
 
-Outbox relay supports exactly `EXECUTION_DISPATCH`, `EXECUTION_APPROVAL_RESUME`, and
-`EXECUTION_MRTR_RESUME` (unknown/corrupt fail closed).
+Tool Factory OpenAPI analysis dispatch (Issue #82 / PR #83):
 
-`published_at IS NULL`이면 미발행/재시도 대상이며 별도 Outbox status enum을 만들지 않는다. broker publish 성공 후 DB mark 전에 process가 종료될 수 있으므로 같은 event가 재전달될 수 있다. Consumer는 `outbox_event_id` lineage를 확인하고 DB Execution claim으로 중복을 제거한다.
+```text
+event_type     = FACTORY_JOB_DISPATCH
+aggregate_type = TOOL_FACTORY_JOB
+aggregate_id   = tool_factory_jobs.id
+dedupe_key     = factory_job:{job_id}:openapi_analyze
+payload        = {"job_id": "..."}
+```
+
+Created in the same transaction as the durable `QUEUED` Factory Job + source
+object metadata. Broker delivery is not business state.
+
+Outbox relay supports exactly `EXECUTION_DISPATCH`, `EXECUTION_APPROVAL_RESUME`,
+`EXECUTION_MRTR_RESUME`, and `FACTORY_JOB_DISPATCH` (unknown/corrupt fail closed).
+
+`published_at IS NULL`이면 미발행/재시도 대상이며 별도 Outbox status enum을 만들지 않는다. broker publish 성공 후 DB mark 전에 process가 종료될 수 있으므로 같은 event가 재전달될 수 있다. Consumer는 `outbox_event_id` lineage를 확인하고 DB Execution/Factory Job claim으로 중복을 제거한다.
+
+Factory recovery (outbox poller, no new JobStatus):
+
+- unpublished `FACTORY_JOB_DISPATCH` → normal Outbox relay retry
+- expired `RUNNING` Factory lease → republish analyze delivery (claim fencing)
+- stale `QUEUED` Factory Job (message loss after mark-published) → bounded republish
 
 Broker/network 실패 시 exception 원문이나 Redis credential을 저장하지 않고 `last_error_code=PUBLISH_FAILED` 수준만 남긴다. published row는 즉시 삭제하지 않으며 retention은 별도 maintenance 정책으로 처리한다.
 

@@ -43,6 +43,13 @@ class ExecutionQueuePublisher(Protocol):
         outbox_event_id: uuid.UUID,
     ) -> None: ...
 
+    def publish_factory_job(
+        self,
+        *,
+        job_id: uuid.UUID,
+        outbox_event_id: uuid.UUID,
+    ) -> None: ...
+
 
 @dataclass(frozen=True, slots=True)
 class PublishBatchResult:
@@ -174,6 +181,39 @@ def validate_execution_mrtr_resume_event(
             status_code=409,
         )
     return execution_id, input_request_id
+
+
+def validate_factory_job_dispatch_event(row: object) -> uuid.UUID:
+    """Validate ID-only Factory Job dispatch Outbox evidence."""
+
+    payload = getattr(row, "payload", None)
+    if not isinstance(payload, dict) or set(payload) != {"job_id"}:
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message="Factory Job dispatch Outbox payload is corrupted.",
+            status_code=409,
+        )
+    try:
+        job_id = uuid.UUID(str(payload["job_id"]))
+    except (TypeError, ValueError) as exc:
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message="Factory Job dispatch Outbox payload is corrupted.",
+            status_code=409,
+        ) from exc
+    expected_dedupe = f"factory_job:{job_id}:openapi_analyze"
+    if (
+        getattr(row, "event_type", None) != "FACTORY_JOB_DISPATCH"
+        or getattr(row, "aggregate_type", None) != "TOOL_FACTORY_JOB"
+        or job_id != getattr(row, "aggregate_id", None)
+        or getattr(row, "dedupe_key", None) != expected_dedupe
+    ):
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message="Factory Job dispatch Outbox lineage is corrupted.",
+            status_code=409,
+        )
+    return job_id
 
 
 class ExecutionQueueService:
@@ -384,6 +424,12 @@ class OutboxRelayService:
             publisher.publish_mrtr_resume(
                 execution_id=execution_id,
                 input_request_id=input_request_id,
+                outbox_event_id=row.id,
+            )
+        elif event_type == "FACTORY_JOB_DISPATCH":
+            job_id = validate_factory_job_dispatch_event(row)
+            publisher.publish_factory_job(
+                job_id=job_id,
                 outbox_event_id=row.id,
             )
         else:

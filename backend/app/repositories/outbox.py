@@ -99,6 +99,30 @@ class OutboxRepository:
         await self._session.flush()
         return row
 
+    async def create_factory_job_dispatch(
+        self,
+        *,
+        job_id: uuid.UUID,
+        created_at: datetime,
+    ) -> OutboxEvent:
+        row = OutboxEvent(
+            id=uuid.uuid4(),
+            event_type="FACTORY_JOB_DISPATCH",
+            aggregate_type="TOOL_FACTORY_JOB",
+            aggregate_id=job_id,
+            dedupe_key=f"factory_job:{job_id}:openapi_analyze",
+            payload={"job_id": str(job_id)},
+            created_at=created_at,
+            last_attempt_at=None,
+            published_at=None,
+            publish_attempt_count=0,
+            last_error_code=None,
+            lock_version=1,
+        )
+        self._session.add(row)
+        await self._session.flush()
+        return row
+
     async def claim_unpublished_batch(self, *, limit: int) -> list[OutboxEvent]:
         stmt = (
             select(OutboxEvent)

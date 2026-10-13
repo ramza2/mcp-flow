@@ -1501,10 +1501,14 @@ boundary (no network, no filesystem, no migration/API):
 - `backend/tests/integration/test_factory_migration.py` — Alembic 0028↔0029,
   JobStatus CHECK, source object metadata columns, unique analysis artifact,
   test_result evidence FK, no raw source column
+- `backend/tests/unit/test_factory_outbox_dispatch.py` — `FACTORY_JOB_DISPATCH`
+  Outbox same-TX create; publish failure keeps unpublished; relay retry; recovery
+  candidate listing for expired RUNNING / stale QUEUED
 - `backend/tests/integration/test_factory_persistence.py` — real PostgreSQL
   concurrent same-key create (barrier on `IdempotencyRepository.create_completed`)
   with orphan object cleanup; different source → `IDEMPOTENCY_KEY_REUSED`;
-  worker restart reconstruction; missing/corrupt object → FAILED
+  worker restart reconstruction; missing/corrupt object → FAILED;
+  Outbox publish failure → relay recovery → exactly one analysis outcome
 
 Sandbox build/test / Publish / DRAFT MCP Server / frontend wiring remain out of scope.
 

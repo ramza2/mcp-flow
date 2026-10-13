@@ -49,6 +49,14 @@ class Settings(BaseSettings):
         description="Path to Object Storage secret key secret file.",
     )
     factory_lease_seconds: int = Field(default=120, gt=0)
+    factory_queued_republish_age_seconds: int = Field(
+        default=30,
+        ge=0,
+        description=(
+            "Minimum QUEUED age before outbox poller republishes analyze delivery "
+            "(covers lost broker messages after Outbox mark-published)."
+        ),
+    )
 
     execution_lease_seconds: int = Field(default=60, gt=0)
     outbox_poll_interval_seconds: float = Field(default=1.0, gt=0)

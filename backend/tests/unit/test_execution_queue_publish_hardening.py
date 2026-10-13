@@ -126,6 +126,15 @@ async def test_outbox_published_at_is_captured_after_publish_returns(
             del execution_id, outbox_event_id
             clock["now"] = after
 
+        def publish_approval_resume(self, **_kwargs: object) -> None:
+            raise AssertionError("approval unexpected")
+
+        def publish_mrtr_resume(self, **_kwargs: object) -> None:
+            raise AssertionError("mrtr unexpected")
+
+        def publish_factory_job(self, **_kwargs: object) -> None:
+            raise AssertionError("factory unexpected")
+
     monkeypatch.setattr(queue_module, "datetime", FakeDateTime)
 
     result = await OutboxRelayService(db_session).publish_batch(

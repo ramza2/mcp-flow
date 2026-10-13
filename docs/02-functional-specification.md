@@ -1103,6 +1103,9 @@ GET  /api/v1/factory/jobs/{job_id}
 - Job stores safe metadata only: `source_bucket`, `source_object_key`,
   `source_content_type`, `source_size_bytes`, `source_sha256`
 - API does **not** run the analyzer inline; broker delivery is not business state
+- Create TX writes durable `FACTORY_JOB_DISPATCH` Outbox alongside the `QUEUED` Job;
+  outbox relay publishes `mcpflow.factory.analyze_openapi` at-least-once
+- Outbox poller also republishes expired `RUNNING` leases and stale `QUEUED` Jobs
 - Missing/corrupt source objects fail the Job with bounded
   `FACTORY_SOURCE_OBJECT_MISSING` / `FACTORY_SOURCE_OBJECT_CORRUPT`
 - Oversize/empty/auth failures do not create Jobs or consume Idempotency-Key
