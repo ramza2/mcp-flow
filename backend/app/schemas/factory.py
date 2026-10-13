@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from app.domain.enums import JobStatus
 from app.factory.contracts import FactoryOpenAPIAnalysis, FactoryParameterCandidate
+from app.factory.openapi_analyzer import MAX_OPERATIONS
 from app.schemas.common_page import Page
 
 FactoryJobType = Literal["OPENAPI_ANALYZE"]
@@ -96,3 +97,58 @@ class FactoryCandidateMaterializeResponse(BaseModel):
     job_id: uuid.UUID
     created_count: int
     total_count: int
+
+
+class FactoryBuildCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    candidate_ids: list[uuid.UUID] = Field(
+        min_length=1,
+        max_length=MAX_OPERATIONS,
+    )
+
+
+class FactoryBuildCandidateSnapshot(BaseModel):
+    """Immutable Candidate contract captured at Build creation time."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    candidate_id: uuid.UUID
+    job_id: uuid.UUID
+    analysis_artifact_id: uuid.UUID
+    source_sha256: str
+    analyzer_version: str
+    operation_key: str
+    method: str
+    path: str
+    operation_id: str | None = None
+    summary: str | None = None
+    description: str | None = None
+    tags: list[str] = Field(default_factory=list)
+    deprecated: bool = False
+    parameters: list[FactoryParameterCandidate] = Field(default_factory=list)
+    request_schema: dict[str, Any] | None = None
+    response_schema: dict[str, Any] | None = None
+
+
+class FactoryBuildResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", from_attributes=True)
+
+    id: uuid.UUID
+    job_id: uuid.UUID
+    analysis_artifact_id: uuid.UUID
+    source_sha256: str
+    analyzer_version: str
+    generator_version: str
+    candidate_ids: list[uuid.UUID]
+    candidate_count: int
+    candidates_snapshot: list[FactoryBuildCandidateSnapshot]
+    candidates_snapshot_hash: str
+    build_input_hash: str
+    requested_by: uuid.UUID
+    created_at: datetime
+
+
+class FactoryBuildListResponse(Page):
+    items: list[FactoryBuildResponse]
+    job_id: uuid.UUID

@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.factory import (
     ToolFactoryArtifact,
+    ToolFactoryBuild,
     ToolFactoryCandidate,
     ToolFactoryJob,
 )
@@ -18,6 +19,7 @@ from app.schemas.common_page import parse_sort
 
 ALLOWED_FACTORY_JOB_SORT = {"created_at", "started_at", "finished_at", "status"}
 ALLOWED_FACTORY_CANDIDATE_SORT = {"created_at", "operation_key", "method", "path"}
+ALLOWED_FACTORY_BUILD_SORT = {"created_at"}
 
 
 class FactoryRepository:
@@ -322,6 +324,81 @@ class FactoryRepository:
         offset = (page - 1) * page_size
         rows_stmt = (
             stmt.order_by(order, ToolFactoryCandidate.id.asc())
+            .offset(offset)
+            .limit(page_size)
+        )
+        rows = list((await self._session.execute(rows_stmt)).scalars().all())
+        return rows, total
+
+    async def get_candidates_by_ids(
+        self, candidate_ids: list[uuid.UUID]
+    ) -> list[ToolFactoryCandidate]:
+        if not candidate_ids:
+            return []
+        stmt = select(ToolFactoryCandidate).where(
+            ToolFactoryCandidate.id.in_(candidate_ids)
+        )
+        return list((await self._session.execute(stmt)).scalars().all())
+
+    async def create_build(
+        self,
+        *,
+        job_id: uuid.UUID,
+        analysis_artifact_id: uuid.UUID,
+        source_sha256: str,
+        analyzer_version: str,
+        generator_version: str,
+        candidate_ids: list[str],
+        candidate_count: int,
+        candidates_snapshot: list[Any],
+        candidates_snapshot_hash: str,
+        build_input_hash: str,
+        requested_by: uuid.UUID,
+        build_id: uuid.UUID | None = None,
+    ) -> ToolFactoryBuild:
+        build = ToolFactoryBuild(
+            id=build_id or uuid.uuid4(),
+            job_id=job_id,
+            analysis_artifact_id=analysis_artifact_id,
+            source_sha256=source_sha256,
+            analyzer_version=analyzer_version,
+            generator_version=generator_version,
+            candidate_ids=candidate_ids,
+            candidate_count=candidate_count,
+            candidates_snapshot=candidates_snapshot,
+            candidates_snapshot_hash=candidates_snapshot_hash,
+            build_input_hash=build_input_hash,
+            requested_by=requested_by,
+        )
+        self._session.add(build)
+        await self._session.flush()
+        await self._session.refresh(build)
+        return build
+
+    async def get_build(self, build_id: uuid.UUID) -> ToolFactoryBuild | None:
+        return await self._session.get(ToolFactoryBuild, build_id)
+
+    async def list_builds_for_job(
+        self,
+        job_id: uuid.UUID,
+        *,
+        page: int = 1,
+        page_size: int = 20,
+        sort: str = "-created_at",
+    ) -> tuple[list[ToolFactoryBuild], int]:
+        field, direction = parse_sort(
+            sort,
+            allowed=ALLOWED_FACTORY_BUILD_SORT,
+            default_field="created_at",
+        )
+        stmt = select(ToolFactoryBuild).where(ToolFactoryBuild.job_id == job_id)
+        count_stmt = select(func.count()).select_from(stmt.order_by(None).subquery())
+        total = int((await self._session.execute(count_stmt)).scalar_one())
+        sort_col = getattr(ToolFactoryBuild, field)
+        order = sort_col.desc() if direction == "desc" else sort_col.asc()
+        offset = (page - 1) * page_size
+        rows_stmt = (
+            stmt.order_by(order, ToolFactoryBuild.id.asc())
             .offset(offset)
             .limit(page_size)
         )

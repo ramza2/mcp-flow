@@ -22,6 +22,7 @@ from app.models.external_discovery import (
 )
 from app.models.factory import (
     ToolFactoryArtifact,
+    ToolFactoryBuild,
     ToolFactoryCandidate,
     ToolFactoryJob,
     ToolFactoryTestResult,
@@ -74,6 +75,7 @@ __all__ = [
     "ExternalMCPSearch",
     "ExternalMCPSource",
     "ToolFactoryArtifact",
+    "ToolFactoryBuild",
     "ToolFactoryCandidate",
     "ToolFactoryJob",
     "ToolFactoryTestResult",

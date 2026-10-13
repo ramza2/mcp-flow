@@ -620,3 +620,71 @@ async def test_pg_concurrent_candidate_materialize_no_duplicates(
             )
         ).scalars().all()
         assert list(keys) == ["GET /ping"]
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_pg_concurrent_build_create_same_idempotency_key(
+    integration_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same Idempotency-Key concurrent Build create keeps a single Build."""
+    storage = InMemoryObjectStorage()
+    async with integration_session_factory() as session:
+        user_id = await _seed_manage_user(session)
+        outcome = await FactoryService(
+            session, storage=storage
+        ).create_openapi_analyze_job(
+            actor_user_id=user_id,
+            source_bytes=MINIMAL_JSON,
+            filename="build.json",
+            idempotency_key=f"job-{uuid.uuid4().hex}",
+        )
+        await session.commit()
+        job_id = outcome.result.id
+
+    async with integration_session_factory() as session:
+        worker = FactoryWorkerService(session, storage=storage, worker_id="pg-build")
+        result = await worker.process_job(job_id=job_id)
+        await session.commit()
+        assert result.status == JobStatus.SUCCEEDED.value
+        cand_id = (
+            await session.execute(
+                text(
+                    "SELECT id FROM tool_factory_candidates WHERE job_id = :jid LIMIT 1"
+                ),
+                {"jid": str(job_id)},
+            )
+        ).scalar_one()
+
+    key = f"build-race-{uuid.uuid4().hex}"
+    _install_create_completed_barrier(monkeypatch, parties=2)
+
+    async def _run() -> Any:
+        async with integration_session_factory() as session:
+            try:
+                return await FactoryService(session, storage=storage).create_build(
+                    actor_user_id=user_id,
+                    job_id=job_id,
+                    candidate_ids=[uuid.UUID(str(cand_id))],
+                    idempotency_key=key,
+                )
+            except AppError as exc:
+                return exc
+
+    results = await asyncio.gather(_run(), _run())
+    outcomes = [r for r in results if not isinstance(r, AppError)]
+    errors = [r for r in results if isinstance(r, AppError)]
+    assert not errors, f"unexpected AppError in build race: {errors}"
+    assert len(outcomes) == 2
+    assert sorted(o.replayed for o in outcomes) == [False, True]
+    assert {o.result.id for o in outcomes} == {outcomes[0].result.id}
+
+    async with integration_session_factory() as session:
+        count = (
+            await session.execute(
+                text("SELECT count(*) FROM tool_factory_builds WHERE job_id = :jid"),
+                {"jid": str(job_id)},
+            )
+        ).scalar_one()
+        assert int(count) == 1

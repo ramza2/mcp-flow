@@ -523,3 +523,76 @@ async def test_candidate_list_requires_read(
     )
     denied = await no_perm.get(f"{API}/jobs/{job_id}/candidates")
     assert denied.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_build_create_list_detail(
+    factory_client: AsyncClient,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    created = await factory_client.post(
+        f"{API}/jobs",
+        files={"source": ("pets.json", MULTI_OP_JSON, "application/json")},
+        headers={"Idempotency-Key": f"k-build-{uuid.uuid4().hex}"},
+    )
+    assert created.status_code == 201
+    job_id = created.json()["id"]
+    await _process_job(db_session_factory, uuid.UUID(job_id))
+
+    cands = await factory_client.get(f"{API}/jobs/{job_id}/candidates")
+    assert cands.status_code == 200
+    cand_ids = [item["id"] for item in cands.json()["items"]]
+    assert len(cand_ids) == 2
+
+    build_resp = await factory_client.post(
+        f"{API}/jobs/{job_id}/builds",
+        json={"candidate_ids": cand_ids[:1]},
+        headers={"Idempotency-Key": f"build-{uuid.uuid4().hex}"},
+    )
+    assert build_resp.status_code == 201, build_resp.text
+    body = build_resp.json()
+    assert body["job_id"] == job_id
+    assert body["candidate_count"] == 1
+    assert body["candidates_snapshot"][0]["operation_key"]
+    assert body["build_input_hash"]
+    assert MULTI_OP_JSON.decode() not in build_resp.text
+    assert "source_object_key" not in build_resp.text
+
+    detail = await factory_client.get(f"{API}/builds/{body['id']}")
+    assert detail.status_code == 200
+    assert detail.json()["id"] == body["id"]
+    assert detail.json()["candidates_snapshot_hash"] == body["candidates_snapshot_hash"]
+
+    listed = await factory_client.get(f"{API}/jobs/{job_id}/builds")
+    assert listed.status_code == 200
+    assert listed.json()["total"] == 1
+    assert listed.json()["items"][0]["id"] == body["id"]
+
+    empty = await factory_client.post(
+        f"{API}/jobs/{job_id}/builds",
+        json={"candidate_ids": []},
+        headers={"Idempotency-Key": f"build-{uuid.uuid4().hex}"},
+    )
+    assert empty.status_code == 422
+
+    dup = await factory_client.post(
+        f"{API}/jobs/{job_id}/builds",
+        json={"candidate_ids": [cand_ids[0], cand_ids[0]]},
+        headers={"Idempotency-Key": f"build-{uuid.uuid4().hex}"},
+    )
+    assert dup.status_code == 422
+
+    replay_key = f"build-replay-{uuid.uuid4().hex}"
+    first = await factory_client.post(
+        f"{API}/jobs/{job_id}/builds",
+        json={"candidate_ids": [cand_ids[1]]},
+        headers={"Idempotency-Key": replay_key},
+    )
+    second = await factory_client.post(
+        f"{API}/jobs/{job_id}/builds",
+        json={"candidate_ids": [cand_ids[1]]},
+        headers={"Idempotency-Key": replay_key},
+    )
+    assert first.status_code == 201
+    assert second.status_code == 201
+    assert second.json()["id"] == first.json()["id"]

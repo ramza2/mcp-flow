@@ -12,6 +12,7 @@ from app.core.errors import AppError
 from app.domain.enums import JobStatus, UserStatus
 from app.factory import (
     ARTIFACT_TYPE_OPENAPI_ANALYSIS,
+    FACTORY_BUILD_GENERATOR_VERSION,
     JOB_TYPE_OPENAPI_ANALYZE,
     OPENAPI_ANALYZER_VERSION,
 )
@@ -22,10 +23,15 @@ from app.factory.errors import (
     FACTORY_SOURCE_OBJECT_MISSING,
     FACTORY_SOURCE_PARSE_ERROR,
 )
-from app.factory.openapi_analyzer import MAX_PATH_LEN, MAX_SOURCE_BYTES
+from app.factory.openapi_analyzer import (
+    MAX_OPERATIONS,
+    MAX_PATH_LEN,
+    MAX_SOURCE_BYTES,
+)
 from app.infrastructure.object_storage import InMemoryObjectStorage
 from app.models.factory import (
     ToolFactoryArtifact,
+    ToolFactoryBuild,
     ToolFactoryCandidate,
     ToolFactoryJob,
 )
@@ -871,3 +877,213 @@ async def test_candidate_read_requires_permission(db_session: AsyncSession) -> N
     with pytest.raises(AppError) as exc:
         await svc.list_candidates_for_job(stranger, outcome.result.id)
     assert exc.value.status_code == 403
+
+
+async def _succeeded_job_with_candidates(
+    db_session: AsyncSession,
+    *,
+    source: bytes = MULTI_OP_JSON,
+    filename: str = "pets.json",
+) -> tuple[FactoryService, InMemoryObjectStorage, uuid.UUID, uuid.UUID, list[uuid.UUID]]:
+    user_id = await _seed_user_with_perms(
+        db_session, codes=["mcp.server.manage", "mcp.server.read"]
+    )
+    svc, store = _svc(db_session)
+    outcome = await svc.create_openapi_analyze_job(
+        actor_user_id=user_id,
+        source_bytes=source,
+        filename=filename,
+        idempotency_key=f"k-{uuid.uuid4().hex}",
+    )
+    await _run_worker(db_session, job_id=outcome.result.id, storage=store)
+    candidates = (
+        await db_session.execute(
+            select(ToolFactoryCandidate).where(
+                ToolFactoryCandidate.job_id == outcome.result.id
+            )
+        )
+    ).scalars().all()
+    assert candidates
+    return svc, store, user_id, outcome.result.id, [c.id for c in candidates]
+
+
+@pytest.mark.asyncio
+async def test_build_create_snapshot_and_hashes(db_session: AsyncSession) -> None:
+    svc, _store, user_id, job_id, cand_ids = await _succeeded_job_with_candidates(
+        db_session
+    )
+    subset = sorted(cand_ids, key=lambda c: c.hex)[:2]
+    outcome = await svc.create_build(
+        actor_user_id=user_id,
+        job_id=job_id,
+        candidate_ids=subset,
+        idempotency_key=f"build-{uuid.uuid4().hex}",
+    )
+    assert outcome.http_status == 201
+    assert outcome.replayed is False
+    build = outcome.result
+    assert build.job_id == job_id
+    assert build.generator_version == FACTORY_BUILD_GENERATOR_VERSION
+    assert build.candidate_count == 2
+    assert set(build.candidate_ids) == set(subset)
+    assert len(build.candidates_snapshot) == 2
+    assert build.analyzer_version == OPENAPI_ANALYZER_VERSION
+
+    # Snapshot hash matches recomputed canonical hash of persisted snapshot body.
+    snap_payload = [item.model_dump(mode="json") for item in build.candidates_snapshot]
+    assert build.candidates_snapshot_hash == compute_canonical_json_hash(snap_payload)
+    assert len(build.build_input_hash) == 64
+
+    row = await db_session.get(ToolFactoryBuild, build.id)
+    assert row is not None
+    assert row.candidates_snapshot_hash == build.candidates_snapshot_hash
+
+    # Later Candidate row edits must not mutate the Build snapshot.
+    candidate = await db_session.get(ToolFactoryCandidate, subset[0])
+    assert candidate is not None
+    candidate.summary = "mutated-after-build"
+    await db_session.commit()
+    detail = await svc.get_build(user_id, build.id)
+    assert all(item.summary != "mutated-after-build" for item in detail.candidates_snapshot)
+
+    tools = (
+        await db_session.execute(select(func.count()).select_from(MCPTool))
+    ).scalar_one()
+    servers = (
+        await db_session.execute(select(func.count()).select_from(MCPServer))
+    ).scalar_one()
+    assert int(tools) == 0
+    assert int(servers) == 0
+
+
+@pytest.mark.asyncio
+async def test_build_fail_closed_empty_duplicate_cross_job(
+    db_session: AsyncSession,
+) -> None:
+    svc, store, user_id, job_id, cand_ids = await _succeeded_job_with_candidates(
+        db_session
+    )
+    with pytest.raises(AppError) as empty_exc:
+        await svc.create_build(
+            actor_user_id=user_id,
+            job_id=job_id,
+            candidate_ids=[],
+            idempotency_key=f"build-{uuid.uuid4().hex}",
+        )
+    assert empty_exc.value.status_code == 422
+
+    with pytest.raises(AppError) as over_exc:
+        await svc.create_build(
+            actor_user_id=user_id,
+            job_id=job_id,
+            candidate_ids=[uuid.uuid4() for _ in range(MAX_OPERATIONS + 1)],
+            idempotency_key=f"build-{uuid.uuid4().hex}",
+        )
+    assert over_exc.value.status_code == 422
+    assert "MAX_OPERATIONS" in over_exc.value.message
+
+    with pytest.raises(AppError) as dup_exc:
+        await svc.create_build(
+            actor_user_id=user_id,
+            job_id=job_id,
+            candidate_ids=[cand_ids[0], cand_ids[0]],
+            idempotency_key=f"build-{uuid.uuid4().hex}",
+        )
+    assert dup_exc.value.status_code == 422
+
+    other = await svc.create_openapi_analyze_job(
+        actor_user_id=user_id,
+        source_bytes=MINIMAL_JSON,
+        filename="other.json",
+        idempotency_key=f"k-{uuid.uuid4().hex}",
+    )
+    await _run_worker(db_session, job_id=other.result.id, storage=store)
+    other_cand = (
+        await db_session.execute(
+            select(ToolFactoryCandidate).where(
+                ToolFactoryCandidate.job_id == other.result.id
+            )
+        )
+    ).scalar_one()
+
+    with pytest.raises(AppError) as cross_exc:
+        await svc.create_build(
+            actor_user_id=user_id,
+            job_id=job_id,
+            candidate_ids=[cand_ids[0], other_cand.id],
+            idempotency_key=f"build-{uuid.uuid4().hex}",
+        )
+    assert cross_exc.value.status_code == 422
+
+    with pytest.raises(AppError) as missing_exc:
+        await svc.create_build(
+            actor_user_id=user_id,
+            job_id=job_id,
+            candidate_ids=[uuid.uuid4()],
+            idempotency_key=f"build-{uuid.uuid4().hex}",
+        )
+    assert missing_exc.value.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_build_fail_closed_non_openapi_analyze_job_type(
+    db_session: AsyncSession,
+) -> None:
+    svc, _store, user_id, job_id, cand_ids = await _succeeded_job_with_candidates(
+        db_session
+    )
+    job = await db_session.get(ToolFactoryJob, job_id)
+    assert job is not None
+    assert job.job_type == JOB_TYPE_OPENAPI_ANALYZE
+    assert job.status == JobStatus.SUCCEEDED.value
+    job.job_type = "FUTURE_FACTORY_JOB"
+    await db_session.commit()
+
+    with pytest.raises(AppError) as wrong_type:
+        await svc.create_build(
+            actor_user_id=user_id,
+            job_id=job_id,
+            candidate_ids=[cand_ids[0]],
+            idempotency_key=f"build-{uuid.uuid4().hex}",
+        )
+    assert wrong_type.value.status_code == 409
+    assert "OPENAPI_ANALYZE" in wrong_type.value.message
+
+
+@pytest.mark.asyncio
+async def test_build_idempotency_replay_and_conflict(
+    db_session: AsyncSession,
+) -> None:
+    svc, _store, user_id, job_id, cand_ids = await _succeeded_job_with_candidates(
+        db_session
+    )
+    key = f"build-idem-{uuid.uuid4().hex}"
+    first = await svc.create_build(
+        actor_user_id=user_id,
+        job_id=job_id,
+        candidate_ids=[cand_ids[0]],
+        idempotency_key=key,
+    )
+    second = await svc.create_build(
+        actor_user_id=user_id,
+        job_id=job_id,
+        candidate_ids=[cand_ids[0]],
+        idempotency_key=key,
+    )
+    assert second.replayed is True
+    assert second.result.id == first.result.id
+    count = (
+        await db_session.execute(
+            select(func.count()).where(ToolFactoryBuild.job_id == job_id)
+        )
+    ).scalar_one()
+    assert int(count) == 1
+
+    with pytest.raises(AppError) as conflict:
+        await svc.create_build(
+            actor_user_id=user_id,
+            job_id=job_id,
+            candidate_ids=[cand_ids[1]],
+            idempotency_key=key,
+        )
+    assert conflict.value.code == "IDEMPOTENCY_KEY_REUSED"

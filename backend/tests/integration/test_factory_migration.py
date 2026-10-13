@@ -42,8 +42,8 @@ def test_alembic_factory_downgrade_upgrade(integration_database_url: str) -> Non
     cfg = _cfg(integration_database_url)
     command.upgrade(cfg, "head")
     command.downgrade(cfg, "20261008_0028")
-    command.upgrade(cfg, "20261013_0030")
-    command.downgrade(cfg, "20261013_0029")
+    command.upgrade(cfg, "20261013_0031")
+    command.downgrade(cfg, "20261013_0030")
     command.upgrade(cfg, "head")
 
 
@@ -57,6 +57,7 @@ async def test_factory_schema_constraints(
             "tool_factory_jobs",
             "tool_factory_artifacts",
             "tool_factory_candidates",
+            "tool_factory_builds",
             "tool_factory_test_results",
         ):
             exists = (
@@ -334,6 +335,36 @@ async def test_factory_job_status_and_artifact_unique(
                     "job_id": job_id,
                     "art": art_id,
                     "sha": "a" * 64,
+                },
+            )
+            await session.flush()
+        await session.rollback()
+
+        # Build candidate_count >= 1.
+        with pytest.raises(IntegrityError):
+            await session.execute(
+                text(
+                    """
+                    INSERT INTO tool_factory_builds (
+                      id, job_id, analysis_artifact_id, source_sha256,
+                      analyzer_version, generator_version, candidate_ids,
+                      candidate_count, candidates_snapshot,
+                      candidates_snapshot_hash, build_input_hash, requested_by
+                    ) VALUES (
+                      :id, :job_id, :art, :sha, 'openapi-analyzer-v1',
+                      'factory-build-foundation-v1', CAST('[]' AS jsonb),
+                      0, CAST('[]' AS jsonb), :h1, :h2, :uid
+                    )
+                    """
+                ),
+                {
+                    "id": uuid.uuid4(),
+                    "job_id": job_id,
+                    "art": art_id,
+                    "sha": "a" * 64,
+                    "h1": "b" * 64,
+                    "h2": "c" * 64,
+                    "uid": user_id,
                 },
             )
             await session.flush()

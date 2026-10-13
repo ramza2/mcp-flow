@@ -1334,6 +1334,9 @@ GET  /factory/jobs/{job_id}
 GET  /factory/jobs/{job_id}/candidates
 POST /factory/jobs/{job_id}/candidates/materialize
 GET  /factory/candidates/{candidate_id}
+POST /factory/jobs/{job_id}/builds
+GET  /factory/jobs/{job_id}/builds
+GET  /factory/builds/{build_id}
 ```
 
 - `POST` multipart field `source` (`.json` / `.yaml` / `.yml`) + required
@@ -1363,6 +1366,19 @@ GET  /factory/candidates/{candidate_id}
 - Never returns raw OpenAPI source bytes, Object Storage keys, or secrets
 - Does **not** create/activate `MCPTool` / `MCPServer`
 
+### Builds (foundation)
+
+- `POST /factory/jobs/{job_id}/builds` — create Build from explicit
+  `candidate_ids` (1..`MAX_OPERATIONS`/2000) + required `Idempotency-Key`
+  (`FACTORY_BUILD_CREATE_V1`); Job must be `OPENAPI_ANALYZE` + `SUCCEEDED`;
+  fails closed on empty/over-limit/duplicate/missing/cross-job candidates or
+  wrong `job_type`; stores immutable `candidates_snapshot` + deterministic hashes
+- `GET /factory/jobs/{job_id}/builds` — paged Build list for a Job
+- `GET /factory/builds/{build_id}` — Build detail with immutable snapshot
+- Auth: `mcp.server.manage` create; `mcp.server.read` list/detail; ACTIVE user
+- Responses never include raw OpenAPI source, Object Storage keys, or secrets
+- Does **not** generate code/packages, start sandboxes, or create MCP entities
+
 ### Aspirational (not implemented by this slice)
 
 ```text
@@ -1371,8 +1387,7 @@ POST /factory/projects
 GET  /factory/projects/{project_id}
 POST /factory/projects/{project_id}/sources
 POST /factory/projects/{project_id}/analyze
-POST /factory/projects/{project_id}/builds
-GET  /factory/builds/{build_id}
+POST /factory/projects/{project_id}/builds   # project-scoped create remains aspirational
 POST /factory/builds/{build_id}/tests
 POST /factory/builds/{build_id}/publish
 POST /factory/builds/{build_id}/rollback
