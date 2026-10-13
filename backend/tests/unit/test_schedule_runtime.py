@@ -626,11 +626,14 @@ async def test_deploy_sh_includes_scheduler() -> None:
     repo_root = Path(__file__).resolve().parents[3]
     deploy_sh = repo_root / "scripts" / "deploy.sh"
     text = deploy_sh.read_text(encoding="utf-8")
-    assert "compose build api worker outbox scheduler migration frontend" in text
-    assert "compose up -d api worker outbox scheduler frontend" in text
-    assert "wait_services \"runtime services\" api worker outbox scheduler frontend" in text
-    assert "compose logs -f --tail=200 api worker outbox scheduler" in text
-    assert "compose restart api worker outbox scheduler frontend" in text
+    assert "compose build api worker factory-worker outbox scheduler migration frontend" in text
+    assert "compose up -d api worker factory-worker outbox scheduler frontend" in text
+    assert (
+        'wait_services "runtime services" api worker factory-worker outbox '
+        "scheduler frontend"
+    ) in text
+    assert "compose logs -f --tail=200 api worker factory-worker outbox scheduler" in text
+    assert "compose restart api worker factory-worker outbox scheduler frontend" in text
 
 
 @pytest.mark.asyncio
