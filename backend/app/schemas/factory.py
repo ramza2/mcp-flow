@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from app.domain.enums import JobStatus
 from app.factory.contracts import FactoryOpenAPIAnalysis, FactoryParameterCandidate
+from app.factory.openapi_analyzer import MAX_OPERATIONS
 from app.schemas.common_page import Page
 
 FactoryJobType = Literal["OPENAPI_ANALYZE"]
@@ -101,7 +102,10 @@ class FactoryCandidateMaterializeResponse(BaseModel):
 class FactoryBuildCreateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    candidate_ids: list[uuid.UUID] = Field(min_length=1)
+    candidate_ids: list[uuid.UUID] = Field(
+        min_length=1,
+        max_length=MAX_OPERATIONS,
+    )
 
 
 class FactoryBuildCandidateSnapshot(BaseModel):

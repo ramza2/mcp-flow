@@ -1,7 +1,8 @@
 """Tool Factory package boundary (docs/03).
 
-OpenAPI analyzer + durable analysis Job/API foundation.
-No code generation, factory-worker, or MCP Server handoff yet.
+OpenAPI analyzer, durable analysis Job/API, Candidate Tools, and Build
+foundation (immutable candidate snapshots). factory-worker runs analysis;
+this package does not generate MCP code or hand off MCP Servers yet.
 
 Generated Tool ≠ activated Tool. Analysis success ≠ generated Tool.
 """

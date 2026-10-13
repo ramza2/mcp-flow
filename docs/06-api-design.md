@@ -1369,9 +1369,10 @@ GET  /factory/builds/{build_id}
 ### Builds (foundation)
 
 - `POST /factory/jobs/{job_id}/builds` — create Build from explicit
-  `candidate_ids` + required `Idempotency-Key` (`FACTORY_BUILD_CREATE_V1`);
-  Job must be `SUCCEEDED`; fails closed on empty/duplicate/missing/cross-job
-  candidates; stores immutable `candidates_snapshot` + deterministic hashes
+  `candidate_ids` (1..`MAX_OPERATIONS`/2000) + required `Idempotency-Key`
+  (`FACTORY_BUILD_CREATE_V1`); Job must be `OPENAPI_ANALYZE` + `SUCCEEDED`;
+  fails closed on empty/over-limit/duplicate/missing/cross-job candidates or
+  wrong `job_type`; stores immutable `candidates_snapshot` + deterministic hashes
 - `GET /factory/jobs/{job_id}/builds` — paged Build list for a Job
 - `GET /factory/builds/{build_id}` — Build detail with immutable snapshot
 - Auth: `mcp.server.manage` create; `mcp.server.read` list/detail; ACTIVE user

@@ -1148,10 +1148,12 @@ GET  /api/v1/factory/builds/{build_id}
 ```
 
 - Auth: `mcp.server.manage` (create), `mcp.server.read` (list/detail); ACTIVE user
-- Job must be `SUCCEEDED` with an `OPENAPI_ANALYSIS` artifact
-- Fail-closed: empty selection, duplicate candidate ids, missing candidates,
-  cross-job / mismatched lineage (`job_id` / `analysis_artifact_id` /
-  `source_sha256` / `analyzer_version`)
+- Job must be `job_type=OPENAPI_ANALYZE`, `SUCCEEDED`, with an
+  `OPENAPI_ANALYSIS` artifact
+- Fail-closed: empty selection, more than `MAX_OPERATIONS` (2000) candidate ids,
+  duplicate candidate ids, missing candidates, cross-job / mismatched lineage
+  (`job_id` / `analysis_artifact_id` / `source_sha256` / `analyzer_version`),
+  or non-`OPENAPI_ANALYZE` Job type
 - Snapshot + `candidates_snapshot_hash` + `build_input_hash` via
   `compute_canonical_json_hash` (sorted keys); later Candidate row edits do not
   mutate an existing Build

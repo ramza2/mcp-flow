@@ -30,7 +30,7 @@ from app.factory.contracts import FactoryOpenAPIAnalysis
 from app.factory.errors import (
     FACTORY_SOURCE_OBJECT_STORE_FAILED,
 )
-from app.factory.openapi_analyzer import MAX_SOURCE_BYTES
+from app.factory.openapi_analyzer import MAX_OPERATIONS, MAX_SOURCE_BYTES
 from app.infrastructure.object_storage import (
     ObjectStorageClient,
     ObjectStorageError,
@@ -896,8 +896,9 @@ class FactoryService:
     ) -> FactoryBuildCreateOutcome:
         """Create a durable Build from an explicit Candidate subset.
 
-        Validates lineage against the SUCCEEDED Job / OPENAPI_ANALYSIS artifact,
-        snapshots candidate contracts immutably, and commits with Idempotency-Key.
+        Validates OPENAPI_ANALYZE + SUCCEEDED Job / OPENAPI_ANALYSIS artifact
+        lineage, snapshots candidate contracts immutably, and commits with
+        Idempotency-Key.
         """
         await self._assert_manage(actor_user_id)
         key = _normalize_idempotency_key(idempotency_key)
@@ -907,6 +908,15 @@ class FactoryService:
             raise AppError(
                 code="VALIDATION_ERROR",
                 message="Build requires a non-empty candidate_ids selection.",
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            )
+        if len(candidate_ids) > MAX_OPERATIONS:
+            raise AppError(
+                code="VALIDATION_ERROR",
+                message=(
+                    f"Build candidate_ids must not exceed {MAX_OPERATIONS} "
+                    "(analyzer MAX_OPERATIONS)."
+                ),
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             )
         if len(candidate_ids) != len(set(candidate_ids)):
@@ -935,6 +945,14 @@ class FactoryService:
                 code="NOT_FOUND",
                 message="Factory Job을 찾을 수 없습니다.",
                 status_code=status.HTTP_404_NOT_FOUND,
+            )
+        if job.job_type != JOB_TYPE_OPENAPI_ANALYZE:
+            raise AppError(
+                code="VALIDATION_ERROR",
+                message=(
+                    "Builds can only be created from an OPENAPI_ANALYZE Job."
+                ),
+                status_code=status.HTTP_409_CONFLICT,
             )
         if job.status != JobStatus.SUCCEEDED.value:
             raise AppError(

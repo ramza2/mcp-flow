@@ -23,7 +23,11 @@ from app.factory.errors import (
     FACTORY_SOURCE_OBJECT_MISSING,
     FACTORY_SOURCE_PARSE_ERROR,
 )
-from app.factory.openapi_analyzer import MAX_PATH_LEN, MAX_SOURCE_BYTES
+from app.factory.openapi_analyzer import (
+    MAX_OPERATIONS,
+    MAX_PATH_LEN,
+    MAX_SOURCE_BYTES,
+)
 from app.infrastructure.object_storage import InMemoryObjectStorage
 from app.models.factory import (
     ToolFactoryArtifact,
@@ -968,6 +972,16 @@ async def test_build_fail_closed_empty_duplicate_cross_job(
         )
     assert empty_exc.value.status_code == 422
 
+    with pytest.raises(AppError) as over_exc:
+        await svc.create_build(
+            actor_user_id=user_id,
+            job_id=job_id,
+            candidate_ids=[uuid.uuid4() for _ in range(MAX_OPERATIONS + 1)],
+            idempotency_key=f"build-{uuid.uuid4().hex}",
+        )
+    assert over_exc.value.status_code == 422
+    assert "MAX_OPERATIONS" in over_exc.value.message
+
     with pytest.raises(AppError) as dup_exc:
         await svc.create_build(
             actor_user_id=user_id,
@@ -1009,6 +1023,31 @@ async def test_build_fail_closed_empty_duplicate_cross_job(
             idempotency_key=f"build-{uuid.uuid4().hex}",
         )
     assert missing_exc.value.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_build_fail_closed_non_openapi_analyze_job_type(
+    db_session: AsyncSession,
+) -> None:
+    svc, _store, user_id, job_id, cand_ids = await _succeeded_job_with_candidates(
+        db_session
+    )
+    job = await db_session.get(ToolFactoryJob, job_id)
+    assert job is not None
+    assert job.job_type == JOB_TYPE_OPENAPI_ANALYZE
+    assert job.status == JobStatus.SUCCEEDED.value
+    job.job_type = "FUTURE_FACTORY_JOB"
+    await db_session.commit()
+
+    with pytest.raises(AppError) as wrong_type:
+        await svc.create_build(
+            actor_user_id=user_id,
+            job_id=job_id,
+            candidate_ids=[cand_ids[0]],
+            idempotency_key=f"build-{uuid.uuid4().hex}",
+        )
+    assert wrong_type.value.status_code == 409
+    assert "OPENAPI_ANALYZE" in wrong_type.value.message
 
 
 @pytest.mark.asyncio

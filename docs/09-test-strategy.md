@@ -1521,9 +1521,10 @@ boundary (no network, no filesystem, no migration/API):
   keeps a single Build
 - `backend/tests/unit/test_factory_service.py` / `backend/tests/api/test_factory.py`
   — Build create from Candidate subset; immutable snapshot + deterministic
-  `build_input_hash`; empty/duplicate/cross-job fail-closed; idempotency
-  replay/conflict; snapshot unaffected by later Candidate row edits; no
-  MCPTool/MCPServer side effects
+  `build_input_hash`; empty/over-`MAX_OPERATIONS`/duplicate/cross-job and
+  non-`OPENAPI_ANALYZE` `job_type` fail-closed; idempotency replay/conflict;
+  snapshot unaffected by later Candidate row edits; no MCPTool/MCPServer
+  side effects
 
 Sandbox code generation / Docker / Python exec / Security tests / Publish /
 DRAFT MCP Server / frontend wiring remain out of scope.
