@@ -1504,10 +1504,10 @@ boundary (no network, no filesystem, no migration/API):
 - `backend/tests/api/test_factory.py` — auth/CSRF, multipart JSON/YAML enqueue,
   empty/oversize/extension, list/detail after worker, 404, idempotency;
   candidate list/detail read API; materialize POST; no raw source/secret exposure
-- `backend/tests/integration/test_factory_migration.py` — Alembic 0028↔0030,
+- `backend/tests/integration/test_factory_migration.py` — Alembic 0028↔0031,
   JobStatus CHECK, source object metadata columns, unique analysis artifact,
-  unique `(job_id, operation_key)` candidates, test_result evidence FK,
-  no raw source column
+  unique `(job_id, operation_key)` candidates, Build table/constraints,
+  test_result evidence FK, no raw source column
 - `backend/tests/unit/test_factory_outbox_dispatch.py` — `FACTORY_JOB_DISPATCH`
   Outbox same-TX create; publish failure keeps unpublished; relay retry; recovery
   candidate listing for expired RUNNING / stale QUEUED
@@ -1517,9 +1517,16 @@ boundary (no network, no filesystem, no migration/API):
   worker restart reconstruction; missing/corrupt object → FAILED;
   Outbox publish failure → relay recovery → exactly one analysis outcome;
   concurrent Candidate Tool materialization keeps a single row per
-  `(job_id, operation_key)`
+  `(job_id, operation_key)`; concurrent Build create with same Idempotency-Key
+  keeps a single Build
+- `backend/tests/unit/test_factory_service.py` / `backend/tests/api/test_factory.py`
+  — Build create from Candidate subset; immutable snapshot + deterministic
+  `build_input_hash`; empty/duplicate/cross-job fail-closed; idempotency
+  replay/conflict; snapshot unaffected by later Candidate row edits; no
+  MCPTool/MCPServer side effects
 
-Sandbox build/test / Publish / DRAFT MCP Server / frontend wiring remain out of scope.
+Sandbox code generation / Docker / Python exec / Security tests / Publish /
+DRAFT MCP Server / frontend wiring remain out of scope.
 
 ---
 

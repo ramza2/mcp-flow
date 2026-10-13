@@ -1132,7 +1132,31 @@ artifact only — no raw OpenAPI re-parse on the API path).
   `GET /factory/candidates/{candidate_id}` (`mcp.server.read`) — no lazy writes
 - Analyzer path/`operation_key` length bounds match Candidate persistence columns
 
-Analysis success ≠ Candidate Tool ≠ generated Tool ≠ verified Tool ≠ activated Tool.
+Analysis success ≠ Candidate Tool ≠ Build ≠ generated Tool ≠ verified Tool ≠ activated Tool.
+
+### Tool Factory Build foundation (implemented slice)
+
+Durable Build creation from an explicit non-empty subset of persisted Candidate
+Tools belonging to one SUCCEEDED analysis Job. A Build stores an **immutable**
+candidate contract snapshot + deterministic hashes; it does **not** generate
+code, run a sandbox, or create MCP Tools/Servers.
+
+```text
+POST /api/v1/factory/jobs/{job_id}/builds
+GET  /api/v1/factory/jobs/{job_id}/builds
+GET  /api/v1/factory/builds/{build_id}
+```
+
+- Auth: `mcp.server.manage` (create), `mcp.server.read` (list/detail); ACTIVE user
+- Job must be `SUCCEEDED` with an `OPENAPI_ANALYSIS` artifact
+- Fail-closed: empty selection, duplicate candidate ids, missing candidates,
+  cross-job / mismatched lineage (`job_id` / `analysis_artifact_id` /
+  `source_sha256` / `analyzer_version`)
+- Snapshot + `candidates_snapshot_hash` + `build_input_hash` via
+  `compute_canonical_json_hash` (sorted keys); later Candidate row edits do not
+  mutate an existing Build
+- Idempotency scope `FACTORY_BUILD_CREATE_V1`; resource_type `TOOL_FACTORY_BUILD`
+- No raw OpenAPI re-parse; no Object Storage credentials/secrets in responses
 
 **Partial requirement coverage (not complete):**
 
@@ -1144,17 +1168,18 @@ Analysis success ≠ Candidate Tool ≠ generated Tool ≠ verified Tool ≠ act
 
 - allowlisted URL source fetch
 - generic `/jobs` API
-- sandbox build/test / generated MCP code/package
-- Python source analysis / dependency install
-- Candidate review decisions / Publish / DRAFT MCP Server creation
+- sandbox build/test / generated MCP code/package / Docker image
+- Python source analysis / dependency install / subprocess
+- Security/Contract Test / Publish / DRAFT MCP Server creation
 - Connection Test / Discovery / activation
 - version/archive/restore
 - frontend real API wiring
-- aspirational `/factory/projects` and `/factory/builds` routes (not implemented by this slice)
+- aspirational `/factory/projects` routes and build tests/publish/rollback
 
 ## FNC-FAC-002. 생성
 
 선택 operation을 Tool로 생성하고 credential은 Secret reference placeholder로만 표현한다.
+(현재 slice의 Build foundation은 Candidate snapshot 고정만 수행하며 code generation은 후속.)
 
 ## FNC-FAC-003. Sandbox Build/Test
 

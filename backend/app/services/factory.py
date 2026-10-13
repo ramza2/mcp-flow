@@ -21,6 +21,7 @@ from app.core.errors import AppError
 from app.domain.enums import JobStatus, UserStatus
 from app.factory import (
     ARTIFACT_TYPE_OPENAPI_ANALYSIS,
+    FACTORY_BUILD_GENERATOR_VERSION,
     JOB_TYPE_OPENAPI_ANALYZE,
     OPENAPI_ANALYZER_VERSION,
     PHASE_ANALYZE,
@@ -35,13 +36,15 @@ from app.infrastructure.object_storage import (
     ObjectStorageError,
     get_object_storage,
 )
-from app.models.factory import ToolFactoryArtifact, ToolFactoryJob
+from app.models.factory import ToolFactoryArtifact, ToolFactoryCandidate, ToolFactoryJob
 from app.repositories.factory import FactoryRepository
 from app.repositories.idempotency import IdempotencyRepository
 from app.repositories.outbox import OutboxRepository
 from app.repositories.user import UserRepository
 from app.schemas.factory import (
     FactoryArtifactSummary,
+    FactoryBuildListResponse,
+    FactoryBuildResponse,
     FactoryCandidateListResponse,
     FactoryCandidateMaterializeResponse,
     FactoryCandidateResponse,
@@ -56,6 +59,8 @@ _MCP_SERVER_MANAGE = "mcp.server.manage"
 
 _OPERATION_SCOPE = "FACTORY_OPENAPI_ANALYZE_V1"
 _RESOURCE_TYPE = "TOOL_FACTORY_JOB"
+_BUILD_OPERATION_SCOPE = "FACTORY_BUILD_CREATE_V1"
+_BUILD_RESOURCE_TYPE = "TOOL_FACTORY_BUILD"
 _IDEMPOTENCY_KEY_MAX_LEN = 128
 _IDEMPOTENCY_PK_NAME = "pk_api_idempotency_records"
 
@@ -69,6 +74,93 @@ class FactoryJobCreateOutcome:
     result: FactoryJobResponse
     http_status: int
     replayed: bool
+
+
+@dataclass(frozen=True, slots=True)
+class FactoryBuildCreateOutcome:
+    result: FactoryBuildResponse
+    http_status: int
+    replayed: bool
+
+
+def _normalize_idempotency_key(idempotency_key: str) -> str:
+    key = idempotency_key.strip()
+    if not key:
+        raise AppError(
+            code="VALIDATION_ERROR",
+            message="Idempotency-Key must be a non-empty string.",
+            status_code=status.HTTP_400_BAD_REQUEST,
+        )
+    if len(key) > _IDEMPOTENCY_KEY_MAX_LEN:
+        raise AppError(
+            code="VALIDATION_ERROR",
+            message=(
+                f"Idempotency-Key must be at most "
+                f"{_IDEMPOTENCY_KEY_MAX_LEN} characters."
+            ),
+            status_code=status.HTTP_400_BAD_REQUEST,
+        )
+    return key
+
+
+def _candidate_contract_snapshot(candidate: ToolFactoryCandidate) -> dict[str, Any]:
+    """Immutable sanitized candidate contract for Build snapshot hashing."""
+
+    tags = candidate.tags if isinstance(candidate.tags, list) else []
+    parameters = candidate.parameters if isinstance(candidate.parameters, list) else []
+    return {
+        "candidate_id": str(candidate.id),
+        "job_id": str(candidate.job_id),
+        "analysis_artifact_id": str(candidate.analysis_artifact_id),
+        "source_sha256": candidate.source_sha256,
+        "analyzer_version": candidate.analyzer_version,
+        "operation_key": candidate.operation_key,
+        "method": candidate.method,
+        "path": candidate.path,
+        "operation_id": candidate.operation_id,
+        "summary": candidate.summary,
+        "description": candidate.description,
+        "tags": [str(t) for t in tags],
+        "deprecated": bool(candidate.deprecated),
+        "parameters": parameters,
+        "request_schema": candidate.request_schema,
+        "response_schema": candidate.response_schema,
+    }
+
+
+def _build_request_hash(
+    *,
+    job_id: uuid.UUID,
+    candidate_ids: list[uuid.UUID],
+) -> str:
+    return compute_canonical_json_hash(
+        {
+            "job_id": str(job_id),
+            "candidate_ids": [str(cid) for cid in candidate_ids],
+        }
+    )
+
+
+def _build_input_hash_payload(
+    *,
+    job_id: uuid.UUID,
+    analysis_artifact_id: uuid.UUID,
+    source_sha256: str,
+    analyzer_version: str,
+    generator_version: str,
+    candidate_ids: list[str],
+    candidates_snapshot_hash: str,
+) -> dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "job_id": str(job_id),
+        "analysis_artifact_id": str(analysis_artifact_id),
+        "source_sha256": source_sha256,
+        "analyzer_version": analyzer_version,
+        "generator_version": generator_version,
+        "candidate_ids": list(candidate_ids),
+        "candidates_snapshot_hash": candidates_snapshot_hash,
+    }
 
 
 def _utc_now() -> datetime:
@@ -256,22 +348,7 @@ class FactoryService:
     ) -> FactoryJobCreateOutcome:
         await self._assert_manage(actor_user_id)
 
-        key = idempotency_key.strip()
-        if not key:
-            raise AppError(
-                code="VALIDATION_ERROR",
-                message="Idempotency-Key must be a non-empty string.",
-                status_code=status.HTTP_400_BAD_REQUEST,
-            )
-        if len(key) > _IDEMPOTENCY_KEY_MAX_LEN:
-            raise AppError(
-                code="VALIDATION_ERROR",
-                message=(
-                    f"Idempotency-Key must be at most "
-                    f"{_IDEMPOTENCY_KEY_MAX_LEN} characters."
-                ),
-                status_code=status.HTTP_400_BAD_REQUEST,
-            )
+        key = _normalize_idempotency_key(idempotency_key)
 
         # Input ingestion failures must not consume the idempotency key.
         source_name = normalize_source_name(filename)
@@ -728,3 +805,302 @@ class FactoryService:
                 status_code=status.HTTP_404_NOT_FOUND,
             )
         return self._candidate_to_response(row)
+
+    def _build_to_response(self, build: Any) -> FactoryBuildResponse:
+        raw_ids = build.candidate_ids if isinstance(build.candidate_ids, list) else []
+        return FactoryBuildResponse(
+            id=build.id,
+            job_id=build.job_id,
+            analysis_artifact_id=build.analysis_artifact_id,
+            source_sha256=build.source_sha256,
+            analyzer_version=build.analyzer_version,
+            generator_version=build.generator_version,
+            candidate_ids=[uuid.UUID(str(cid)) for cid in raw_ids],
+            candidate_count=int(build.candidate_count),
+            candidates_snapshot=build.candidates_snapshot or [],
+            candidates_snapshot_hash=build.candidates_snapshot_hash,
+            build_input_hash=build.build_input_hash,
+            requested_by=build.requested_by,
+            created_at=build.created_at,
+        )
+
+    async def _replay_or_conflict_build(
+        self,
+        record: Any,
+        request_hash: str,
+    ) -> FactoryBuildCreateOutcome:
+        if record.request_hash != request_hash:
+            raise AppError(
+                code="IDEMPOTENCY_KEY_REUSED",
+                message="Idempotency-Key가 다른 요청에 재사용되었습니다.",
+                status_code=status.HTTP_409_CONFLICT,
+            )
+        if record.status != "COMPLETED":
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message="Idempotency record가 COMPLETED가 아닙니다.",
+                status_code=status.HTTP_409_CONFLICT,
+            )
+        if (
+            record.resource_type != _BUILD_RESOURCE_TYPE
+            or record.resource_id is None
+        ):
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message="Idempotency resource metadata가 손상되었습니다.",
+                status_code=status.HTTP_409_CONFLICT,
+            )
+        build = await self._repo.get_build(record.resource_id)
+        if build is None:
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message="Idempotency가 가리키는 Factory Build가 없습니다.",
+                status_code=status.HTTP_409_CONFLICT,
+            )
+        if (
+            record.response_status != status.HTTP_201_CREATED
+            or record.response_body is None
+        ):
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message="Idempotency response snapshot이 손상되었습니다.",
+                status_code=status.HTTP_409_CONFLICT,
+            )
+        try:
+            result = FactoryBuildResponse.model_validate(record.response_body)
+        except ValidationError as exc:
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message="Idempotency response snapshot이 유효하지 않습니다.",
+                status_code=status.HTTP_409_CONFLICT,
+            ) from exc
+        if result.id != record.resource_id:
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message="Idempotency response snapshot이 손상되었습니다.",
+                status_code=status.HTTP_409_CONFLICT,
+            )
+        return FactoryBuildCreateOutcome(
+            result=result,
+            http_status=status.HTTP_201_CREATED,
+            replayed=True,
+        )
+
+    async def create_build(
+        self,
+        *,
+        actor_user_id: uuid.UUID,
+        job_id: uuid.UUID,
+        candidate_ids: list[uuid.UUID],
+        idempotency_key: str,
+    ) -> FactoryBuildCreateOutcome:
+        """Create a durable Build from an explicit Candidate subset.
+
+        Validates lineage against the SUCCEEDED Job / OPENAPI_ANALYSIS artifact,
+        snapshots candidate contracts immutably, and commits with Idempotency-Key.
+        """
+        await self._assert_manage(actor_user_id)
+        key = _normalize_idempotency_key(idempotency_key)
+
+        # Fail-closed selection validation before consuming the idempotency key.
+        if not candidate_ids:
+            raise AppError(
+                code="VALIDATION_ERROR",
+                message="Build requires a non-empty candidate_ids selection.",
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            )
+        if len(candidate_ids) != len(set(candidate_ids)):
+            raise AppError(
+                code="VALIDATION_ERROR",
+                message="Build candidate_ids must not contain duplicates.",
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            )
+
+        # Deterministic order for hashing / persistence (stable UUID sort).
+        ordered_ids = sorted(candidate_ids, key=lambda cid: cid.hex)
+        req_hash = _build_request_hash(job_id=job_id, candidate_ids=ordered_ids)
+        principal_key = str(actor_user_id)
+
+        existing = await self._idempotency.get(
+            principal_key=principal_key,
+            operation_scope=_BUILD_OPERATION_SCOPE,
+            idempotency_key=key,
+        )
+        if existing is not None:
+            return await self._replay_or_conflict_build(existing, req_hash)
+
+        job = await self._repo.get_job(job_id)
+        if job is None:
+            raise AppError(
+                code="NOT_FOUND",
+                message="Factory Job을 찾을 수 없습니다.",
+                status_code=status.HTTP_404_NOT_FOUND,
+            )
+        if job.status != JobStatus.SUCCEEDED.value:
+            raise AppError(
+                code="VALIDATION_ERROR",
+                message=(
+                    "Builds can only be created from a SUCCEEDED "
+                    "OPENAPI_ANALYZE Job."
+                ),
+                status_code=status.HTTP_409_CONFLICT,
+            )
+        artifact = await self._repo.get_analysis_artifact(
+            job.id,
+            artifact_type=ARTIFACT_TYPE_OPENAPI_ANALYSIS,
+        )
+        if artifact is None or artifact.inline_payload is None:
+            raise AppError(
+                code="NOT_FOUND",
+                message="OPENAPI_ANALYSIS artifact를 찾을 수 없습니다.",
+                status_code=status.HTTP_404_NOT_FOUND,
+            )
+
+        rows = await self._repo.get_candidates_by_ids(ordered_ids)
+        by_id = {row.id: row for row in rows}
+        missing = [cid for cid in ordered_ids if cid not in by_id]
+        if missing:
+            raise AppError(
+                code="NOT_FOUND",
+                message="One or more Candidate Tools were not found.",
+                status_code=status.HTTP_404_NOT_FOUND,
+            )
+
+        for cid in ordered_ids:
+            row = by_id[cid]
+            if (
+                row.job_id != job.id
+                or row.analysis_artifact_id != artifact.id
+                or row.source_sha256 != job.source_sha256
+                or row.analyzer_version != job.analyzer_version
+            ):
+                raise AppError(
+                    code="VALIDATION_ERROR",
+                    message=(
+                        "All selected Candidate Tools must belong to the same "
+                        "SUCCEEDED Job/analysis lineage."
+                    ),
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                )
+
+        # Snapshot sorted by operation_key then candidate_id for determinism.
+        snapshot_rows = sorted(
+            (by_id[cid] for cid in ordered_ids),
+            key=lambda c: (c.operation_key, c.id.hex),
+        )
+        candidates_snapshot = [
+            _candidate_contract_snapshot(row) for row in snapshot_rows
+        ]
+        candidates_snapshot_hash = compute_canonical_json_hash(candidates_snapshot)
+        candidate_id_strs = [str(cid) for cid in ordered_ids]
+        build_input_hash = compute_canonical_json_hash(
+            _build_input_hash_payload(
+                job_id=job.id,
+                analysis_artifact_id=artifact.id,
+                source_sha256=job.source_sha256,
+                analyzer_version=job.analyzer_version,
+                generator_version=FACTORY_BUILD_GENERATOR_VERSION,
+                candidate_ids=candidate_id_strs,
+                candidates_snapshot_hash=candidates_snapshot_hash,
+            )
+        )
+
+        build_id = uuid.uuid4()
+        now = _utc_now()
+        try:
+            build = await self._repo.create_build(
+                build_id=build_id,
+                job_id=job.id,
+                analysis_artifact_id=artifact.id,
+                source_sha256=job.source_sha256,
+                analyzer_version=job.analyzer_version,
+                generator_version=FACTORY_BUILD_GENERATOR_VERSION,
+                candidate_ids=candidate_id_strs,
+                candidate_count=len(candidate_id_strs),
+                candidates_snapshot=candidates_snapshot,
+                candidates_snapshot_hash=candidates_snapshot_hash,
+                build_input_hash=build_input_hash,
+                requested_by=actor_user_id,
+            )
+            response = self._build_to_response(build)
+            await self._idempotency.create_completed(
+                principal_key=principal_key,
+                operation_scope=_BUILD_OPERATION_SCOPE,
+                idempotency_key=key,
+                request_hash=req_hash,
+                response_status=status.HTTP_201_CREATED,
+                response_body=response.model_dump(mode="json"),
+                resource_type=_BUILD_RESOURCE_TYPE,
+                resource_id=build.id,
+                completed_at=now,
+            )
+            await self._session.commit()
+        except IntegrityError as exc:
+            await self._session.rollback()
+            if not _is_idempotency_pk_violation(exc):
+                raise
+            raced = await self._idempotency.get(
+                principal_key=principal_key,
+                operation_scope=_BUILD_OPERATION_SCOPE,
+                idempotency_key=key,
+            )
+            if raced is None:
+                raise AppError(
+                    code="RESOURCE_CONFLICT",
+                    message="Factory Build 생성 중 충돌이 발생했습니다.",
+                    status_code=status.HTTP_409_CONFLICT,
+                ) from exc
+            return await self._replay_or_conflict_build(raced, req_hash)
+
+        return FactoryBuildCreateOutcome(
+            result=response,
+            http_status=status.HTTP_201_CREATED,
+            replayed=False,
+        )
+
+    async def get_build(
+        self,
+        actor_user_id: uuid.UUID,
+        build_id: uuid.UUID,
+    ) -> FactoryBuildResponse:
+        await self._assert_read(actor_user_id)
+        build = await self._repo.get_build(build_id)
+        if build is None:
+            raise AppError(
+                code="NOT_FOUND",
+                message="Factory Build를 찾을 수 없습니다.",
+                status_code=status.HTTP_404_NOT_FOUND,
+            )
+        return self._build_to_response(build)
+
+    async def list_builds_for_job(
+        self,
+        actor_user_id: uuid.UUID,
+        job_id: uuid.UUID,
+        *,
+        page: int = 1,
+        page_size: int = 20,
+        sort: str = "-created_at",
+    ) -> FactoryBuildListResponse:
+        await self._assert_read(actor_user_id)
+        job = await self._repo.get_job(job_id)
+        if job is None:
+            raise AppError(
+                code="NOT_FOUND",
+                message="Factory Job을 찾을 수 없습니다.",
+                status_code=status.HTTP_404_NOT_FOUND,
+            )
+        rows, total = await self._repo.list_builds_for_job(
+            job.id,
+            page=page,
+            page_size=page_size,
+            sort=sort,
+        )
+        return FactoryBuildListResponse(
+            items=[self._build_to_response(row) for row in rows],
+            page=page,
+            page_size=page_size,
+            total=total,
+            has_next=(page * page_size) < total,
+            job_id=job.id,
+        )

@@ -283,6 +283,83 @@ class ToolFactoryCandidate(Base):
     )
 
 
+class ToolFactoryBuild(Base):
+    """Factory-local Build: immutable snapshot of selected Candidate Tools.
+
+    Not an MCPTool / MCPServer. No generation/sandbox execution in this slice.
+    No new product-wide status enum — durable create evidence only.
+    """
+
+    __tablename__ = "tool_factory_builds"
+    __table_args__ = (
+        CheckConstraint(
+            "length(source_sha256) = 64",
+            name="ck_tool_factory_builds_source_sha256_len",
+        ),
+        CheckConstraint(
+            "length(trim(analyzer_version)) > 0",
+            name="ck_tool_factory_builds_analyzer_version_ne",
+        ),
+        CheckConstraint(
+            "length(trim(generator_version)) > 0",
+            name="ck_tool_factory_builds_generator_version_ne",
+        ),
+        CheckConstraint(
+            "length(candidates_snapshot_hash) = 64",
+            name="ck_tool_factory_builds_candidates_snapshot_hash_len",
+        ),
+        CheckConstraint(
+            "length(build_input_hash) = 64",
+            name="ck_tool_factory_builds_build_input_hash_len",
+        ),
+        CheckConstraint(
+            "candidate_count >= 1",
+            name="ck_tool_factory_builds_candidate_count",
+        ),
+        Index("ix_tool_factory_builds_job_id", "job_id"),
+        Index(
+            "ix_tool_factory_builds_analysis_artifact_id",
+            "analysis_artifact_id",
+        ),
+        Index("ix_tool_factory_builds_requested_by_created_at", "requested_by", "created_at"),
+        Index("ix_tool_factory_builds_created_at", "created_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    job_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("tool_factory_jobs.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    analysis_artifact_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("tool_factory_artifacts.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    source_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    analyzer_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    generator_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    candidate_ids: Mapped[list[Any]] = mapped_column(
+        JSONB(none_as_null=True), nullable=False
+    )
+    candidate_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    candidates_snapshot: Mapped[list[Any]] = mapped_column(
+        JSONB(none_as_null=True), nullable=False
+    )
+    candidates_snapshot_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    build_input_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    requested_by: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
 class ToolFactoryTestResult(Base):
     """Forward-compatible evidence table — unused by OpenAPI analysis in this slice."""
 

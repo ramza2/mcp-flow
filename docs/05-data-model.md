@@ -1962,12 +1962,13 @@ Import rules:
 tool_factory_jobs
 tool_factory_artifacts
 tool_factory_candidates
+tool_factory_builds
 tool_factory_test_results
 ```
 
 생성 artifact hash, generator version, sandbox policy, 시험 결과를 보존한다. 운영 활성화는 관리자 승인 후 별도 MCP Server 등록 흐름을 사용한다.
 
-**Implemented durable foundation (migrations `20261008_0028`, `20261013_0029`, `20261013_0030`):**
+**Implemented durable foundation (migrations `20261008_0028`, `20261013_0029`, `20261013_0030`, `20261013_0031`):**
 
 - `tool_factory_jobs` — OpenAPI analysis Jobs; canonical `JobStatus` CHECK;
   **no** raw source/body column; stores `source_sha256`, Object Storage
@@ -1983,6 +1984,13 @@ tool_factory_test_results
   `job_id` / `analysis_artifact_id` / `source_sha256` / `analyzer_version`;
   sanitized operation fields only (method/path/parameters/schemas/tags);
   **no** FK to `mcp_tools` / `mcp_servers`; **no** new product-wide status enum
+- `tool_factory_builds` — durable Build foundation; lineage
+  `job_id` / `analysis_artifact_id` / `source_sha256` / `analyzer_version`;
+  `generator_version` placeholder (`factory-build-foundation-v1`);
+  sorted `candidate_ids` + immutable `candidates_snapshot` JSONB;
+  `candidates_snapshot_hash` + `build_input_hash` (canonical JSON SHA-256);
+  `candidate_count >= 1`; **no** new product-wide Build status enum;
+  **no** FK to `mcp_tools` / `mcp_servers`
 - `tool_factory_test_results` — forward-compatible evidence table (unused by
   the analysis flow in this slice)
 

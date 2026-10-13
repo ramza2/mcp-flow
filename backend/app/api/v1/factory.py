@@ -1,4 +1,4 @@
-"""Tool Factory Job + Candidate Tool API (docs/06)."""
+"""Tool Factory Job + Candidate Tool + Build API (docs/06)."""
 
 from __future__ import annotations
 
@@ -10,6 +10,9 @@ from fastapi import APIRouter, File, Header, Query, Response, UploadFile, status
 from app.api.dependencies import CurrentPrincipalDep, DbSessionDep
 from app.factory.openapi_analyzer import MAX_SOURCE_BYTES
 from app.schemas.factory import (
+    FactoryBuildCreateRequest,
+    FactoryBuildListResponse,
+    FactoryBuildResponse,
     FactoryCandidateListResponse,
     FactoryCandidateMaterializeResponse,
     FactoryCandidateResponse,
@@ -131,3 +134,59 @@ async def get_factory_candidate(
     principal: CurrentPrincipalDep,
 ) -> FactoryCandidateResponse:
     return await _service(session).get_candidate(principal.user_id, candidate_id)
+
+
+@router.post(
+    "/jobs/{job_id}/builds",
+    response_model=FactoryBuildResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_factory_build(
+    job_id: uuid.UUID,
+    body: FactoryBuildCreateRequest,
+    response: Response,
+    session: DbSessionDep,
+    principal: CurrentPrincipalDep,
+    idempotency_key: Annotated[str, Header(alias="Idempotency-Key")],
+) -> FactoryBuildResponse:
+    outcome = await _service(session).create_build(
+        actor_user_id=principal.user_id,
+        job_id=job_id,
+        candidate_ids=body.candidate_ids,
+        idempotency_key=idempotency_key,
+    )
+    response.status_code = outcome.http_status
+    return outcome.result
+
+
+@router.get(
+    "/jobs/{job_id}/builds",
+    response_model=FactoryBuildListResponse,
+)
+async def list_factory_job_builds(
+    job_id: uuid.UUID,
+    session: DbSessionDep,
+    principal: CurrentPrincipalDep,
+    page: Annotated[int, Query(ge=1)] = 1,
+    page_size: Annotated[int, Query(ge=1, le=100)] = 20,
+    sort: Annotated[str, Query()] = "-created_at",
+) -> FactoryBuildListResponse:
+    return await _service(session).list_builds_for_job(
+        principal.user_id,
+        job_id,
+        page=page,
+        page_size=page_size,
+        sort=sort,
+    )
+
+
+@router.get(
+    "/builds/{build_id}",
+    response_model=FactoryBuildResponse,
+)
+async def get_factory_build(
+    build_id: uuid.UUID,
+    session: DbSessionDep,
+    principal: CurrentPrincipalDep,
+) -> FactoryBuildResponse:
+    return await _service(session).get_build(principal.user_id, build_id)
