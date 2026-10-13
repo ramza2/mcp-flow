@@ -34,7 +34,6 @@ from app.models.mcp import MCPServer, MCPTool
 from app.models.outbox import OutboxEvent
 from app.repositories.factory import FactoryRepository
 from app.repositories.role import PermissionRepository
-from sqlalchemy.exc import DataError
 from app.schemas.auth import (
     RoleCreate,
     RolePermissionReplaceRequest,
@@ -46,6 +45,7 @@ from app.services.factory_worker import FactoryWorkerService
 from app.services.role import RoleService
 from app.services.user import UserService
 from sqlalchemy import func, select
+from sqlalchemy.exc import DataError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 MINIMAL_JSON = json.dumps(

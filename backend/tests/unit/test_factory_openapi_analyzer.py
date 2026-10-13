@@ -22,8 +22,8 @@ from app.factory.errors import (
     FactoryAnalysisError,
 )
 from app.factory.openapi_analyzer import (
-    MAX_OPERATIONS,
     MAX_OPERATION_KEY_LEN,
+    MAX_OPERATIONS,
     MAX_PATH_LEN,
     MAX_PATHS,
     MAX_REF_DEPTH,
