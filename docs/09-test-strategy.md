@@ -1497,10 +1497,12 @@ boundary (no network, no filesystem, no migration/API):
   hash, permissions, idempotency replay/conflict, orphan object prevention,
   oversize fail-closed, no raw source persistence; Candidate Tool
   materialization from `OPENAPI_ANALYSIS` + replay idempotency on
-  `(job_id, operation_key)`
+  `(job_id, operation_key)`; GET list does not write; explicit materialize
+  commits durable rows for pre-existing SUCCEEDED analyses; analyzer path
+  length bound matches Candidate columns
 - `backend/tests/api/test_factory.py` — auth/CSRF, multipart JSON/YAML enqueue,
   empty/oversize/extension, list/detail after worker, 404, idempotency;
-  candidate list/detail read API; no raw source/secret exposure
+  candidate list/detail read API; materialize POST; no raw source/secret exposure
 - `backend/tests/integration/test_factory_migration.py` — Alembic 0028↔0030,
   JobStatus CHECK, source object metadata columns, unique analysis artifact,
   unique `(job_id, operation_key)` candidates, test_result evidence FK,

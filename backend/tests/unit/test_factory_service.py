@@ -16,11 +16,12 @@ from app.factory import (
     OPENAPI_ANALYZER_VERSION,
 )
 from app.factory.errors import (
+    FACTORY_ANALYSIS_LIMIT_EXCEEDED,
     FACTORY_SOURCE_OBJECT_CORRUPT,
     FACTORY_SOURCE_OBJECT_MISSING,
     FACTORY_SOURCE_PARSE_ERROR,
 )
-from app.factory.openapi_analyzer import MAX_SOURCE_BYTES
+from app.factory.openapi_analyzer import MAX_PATH_LEN, MAX_SOURCE_BYTES
 from app.infrastructure.object_storage import InMemoryObjectStorage
 from app.models.factory import (
     ToolFactoryArtifact,
@@ -694,17 +695,103 @@ async def test_candidate_materialize_replay_idempotent(
     ).scalar_one()
     assert int(count) == 3
 
-    # List path also re-materializes safely.
-    listed = await svc.list_candidates_for_job(user_id, outcome.result.id)
-    assert listed.total == 3
-    count2 = (
+    # Explicit materialize endpoint is also idempotent.
+    replay = await svc.materialize_candidates_for_job(user_id, outcome.result.id)
+    assert replay.created_count == 0
+    assert replay.total_count == 3
+
+
+@pytest.mark.asyncio
+async def test_candidate_list_is_readonly_materialize_is_durable(
+    db_session: AsyncSession,
+) -> None:
+    """GET must not write; POST materialize commits durable candidates."""
+    user_id = await _seed_user_with_perms(
+        db_session, codes=["mcp.server.manage", "mcp.server.read"]
+    )
+    svc, store = _svc(db_session)
+    outcome = await svc.create_openapi_analyze_job(
+        actor_user_id=user_id,
+        source_bytes=MULTI_OP_JSON,
+        filename="pets.json",
+        idempotency_key=f"k-{uuid.uuid4().hex}",
+    )
+    await _run_worker(db_session, job_id=outcome.result.id, storage=store)
+
+    # Simulate a historical SUCCEEDED analysis without candidate rows.
+    for row in (
+        await db_session.execute(
+            select(ToolFactoryCandidate).where(
+                ToolFactoryCandidate.job_id == outcome.result.id
+            )
+        )
+    ).scalars().all():
+        await db_session.delete(row)
+    await db_session.commit()
+
+    empty = await svc.list_candidates_for_job(user_id, outcome.result.id)
+    assert empty.total == 0
+    # GET path must not have left uncommitted inserts.
+    await db_session.commit()
+    still_empty = (
         await db_session.execute(
             select(func.count()).where(
                 ToolFactoryCandidate.job_id == outcome.result.id
             )
         )
     ).scalar_one()
-    assert int(count2) == 3
+    assert int(still_empty) == 0
+
+    materialized = await svc.materialize_candidates_for_job(
+        user_id, outcome.result.id
+    )
+    assert materialized.created_count == 3
+    assert materialized.total_count == 3
+
+    listed = await svc.list_candidates_for_job(user_id, outcome.result.id)
+    assert listed.total == 3
+
+
+@pytest.mark.asyncio
+async def test_worker_rejects_oversized_path_before_candidate_persist(
+    db_session: AsyncSession,
+) -> None:
+    """Analyzer-invalid long path fails the Job; does not leave RUNNING."""
+    user_id = await _seed_user_with_perms(db_session, codes=["mcp.server.manage"])
+    long_path = "/" + ("z" * MAX_PATH_LEN)
+    assert len(long_path) == MAX_PATH_LEN + 1
+    source = json.dumps(
+        {
+            "openapi": "3.0.3",
+            "info": {"title": "Long", "version": "1"},
+            "paths": {
+                long_path: {
+                    "get": {"responses": {"200": {"description": "ok"}}},
+                }
+            },
+        },
+        separators=(",", ":"),
+    ).encode("utf-8")
+    svc, store = _svc(db_session)
+    outcome = await svc.create_openapi_analyze_job(
+        actor_user_id=user_id,
+        source_bytes=source,
+        filename="long.json",
+        idempotency_key=f"k-{uuid.uuid4().hex}",
+    )
+    await _run_worker(db_session, job_id=outcome.result.id, storage=store)
+    job_row = await db_session.get(ToolFactoryJob, outcome.result.id)
+    assert job_row is not None
+    assert job_row.status == JobStatus.FAILED.value
+    assert job_row.error_code == FACTORY_ANALYSIS_LIMIT_EXCEEDED
+    cand_count = (
+        await db_session.execute(
+            select(func.count()).where(
+                ToolFactoryCandidate.job_id == outcome.result.id
+            )
+        )
+    ).scalar_one()
+    assert int(cand_count) == 0
 
 
 @pytest.mark.asyncio

@@ -438,6 +438,67 @@ async def test_candidate_list_and_detail(
 
 
 @pytest.mark.asyncio
+async def test_candidate_materialize_post_is_durable(
+    factory_client: AsyncClient,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from app.models.factory import ToolFactoryCandidate
+    from sqlalchemy import delete, func, select
+
+    created = await factory_client.post(
+        f"{API}/jobs",
+        files={"source": ("pets.json", MULTI_OP_JSON, "application/json")},
+        headers={"Idempotency-Key": f"k-mat-{uuid.uuid4().hex}"},
+    )
+    assert created.status_code == 201
+    job_id = created.json()["id"]
+    await _process_job(db_session_factory, uuid.UUID(job_id))
+
+    async with db_session_factory() as session:
+        await session.execute(
+            delete(ToolFactoryCandidate).where(
+                ToolFactoryCandidate.job_id == uuid.UUID(job_id)
+            )
+        )
+        await session.commit()
+
+    empty = await factory_client.get(f"{API}/jobs/{job_id}/candidates")
+    assert empty.status_code == 200
+    assert empty.json()["total"] == 0
+
+    async with db_session_factory() as session:
+        count_after_get = (
+            await session.execute(
+                select(func.count()).where(
+                    ToolFactoryCandidate.job_id == uuid.UUID(job_id)
+                )
+            )
+        ).scalar_one()
+        assert int(count_after_get) == 0
+
+    materialized = await factory_client.post(
+        f"{API}/jobs/{job_id}/candidates/materialize"
+    )
+    assert materialized.status_code == 200, materialized.text
+    body = materialized.json()
+    assert body["created_count"] == 2
+    assert body["total_count"] == 2
+
+    async with db_session_factory() as session:
+        durable = (
+            await session.execute(
+                select(func.count()).where(
+                    ToolFactoryCandidate.job_id == uuid.UUID(job_id)
+                )
+            )
+        ).scalar_one()
+        assert int(durable) == 2
+
+    listed = await factory_client.get(f"{API}/jobs/{job_id}/candidates")
+    assert listed.json()["total"] == 2
+
+
+@pytest.mark.asyncio
 async def test_candidate_list_requires_read(
     factory_client: AsyncClient,
     unauthenticated_db_client: AsyncClient,

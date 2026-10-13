@@ -11,6 +11,7 @@ from app.api.dependencies import CurrentPrincipalDep, DbSessionDep
 from app.factory.openapi_analyzer import MAX_SOURCE_BYTES
 from app.schemas.factory import (
     FactoryCandidateListResponse,
+    FactoryCandidateMaterializeResponse,
     FactoryCandidateResponse,
     FactoryJobDetailResponse,
     FactoryJobListResponse,
@@ -101,6 +102,22 @@ async def list_factory_job_candidates(
         page_size=page_size,
         q=q,
         sort=sort,
+    )
+
+
+@router.post(
+    "/jobs/{job_id}/candidates/materialize",
+    response_model=FactoryCandidateMaterializeResponse,
+)
+async def materialize_factory_job_candidates(
+    job_id: uuid.UUID,
+    session: DbSessionDep,
+    principal: CurrentPrincipalDep,
+) -> FactoryCandidateMaterializeResponse:
+    """Durable Candidate Tool materialization (manage). GET list never writes."""
+    return await _service(session).materialize_candidates_for_job(
+        principal.user_id,
+        job_id,
     )
 
 

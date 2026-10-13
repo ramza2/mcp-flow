@@ -43,6 +43,7 @@ from app.repositories.user import UserRepository
 from app.schemas.factory import (
     FactoryArtifactSummary,
     FactoryCandidateListResponse,
+    FactoryCandidateMaterializeResponse,
     FactoryCandidateResponse,
     FactoryJobDetailResponse,
     FactoryJobListResponse,
@@ -616,24 +617,6 @@ class FactoryService:
                 existing_keys.add(operation.operation_key)
         return created
 
-    async def _ensure_candidates_for_succeeded_job(
-        self, job: ToolFactoryJob
-    ) -> None:
-        if job.status != JobStatus.SUCCEEDED.value:
-            return
-        artifact = await self._repo.get_analysis_artifact(
-            job.id,
-            artifact_type=ARTIFACT_TYPE_OPENAPI_ANALYSIS,
-        )
-        if artifact is None or artifact.inline_payload is None:
-            return
-        analysis = FactoryOpenAPIAnalysis.model_validate(artifact.inline_payload)
-        await self.materialize_candidates_from_analysis(
-            job=job,
-            artifact=artifact,
-            analysis=analysis,
-        )
-
     async def list_candidates_for_job(
         self,
         actor_user_id: uuid.UUID,
@@ -644,6 +627,7 @@ class FactoryService:
         q: str | None = None,
         sort: str = "operation_key",
     ) -> FactoryCandidateListResponse:
+        """Read-only list of already-persisted Candidate Tools (no materialize)."""
         await self._assert_read(actor_user_id)
         job = await self._repo.get_job(job_id)
         if job is None:
@@ -652,7 +636,6 @@ class FactoryService:
                 message="Factory Job을 찾을 수 없습니다.",
                 status_code=status.HTTP_404_NOT_FOUND,
             )
-        await self._ensure_candidates_for_succeeded_job(job)
         rows, total = await self._repo.list_candidates_for_job(
             job.id,
             page=page,
@@ -667,6 +650,57 @@ class FactoryService:
             total=total,
             has_next=(page * page_size) < total,
             job_id=job.id,
+        )
+
+    async def materialize_candidates_for_job(
+        self,
+        actor_user_id: uuid.UUID,
+        job_id: uuid.UUID,
+    ) -> FactoryCandidateMaterializeResponse:
+        """Explicit durable materialization from a SUCCEEDED Job's analysis artifact.
+
+        Commits in this service (same pattern as Job create). GET list/detail
+        never write candidates.
+        """
+        await self._assert_manage(actor_user_id)
+        job = await self._repo.get_job(job_id)
+        if job is None:
+            raise AppError(
+                code="NOT_FOUND",
+                message="Factory Job을 찾을 수 없습니다.",
+                status_code=status.HTTP_404_NOT_FOUND,
+            )
+        if job.status != JobStatus.SUCCEEDED.value:
+            raise AppError(
+                code="VALIDATION_ERROR",
+                message=(
+                    "Candidate Tools can only be materialized from a "
+                    "SUCCEEDED OPENAPI_ANALYZE Job."
+                ),
+                status_code=status.HTTP_409_CONFLICT,
+            )
+        artifact = await self._repo.get_analysis_artifact(
+            job.id,
+            artifact_type=ARTIFACT_TYPE_OPENAPI_ANALYSIS,
+        )
+        if artifact is None or artifact.inline_payload is None:
+            raise AppError(
+                code="NOT_FOUND",
+                message="OPENAPI_ANALYSIS artifact를 찾을 수 없습니다.",
+                status_code=status.HTTP_404_NOT_FOUND,
+            )
+        analysis = FactoryOpenAPIAnalysis.model_validate(artifact.inline_payload)
+        created = await self.materialize_candidates_from_analysis(
+            job=job,
+            artifact=artifact,
+            analysis=analysis,
+        )
+        await self._session.commit()
+        total = await self._repo.count_candidates(job.id)
+        return FactoryCandidateMaterializeResponse(
+            job_id=job.id,
+            created_count=created,
+            total_count=total,
         )
 
     async def get_candidate(

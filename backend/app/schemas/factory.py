@@ -88,3 +88,11 @@ class FactoryCandidateResponse(BaseModel):
 class FactoryCandidateListResponse(Page):
     items: list[FactoryCandidateResponse]
     job_id: uuid.UUID
+
+
+class FactoryCandidateMaterializeResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    job_id: uuid.UUID
+    created_count: int
+    total_count: int

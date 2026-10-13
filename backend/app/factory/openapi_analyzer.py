@@ -45,6 +45,10 @@ MAX_PARAMETERS_PER_OPERATION = 128
 MAX_STRING_LEN = 2000
 MAX_REF_DEPTH = 32
 MAX_SCHEMA_NODES = 5_000
+# Persistable Candidate Tool columns: operation_key VARCHAR(512), path VARCHAR(1024).
+# operation_key = f"{METHOD} {path}"; longest method token is OPTIONS (7) + space.
+MAX_OPERATION_KEY_LEN = 512
+MAX_PATH_LEN = MAX_OPERATION_KEY_LEN - len("OPTIONS ")
 
 _HTTP_METHODS = (
     "get",
@@ -428,6 +432,11 @@ def _parse_operations(
                 FACTORY_OPENAPI_STRUCTURE_INVALID,
                 "OpenAPI path keys must be strings that start with '/'.",
             )
+        if len(path) > MAX_PATH_LEN:
+            raise FactoryAnalysisError(
+                FACTORY_ANALYSIS_LIMIT_EXCEEDED,
+                f"OpenAPI path exceeds maximum length of {MAX_PATH_LEN}.",
+            )
         item = paths[path]
         if item is None:
             continue
@@ -466,6 +475,14 @@ def _parse_operations(
 
             method_upper = method.upper()
             operation_key = f"{method_upper} {path}"
+            if len(operation_key) > MAX_OPERATION_KEY_LEN:
+                raise FactoryAnalysisError(
+                    FACTORY_ANALYSIS_LIMIT_EXCEEDED,
+                    (
+                        "OpenAPI operation_key exceeds maximum length of "
+                        f"{MAX_OPERATION_KEY_LEN}."
+                    ),
+                )
             operation_id = _bound_str(op.get("operationId"), max_len=256)
             tags = _parse_tags(op.get("tags"))
 

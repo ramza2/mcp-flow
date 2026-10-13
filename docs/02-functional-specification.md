@@ -1094,6 +1094,7 @@ POST /api/v1/factory/jobs   (multipart source + Idempotency-Key)
 GET  /api/v1/factory/jobs
 GET  /api/v1/factory/jobs/{job_id}
 GET  /api/v1/factory/jobs/{job_id}/candidates
+POST /api/v1/factory/jobs/{job_id}/candidates/materialize
 GET  /api/v1/factory/candidates/{candidate_id}
 ```
 
@@ -1125,8 +1126,11 @@ artifact only — no raw OpenAPI re-parse on the API path).
 - Payloads are bounded/sanitized operation contracts (parameters, schemas, tags)
 - Candidates are **factory-local review input**; they do **not** create or activate
   `MCPTool` / `MCPServer`
-- Read API: `GET /factory/jobs/{job_id}/candidates`,
-  `GET /factory/candidates/{candidate_id}` (`mcp.server.read`)
+- Durable materialization: factory-worker success path, or explicit
+  `POST /factory/jobs/{job_id}/candidates/materialize` (`mcp.server.manage`, commits)
+- Read API is read-only: `GET /factory/jobs/{job_id}/candidates`,
+  `GET /factory/candidates/{candidate_id}` (`mcp.server.read`) — no lazy writes
+- Analyzer path/`operation_key` length bounds match Candidate persistence columns
 
 Analysis success ≠ Candidate Tool ≠ generated Tool ≠ verified Tool ≠ activated Tool.
 

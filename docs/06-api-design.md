@@ -1332,6 +1332,7 @@ POST /factory/jobs
 GET  /factory/jobs
 GET  /factory/jobs/{job_id}
 GET  /factory/jobs/{job_id}/candidates
+POST /factory/jobs/{job_id}/candidates/materialize
 GET  /factory/candidates/{candidate_id}
 ```
 
@@ -1347,13 +1348,16 @@ GET  /factory/candidates/{candidate_id}
   (create itself remains HTTP 201 with `QUEUED`)
 - Oversize source → `413 FACTORY_SOURCE_TOO_LARGE` (no Job row)
 
-### Candidate Tools (read API)
+### Candidate Tools
 
-- `GET /factory/jobs/{job_id}/candidates` — paged list of durable Candidate Tools
-  for a Job; materializes from the Job's `OPENAPI_ANALYSIS` artifact when the Job
-  is `SUCCEEDED` (idempotent on `(job_id, operation_key)`)
+- `GET /factory/jobs/{job_id}/candidates` — paged **read-only** list of persisted
+  Candidate Tools (does not insert/materialize)
+- `POST /factory/jobs/{job_id}/candidates/materialize` — durable idempotent
+  materialization from the Job's `OPENAPI_ANALYSIS` artifact
+  (`mcp.server.manage`; Job must be `SUCCEEDED`; commits)
 - `GET /factory/candidates/{candidate_id}` — Candidate Tool detail
-- Auth: `mcp.server.read`; ACTIVE user
+- Auth: `mcp.server.read` for GET; `mcp.server.manage` for materialize; ACTIVE user
+- Worker also materializes candidates before marking the analysis Job `SUCCEEDED`
 - Responses expose sanitized operation contracts + lineage
   (`job_id`, `analysis_artifact_id`, `source_sha256`, `analyzer_version`) only
 - Never returns raw OpenAPI source bytes, Object Storage keys, or secrets
