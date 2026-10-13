@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from sqlalchemy.exc import DataError, DBAPIError, StatementError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.canonical_hash import compute_canonical_json_hash
@@ -20,7 +21,9 @@ from app.factory import (
     ARTIFACT_TYPE_OPENAPI_ANALYSIS,
     PHASE_ANALYZE,
 )
+from app.factory.contracts import FactoryOpenAPIAnalysis
 from app.factory.errors import (
+    FACTORY_CANDIDATE_PERSIST_FAILED,
     FACTORY_SOURCE_OBJECT_CORRUPT,
     FACTORY_SOURCE_OBJECT_FETCH_FAILED,
     FACTORY_SOURCE_OBJECT_MISSING,
@@ -34,6 +37,7 @@ from app.infrastructure.object_storage import (
 )
 from app.models.factory import ToolFactoryJob
 from app.repositories.factory import FactoryRepository
+from app.services.factory import FactoryService
 
 logger = logging.getLogger(__name__)
 
@@ -218,10 +222,37 @@ class FactoryWorkerService:
         )
         if existing is not None and existing.inline_payload is not None:
             payload = existing.inline_payload
+            analysis = FactoryOpenAPIAnalysis.model_validate(payload)
+            persist_error = await self._materialize_candidates_or_error(
+                job=current,
+                artifact=existing,
+                analysis=analysis,
+            )
+            if persist_error is not None:
+                finished = _utc_now()
+                await self._repo.finish_job_failed(
+                    current,
+                    error_code=FACTORY_CANDIDATE_PERSIST_FAILED,
+                    error_message=persist_error,
+                    finished_at=finished,
+                    source_format=str(
+                        payload.get("source_format")
+                        or current.source_format
+                        or "JSON"
+                    ),
+                )
+                return FactoryAnalyzeOutcome(
+                    job_id=current.id,
+                    status=JobStatus.FAILED.value,
+                    claimed=True,
+                    reason=FACTORY_CANDIDATE_PERSIST_FAILED,
+                )
             finished = _utc_now()
             await self._repo.finish_job_success(
                 current,
-                source_format=str(payload.get("source_format") or current.source_format or "JSON"),
+                source_format=str(
+                    payload.get("source_format") or current.source_format or "JSON"
+                ),
                 operation_count=len(payload.get("operations") or []),
                 server_count=len(payload.get("servers") or []),
                 finished_at=finished,
@@ -295,7 +326,7 @@ class FactoryWorkerService:
         payload = analysis.model_dump(mode="json")
         encoded = _canonical_json_bytes(payload)
         content_sha256 = compute_canonical_json_hash(payload)
-        await self._repo.create_analysis_artifact(
+        artifact = await self._repo.create_analysis_artifact(
             job_id=current.id,
             artifact_type=ARTIFACT_TYPE_OPENAPI_ANALYSIS,
             content_type=ARTIFACT_CONTENT_TYPE_JSON,
@@ -303,6 +334,26 @@ class FactoryWorkerService:
             size_bytes=len(encoded),
             inline_payload=payload,
         )
+        persist_error = await self._materialize_candidates_or_error(
+            job=current,
+            artifact=artifact,
+            analysis=analysis,
+        )
+        if persist_error is not None:
+            finished = _utc_now()
+            await self._repo.finish_job_failed(
+                current,
+                error_code=FACTORY_CANDIDATE_PERSIST_FAILED,
+                error_message=persist_error,
+                finished_at=finished,
+                source_format=analysis.source_format,
+            )
+            return FactoryAnalyzeOutcome(
+                job_id=current.id,
+                status=JobStatus.FAILED.value,
+                claimed=True,
+                reason=FACTORY_CANDIDATE_PERSIST_FAILED,
+            )
         finished = _utc_now()
         await self._repo.finish_job_success(
             current,
@@ -317,6 +368,35 @@ class FactoryWorkerService:
             claimed=True,
             reason="ANALYZED",
         )
+
+    async def _materialize_candidates_or_error(
+        self,
+        *,
+        job: ToolFactoryJob,
+        artifact: Any,
+        analysis: FactoryOpenAPIAnalysis,
+    ) -> str | None:
+        """Materialize candidates before marking SUCCEEDED.
+
+        Returns a bounded error message on unexpected DB failures so the Job
+        can terminalize as FAILED instead of remaining RUNNING for recovery
+        loops. Materialize itself is all-or-nothing per attempt (outer
+        savepoint), so FAILED commits never retain a partial candidate set.
+        Integrity races are handled inside materialize itself.
+        """
+        try:
+            await FactoryService(self._session).materialize_candidates_from_analysis(
+                job=job,
+                artifact=artifact,
+                analysis=analysis,
+            )
+        except (DataError, StatementError, DBAPIError):
+            logger.exception(
+                "factory candidate persist failed job_id=%s",
+                job.id,
+            )
+            return "Failed to persist Candidate Tools from analysis artifact."
+        return None
 
     async def process_job(
         self,

@@ -202,6 +202,87 @@ class ToolFactoryArtifact(Base):
     )
 
 
+class ToolFactoryCandidate(Base):
+    """Factory-local Candidate Tool derived from an OPENAPI_ANALYSIS artifact.
+
+    Not an MCPTool / MCPServer. Identity is (job_id, operation_key).
+    """
+
+    __tablename__ = "tool_factory_candidates"
+    __table_args__ = (
+        UniqueConstraint(
+            "job_id",
+            "operation_key",
+            name="uq_tool_factory_candidates_job_operation_key",
+        ),
+        CheckConstraint(
+            "length(source_sha256) = 64",
+            name="ck_tool_factory_candidates_source_sha256_len",
+        ),
+        CheckConstraint(
+            "length(trim(analyzer_version)) > 0",
+            name="ck_tool_factory_candidates_analyzer_version_ne",
+        ),
+        CheckConstraint(
+            "length(trim(operation_key)) > 0",
+            name="ck_tool_factory_candidates_operation_key_ne",
+        ),
+        CheckConstraint(
+            "length(trim(method)) > 0",
+            name="ck_tool_factory_candidates_method_ne",
+        ),
+        CheckConstraint(
+            "length(trim(path)) > 0",
+            name="ck_tool_factory_candidates_path_ne",
+        ),
+        Index("ix_tool_factory_candidates_job_id", "job_id"),
+        Index(
+            "ix_tool_factory_candidates_analysis_artifact_id",
+            "analysis_artifact_id",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    job_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("tool_factory_jobs.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    analysis_artifact_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("tool_factory_artifacts.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    source_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    analyzer_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    operation_key: Mapped[str] = mapped_column(String(512), nullable=False)
+    method: Mapped[str] = mapped_column(String(16), nullable=False)
+    path: Mapped[str] = mapped_column(String(1024), nullable=False)
+    operation_id: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    summary: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    description: Mapped[str | None] = mapped_column(String(4000), nullable=True)
+    tags: Mapped[list[Any]] = mapped_column(
+        JSONB(none_as_null=True), nullable=False, default=list
+    )
+    deprecated: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
+    parameters: Mapped[list[Any]] = mapped_column(
+        JSONB(none_as_null=True), nullable=False, default=list
+    )
+    request_schema: Mapped[dict[str, Any] | None] = mapped_column(
+        JSONB(none_as_null=True), nullable=True
+    )
+    response_schema: Mapped[dict[str, Any] | None] = mapped_column(
+        JSONB(none_as_null=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
 class ToolFactoryTestResult(Base):
     """Forward-compatible evidence table — unused by OpenAPI analysis in this slice."""
 

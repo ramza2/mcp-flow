@@ -22,7 +22,9 @@ from app.factory.errors import (
     FactoryAnalysisError,
 )
 from app.factory.openapi_analyzer import (
+    MAX_OPERATION_KEY_LEN,
     MAX_OPERATIONS,
+    MAX_PATH_LEN,
     MAX_PATHS,
     MAX_REF_DEPTH,
     MAX_SOURCE_BYTES,
@@ -461,6 +463,47 @@ def test_ref_depth_limit() -> None:
     with pytest.raises(FactoryAnalysisError) as exc:
         analyze_openapi(_json_bytes(doc))
     assert exc.value.code == FACTORY_ANALYSIS_LIMIT_EXCEEDED
+
+
+def test_path_length_bounded_for_candidate_persistence() -> None:
+    """Analyzer rejects paths that cannot fit Candidate operation_key/path columns."""
+    long_path = "/" + ("a" * MAX_PATH_LEN)
+    with pytest.raises(FactoryAnalysisError) as exc:
+        analyze_openapi(
+            _json_bytes(
+                {
+                    "openapi": "3.0.3",
+                    "info": {"title": "Long", "version": "1"},
+                    "paths": {
+                        long_path: {
+                            "get": {"responses": {"200": {"description": "ok"}}},
+                        }
+                    },
+                }
+            )
+        )
+    assert exc.value.code == FACTORY_ANALYSIS_LIMIT_EXCEEDED
+    assert str(MAX_PATH_LEN) in exc.value.message
+
+    # Boundary: path of MAX_PATH_LEN is accepted and operation_key fits the column.
+    ok_path = "/" + ("b" * (MAX_PATH_LEN - 1))
+    assert len(ok_path) == MAX_PATH_LEN
+    result = analyze_openapi(
+        _json_bytes(
+            {
+                "openapi": "3.0.3",
+                "info": {"title": "Ok", "version": "1"},
+                "paths": {
+                    ok_path: {
+                        "get": {"responses": {"200": {"description": "ok"}}},
+                    }
+                },
+            }
+        )
+    )
+    assert len(result.operations) == 1
+    assert len(result.operations[0].path) == MAX_PATH_LEN
+    assert len(result.operations[0].operation_key) <= MAX_OPERATION_KEY_LEN
 
 
 def test_excessive_paths_bounded() -> None:

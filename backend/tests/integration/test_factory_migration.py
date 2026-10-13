@@ -42,8 +42,8 @@ def test_alembic_factory_downgrade_upgrade(integration_database_url: str) -> Non
     cfg = _cfg(integration_database_url)
     command.upgrade(cfg, "head")
     command.downgrade(cfg, "20261008_0028")
-    command.upgrade(cfg, "20261013_0029")
-    command.downgrade(cfg, "20261008_0028")
+    command.upgrade(cfg, "20261013_0030")
+    command.downgrade(cfg, "20261013_0029")
     command.upgrade(cfg, "head")
 
 
@@ -56,6 +56,7 @@ async def test_factory_schema_constraints(
         for table in (
             "tool_factory_jobs",
             "tool_factory_artifacts",
+            "tool_factory_candidates",
             "tool_factory_test_results",
         ):
             exists = (
@@ -283,6 +284,56 @@ async def test_factory_job_status_and_artifact_unique(
                     "job_id": job_id,
                     "art": uuid.uuid4(),
                     "passed": False,
+                },
+            )
+            await session.flush()
+        await session.rollback()
+
+        # Candidate unique (job_id, operation_key).
+        cand_id = uuid.uuid4()
+        await session.execute(
+            text(
+                """
+                INSERT INTO tool_factory_candidates (
+                  id, job_id, analysis_artifact_id, source_sha256,
+                  analyzer_version, operation_key, method, path,
+                  tags, parameters
+                ) VALUES (
+                  :id, :job_id, :art, :sha, 'openapi-analyzer-v1',
+                  'GET /pets', 'GET', '/pets',
+                  CAST('[]' AS jsonb), CAST('[]' AS jsonb)
+                )
+                """
+            ),
+            {
+                "id": cand_id,
+                "job_id": job_id,
+                "art": art_id,
+                "sha": "a" * 64,
+            },
+        )
+        await session.commit()
+
+        with pytest.raises(IntegrityError):
+            await session.execute(
+                text(
+                    """
+                    INSERT INTO tool_factory_candidates (
+                      id, job_id, analysis_artifact_id, source_sha256,
+                      analyzer_version, operation_key, method, path,
+                      tags, parameters
+                    ) VALUES (
+                      :id, :job_id, :art, :sha, 'openapi-analyzer-v1',
+                      'GET /pets', 'GET', '/pets',
+                      CAST('[]' AS jsonb), CAST('[]' AS jsonb)
+                    )
+                    """
+                ),
+                {
+                    "id": uuid.uuid4(),
+                    "job_id": job_id,
+                    "art": art_id,
+                    "sha": "a" * 64,
                 },
             )
             await session.flush()

@@ -1331,6 +1331,9 @@ import response: { candidate_id, mcp_server_id, created, server_status: DRAFT }
 POST /factory/jobs
 GET  /factory/jobs
 GET  /factory/jobs/{job_id}
+GET  /factory/jobs/{job_id}/candidates
+POST /factory/jobs/{job_id}/candidates/materialize
+GET  /factory/candidates/{candidate_id}
 ```
 
 - `POST` multipart field `source` (`.json` / `.yaml` / `.yml`) + required
@@ -1344,6 +1347,21 @@ GET  /factory/jobs/{job_id}
 - Analyzer / missing-object / corrupt-object failures → durable Job `FAILED`
   (create itself remains HTTP 201 with `QUEUED`)
 - Oversize source → `413 FACTORY_SOURCE_TOO_LARGE` (no Job row)
+
+### Candidate Tools
+
+- `GET /factory/jobs/{job_id}/candidates` — paged **read-only** list of persisted
+  Candidate Tools (does not insert/materialize)
+- `POST /factory/jobs/{job_id}/candidates/materialize` — durable idempotent
+  materialization from the Job's `OPENAPI_ANALYSIS` artifact
+  (`mcp.server.manage`; Job must be `SUCCEEDED`; commits)
+- `GET /factory/candidates/{candidate_id}` — Candidate Tool detail
+- Auth: `mcp.server.read` for GET; `mcp.server.manage` for materialize; ACTIVE user
+- Worker also materializes candidates before marking the analysis Job `SUCCEEDED`
+- Responses expose sanitized operation contracts + lineage
+  (`job_id`, `analysis_artifact_id`, `source_sha256`, `analyzer_version`) only
+- Never returns raw OpenAPI source bytes, Object Storage keys, or secrets
+- Does **not** create/activate `MCPTool` / `MCPServer`
 
 ### Aspirational (not implemented by this slice)
 

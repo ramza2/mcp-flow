@@ -374,3 +374,152 @@ async def test_idempotency_replay_and_conflict(
     )
     assert conflict.status_code == 409
     assert conflict.json()["error"]["code"] == "IDEMPOTENCY_KEY_REUSED"
+
+
+MULTI_OP_JSON = json.dumps(
+    {
+        "openapi": "3.0.3",
+        "info": {"title": "Pets", "version": "1.0.0"},
+        "paths": {
+            "/pets": {
+                "get": {
+                    "operationId": "listPets",
+                    "responses": {"200": {"description": "ok"}},
+                },
+                "post": {
+                    "operationId": "createPet",
+                    "responses": {"201": {"description": "created"}},
+                },
+            }
+        },
+    }
+).encode("utf-8")
+
+
+@pytest.mark.asyncio
+async def test_candidate_list_and_detail(
+    factory_client: AsyncClient,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    created = await factory_client.post(
+        f"{API}/jobs",
+        files={"source": ("pets.json", MULTI_OP_JSON, "application/json")},
+        headers={"Idempotency-Key": f"k-cand-{uuid.uuid4().hex}"},
+    )
+    assert created.status_code == 201
+    job_id = created.json()["id"]
+    await _process_job(db_session_factory, uuid.UUID(job_id))
+
+    listed = await factory_client.get(f"{API}/jobs/{job_id}/candidates")
+    assert listed.status_code == 200, listed.text
+    payload = listed.json()
+    assert payload["job_id"] == job_id
+    assert payload["total"] == 2
+    assert len(payload["items"]) == 2
+    keys = {item["operation_key"] for item in payload["items"]}
+    assert keys == {"GET /pets", "POST /pets"}
+    assert MULTI_OP_JSON.decode() not in listed.text
+    assert "source_object_key" not in listed.text
+
+    cand_id = payload["items"][0]["id"]
+    detail = await factory_client.get(f"{API}/candidates/{cand_id}")
+    assert detail.status_code == 200
+    body = detail.json()
+    assert body["id"] == cand_id
+    assert body["job_id"] == job_id
+    assert body["analysis_artifact_id"]
+    assert body["source_sha256"]
+    assert body["analyzer_version"]
+    assert body["operation_key"] in keys
+    assert MULTI_OP_JSON.decode() not in detail.text
+
+    job_detail = await factory_client.get(f"{API}/jobs/{job_id}")
+    assert job_detail.json()["candidate_count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_candidate_materialize_post_is_durable(
+    factory_client: AsyncClient,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from app.models.factory import ToolFactoryCandidate
+    from sqlalchemy import delete, func, select
+
+    created = await factory_client.post(
+        f"{API}/jobs",
+        files={"source": ("pets.json", MULTI_OP_JSON, "application/json")},
+        headers={"Idempotency-Key": f"k-mat-{uuid.uuid4().hex}"},
+    )
+    assert created.status_code == 201
+    job_id = created.json()["id"]
+    await _process_job(db_session_factory, uuid.UUID(job_id))
+
+    async with db_session_factory() as session:
+        await session.execute(
+            delete(ToolFactoryCandidate).where(
+                ToolFactoryCandidate.job_id == uuid.UUID(job_id)
+            )
+        )
+        await session.commit()
+
+    empty = await factory_client.get(f"{API}/jobs/{job_id}/candidates")
+    assert empty.status_code == 200
+    assert empty.json()["total"] == 0
+
+    async with db_session_factory() as session:
+        count_after_get = (
+            await session.execute(
+                select(func.count()).where(
+                    ToolFactoryCandidate.job_id == uuid.UUID(job_id)
+                )
+            )
+        ).scalar_one()
+        assert int(count_after_get) == 0
+
+    materialized = await factory_client.post(
+        f"{API}/jobs/{job_id}/candidates/materialize"
+    )
+    assert materialized.status_code == 200, materialized.text
+    body = materialized.json()
+    assert body["created_count"] == 2
+    assert body["total_count"] == 2
+
+    async with db_session_factory() as session:
+        durable = (
+            await session.execute(
+                select(func.count()).where(
+                    ToolFactoryCandidate.job_id == uuid.UUID(job_id)
+                )
+            )
+        ).scalar_one()
+        assert int(durable) == 2
+
+    listed = await factory_client.get(f"{API}/jobs/{job_id}/candidates")
+    assert listed.json()["total"] == 2
+
+
+@pytest.mark.asyncio
+async def test_candidate_list_requires_read(
+    factory_client: AsyncClient,
+    unauthenticated_db_client: AsyncClient,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    created = await factory_client.post(
+        f"{API}/jobs",
+        files={"source": ("demo.json", MINIMAL_JSON, "application/json")},
+        headers={"Idempotency-Key": f"k-cand-auth-{uuid.uuid4().hex}"},
+    )
+    job_id = created.json()["id"]
+    await _process_job(db_session_factory, uuid.UUID(job_id))
+
+    missing = await factory_client.get(f"{API}/candidates/{uuid.uuid4()}")
+    assert missing.status_code == 404
+    assert missing.json()["error"]["code"] == "NOT_FOUND"
+
+    no_perm = await _seed_client(
+        unauthenticated_db_client,
+        db_session_factory,
+        codes=[],
+    )
+    denied = await no_perm.get(f"{API}/jobs/{job_id}/candidates")
+    assert denied.status_code == 403

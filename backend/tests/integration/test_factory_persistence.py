@@ -532,3 +532,91 @@ async def test_pg_outbox_publish_failure_then_recovery_one_analysis(
             )
         ).scalar_one()
         assert int(jobs) == 1
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_pg_concurrent_candidate_materialize_no_duplicates(
+    integration_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Two sessions materializing the same SUCCEEDED analysis keep one row/key."""
+    storage = InMemoryObjectStorage()
+    async with integration_session_factory() as session:
+        user_id = await _seed_manage_user(session)
+        outcome = await FactoryService(
+            session, storage=storage
+        ).create_openapi_analyze_job(
+            actor_user_id=user_id,
+            source_bytes=MINIMAL_JSON,
+            filename="cand.json",
+            idempotency_key=f"cand-{uuid.uuid4().hex}",
+        )
+        await session.commit()
+        job_id = outcome.result.id
+
+    async with integration_session_factory() as session:
+        worker = FactoryWorkerService(session, storage=storage, worker_id="pg-cand")
+        result = await worker.process_job(job_id=job_id)
+        await session.commit()
+        assert result.status == JobStatus.SUCCEEDED.value
+
+    # Wipe candidates to simulate a race where both sessions see empty keys.
+    async with integration_session_factory() as session:
+        await session.execute(
+            text("DELETE FROM tool_factory_candidates WHERE job_id = :jid"),
+            {"jid": str(job_id)},
+        )
+        await session.commit()
+
+    barrier = asyncio.Barrier(2)
+
+    async def _materialize() -> int:
+        async with integration_session_factory() as session:
+            from app.factory.contracts import FactoryOpenAPIAnalysis
+            from app.models.factory import ToolFactoryArtifact, ToolFactoryJob
+            from sqlalchemy import select
+
+            job = await session.get(ToolFactoryJob, job_id)
+            assert job is not None
+            artifact = (
+                await session.execute(
+                    select(ToolFactoryArtifact).where(
+                        ToolFactoryArtifact.job_id == job_id
+                    )
+                )
+            ).scalar_one()
+            analysis = FactoryOpenAPIAnalysis.model_validate(artifact.inline_payload)
+            await barrier.wait()
+            created = await FactoryService(
+                session, storage=storage
+            ).materialize_candidates_from_analysis(
+                job=job,
+                artifact=artifact,
+                analysis=analysis,
+            )
+            await session.commit()
+            return created
+
+    created_counts = await asyncio.gather(_materialize(), _materialize())
+    assert sum(created_counts) >= 1
+
+    async with integration_session_factory() as session:
+        count = (
+            await session.execute(
+                text(
+                    "SELECT count(*) FROM tool_factory_candidates WHERE job_id = :jid"
+                ),
+                {"jid": str(job_id)},
+            )
+        ).scalar_one()
+        assert int(count) == 1
+        keys = (
+            await session.execute(
+                text(
+                    "SELECT operation_key FROM tool_factory_candidates "
+                    "WHERE job_id = :jid"
+                ),
+                {"jid": str(job_id)},
+            )
+        ).scalars().all()
+        assert list(keys) == ["GET /ping"]

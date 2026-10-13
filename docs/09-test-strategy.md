@@ -1495,12 +1495,19 @@ boundary (no network, no filesystem, no migration/API):
 - `backend/tests/unit/test_factory_service.py` — create returns `QUEUED`, worker
   SUCCEEDED/FAILED, missing/corrupt object, restart reconstruction, artifact
   hash, permissions, idempotency replay/conflict, orphan object prevention,
-  oversize fail-closed, no raw source persistence
+  oversize fail-closed, no raw source persistence; Candidate Tool
+  materialization from `OPENAPI_ANALYSIS` + replay idempotency on
+  `(job_id, operation_key)`;   GET list does not write; explicit materialize
+  commits durable rows for pre-existing SUCCEEDED analyses; analyzer path
+  length bound matches Candidate columns; mid-batch candidate persist
+  failure leaves Job `FAILED` with zero partial candidate rows
 - `backend/tests/api/test_factory.py` — auth/CSRF, multipart JSON/YAML enqueue,
-  empty/oversize/extension, list/detail after worker, 404, idempotency
-- `backend/tests/integration/test_factory_migration.py` — Alembic 0028↔0029,
+  empty/oversize/extension, list/detail after worker, 404, idempotency;
+  candidate list/detail read API; materialize POST; no raw source/secret exposure
+- `backend/tests/integration/test_factory_migration.py` — Alembic 0028↔0030,
   JobStatus CHECK, source object metadata columns, unique analysis artifact,
-  test_result evidence FK, no raw source column
+  unique `(job_id, operation_key)` candidates, test_result evidence FK,
+  no raw source column
 - `backend/tests/unit/test_factory_outbox_dispatch.py` — `FACTORY_JOB_DISPATCH`
   Outbox same-TX create; publish failure keeps unpublished; relay retry; recovery
   candidate listing for expired RUNNING / stale QUEUED
@@ -1508,7 +1515,9 @@ boundary (no network, no filesystem, no migration/API):
   concurrent same-key create (barrier on `IdempotencyRepository.create_completed`)
   with orphan object cleanup; different source → `IDEMPOTENCY_KEY_REUSED`;
   worker restart reconstruction; missing/corrupt object → FAILED;
-  Outbox publish failure → relay recovery → exactly one analysis outcome
+  Outbox publish failure → relay recovery → exactly one analysis outcome;
+  concurrent Candidate Tool materialization keeps a single row per
+  `(job_id, operation_key)`
 
 Sandbox build/test / Publish / DRAFT MCP Server / frontend wiring remain out of scope.
 
