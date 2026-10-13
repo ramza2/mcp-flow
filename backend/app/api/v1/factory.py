@@ -1,4 +1,4 @@
-"""Tool Factory Job + Candidate Tool + Build API (docs/06)."""
+"""Tool Factory Job + Candidate Tool + Build + Generated Package API (docs/06)."""
 
 from __future__ import annotations
 
@@ -16,6 +16,8 @@ from app.schemas.factory import (
     FactoryCandidateListResponse,
     FactoryCandidateMaterializeResponse,
     FactoryCandidateResponse,
+    FactoryGeneratedPackageListResponse,
+    FactoryGeneratedPackageResponse,
     FactoryJobDetailResponse,
     FactoryJobListResponse,
     FactoryJobResponse,
@@ -190,3 +192,60 @@ async def get_factory_build(
     principal: CurrentPrincipalDep,
 ) -> FactoryBuildResponse:
     return await _service(session).get_build(principal.user_id, build_id)
+
+
+@router.post(
+    "/builds/{build_id}/generate",
+    response_model=FactoryGeneratedPackageResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def generate_factory_package(
+    build_id: uuid.UUID,
+    response: Response,
+    session: DbSessionDep,
+    principal: CurrentPrincipalDep,
+    idempotency_key: Annotated[str, Header(alias="Idempotency-Key")],
+) -> FactoryGeneratedPackageResponse:
+    outcome = await _service(session).generate_package(
+        actor_user_id=principal.user_id,
+        build_id=build_id,
+        idempotency_key=idempotency_key,
+    )
+    response.status_code = outcome.http_status
+    return outcome.result
+
+
+@router.get(
+    "/builds/{build_id}/artifacts",
+    response_model=FactoryGeneratedPackageListResponse,
+)
+async def list_factory_build_artifacts(
+    build_id: uuid.UUID,
+    session: DbSessionDep,
+    principal: CurrentPrincipalDep,
+    page: Annotated[int, Query(ge=1)] = 1,
+    page_size: Annotated[int, Query(ge=1, le=100)] = 20,
+    sort: Annotated[str, Query()] = "-created_at",
+) -> FactoryGeneratedPackageListResponse:
+    return await _service(session).list_generated_packages_for_build(
+        principal.user_id,
+        build_id,
+        page=page,
+        page_size=page_size,
+        sort=sort,
+    )
+
+
+@router.get(
+    "/artifacts/{artifact_id}",
+    response_model=FactoryGeneratedPackageResponse,
+)
+async def get_factory_generated_package(
+    artifact_id: uuid.UUID,
+    session: DbSessionDep,
+    principal: CurrentPrincipalDep,
+) -> FactoryGeneratedPackageResponse:
+    return await _service(session).get_generated_package(
+        principal.user_id,
+        artifact_id,
+    )

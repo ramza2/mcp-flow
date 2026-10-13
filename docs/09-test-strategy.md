@@ -1504,10 +1504,10 @@ boundary (no network, no filesystem, no migration/API):
 - `backend/tests/api/test_factory.py` — auth/CSRF, multipart JSON/YAML enqueue,
   empty/oversize/extension, list/detail after worker, 404, idempotency;
   candidate list/detail read API; materialize POST; no raw source/secret exposure
-- `backend/tests/integration/test_factory_migration.py` — Alembic 0028↔0031,
+- `backend/tests/integration/test_factory_migration.py` — Alembic 0028↔0032,
   JobStatus CHECK, source object metadata columns, unique analysis artifact,
-  unique `(job_id, operation_key)` candidates, Build table/constraints,
-  test_result evidence FK, no raw source column
+  unique `(job_id, operation_key)` candidates, Build + Generated Package
+  table/constraints, test_result evidence FK, no raw source column
 - `backend/tests/unit/test_factory_outbox_dispatch.py` — `FACTORY_JOB_DISPATCH`
   Outbox same-TX create; publish failure keeps unpublished; relay retry; recovery
   candidate listing for expired RUNNING / stale QUEUED
@@ -1523,10 +1523,17 @@ boundary (no network, no filesystem, no migration/API):
   — Build create from Candidate subset; immutable snapshot + deterministic
   `build_input_hash`; empty/over-`MAX_OPERATIONS`/duplicate/cross-job and
   non-`OPENAPI_ANALYZE` `job_type` fail-closed; idempotency replay/conflict;
-  snapshot unaffected by later Candidate row edits; no MCPTool/MCPServer
-  side effects
+  snapshot unaffected by later Candidate row edits; Generated Package generate
+  from Build snapshot; deterministic `package_content_sha256`; snapshot /
+  `build_input_hash` tamper fail-closed; idempotency replay; no
+  MCPTool/MCPServer side effects
+- `backend/tests/unit/test_factory_package_generator.py` — pure deterministic
+  package builder + stable tool ordering
+- `backend/tests/integration/test_factory_persistence.py` — concurrent Generate
+  with same Idempotency-Key keeps a single Generated Package; no MCPTool /
+  MCPServer rows
 
-Sandbox code generation / Docker / Python exec / Security tests / Publish /
+Sandbox executable codegen / Docker / Python exec / Security tests / Publish /
 DRAFT MCP Server / frontend wiring remain out of scope.
 
 ---

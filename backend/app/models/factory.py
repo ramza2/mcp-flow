@@ -360,6 +360,114 @@ class ToolFactoryBuild(Base):
     )
 
 
+class ToolFactoryGeneratedPackage(Base):
+    """Declarative Generated Package artifact linked to a Factory Build.
+
+    Package bytes live in Object Storage. PostgreSQL stores metadata + hashes.
+    Not an MCPTool / MCPServer. No executable codegen in this slice.
+    """
+
+    __tablename__ = "tool_factory_generated_packages"
+    __table_args__ = (
+        UniqueConstraint(
+            "build_id",
+            "generator_version",
+            name="uq_tool_factory_generated_packages_build_generator",
+        ),
+        CheckConstraint(
+            "length(source_sha256) = 64",
+            name="ck_tool_factory_generated_packages_source_sha256_len",
+        ),
+        CheckConstraint(
+            "length(build_input_hash) = 64",
+            name="ck_tool_factory_generated_packages_build_input_hash_len",
+        ),
+        CheckConstraint(
+            "length(package_content_sha256) = 64",
+            name="ck_tool_factory_generated_packages_content_sha256_len",
+        ),
+        CheckConstraint(
+            "length(trim(analyzer_version)) > 0",
+            name="ck_tool_factory_generated_packages_analyzer_version_ne",
+        ),
+        CheckConstraint(
+            "length(trim(generator_version)) > 0",
+            name="ck_tool_factory_generated_packages_generator_version_ne",
+        ),
+        CheckConstraint(
+            "length(trim(package_schema_version)) > 0",
+            name="ck_tool_factory_generated_packages_schema_version_ne",
+        ),
+        CheckConstraint(
+            "length(trim(object_bucket)) > 0",
+            name="ck_tool_factory_generated_packages_bucket_ne",
+        ),
+        CheckConstraint(
+            "length(trim(object_key)) > 0",
+            name="ck_tool_factory_generated_packages_object_key_ne",
+        ),
+        CheckConstraint(
+            "length(trim(content_type)) > 0",
+            name="ck_tool_factory_generated_packages_content_type_ne",
+        ),
+        CheckConstraint(
+            "package_size_bytes >= 0",
+            name="ck_tool_factory_generated_packages_size_bytes",
+        ),
+        CheckConstraint(
+            "tool_count >= 1",
+            name="ck_tool_factory_generated_packages_tool_count",
+        ),
+        Index("ix_tool_factory_generated_packages_build_id", "build_id"),
+        Index("ix_tool_factory_generated_packages_job_id", "job_id"),
+        Index(
+            "ix_tool_factory_generated_packages_requested_by_created_at",
+            "requested_by",
+            "created_at",
+        ),
+        Index("ix_tool_factory_generated_packages_created_at", "created_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    build_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("tool_factory_builds.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    job_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("tool_factory_jobs.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    analysis_artifact_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("tool_factory_artifacts.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    source_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    analyzer_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    build_input_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    build_generator_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    generator_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    package_schema_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    package_content_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    package_size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
+    tool_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    object_bucket: Mapped[str] = mapped_column(String(128), nullable=False)
+    object_key: Mapped[str] = mapped_column(String(512), nullable=False)
+    content_type: Mapped[str] = mapped_column(String(128), nullable=False)
+    requested_by: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
 class ToolFactoryTestResult(Base):
     """Forward-compatible evidence table — unused by OpenAPI analysis in this slice."""
 

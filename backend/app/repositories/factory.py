@@ -13,6 +13,7 @@ from app.models.factory import (
     ToolFactoryArtifact,
     ToolFactoryBuild,
     ToolFactoryCandidate,
+    ToolFactoryGeneratedPackage,
     ToolFactoryJob,
 )
 from app.schemas.common_page import parse_sort
@@ -20,6 +21,7 @@ from app.schemas.common_page import parse_sort
 ALLOWED_FACTORY_JOB_SORT = {"created_at", "started_at", "finished_at", "status"}
 ALLOWED_FACTORY_CANDIDATE_SORT = {"created_at", "operation_key", "method", "path"}
 ALLOWED_FACTORY_BUILD_SORT = {"created_at"}
+ALLOWED_FACTORY_PACKAGE_SORT = {"created_at"}
 
 
 class FactoryRepository:
@@ -378,6 +380,18 @@ class FactoryRepository:
     async def get_build(self, build_id: uuid.UUID) -> ToolFactoryBuild | None:
         return await self._session.get(ToolFactoryBuild, build_id)
 
+    async def get_build_for_update(
+        self, build_id: uuid.UUID
+    ) -> ToolFactoryBuild | None:
+        """Load Build with row lock for serialized package generation."""
+
+        stmt = (
+            select(ToolFactoryBuild)
+            .where(ToolFactoryBuild.id == build_id)
+            .with_for_update()
+        )
+        return (await self._session.execute(stmt)).scalar_one_or_none()
+
     async def list_builds_for_job(
         self,
         job_id: uuid.UUID,
@@ -399,6 +413,97 @@ class FactoryRepository:
         offset = (page - 1) * page_size
         rows_stmt = (
             stmt.order_by(order, ToolFactoryBuild.id.asc())
+            .offset(offset)
+            .limit(page_size)
+        )
+        rows = list((await self._session.execute(rows_stmt)).scalars().all())
+        return rows, total
+
+    async def create_generated_package(
+        self,
+        *,
+        package_id: uuid.UUID,
+        build_id: uuid.UUID,
+        job_id: uuid.UUID,
+        analysis_artifact_id: uuid.UUID,
+        source_sha256: str,
+        analyzer_version: str,
+        build_input_hash: str,
+        build_generator_version: str,
+        generator_version: str,
+        package_schema_version: str,
+        package_content_sha256: str,
+        package_size_bytes: int,
+        tool_count: int,
+        object_bucket: str,
+        object_key: str,
+        content_type: str,
+        requested_by: uuid.UUID,
+    ) -> ToolFactoryGeneratedPackage:
+        row = ToolFactoryGeneratedPackage(
+            id=package_id,
+            build_id=build_id,
+            job_id=job_id,
+            analysis_artifact_id=analysis_artifact_id,
+            source_sha256=source_sha256,
+            analyzer_version=analyzer_version,
+            build_input_hash=build_input_hash,
+            build_generator_version=build_generator_version,
+            generator_version=generator_version,
+            package_schema_version=package_schema_version,
+            package_content_sha256=package_content_sha256,
+            package_size_bytes=package_size_bytes,
+            tool_count=tool_count,
+            object_bucket=object_bucket,
+            object_key=object_key,
+            content_type=content_type,
+            requested_by=requested_by,
+        )
+        self._session.add(row)
+        await self._session.flush()
+        await self._session.refresh(row)
+        return row
+
+    async def get_generated_package(
+        self, package_id: uuid.UUID
+    ) -> ToolFactoryGeneratedPackage | None:
+        return await self._session.get(ToolFactoryGeneratedPackage, package_id)
+
+    async def get_generated_package_for_build(
+        self,
+        build_id: uuid.UUID,
+        *,
+        generator_version: str,
+    ) -> ToolFactoryGeneratedPackage | None:
+        stmt = select(ToolFactoryGeneratedPackage).where(
+            ToolFactoryGeneratedPackage.build_id == build_id,
+            ToolFactoryGeneratedPackage.generator_version == generator_version,
+        )
+        return (await self._session.execute(stmt)).scalar_one_or_none()
+
+    async def list_generated_packages_for_build(
+        self,
+        build_id: uuid.UUID,
+        *,
+        page: int = 1,
+        page_size: int = 20,
+        sort: str = "-created_at",
+    ) -> tuple[list[ToolFactoryGeneratedPackage], int]:
+        field, direction = parse_sort(
+            sort,
+            allowed=ALLOWED_FACTORY_PACKAGE_SORT,
+            default_field="created_at",
+        )
+        stmt = select(ToolFactoryGeneratedPackage).where(
+            ToolFactoryGeneratedPackage.build_id == build_id
+        )
+        count_stmt = select(func.count()).select_from(stmt.order_by(None).subquery())
+        total = int((await self._session.execute(count_stmt)).scalar_one())
+        sort_col = getattr(ToolFactoryGeneratedPackage, field)
+        order = sort_col.desc() if direction == "desc" else sort_col.asc()
+        offset = (page - 1) * page_size
+        rows_stmt = (
+            stmt.order_by(order, ToolFactoryGeneratedPackage.id.asc())
             .offset(offset)
             .limit(page_size)
         )

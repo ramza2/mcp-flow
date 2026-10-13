@@ -24,6 +24,7 @@ from app.models.factory import (
     ToolFactoryArtifact,
     ToolFactoryBuild,
     ToolFactoryCandidate,
+    ToolFactoryGeneratedPackage,
     ToolFactoryJob,
     ToolFactoryTestResult,
 )
@@ -77,6 +78,7 @@ __all__ = [
     "ToolFactoryArtifact",
     "ToolFactoryBuild",
     "ToolFactoryCandidate",
+    "ToolFactoryGeneratedPackage",
     "ToolFactoryJob",
     "ToolFactoryTestResult",
     "StepAttempt",
