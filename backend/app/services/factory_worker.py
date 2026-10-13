@@ -380,7 +380,9 @@ class FactoryWorkerService:
 
         Returns a bounded error message on unexpected DB failures so the Job
         can terminalize as FAILED instead of remaining RUNNING for recovery
-        loops. Integrity races are handled inside materialize itself.
+        loops. Materialize itself is all-or-nothing per attempt (outer
+        savepoint), so FAILED commits never retain a partial candidate set.
+        Integrity races are handled inside materialize itself.
         """
         try:
             await FactoryService(self._session).materialize_candidates_from_analysis(

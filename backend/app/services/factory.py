@@ -576,8 +576,12 @@ class FactoryService:
         """Persist one Candidate Tool per analyzed operation (idempotent).
 
         Derives only from the sanitized OPENAPI_ANALYSIS artifact — never
-        re-parses raw OpenAPI. Safe under concurrent replay via
-        UNIQUE(job_id, operation_key) + savepoint inserts.
+        re-parses raw OpenAPI.
+
+        All-or-nothing for a single materialization attempt: new inserts are
+        wrapped in one outer savepoint so a mid-batch persistence error does
+        not leave a partial candidate set. Per-row nested savepoints still
+        absorb concurrent UNIQUE(job_id, operation_key) races.
         """
         if analysis is None:
             if artifact.inline_payload is None:
@@ -585,36 +589,43 @@ class FactoryService:
             analysis = FactoryOpenAPIAnalysis.model_validate(artifact.inline_payload)
 
         existing_keys = await self._repo.list_candidate_operation_keys(job.id)
+        pending = [
+            operation
+            for operation in analysis.operations
+            if operation.operation_key not in existing_keys
+        ]
+        if not pending:
+            return 0
+
         created = 0
-        for operation in analysis.operations:
-            if operation.operation_key in existing_keys:
-                continue
-            try:
-                async with self._session.begin_nested():
-                    await self._repo.create_candidate(
-                        job_id=job.id,
-                        analysis_artifact_id=artifact.id,
-                        source_sha256=job.source_sha256,
-                        analyzer_version=job.analyzer_version,
-                        operation_key=operation.operation_key,
-                        method=operation.method,
-                        path=operation.path,
-                        operation_id=operation.operation_id,
-                        summary=operation.summary,
-                        description=operation.description,
-                        tags=list(operation.tags),
-                        deprecated=bool(operation.deprecated),
-                        parameters=[
-                            p.model_dump(mode="json") for p in operation.parameters
-                        ],
-                        request_schema=operation.request_schema,
-                        response_schema=operation.response_schema,
-                    )
-                created += 1
-                existing_keys.add(operation.operation_key)
-            except IntegrityError:
-                # Concurrent materialization of the same (job_id, operation_key).
-                existing_keys.add(operation.operation_key)
+        async with self._session.begin_nested():
+            for operation in pending:
+                try:
+                    async with self._session.begin_nested():
+                        await self._repo.create_candidate(
+                            job_id=job.id,
+                            analysis_artifact_id=artifact.id,
+                            source_sha256=job.source_sha256,
+                            analyzer_version=job.analyzer_version,
+                            operation_key=operation.operation_key,
+                            method=operation.method,
+                            path=operation.path,
+                            operation_id=operation.operation_id,
+                            summary=operation.summary,
+                            description=operation.description,
+                            tags=list(operation.tags),
+                            deprecated=bool(operation.deprecated),
+                            parameters=[
+                                p.model_dump(mode="json") for p in operation.parameters
+                            ],
+                            request_schema=operation.request_schema,
+                            response_schema=operation.response_schema,
+                        )
+                    created += 1
+                    existing_keys.add(operation.operation_key)
+                except IntegrityError:
+                    # Concurrent materialization of the same (job_id, operation_key).
+                    existing_keys.add(operation.operation_key)
         return created
 
     async def list_candidates_for_job(

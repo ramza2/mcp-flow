@@ -17,6 +17,7 @@ from app.factory import (
 )
 from app.factory.errors import (
     FACTORY_ANALYSIS_LIMIT_EXCEEDED,
+    FACTORY_CANDIDATE_PERSIST_FAILED,
     FACTORY_SOURCE_OBJECT_CORRUPT,
     FACTORY_SOURCE_OBJECT_MISSING,
     FACTORY_SOURCE_PARSE_ERROR,
@@ -29,8 +30,11 @@ from app.models.factory import (
     ToolFactoryJob,
 )
 from app.models.idempotency import ApiIdempotencyRecord
+from app.models.mcp import MCPServer, MCPTool
 from app.models.outbox import OutboxEvent
+from app.repositories.factory import FactoryRepository
 from app.repositories.role import PermissionRepository
+from sqlalchemy.exc import DataError
 from app.schemas.auth import (
     RoleCreate,
     RolePermissionReplaceRequest,
@@ -750,6 +754,64 @@ async def test_candidate_list_is_readonly_materialize_is_durable(
 
     listed = await svc.list_candidates_for_job(user_id, outcome.result.id)
     assert listed.total == 3
+
+
+@pytest.mark.asyncio
+async def test_worker_candidate_materialize_all_or_nothing_on_mid_batch_failure(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Partial candidate inserts must not remain when Job fails persist."""
+    user_id = await _seed_user_with_perms(
+        db_session, codes=["mcp.server.manage", "mcp.server.read"]
+    )
+    calls = {"n": 0}
+    original = FactoryRepository.create_candidate
+
+    async def _flaky(self: FactoryRepository, **kwargs: object) -> object:
+        calls["n"] += 1
+        if calls["n"] >= 2:
+            raise DataError(
+                "forced candidate persist failure",
+                {},
+                Exception("mock truncation after first insert"),
+            )
+        return await original(self, **kwargs)
+
+    monkeypatch.setattr(FactoryRepository, "create_candidate", _flaky)
+
+    svc, store = _svc(db_session)
+    outcome = await svc.create_openapi_analyze_job(
+        actor_user_id=user_id,
+        source_bytes=MULTI_OP_JSON,
+        filename="pets.json",
+        idempotency_key=f"k-{uuid.uuid4().hex}",
+    )
+    await _run_worker(db_session, job_id=outcome.result.id, storage=store)
+
+    job_row = await db_session.get(ToolFactoryJob, outcome.result.id)
+    assert job_row is not None
+    assert job_row.status == JobStatus.FAILED.value
+    assert job_row.error_code == FACTORY_CANDIDATE_PERSIST_FAILED
+    assert calls["n"] >= 2
+
+    cand_count = (
+        await db_session.execute(
+            select(func.count()).where(
+                ToolFactoryCandidate.job_id == outcome.result.id
+            )
+        )
+    ).scalar_one()
+    assert int(cand_count) == 0
+
+    tools = (
+        await db_session.execute(select(func.count()).select_from(MCPTool))
+    ).scalar_one()
+    servers = (
+        await db_session.execute(select(func.count()).select_from(MCPServer))
+    ).scalar_one()
+    assert int(tools) == 0
+    assert int(servers) == 0
 
 
 @pytest.mark.asyncio

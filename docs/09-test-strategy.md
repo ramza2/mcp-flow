@@ -1497,9 +1497,10 @@ boundary (no network, no filesystem, no migration/API):
   hash, permissions, idempotency replay/conflict, orphan object prevention,
   oversize fail-closed, no raw source persistence; Candidate Tool
   materialization from `OPENAPI_ANALYSIS` + replay idempotency on
-  `(job_id, operation_key)`; GET list does not write; explicit materialize
+  `(job_id, operation_key)`;   GET list does not write; explicit materialize
   commits durable rows for pre-existing SUCCEEDED analyses; analyzer path
-  length bound matches Candidate columns
+  length bound matches Candidate columns; mid-batch candidate persist
+  failure leaves Job `FAILED` with zero partial candidate rows
 - `backend/tests/api/test_factory.py` — auth/CSRF, multipart JSON/YAML enqueue,
   empty/oversize/extension, list/detail after worker, 404, idempotency;
   candidate list/detail read API; materialize POST; no raw source/secret exposure
