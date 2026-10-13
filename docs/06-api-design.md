@@ -1336,9 +1336,12 @@ GET  /factory/jobs/{job_id}
 - `POST` multipart field `source` (`.json` / `.yaml` / `.yml`) + required
   `Idempotency-Key` (`FACTORY_OPENAPI_ANALYZE_V1`)
 - Auth: Session + CSRF; `mcp.server.manage` to create; `mcp.server.read` to list/detail
-- Response exposes safe Job metadata only (never raw OpenAPI source)
-- Detail may include sanitized `analysis` + `analysis_artifact` summary
-- Expected analyzer failures → durable Job `status=FAILED` with HTTP 201
+- Create path: bounded upload → Object Storage put → durable Job `QUEUED` +
+  idempotency → enqueue `mcpflow.factory.analyze_openapi` (returns before analysis)
+- Response exposes safe Job metadata only (never raw OpenAPI source / object keys)
+- Detail may include sanitized `analysis` + `analysis_artifact` summary after worker completion
+- Analyzer / missing-object / corrupt-object failures → durable Job `FAILED`
+  (create itself remains HTTP 201 with `QUEUED`)
 - Oversize source → `413 FACTORY_SOURCE_TOO_LARGE` (no Job row)
 
 ### Aspirational (not implemented by this slice)

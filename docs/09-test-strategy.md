@@ -1492,20 +1492,21 @@ boundary (no network, no filesystem, no migration/API):
 
 ### Tool Factory durable OpenAPI analysis Job/API (unit/API/integration)
 
-- `backend/tests/unit/test_factory_service.py` — SUCCEEDED/FAILED Jobs, artifact
-  hash, permissions, idempotency replay/conflict, oversize fail-closed, no raw
-  source persistence
-- `backend/tests/api/test_factory.py` — auth/CSRF, multipart JSON/YAML, empty/
-  oversize/extension, list/detail, 404, idempotency
-- `backend/tests/integration/test_factory_migration.py` — Alembic 0027↔0028,
-  JobStatus CHECK, unique analysis artifact, test_result evidence FK, no raw
-  source column
+- `backend/tests/unit/test_factory_service.py` — create returns `QUEUED`, worker
+  SUCCEEDED/FAILED, missing/corrupt object, restart reconstruction, artifact
+  hash, permissions, idempotency replay/conflict, orphan object prevention,
+  oversize fail-closed, no raw source persistence
+- `backend/tests/api/test_factory.py` — auth/CSRF, multipart JSON/YAML enqueue,
+  empty/oversize/extension, list/detail after worker, 404, idempotency
+- `backend/tests/integration/test_factory_migration.py` — Alembic 0028↔0029,
+  JobStatus CHECK, source object metadata columns, unique analysis artifact,
+  test_result evidence FK, no raw source column
 - `backend/tests/integration/test_factory_persistence.py` — real PostgreSQL
-  concurrent same-key create (barrier on `IdempotencyRepository.create_completed`):
-  same source → one Job + one replay; different source → one Job +
-  `IDEMPOTENCY_KEY_REUSED`
+  concurrent same-key create (barrier on `IdempotencyRepository.create_completed`)
+  with orphan object cleanup; different source → `IDEMPOTENCY_KEY_REUSED`;
+  worker restart reconstruction; missing/corrupt object → FAILED
 
-Async queue / factory-worker / sandbox / frontend wiring remain out of scope.
+Sandbox build/test / Publish / DRAFT MCP Server / frontend wiring remain out of scope.
 
 ---
 

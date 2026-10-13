@@ -1,9 +1,9 @@
 name: mcpflow
 
 # Base Compose — local/test/pilot should layer overrides (no Compose Profiles in this baseline).
-# Canonical services in this PR: traefik, frontend, api, worker, outbox, scheduler,
-# postgres, redis, object-storage, migration. Deferred (no placeholder containers):
-# mcp-worker, factory-worker.
+# Canonical services in this PR: traefik, frontend, api, worker, factory-worker,
+# outbox, scheduler, postgres, redis, object-storage, migration.
+# Deferred (no placeholder containers): mcp-worker.
 
 x-backend-build: &backend-build
   context: .
@@ -92,8 +92,14 @@ services:
       MCPFLOW_DB_PASSWORD_FILE: /run/secrets/postgres_app_password
       MCPFLOW_REDIS_URL: redis://redis:6379/0
       MCPFLOW_OBJECT_STORAGE_ENDPOINT: http://object-storage:9000
+      MCPFLOW_OBJECT_STORAGE_BACKEND: minio
+      MCPFLOW_OBJECT_STORAGE_BUCKET: mcpflow-factory
+      MCPFLOW_OBJECT_STORAGE_ACCESS_KEY_FILE: /run/secrets/minio_root_user
+      MCPFLOW_OBJECT_STORAGE_SECRET_KEY_FILE: /run/secrets/minio_root_password
     secrets:
       - postgres_app_password
+      - minio_root_user
+      - minio_root_password
     networks:
       - edge
       - app
@@ -164,6 +170,60 @@ services:
         "worker",
         "-Q",
         "execution",
+        "--loglevel=INFO",
+      ]
+
+  factory-worker:
+    image: mcpflow-backend:${MCPFLOW_IMAGE_TAG:-local}
+    build: *backend-build
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    environment:
+      MCPFLOW_ENVIRONMENT: ${MCPFLOW_ENVIRONMENT:-development}
+      MCPFLOW_LOG_LEVEL: ${MCPFLOW_LOG_LEVEL:-INFO}
+      MCPFLOW_DB_HOST: postgres
+      MCPFLOW_DB_PORT: "5432"
+      MCPFLOW_DB_NAME: mcpflow
+      MCPFLOW_DB_USER: mcpflow_app
+      MCPFLOW_DB_PASSWORD_FILE: /run/secrets/postgres_app_password
+      MCPFLOW_REDIS_URL: redis://redis:6379/0
+      MCPFLOW_OBJECT_STORAGE_ENDPOINT: http://object-storage:9000
+      MCPFLOW_OBJECT_STORAGE_BACKEND: minio
+      MCPFLOW_OBJECT_STORAGE_BUCKET: mcpflow-factory
+      MCPFLOW_OBJECT_STORAGE_ACCESS_KEY_FILE: /run/secrets/minio_root_user
+      MCPFLOW_OBJECT_STORAGE_SECRET_KEY_FILE: /run/secrets/minio_root_password
+      MCPFLOW_FACTORY_LEASE_SECONDS: ${MCPFLOW_FACTORY_LEASE_SECONDS:-120}
+    secrets:
+      - postgres_app_password
+      - minio_root_user
+      - minio_root_password
+    networks:
+      - app
+      - data
+      - factory
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      object-storage:
+        condition: service_healthy
+      migration:
+        condition: service_completed_successfully
+    command:
+      [
+        "celery",
+        "-A",
+        "app.infrastructure.celery_app:celery_app",
+        "worker",
+        "-Q",
+        "factory",
         "--loglevel=INFO",
       ]
 

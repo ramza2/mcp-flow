@@ -1947,18 +1947,23 @@ tool_factory_test_results
 
 생성 artifact hash, generator version, sandbox policy, 시험 결과를 보존한다. 운영 활성화는 관리자 승인 후 별도 MCP Server 등록 흐름을 사용한다.
 
-**Implemented durable foundation (migration `20261008_0028`):**
+**Implemented durable foundation (migrations `20261008_0028`, `20261013_0029`):**
 
 - `tool_factory_jobs` — OpenAPI analysis Jobs; canonical `JobStatus` CHECK;
-  **no** raw source/body column; stores `source_sha256`, `analyzer_version`,
-  counts, progress, safe error fields, `requested_by`
+  **no** raw source/body column; stores `source_sha256`, Object Storage
+  reference metadata (`source_bucket`, `source_object_key`,
+  `source_content_type`, `source_size_bytes`), claim fencing
+  (`queued_at`, `worker_id`, `lease_token`, `lease_expires_at`, `lock_version`),
+  `analyzer_version`, counts, progress, safe error fields, `requested_by`
 - `tool_factory_artifacts` — current slice uses `artifact_type=OPENAPI_ANALYSIS`
   with sanitized JSON `inline_payload` only; unique `(job_id, artifact_type)`
 - `tool_factory_test_results` — forward-compatible evidence table (unused by
   the analysis flow in this slice)
 
 Do not duplicate product-wide `JobStatus` with Factory-local analysis issue
-severities. Object Storage linkage / generated packages remain later.
+severities. Generated packages / Publish remain later. Product-wide
+`object_blobs` catalog is still deferred; Factory Jobs store safe object
+reference columns directly.
 
 ---
 

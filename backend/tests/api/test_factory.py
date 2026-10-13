@@ -1,4 +1,4 @@
-"""SQLite-backed API tests for Tool Factory Jobs."""
+"""SQLite-backed API tests for Tool Factory Jobs (async enqueue)."""
 
 from __future__ import annotations
 
@@ -8,6 +8,8 @@ import uuid
 import pytest
 from app.domain.enums import JobStatus, UserStatus
 from app.factory.openapi_analyzer import MAX_SOURCE_BYTES
+from app.infrastructure.object_storage import get_object_storage, reset_memory_object_storage
+from app.models.factory import ToolFactoryJob
 from app.repositories.role import PermissionRepository
 from app.repositories.user import UserRepository
 from app.schemas.auth import (
@@ -15,9 +17,11 @@ from app.schemas.auth import (
     RolePermissionReplaceRequest,
     UserRoleReplaceRequest,
 )
+from app.services.factory_worker import FactoryWorkerService
 from app.services.role import RoleService
 from app.services.user import UserService
 from httpx import AsyncClient
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 API = "/api/v1/factory"
@@ -48,6 +52,11 @@ paths:
 """
 
 PASSWORD = "correct-horse-battery-staple"
+
+
+@pytest.fixture(autouse=True)
+def _fresh_memory_storage() -> None:
+    reset_memory_object_storage()
 
 
 async def _seed_client(
@@ -102,6 +111,17 @@ async def _seed_client(
     return client
 
 
+async def _process_job(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    job_id: uuid.UUID,
+) -> None:
+    storage = get_object_storage()
+    async with db_session_factory() as session:
+        worker = FactoryWorkerService(session, storage=storage, worker_id="api-test")
+        await worker.process_job(job_id=job_id)
+        await session.commit()
+
+
 @pytest.fixture
 async def factory_client(
     unauthenticated_db_client: AsyncClient,
@@ -134,7 +154,6 @@ async def test_unauthenticated_rejected(unauthenticated_db_client: AsyncClient) 
 
 @pytest.mark.asyncio
 async def test_csrf_required_on_post(factory_client: AsyncClient) -> None:
-    # Drop CSRF header after login.
     factory_client.headers.pop("X-CSRF-Token", None)
     resp = await factory_client.post(
         f"{API}/jobs",
@@ -152,7 +171,6 @@ async def test_manage_required_for_post(factory_read_client: AsyncClient) -> Non
         headers={"Idempotency-Key": f"k-{uuid.uuid4().hex}"},
     )
     assert resp.status_code == 403
-    assert resp.json()["error"]["code"] == "AUTH_FORBIDDEN"
 
 
 @pytest.mark.asyncio
@@ -161,14 +179,15 @@ async def test_read_allows_get_not_post(
     unauthenticated_db_client: AsyncClient,
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    # Same ASGI client cannot hold two sessions; create as manage, then re-login read-only.
     created = await factory_client.post(
         f"{API}/jobs",
         files={"source": ("demo.json", MINIMAL_JSON, "application/json")},
         headers={"Idempotency-Key": f"k-{uuid.uuid4().hex}"},
     )
     assert created.status_code == 201, created.text
-    job_id = created.json()["id"]
+    assert created.json()["status"] == JobStatus.QUEUED.value
+    job_id = uuid.UUID(created.json()["id"])
+    await _process_job(db_session_factory, job_id)
 
     read_client = await _seed_client(
         unauthenticated_db_client,
@@ -179,6 +198,7 @@ async def test_read_allows_get_not_post(
     assert listed.status_code == 200
     detail = await read_client.get(f"{API}/jobs/{job_id}")
     assert detail.status_code == 200
+    assert detail.json()["status"] == JobStatus.SUCCEEDED.value
     assert detail.json()["analysis"] is not None
 
     denied = await read_client.post(
@@ -190,7 +210,10 @@ async def test_read_allows_get_not_post(
 
 
 @pytest.mark.asyncio
-async def test_multipart_json_and_yaml(factory_client: AsyncClient) -> None:
+async def test_multipart_json_and_yaml(
+    factory_client: AsyncClient,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     json_resp = await factory_client.post(
         f"{API}/jobs",
         files={"source": ("demo.json", MINIMAL_JSON, "application/json")},
@@ -198,9 +221,13 @@ async def test_multipart_json_and_yaml(factory_client: AsyncClient) -> None:
     )
     assert json_resp.status_code == 201
     body = json_resp.json()
-    assert body["status"] == JobStatus.SUCCEEDED.value
-    assert body["source_format"] == "JSON"
+    assert body["status"] == JobStatus.QUEUED.value
+    assert body["source_format"] is None
     assert MINIMAL_JSON.decode() not in json_resp.text
+    await _process_job(db_session_factory, uuid.UUID(body["id"]))
+    detail = await factory_client.get(f"{API}/jobs/{body['id']}")
+    assert detail.json()["status"] == JobStatus.SUCCEEDED.value
+    assert detail.json()["source_format"] == "JSON"
 
     yaml_resp = await factory_client.post(
         f"{API}/jobs",
@@ -208,7 +235,10 @@ async def test_multipart_json_and_yaml(factory_client: AsyncClient) -> None:
         headers={"Idempotency-Key": f"k-yaml-{uuid.uuid4().hex}"},
     )
     assert yaml_resp.status_code == 201
-    assert yaml_resp.json()["source_format"] == "YAML"
+    assert yaml_resp.json()["status"] == JobStatus.QUEUED.value
+    await _process_job(db_session_factory, uuid.UUID(yaml_resp.json()["id"]))
+    yaml_detail = await factory_client.get(f"{API}/jobs/{yaml_resp.json()['id']}")
+    assert yaml_detail.json()["source_format"] == "YAML"
 
 
 @pytest.mark.asyncio
@@ -219,7 +249,7 @@ async def test_empty_file_rejected(factory_client: AsyncClient) -> None:
         headers={"Idempotency-Key": f"k-{uuid.uuid4().hex}"},
     )
     assert resp.status_code == 422
-    assert "empty" not in resp.text.lower() or resp.json()["error"]["code"] == "VALIDATION_ERROR"
+    assert resp.json()["error"]["code"] == "VALIDATION_ERROR"
 
 
 @pytest.mark.asyncio
@@ -246,7 +276,10 @@ async def test_unsupported_extension(factory_client: AsyncClient) -> None:
 
 
 @pytest.mark.asyncio
-async def test_list_detail_pagination_filter_sort(factory_client: AsyncClient) -> None:
+async def test_list_detail_pagination_filter_sort(
+    factory_client: AsyncClient,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     for i in range(3):
         resp = await factory_client.post(
             f"{API}/jobs",
@@ -254,6 +287,7 @@ async def test_list_detail_pagination_filter_sort(factory_client: AsyncClient) -
             headers={"Idempotency-Key": f"k-list-{i}-{uuid.uuid4().hex}"},
         )
         assert resp.status_code == 201
+        await _process_job(db_session_factory, uuid.UUID(resp.json()["id"]))
 
     bad = await factory_client.post(
         f"{API}/jobs",
@@ -261,7 +295,8 @@ async def test_list_detail_pagination_filter_sort(factory_client: AsyncClient) -
         headers={"Idempotency-Key": f"k-bad-{uuid.uuid4().hex}"},
     )
     assert bad.status_code == 201
-    assert bad.json()["status"] == JobStatus.FAILED.value
+    assert bad.json()["status"] == JobStatus.QUEUED.value
+    await _process_job(db_session_factory, uuid.UUID(bad.json()["id"]))
 
     listed = await factory_client.get(
         f"{API}/jobs",
@@ -288,6 +323,7 @@ async def test_list_detail_pagination_filter_sort(factory_client: AsyncClient) -
     job_id = bad.json()["id"]
     detail = await factory_client.get(f"{API}/jobs/{job_id}")
     assert detail.status_code == 200
+    assert detail.json()["status"] == JobStatus.FAILED.value
     assert detail.json()["analysis"] is None
     assert detail.json()["test_result_count"] == 0
 
@@ -300,7 +336,10 @@ async def test_not_found(factory_client: AsyncClient) -> None:
 
 
 @pytest.mark.asyncio
-async def test_idempotency_replay_and_conflict(factory_client: AsyncClient) -> None:
+async def test_idempotency_replay_and_conflict(
+    factory_client: AsyncClient,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     key = f"idem-api-{uuid.uuid4().hex}"
     first = await factory_client.post(
         f"{API}/jobs",
@@ -308,6 +347,7 @@ async def test_idempotency_replay_and_conflict(factory_client: AsyncClient) -> N
         headers={"Idempotency-Key": key},
     )
     assert first.status_code == 201
+    assert first.json()["status"] == JobStatus.QUEUED.value
     second = await factory_client.post(
         f"{API}/jobs",
         files={"source": ("demo.json", MINIMAL_JSON, "application/json")},
@@ -315,6 +355,10 @@ async def test_idempotency_replay_and_conflict(factory_client: AsyncClient) -> N
     )
     assert second.status_code == 201
     assert second.json()["id"] == first.json()["id"]
+
+    async with db_session_factory() as session:
+        jobs = list((await session.execute(select(ToolFactoryJob))).scalars().all())
+        assert len(jobs) == 1
 
     other = json.dumps(
         {

@@ -29,6 +29,26 @@ class Settings(BaseSettings):
 
     redis_url: str = "redis://localhost:6379/0"
     object_storage_endpoint: str = "http://localhost:9000"
+    object_storage_backend: str = Field(
+        default="memory",
+        description="Object Storage backend: memory | s3 | minio",
+    )
+    object_storage_bucket: str = Field(
+        default="mcpflow-factory",
+        description="Default bucket for Tool Factory source handoff.",
+    )
+    object_storage_region: str = "us-east-1"
+    object_storage_access_key: str | None = None
+    object_storage_secret_key: str | None = None
+    object_storage_access_key_file: str | None = Field(
+        default=None,
+        description="Path to Object Storage access key secret file.",
+    )
+    object_storage_secret_key_file: str | None = Field(
+        default=None,
+        description="Path to Object Storage secret key secret file.",
+    )
+    factory_lease_seconds: int = Field(default=120, gt=0)
 
     execution_lease_seconds: int = Field(default=60, gt=0)
     outbox_poll_interval_seconds: float = Field(default=1.0, gt=0)

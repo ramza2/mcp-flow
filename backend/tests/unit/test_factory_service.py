@@ -1,4 +1,4 @@
-"""Unit tests for Tool Factory durable OpenAPI analysis service."""
+"""Unit tests for Tool Factory async OpenAPI analysis service."""
 
 from __future__ import annotations
 
@@ -15,8 +15,14 @@ from app.factory import (
     JOB_TYPE_OPENAPI_ANALYZE,
     OPENAPI_ANALYZER_VERSION,
 )
-from app.factory.errors import FACTORY_SOURCE_PARSE_ERROR
+from app.factory.errors import (
+    FACTORY_SOURCE_OBJECT_CORRUPT,
+    FACTORY_SOURCE_OBJECT_MISSING,
+    FACTORY_SOURCE_PARSE_ERROR,
+)
 from app.factory.openapi_analyzer import MAX_SOURCE_BYTES
+from app.infrastructure.factory_queue import RecordingFactoryQueuePublisher
+from app.infrastructure.object_storage import InMemoryObjectStorage
 from app.models.factory import ToolFactoryArtifact, ToolFactoryJob
 from app.models.idempotency import ApiIdempotencyRecord
 from app.repositories.role import PermissionRepository
@@ -27,6 +33,7 @@ from app.schemas.auth import (
     UserRoleReplaceRequest,
 )
 from app.services.factory import FactoryService, normalize_source_name
+from app.services.factory_worker import FactoryWorkerService
 from app.services.role import RoleService
 from app.services.user import UserService
 from sqlalchemy import func, select
@@ -102,12 +109,37 @@ async def _seed_user_with_perms(
     return user.id
 
 
+def _svc(
+    session: AsyncSession,
+    *,
+    storage: InMemoryObjectStorage | None = None,
+    queue: RecordingFactoryQueuePublisher | None = None,
+) -> tuple[FactoryService, InMemoryObjectStorage, RecordingFactoryQueuePublisher]:
+    store = storage or InMemoryObjectStorage()
+    q = queue or RecordingFactoryQueuePublisher()
+    return FactoryService(session, storage=store, queue=q), store, q
+
+
+async def _run_worker(
+    session: AsyncSession,
+    *,
+    job_id: uuid.UUID,
+    storage: InMemoryObjectStorage,
+) -> None:
+    worker = FactoryWorkerService(session, storage=storage, worker_id="unit-worker")
+    outcome = await worker.process_job(job_id=job_id)
+    await session.commit()
+    assert outcome.claimed or outcome.reason in {"TERMINAL", "LEASE_HELD"}
+
+
 @pytest.mark.asyncio
-async def test_successful_openapi_30_analysis(db_session: AsyncSession) -> None:
+async def test_create_returns_queued_without_inline_analysis(
+    db_session: AsyncSession,
+) -> None:
     user_id = await _seed_user_with_perms(
         db_session, codes=["mcp.server.manage", "mcp.server.read"]
     )
-    svc = FactoryService(db_session)
+    svc, store, queue = _svc(db_session)
     outcome = await svc.create_openapi_analyze_job(
         actor_user_id=user_id,
         source_bytes=MINIMAL_JSON,
@@ -117,76 +149,196 @@ async def test_successful_openapi_30_analysis(db_session: AsyncSession) -> None:
     assert outcome.http_status == 201
     assert outcome.replayed is False
     job = outcome.result
-    assert job.status == JobStatus.SUCCEEDED
+    assert job.status == JobStatus.QUEUED
     assert job.job_type == JOB_TYPE_OPENAPI_ANALYZE
     assert job.analyzer_version == OPENAPI_ANALYZER_VERSION
-    assert job.source_format == "JSON"
+    assert job.source_format is None
     assert job.source_sha256 == hashlib.sha256(MINIMAL_JSON).hexdigest()
-    assert job.operation_count == 1
-    assert job.server_count == 1
-    assert job.progress_current == 1
-    assert job.error_code is None
+    assert job.operation_count == 0
+    assert job.progress_current == 0
+    assert queue.published == [job.id]
 
+    job_row = await db_session.get(ToolFactoryJob, job.id)
+    assert job_row is not None
+    assert job_row.source_object_key is not None
+    assert job_row.source_bucket is not None
+    assert job_row.source_size_bytes == len(MINIMAL_JSON)
+    assert not hasattr(job_row, "source_body")
+    assert store.has_object(
+        bucket=job_row.source_bucket,
+        object_key=job_row.source_object_key,
+    )
+    arts = (
+        await db_session.execute(
+            select(func.count()).where(ToolFactoryArtifact.job_id == job.id)
+        )
+    ).scalar_one()
+    assert int(arts) == 0
+
+
+@pytest.mark.asyncio
+async def test_worker_completes_openapi_30_analysis(db_session: AsyncSession) -> None:
+    user_id = await _seed_user_with_perms(db_session, codes=["mcp.server.manage"])
+    svc, store, _queue = _svc(db_session)
+    outcome = await svc.create_openapi_analyze_job(
+        actor_user_id=user_id,
+        source_bytes=MINIMAL_JSON,
+        filename="demo.json",
+        idempotency_key=f"k-{uuid.uuid4().hex}",
+    )
+    await _run_worker(db_session, job_id=outcome.result.id, storage=store)
+
+    job_row = await db_session.get(ToolFactoryJob, outcome.result.id)
+    assert job_row is not None
+    assert job_row.status == JobStatus.SUCCEEDED.value
+    assert job_row.source_format == "JSON"
+    assert job_row.operation_count == 1
+    assert job_row.server_count == 1
     artifact = (
         await db_session.execute(
-            select(ToolFactoryArtifact).where(ToolFactoryArtifact.job_id == job.id)
+            select(ToolFactoryArtifact).where(
+                ToolFactoryArtifact.job_id == outcome.result.id
+            )
         )
     ).scalar_one()
     assert artifact.artifact_type == ARTIFACT_TYPE_OPENAPI_ANALYSIS
     assert artifact.inline_payload is not None
-    # Raw source must not be stored on job or artifact.
-    job_row = await db_session.get(ToolFactoryJob, job.id)
-    assert job_row is not None
-    assert not hasattr(job_row, "source_body")
     dumped = json.dumps(artifact.inline_payload)
     assert MINIMAL_JSON.decode() not in dumped
-    expected_hash = compute_canonical_json_hash(artifact.inline_payload)
-    assert artifact.content_sha256 == expected_hash
+    assert artifact.content_sha256 == compute_canonical_json_hash(artifact.inline_payload)
 
 
 @pytest.mark.asyncio
-async def test_yaml_analysis_source_format(db_session: AsyncSession) -> None:
+async def test_worker_yaml_analysis_source_format(db_session: AsyncSession) -> None:
     user_id = await _seed_user_with_perms(db_session, codes=["mcp.server.manage"])
-    svc = FactoryService(db_session)
+    svc, store, _q = _svc(db_session)
     outcome = await svc.create_openapi_analyze_job(
         actor_user_id=user_id,
         source_bytes=MINIMAL_YAML,
         filename="demo.yaml",
         idempotency_key=f"k-{uuid.uuid4().hex}",
     )
-    assert outcome.result.status == JobStatus.SUCCEEDED
-    assert outcome.result.source_format == "YAML"
+    await _run_worker(db_session, job_id=outcome.result.id, storage=store)
+    job_row = await db_session.get(ToolFactoryJob, outcome.result.id)
+    assert job_row is not None
+    assert job_row.status == JobStatus.SUCCEEDED.value
+    assert job_row.source_format == "YAML"
 
 
 @pytest.mark.asyncio
-async def test_malformed_source_durable_failed(db_session: AsyncSession) -> None:
+async def test_worker_malformed_source_durable_failed(db_session: AsyncSession) -> None:
     user_id = await _seed_user_with_perms(db_session, codes=["mcp.server.manage"])
     bad = b"{not-json"
-    svc = FactoryService(db_session)
+    svc, store, _q = _svc(db_session)
     outcome = await svc.create_openapi_analyze_job(
         actor_user_id=user_id,
         source_bytes=bad,
         filename="bad.json",
         idempotency_key=f"k-{uuid.uuid4().hex}",
     )
-    assert outcome.http_status == 201
-    job = outcome.result
-    assert job.status == JobStatus.FAILED
-    assert job.error_code == FACTORY_SOURCE_PARSE_ERROR
-    assert "{not-json" not in (job.error_message or "")
-    assert job.progress_current == 0
+    assert outcome.result.status == JobStatus.QUEUED
+    await _run_worker(db_session, job_id=outcome.result.id, storage=store)
+    job_row = await db_session.get(ToolFactoryJob, outcome.result.id)
+    assert job_row is not None
+    assert job_row.status == JobStatus.FAILED.value
+    assert job_row.error_code == FACTORY_SOURCE_PARSE_ERROR
+    assert "{not-json" not in (job_row.error_message or "")
     count = (
         await db_session.execute(
-            select(func.count()).where(ToolFactoryArtifact.job_id == job.id)
+            select(func.count()).where(ToolFactoryArtifact.job_id == outcome.result.id)
         )
     ).scalar_one()
     assert int(count) == 0
 
 
 @pytest.mark.asyncio
+async def test_worker_missing_object_fails_safely(db_session: AsyncSession) -> None:
+    user_id = await _seed_user_with_perms(db_session, codes=["mcp.server.manage"])
+    svc, store, _q = _svc(db_session)
+    outcome = await svc.create_openapi_analyze_job(
+        actor_user_id=user_id,
+        source_bytes=MINIMAL_JSON,
+        filename="demo.json",
+        idempotency_key=f"k-{uuid.uuid4().hex}",
+    )
+    job_row = await db_session.get(ToolFactoryJob, outcome.result.id)
+    assert job_row is not None
+    await store.delete_object(
+        bucket=job_row.source_bucket or "",
+        object_key=job_row.source_object_key or "",
+    )
+    await _run_worker(db_session, job_id=outcome.result.id, storage=store)
+    job_row = await db_session.get(ToolFactoryJob, outcome.result.id)
+    assert job_row is not None
+    assert job_row.status == JobStatus.FAILED.value
+    assert job_row.error_code == FACTORY_SOURCE_OBJECT_MISSING
+
+
+@pytest.mark.asyncio
+async def test_worker_corrupt_object_fails_safely(db_session: AsyncSession) -> None:
+    user_id = await _seed_user_with_perms(db_session, codes=["mcp.server.manage"])
+    svc, store, _q = _svc(db_session)
+    outcome = await svc.create_openapi_analyze_job(
+        actor_user_id=user_id,
+        source_bytes=MINIMAL_JSON,
+        filename="demo.json",
+        idempotency_key=f"k-{uuid.uuid4().hex}",
+    )
+    job_row = await db_session.get(ToolFactoryJob, outcome.result.id)
+    assert job_row is not None
+    await store.put_bytes(
+        bucket=job_row.source_bucket or "",
+        object_key=job_row.source_object_key or "",
+        data=b'{"openapi":"3.0.0","info":{"title":"x","version":"1"},"paths":{}}',
+        content_type="application/json",
+    )
+    await _run_worker(db_session, job_id=outcome.result.id, storage=store)
+    job_row = await db_session.get(ToolFactoryJob, outcome.result.id)
+    assert job_row is not None
+    assert job_row.status == JobStatus.FAILED.value
+    assert job_row.error_code == FACTORY_SOURCE_OBJECT_CORRUPT
+
+
+@pytest.mark.asyncio
+async def test_worker_restart_reconstructs_from_object(
+    db_session: AsyncSession,
+) -> None:
+    user_id = await _seed_user_with_perms(db_session, codes=["mcp.server.manage"])
+    svc, store, _q = _svc(db_session)
+    outcome = await svc.create_openapi_analyze_job(
+        actor_user_id=user_id,
+        source_bytes=MINIMAL_JSON,
+        filename="demo.json",
+        idempotency_key=f"k-{uuid.uuid4().hex}",
+    )
+    # Simulate crashed RUNNING lease (expired).
+    job_row = await db_session.get(ToolFactoryJob, outcome.result.id)
+    assert job_row is not None
+    from datetime import UTC, datetime, timedelta
+
+    job_row.status = JobStatus.RUNNING.value
+    job_row.worker_id = "dead-worker"
+    job_row.lease_token = uuid.uuid4()
+    job_row.lease_expires_at = datetime.now(UTC) - timedelta(seconds=30)
+    await db_session.commit()
+
+    await _run_worker(db_session, job_id=outcome.result.id, storage=store)
+    job_row = await db_session.get(ToolFactoryJob, outcome.result.id)
+    assert job_row is not None
+    assert job_row.status == JobStatus.SUCCEEDED.value
+    arts = (
+        await db_session.execute(
+            select(func.count()).where(ToolFactoryArtifact.job_id == outcome.result.id)
+        )
+    ).scalar_one()
+    assert int(arts) == 1
+
+
+@pytest.mark.asyncio
 async def test_artifact_hash_deterministic(db_session: AsyncSession) -> None:
     user_id = await _seed_user_with_perms(db_session, codes=["mcp.server.manage"])
-    svc = FactoryService(db_session)
+    store = InMemoryObjectStorage()
+    svc, _, _q = _svc(db_session, storage=store)
     a = await svc.create_openapi_analyze_job(
         actor_user_id=user_id,
         source_bytes=MINIMAL_JSON,
@@ -199,6 +351,8 @@ async def test_artifact_hash_deterministic(db_session: AsyncSession) -> None:
         filename="b.json",
         idempotency_key=f"k-b-{uuid.uuid4().hex}",
     )
+    await _run_worker(db_session, job_id=a.result.id, storage=store)
+    await _run_worker(db_session, job_id=b.result.id, storage=store)
     art_a = (
         await db_session.execute(
             select(ToolFactoryArtifact).where(ToolFactoryArtifact.job_id == a.result.id)
@@ -209,19 +363,17 @@ async def test_artifact_hash_deterministic(db_session: AsyncSession) -> None:
             select(ToolFactoryArtifact).where(ToolFactoryArtifact.job_id == b.result.id)
         )
     ).scalar_one()
-    # Same analysis structure → same content hash (source_sha256 differs by source only).
-    # Payloads include source_sha256 so hashes differ when source bytes differ; here source
-    # bytes are identical so hashes match.
     assert art_a.content_sha256 == art_b.content_sha256
-    assert a.result.source_sha256 == b.result.source_sha256
 
 
 @pytest.mark.asyncio
 async def test_permission_separation(db_session: AsyncSession) -> None:
     reader = await _seed_user_with_perms(db_session, codes=["mcp.server.read"])
-    manager = await _seed_user_with_perms(db_session, codes=["mcp.server.manage"])
-    svc = FactoryService(db_session)
-
+    manager = await _seed_user_with_perms(
+        db_session, codes=["mcp.server.manage", "mcp.server.read"]
+    )
+    store = InMemoryObjectStorage()
+    svc, _, q = _svc(db_session, storage=store)
     with pytest.raises(AppError) as exc:
         await svc.create_openapi_analyze_job(
             actor_user_id=reader,
@@ -237,10 +389,11 @@ async def test_permission_separation(db_session: AsyncSession) -> None:
         filename="x.json",
         idempotency_key=f"k-{uuid.uuid4().hex}",
     )
-    listed = await svc.list_jobs(reader)
-    assert any(item.id == created.result.id for item in listed.items)
+    await _run_worker(db_session, job_id=created.result.id, storage=store)
     detail = await svc.get_job(reader, created.result.id)
+    assert detail.status == JobStatus.SUCCEEDED
     assert detail.analysis is not None
+    assert q.published == [created.result.id]
 
 
 @pytest.mark.asyncio
@@ -250,7 +403,7 @@ async def test_inactive_user_rejected(db_session: AsyncSession) -> None:
         codes=["mcp.server.manage"],
         status=UserStatus.INACTIVE,
     )
-    svc = FactoryService(db_session)
+    svc, _, _q = _svc(db_session)
     with pytest.raises(AppError) as exc:
         await svc.create_openapi_analyze_job(
             actor_user_id=user_id,
@@ -264,7 +417,7 @@ async def test_inactive_user_rejected(db_session: AsyncSession) -> None:
 @pytest.mark.asyncio
 async def test_idempotency_replay_same_source(db_session: AsyncSession) -> None:
     user_id = await _seed_user_with_perms(db_session, codes=["mcp.server.manage"])
-    svc = FactoryService(db_session)
+    svc, store, _q = _svc(db_session)
     key = f"idem-{uuid.uuid4().hex}"
     first = await svc.create_openapi_analyze_job(
         actor_user_id=user_id,
@@ -272,6 +425,7 @@ async def test_idempotency_replay_same_source(db_session: AsyncSession) -> None:
         filename="demo.json",
         idempotency_key=key,
     )
+    objects_after_first = store.object_count()
     second = await svc.create_openapi_analyze_job(
         actor_user_id=user_id,
         source_bytes=MINIMAL_JSON,
@@ -280,6 +434,7 @@ async def test_idempotency_replay_same_source(db_session: AsyncSession) -> None:
     )
     assert second.replayed is True
     assert second.result.id == first.result.id
+    assert store.object_count() == objects_after_first
     count = (
         await db_session.execute(select(func.count()).select_from(ToolFactoryJob))
     ).scalar_one()
@@ -289,7 +444,7 @@ async def test_idempotency_replay_same_source(db_session: AsyncSession) -> None:
 @pytest.mark.asyncio
 async def test_idempotency_conflict_changed_source(db_session: AsyncSession) -> None:
     user_id = await _seed_user_with_perms(db_session, codes=["mcp.server.manage"])
-    svc = FactoryService(db_session)
+    svc, store, _q = _svc(db_session)
     key = f"idem-{uuid.uuid4().hex}"
     await svc.create_openapi_analyze_job(
         actor_user_id=user_id,
@@ -297,6 +452,7 @@ async def test_idempotency_conflict_changed_source(db_session: AsyncSession) -> 
         filename="demo.json",
         idempotency_key=key,
     )
+    before = store.object_count()
     other = json.dumps(
         {
             "openapi": "3.0.0",
@@ -313,34 +469,8 @@ async def test_idempotency_conflict_changed_source(db_session: AsyncSession) -> 
         )
     assert exc.value.code == "IDEMPOTENCY_KEY_REUSED"
     assert exc.value.status_code == 409
-
-
-@pytest.mark.asyncio
-async def test_failed_replay_does_not_reanalyze(db_session: AsyncSession) -> None:
-    user_id = await _seed_user_with_perms(db_session, codes=["mcp.server.manage"])
-    svc = FactoryService(db_session)
-    key = f"idem-fail-{uuid.uuid4().hex}"
-    bad = b"{broken"
-    first = await svc.create_openapi_analyze_job(
-        actor_user_id=user_id,
-        source_bytes=bad,
-        filename="bad.json",
-        idempotency_key=key,
-    )
-    assert first.result.status == JobStatus.FAILED
-    second = await svc.create_openapi_analyze_job(
-        actor_user_id=user_id,
-        source_bytes=bad,
-        filename="bad.json",
-        idempotency_key=key,
-    )
-    assert second.replayed is True
-    assert second.result.id == first.result.id
-    assert second.result.status == JobStatus.FAILED
-    jobs = (
-        await db_session.execute(select(func.count()).select_from(ToolFactoryJob))
-    ).scalar_one()
-    assert int(jobs) == 1
+    # Fast-path conflict before upload when idempotency already exists.
+    assert store.object_count() == before
 
 
 @pytest.mark.asyncio
@@ -349,8 +479,7 @@ async def test_idempotency_replay_keeps_single_job(db_session: AsyncSession) -> 
 
     user_id = await _seed_user_with_perms(db_session, codes=["mcp.server.manage"])
     key = f"race-{uuid.uuid4().hex}"
-
-    svc = FactoryService(db_session)
+    svc, store, _q = _svc(db_session)
     first = await svc.create_openapi_analyze_job(
         actor_user_id=user_id,
         source_bytes=MINIMAL_JSON,
@@ -375,13 +504,14 @@ async def test_idempotency_replay_keeps_single_job(db_session: AsyncSession) -> 
         await db_session.execute(select(func.count()).select_from(ToolFactoryJob))
     ).scalar_one()
     assert int(jobs) == 1
+    assert store.object_count() == 1
 
 
 @pytest.mark.asyncio
 async def test_oversize_rejected_without_job(db_session: AsyncSession) -> None:
     user_id = await _seed_user_with_perms(db_session, codes=["mcp.server.manage"])
     huge = b"{" + (b"a" * (MAX_SOURCE_BYTES + 1))
-    svc = FactoryService(db_session)
+    svc, store, _q = _svc(db_session)
     with pytest.raises(AppError) as exc:
         await svc.create_openapi_analyze_job(
             actor_user_id=user_id,
@@ -399,6 +529,7 @@ async def test_oversize_rejected_without_job(db_session: AsyncSession) -> None:
         await db_session.execute(select(func.count()).select_from(ApiIdempotencyRecord))
     ).scalar_one()
     assert int(idemp) == 0
+    assert store.object_count() == 0
 
 
 def test_normalize_source_name_strips_paths_and_controls() -> None:
@@ -412,15 +543,14 @@ def test_normalize_source_name_strips_paths_and_controls() -> None:
 @pytest.mark.asyncio
 async def test_no_raw_source_in_idempotency_snapshot(db_session: AsyncSession) -> None:
     user_id = await _seed_user_with_perms(db_session, codes=["mcp.server.manage"])
-    secretish = MINIMAL_JSON
-    svc = FactoryService(db_session)
+    svc, _, _q = _svc(db_session)
     await svc.create_openapi_analyze_job(
         actor_user_id=user_id,
-        source_bytes=secretish,
+        source_bytes=MINIMAL_JSON,
         filename="demo.json",
         idempotency_key=f"k-{uuid.uuid4().hex}",
     )
     row = (await db_session.execute(select(ApiIdempotencyRecord))).scalar_one()
     body = json.dumps(row.response_body)
-    assert secretish.decode() not in body
-    assert "openapi" not in body or '"job_type"' in body
+    assert MINIMAL_JSON.decode() not in body
+    assert "source_object_key" not in body

@@ -28,6 +28,10 @@ class FactoryRepository:
         source_sha256: str,
         analyzer_version: str,
         requested_by: uuid.UUID,
+        source_bucket: str | None = None,
+        source_object_key: str | None = None,
+        source_content_type: str | None = None,
+        source_size_bytes: int | None = None,
         source_format: str | None = None,
         operation_count: int = 0,
         server_count: int = 0,
@@ -36,14 +40,21 @@ class FactoryRepository:
         current_phase: str | None = None,
         error_code: str | None = None,
         error_message: str | None = None,
+        queued_at: datetime | None = None,
         started_at: datetime | None = None,
         finished_at: datetime | None = None,
+        job_id: uuid.UUID | None = None,
     ) -> ToolFactoryJob:
         job = ToolFactoryJob(
+            id=job_id or uuid.uuid4(),
             job_type=job_type,
             status=status,
             source_name=source_name,
             source_sha256=source_sha256,
+            source_bucket=source_bucket,
+            source_object_key=source_object_key,
+            source_content_type=source_content_type,
+            source_size_bytes=source_size_bytes,
             source_format=source_format,
             analyzer_version=analyzer_version,
             operation_count=operation_count,
@@ -54,13 +65,23 @@ class FactoryRepository:
             error_code=error_code,
             error_message=error_message,
             requested_by=requested_by,
+            queued_at=queued_at,
             started_at=started_at,
             finished_at=finished_at,
+            lock_version=1,
         )
         self._session.add(job)
         await self._session.flush()
         await self._session.refresh(job)
         return job
+
+    async def get_job_for_update(self, job_id: uuid.UUID) -> ToolFactoryJob | None:
+        stmt = (
+            select(ToolFactoryJob)
+            .where(ToolFactoryJob.id == job_id)
+            .with_for_update()
+        )
+        return (await self._session.execute(stmt)).scalar_one_or_none()
 
     async def finish_job_success(
         self,
@@ -80,6 +101,10 @@ class FactoryRepository:
         job.error_code = None
         job.error_message = None
         job.finished_at = finished_at
+        job.worker_id = None
+        job.lease_token = None
+        job.lease_expires_at = None
+        job.lock_version = int(job.lock_version) + 1
         await self._session.flush()
         await self._session.refresh(job)
         return job
@@ -100,6 +125,10 @@ class FactoryRepository:
         job.error_code = error_code[:128]
         job.error_message = error_message[:500]
         job.finished_at = finished_at
+        job.worker_id = None
+        job.lease_token = None
+        job.lease_expires_at = None
+        job.lock_version = int(job.lock_version) + 1
         await self._session.flush()
         await self._session.refresh(job)
         return job
