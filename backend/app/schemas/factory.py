@@ -1,4 +1,4 @@
-"""API schemas for Tool Factory Jobs (docs/06)."""
+"""API schemas for Tool Factory Jobs and Candidate Tools (docs/06)."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.domain.enums import JobStatus
-from app.factory.contracts import FactoryOpenAPIAnalysis
+from app.factory.contracts import FactoryOpenAPIAnalysis, FactoryParameterCandidate
 from app.schemas.common_page import Page
 
 FactoryJobType = Literal["OPENAPI_ANALYZE"]
@@ -54,7 +54,37 @@ class FactoryJobDetailResponse(FactoryJobResponse):
     analysis_artifact: FactoryArtifactSummary | None = None
     test_results: list[Any] = Field(default_factory=list)
     test_result_count: int = 0
+    candidate_count: int = 0
 
 
 class FactoryJobListResponse(Page):
     items: list[FactoryJobResponse]
+
+
+class FactoryCandidateResponse(BaseModel):
+    """Sanitized Candidate Tool — factory-local; never raw OpenAPI source."""
+
+    model_config = ConfigDict(extra="forbid", from_attributes=True)
+
+    id: uuid.UUID
+    job_id: uuid.UUID
+    analysis_artifact_id: uuid.UUID
+    source_sha256: str
+    analyzer_version: str
+    operation_key: str
+    method: str
+    path: str
+    operation_id: str | None = None
+    summary: str | None = None
+    description: str | None = None
+    tags: list[str] = Field(default_factory=list)
+    deprecated: bool = False
+    parameters: list[FactoryParameterCandidate] = Field(default_factory=list)
+    request_schema: dict[str, Any] | None = None
+    response_schema: dict[str, Any] | None = None
+    created_at: datetime
+
+
+class FactoryCandidateListResponse(Page):
+    items: list[FactoryCandidateResponse]
+    job_id: uuid.UUID

@@ -22,7 +22,11 @@ from app.factory.errors import (
 )
 from app.factory.openapi_analyzer import MAX_SOURCE_BYTES
 from app.infrastructure.object_storage import InMemoryObjectStorage
-from app.models.factory import ToolFactoryArtifact, ToolFactoryJob
+from app.models.factory import (
+    ToolFactoryArtifact,
+    ToolFactoryCandidate,
+    ToolFactoryJob,
+)
 from app.models.idempotency import ApiIdempotencyRecord
 from app.models.outbox import OutboxEvent
 from app.repositories.role import PermissionRepository
@@ -561,3 +565,160 @@ async def test_no_raw_source_in_idempotency_snapshot(db_session: AsyncSession) -
     body = json.dumps(row.response_body)
     assert MINIMAL_JSON.decode() not in body
     assert "source_object_key" not in body
+
+
+MULTI_OP_JSON = json.dumps(
+    {
+        "openapi": "3.0.3",
+        "info": {"title": "Pets", "version": "1.0.0"},
+        "paths": {
+            "/pets": {
+                "get": {
+                    "operationId": "listPets",
+                    "summary": "List pets",
+                    "tags": ["pets"],
+                    "responses": {"200": {"description": "ok"}},
+                },
+                "post": {
+                    "operationId": "createPet",
+                    "summary": "Create pet",
+                    "tags": ["pets"],
+                    "responses": {"201": {"description": "created"}},
+                },
+            },
+            "/pets/{petId}": {
+                "get": {
+                    "operationId": "getPet",
+                    "parameters": [
+                        {
+                            "name": "petId",
+                            "in": "path",
+                            "required": True,
+                            "schema": {"type": "string"},
+                        }
+                    ],
+                    "responses": {"200": {"description": "ok"}},
+                }
+            },
+        },
+    },
+    separators=(",", ":"),
+).encode("utf-8")
+
+
+@pytest.mark.asyncio
+async def test_worker_materializes_candidate_tools(db_session: AsyncSession) -> None:
+    user_id = await _seed_user_with_perms(
+        db_session, codes=["mcp.server.manage", "mcp.server.read"]
+    )
+    svc, store = _svc(db_session)
+    outcome = await svc.create_openapi_analyze_job(
+        actor_user_id=user_id,
+        source_bytes=MULTI_OP_JSON,
+        filename="pets.json",
+        idempotency_key=f"k-{uuid.uuid4().hex}",
+    )
+    await _run_worker(db_session, job_id=outcome.result.id, storage=store)
+
+    candidates = (
+        await db_session.execute(
+            select(ToolFactoryCandidate).where(
+                ToolFactoryCandidate.job_id == outcome.result.id
+            )
+        )
+    ).scalars().all()
+    assert len(candidates) == 3
+    keys = {c.operation_key for c in candidates}
+    assert keys == {"GET /pets", "POST /pets", "GET /pets/{petId}"}
+    for c in candidates:
+        assert c.source_sha256 == hashlib.sha256(MULTI_OP_JSON).hexdigest()
+        assert c.analyzer_version == OPENAPI_ANALYZER_VERSION
+        assert c.analysis_artifact_id is not None
+        assert MULTI_OP_JSON.decode() not in json.dumps(
+            {
+                "parameters": c.parameters,
+                "request_schema": c.request_schema,
+                "response_schema": c.response_schema,
+            }
+        )
+
+    listed = await svc.list_candidates_for_job(user_id, outcome.result.id)
+    assert listed.total == 3
+    assert listed.job_id == outcome.result.id
+    assert len(listed.items) == 3
+
+    detail = await svc.get_candidate(user_id, listed.items[0].id)
+    assert detail.operation_key == listed.items[0].operation_key
+    assert detail.job_id == outcome.result.id
+
+    job_detail = await svc.get_job(user_id, outcome.result.id)
+    assert job_detail.candidate_count == 3
+
+
+@pytest.mark.asyncio
+async def test_candidate_materialize_replay_idempotent(
+    db_session: AsyncSession,
+) -> None:
+    user_id = await _seed_user_with_perms(
+        db_session, codes=["mcp.server.manage", "mcp.server.read"]
+    )
+    svc, store = _svc(db_session)
+    outcome = await svc.create_openapi_analyze_job(
+        actor_user_id=user_id,
+        source_bytes=MULTI_OP_JSON,
+        filename="pets.json",
+        idempotency_key=f"k-{uuid.uuid4().hex}",
+    )
+    await _run_worker(db_session, job_id=outcome.result.id, storage=store)
+
+    job = await db_session.get(ToolFactoryJob, outcome.result.id)
+    assert job is not None
+    artifact = (
+        await db_session.execute(
+            select(ToolFactoryArtifact).where(
+                ToolFactoryArtifact.job_id == job.id
+            )
+        )
+    ).scalar_one()
+    created_again = await svc.materialize_candidates_from_analysis(
+        job=job,
+        artifact=artifact,
+    )
+    assert created_again == 0
+    count = (
+        await db_session.execute(
+            select(func.count()).where(
+                ToolFactoryCandidate.job_id == outcome.result.id
+            )
+        )
+    ).scalar_one()
+    assert int(count) == 3
+
+    # List path also re-materializes safely.
+    listed = await svc.list_candidates_for_job(user_id, outcome.result.id)
+    assert listed.total == 3
+    count2 = (
+        await db_session.execute(
+            select(func.count()).where(
+                ToolFactoryCandidate.job_id == outcome.result.id
+            )
+        )
+    ).scalar_one()
+    assert int(count2) == 3
+
+
+@pytest.mark.asyncio
+async def test_candidate_read_requires_permission(db_session: AsyncSession) -> None:
+    manager = await _seed_user_with_perms(db_session, codes=["mcp.server.manage"])
+    stranger = await _seed_user_with_perms(db_session, codes=[])
+    svc, store = _svc(db_session)
+    outcome = await svc.create_openapi_analyze_job(
+        actor_user_id=manager,
+        source_bytes=MINIMAL_JSON,
+        filename="demo.json",
+        idempotency_key=f"k-{uuid.uuid4().hex}",
+    )
+    await _run_worker(db_session, job_id=outcome.result.id, storage=store)
+    with pytest.raises(AppError) as exc:
+        await svc.list_candidates_for_job(stranger, outcome.result.id)
+    assert exc.value.status_code == 403

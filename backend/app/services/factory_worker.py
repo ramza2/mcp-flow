@@ -32,8 +32,10 @@ from app.infrastructure.object_storage import (
     ObjectStorageError,
     get_object_storage,
 )
+from app.factory.contracts import FactoryOpenAPIAnalysis
 from app.models.factory import ToolFactoryJob
 from app.repositories.factory import FactoryRepository
+from app.services.factory import FactoryService
 
 logger = logging.getLogger(__name__)
 
@@ -226,6 +228,12 @@ class FactoryWorkerService:
                 server_count=len(payload.get("servers") or []),
                 finished_at=finished,
             )
+            analysis = FactoryOpenAPIAnalysis.model_validate(payload)
+            await FactoryService(self._session).materialize_candidates_from_analysis(
+                job=current,
+                artifact=existing,
+                analysis=analysis,
+            )
             return FactoryAnalyzeOutcome(
                 job_id=current.id,
                 status=JobStatus.SUCCEEDED.value,
@@ -295,7 +303,7 @@ class FactoryWorkerService:
         payload = analysis.model_dump(mode="json")
         encoded = _canonical_json_bytes(payload)
         content_sha256 = compute_canonical_json_hash(payload)
-        await self._repo.create_analysis_artifact(
+        artifact = await self._repo.create_analysis_artifact(
             job_id=current.id,
             artifact_type=ARTIFACT_TYPE_OPENAPI_ANALYSIS,
             content_type=ARTIFACT_CONTENT_TYPE_JSON,
@@ -310,6 +318,11 @@ class FactoryWorkerService:
             operation_count=len(analysis.operations),
             server_count=len(analysis.servers),
             finished_at=finished,
+        )
+        await FactoryService(self._session).materialize_candidates_from_analysis(
+            job=current,
+            artifact=artifact,
+            analysis=analysis,
         )
         return FactoryAnalyzeOutcome(
             job_id=current.id,

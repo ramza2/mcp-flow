@@ -1087,12 +1087,14 @@ Pure in-process OpenAPI **3.0.x / 3.1.x** analyzer at
 Authenticated admin file upload → Object Storage source handoff → durable
 `ToolFactoryJob` (`QUEUED`) → Celery `factory` queue → `factory-worker`
 re-fetches/verifies source → pure `analyze_openapi()` → sanitized
-`OPENAPI_ANALYSIS` artifact → list/detail API.
+`OPENAPI_ANALYSIS` artifact → Candidate Tool materialization → list/detail API.
 
 ```text
 POST /api/v1/factory/jobs   (multipart source + Idempotency-Key)
 GET  /api/v1/factory/jobs
 GET  /api/v1/factory/jobs/{job_id}
+GET  /api/v1/factory/jobs/{job_id}/candidates
+GET  /api/v1/factory/candidates/{candidate_id}
 ```
 
 - Permissions: `mcp.server.manage` (create), `mcp.server.read` (list/detail); ACTIVE user
@@ -1112,7 +1114,21 @@ GET  /api/v1/factory/jobs/{job_id}
 - Idempotency scope `FACTORY_OPENAPI_ANALYZE_V1`; resource_type `TOOL_FACTORY_JOB`;
   duplicate races delete orphan uploaded objects
 
-Analysis success ≠ generated Tool ≠ verified Tool ≠ activated Tool.
+### Tool Factory Candidate Tools (implemented slice)
+
+After a `SUCCEEDED` `OPENAPI_ANALYZE` Job, one durable **Candidate Tool** is
+materialized per sanitized analysis `operation` (from the `OPENAPI_ANALYSIS`
+artifact only — no raw OpenAPI re-parse on the API path).
+
+- Identity: `UNIQUE (job_id, operation_key)` — replay/re-materialize is idempotent
+- Lineage: `job_id`, `analysis_artifact_id`, `source_sha256`, `analyzer_version`
+- Payloads are bounded/sanitized operation contracts (parameters, schemas, tags)
+- Candidates are **factory-local review input**; they do **not** create or activate
+  `MCPTool` / `MCPServer`
+- Read API: `GET /factory/jobs/{job_id}/candidates`,
+  `GET /factory/candidates/{candidate_id}` (`mcp.server.read`)
+
+Analysis success ≠ Candidate Tool ≠ generated Tool ≠ verified Tool ≠ activated Tool.
 
 **Partial requirement coverage (not complete):**
 
@@ -1126,7 +1142,7 @@ Analysis success ≠ generated Tool ≠ verified Tool ≠ activated Tool.
 - generic `/jobs` API
 - sandbox build/test / generated MCP code/package
 - Python source analysis / dependency install
-- administrator Publish approval / DRAFT MCP Server creation
+- Candidate review decisions / Publish / DRAFT MCP Server creation
 - Connection Test / Discovery / activation
 - version/archive/restore
 - frontend real API wiring

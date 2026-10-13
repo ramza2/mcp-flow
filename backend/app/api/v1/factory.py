@@ -1,4 +1,4 @@
-"""Tool Factory Job API — durable OpenAPI analysis foundation (docs/06)."""
+"""Tool Factory Job + Candidate Tool API (docs/06)."""
 
 from __future__ import annotations
 
@@ -10,6 +10,8 @@ from fastapi import APIRouter, File, Header, Query, Response, UploadFile, status
 from app.api.dependencies import CurrentPrincipalDep, DbSessionDep
 from app.factory.openapi_analyzer import MAX_SOURCE_BYTES
 from app.schemas.factory import (
+    FactoryCandidateListResponse,
+    FactoryCandidateResponse,
     FactoryJobDetailResponse,
     FactoryJobListResponse,
     FactoryJobResponse,
@@ -77,3 +79,38 @@ async def get_factory_job(
     principal: CurrentPrincipalDep,
 ) -> FactoryJobDetailResponse:
     return await _service(session).get_job(principal.user_id, job_id)
+
+
+@router.get(
+    "/jobs/{job_id}/candidates",
+    response_model=FactoryCandidateListResponse,
+)
+async def list_factory_job_candidates(
+    job_id: uuid.UUID,
+    session: DbSessionDep,
+    principal: CurrentPrincipalDep,
+    page: Annotated[int, Query(ge=1)] = 1,
+    page_size: Annotated[int, Query(ge=1, le=100)] = 20,
+    q: Annotated[str | None, Query(max_length=255)] = None,
+    sort: Annotated[str, Query()] = "operation_key",
+) -> FactoryCandidateListResponse:
+    return await _service(session).list_candidates_for_job(
+        principal.user_id,
+        job_id,
+        page=page,
+        page_size=page_size,
+        q=q,
+        sort=sort,
+    )
+
+
+@router.get(
+    "/candidates/{candidate_id}",
+    response_model=FactoryCandidateResponse,
+)
+async def get_factory_candidate(
+    candidate_id: uuid.UUID,
+    session: DbSessionDep,
+    principal: CurrentPrincipalDep,
+) -> FactoryCandidateResponse:
+    return await _service(session).get_candidate(principal.user_id, candidate_id)
