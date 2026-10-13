@@ -1,9 +1,8 @@
-"""Tool Factory durable OpenAPI analysis Job service."""
+"""Tool Factory durable OpenAPI analysis Job service (async Object Storage handoff)."""
 
 from __future__ import annotations
 
 import hashlib
-import json
 import re
 import uuid
 from dataclasses import dataclass
@@ -17,20 +16,28 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.canonical_hash import compute_canonical_json_hash
+from app.core.config import get_settings
 from app.core.errors import AppError
 from app.domain.enums import JobStatus, UserStatus
 from app.factory import (
-    ARTIFACT_CONTENT_TYPE_JSON,
     ARTIFACT_TYPE_OPENAPI_ANALYSIS,
     JOB_TYPE_OPENAPI_ANALYZE,
     OPENAPI_ANALYZER_VERSION,
     PHASE_ANALYZE,
 )
 from app.factory.contracts import FactoryOpenAPIAnalysis
-from app.factory.errors import FactoryAnalysisError
-from app.factory.openapi_analyzer import MAX_SOURCE_BYTES, analyze_openapi
+from app.factory.errors import (
+    FACTORY_SOURCE_OBJECT_STORE_FAILED,
+)
+from app.factory.openapi_analyzer import MAX_SOURCE_BYTES
+from app.infrastructure.object_storage import (
+    ObjectStorageClient,
+    ObjectStorageError,
+    get_object_storage,
+)
 from app.repositories.factory import FactoryRepository
 from app.repositories.idempotency import IdempotencyRepository
+from app.repositories.outbox import OutboxRepository
 from app.repositories.user import UserRepository
 from app.schemas.factory import (
     FactoryArtifactSummary,
@@ -62,15 +69,6 @@ class FactoryJobCreateOutcome:
 
 def _utc_now() -> datetime:
     return datetime.now(UTC)
-
-
-def _canonical_json_bytes(payload: Any) -> bytes:
-    return json.dumps(
-        payload,
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=False,
-    ).encode("utf-8")
 
 
 def _request_hash(*, source_name: str, source_sha256: str) -> str:
@@ -117,7 +115,6 @@ def normalize_source_name(filename: str | None) -> str:
     if not filename or not str(filename).strip():
         return _FALLBACK_SOURCE_NAME
     raw = str(filename).strip().replace("\x00", "")
-    # Drop any directory components from POSIX or Windows-style paths.
     name = PureWindowsPath(raw).name
     name = PurePosixPath(name).name
     name = _CONTROL_RE.sub("", name).strip()
@@ -163,13 +160,38 @@ def ingest_source_bytes(data: bytes) -> bytes:
     return raw
 
 
+def _guess_content_type(source_name: str) -> str:
+    lower = source_name.lower()
+    if lower.endswith(".yaml") or lower.endswith(".yml"):
+        return "application/yaml"
+    return "application/json"
+
+
+def build_source_object_key(*, job_id: uuid.UUID) -> str:
+    """Server-generated non-guessable Object Storage key (no credentials/secrets)."""
+
+    return f"factory/openapi/{job_id.hex}/{uuid.uuid4().hex}"
+
+
 class FactoryService:
-    def __init__(self, session: AsyncSession) -> None:
+    def __init__(
+        self,
+        session: AsyncSession,
+        *,
+        storage: ObjectStorageClient | None = None,
+    ) -> None:
         self._session = session
         self._repo = FactoryRepository(session)
         self._users = UserRepository(session)
         self._authz = AuthorizationResolver(session)
         self._idempotency = IdempotencyRepository(session)
+        self._outbox = OutboxRepository(session)
+        self._storage = storage
+
+    def _storage_client(self) -> ObjectStorageClient:
+        if self._storage is not None:
+            return self._storage
+        return get_object_storage()
 
     async def _assert_active(self, actor_user_id: uuid.UUID) -> None:
         user = await self._users.get(actor_user_id)
@@ -252,6 +274,8 @@ class FactoryService:
         validate_source_extension(source_name)
         raw = ingest_source_bytes(source_bytes)
         source_sha256 = hashlib.sha256(raw).hexdigest()
+        content_type = _guess_content_type(source_name)
+        size_bytes = len(raw)
 
         principal_key = str(actor_user_id)
         req_hash = _request_hash(source_name=source_name, source_sha256=source_sha256)
@@ -264,20 +288,48 @@ class FactoryService:
         if existing is not None:
             return await self._replay_or_conflict(existing, req_hash)
 
+        settings = get_settings()
+        bucket = settings.object_storage_bucket
+        job_id = uuid.uuid4()
+        object_key = build_source_object_key(job_id=job_id)
+        storage = self._storage_client()
+
         try:
-            outcome = await self._analyze_and_persist(
+            await storage.ensure_bucket(bucket)
+            await storage.put_bytes(
+                bucket=bucket,
+                object_key=object_key,
+                data=raw,
+                content_type=content_type,
+            )
+        except ObjectStorageError as exc:
+            raise AppError(
+                code=exc.code or FACTORY_SOURCE_OBJECT_STORE_FAILED,
+                message=exc.message,
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            ) from exc
+
+        try:
+            outcome = await self._persist_queued_job(
+                job_id=job_id,
                 actor_user_id=actor_user_id,
-                raw=raw,
                 source_name=source_name,
                 source_sha256=source_sha256,
+                source_bucket=bucket,
+                source_object_key=object_key,
+                source_content_type=content_type,
+                source_size_bytes=size_bytes,
                 principal_key=principal_key,
                 idempotency_key=key,
                 request_hash=req_hash,
             )
+            # Durable Outbox is written in the same TX. Broker publish is the
+            # outbox poller's responsibility — never SoT for Job status.
             await self._session.commit()
-            return outcome
         except IntegrityError as exc:
             await self._session.rollback()
+            # Loser of the idempotency race must not leave an orphan object.
+            await storage.delete_object(bucket=bucket, object_key=object_key)
             if not _is_idempotency_pk_violation(exc):
                 raise
             raced = await self._idempotency.get(
@@ -292,79 +344,48 @@ class FactoryService:
                     status_code=status.HTTP_409_CONFLICT,
                 ) from exc
             return await self._replay_or_conflict(raced, req_hash)
+        except Exception:
+            await self._session.rollback()
+            await storage.delete_object(bucket=bucket, object_key=object_key)
+            raise
+        return outcome
 
-    async def _analyze_and_persist(
+    async def _persist_queued_job(
         self,
         *,
+        job_id: uuid.UUID,
         actor_user_id: uuid.UUID,
-        raw: bytes,
         source_name: str,
         source_sha256: str,
+        source_bucket: str,
+        source_object_key: str,
+        source_content_type: str,
+        source_size_bytes: int,
         principal_key: str,
         idempotency_key: str,
         request_hash: str,
     ) -> FactoryJobCreateOutcome:
         now = _utc_now()
         job = await self._repo.create_job(
+            job_id=job_id,
             job_type=JOB_TYPE_OPENAPI_ANALYZE,
-            status=JobStatus.RUNNING.value,
+            status=JobStatus.QUEUED.value,
             source_name=source_name,
             source_sha256=source_sha256,
+            source_bucket=source_bucket,
+            source_object_key=source_object_key,
+            source_content_type=source_content_type,
+            source_size_bytes=source_size_bytes,
             analyzer_version=OPENAPI_ANALYZER_VERSION,
             requested_by=actor_user_id,
             progress_current=0,
             progress_total=1,
             current_phase=PHASE_ANALYZE,
-            started_at=now,
+            queued_at=now,
         )
-
-        try:
-            analysis = analyze_openapi(raw, filename=source_name)
-        except FactoryAnalysisError as exc:
-            finished = _utc_now()
-            job = await self._repo.finish_job_failed(
-                job,
-                error_code=exc.code,
-                error_message=exc.message,
-                finished_at=finished,
-            )
-            response = self._job_to_response(job)
-            await self._idempotency.create_completed(
-                principal_key=principal_key,
-                operation_scope=_OPERATION_SCOPE,
-                idempotency_key=idempotency_key,
-                request_hash=request_hash,
-                response_status=status.HTTP_201_CREATED,
-                response_body=response.model_dump(mode="json"),
-                resource_type=_RESOURCE_TYPE,
-                resource_id=job.id,
-                completed_at=finished,
-            )
-            return FactoryJobCreateOutcome(
-                result=response,
-                http_status=status.HTTP_201_CREATED,
-                replayed=False,
-            )
-
-        payload = analysis.model_dump(mode="json")
-        encoded = _canonical_json_bytes(payload)
-        content_sha256 = compute_canonical_json_hash(payload)
-
-        await self._repo.create_analysis_artifact(
+        await self._outbox.create_factory_job_dispatch(
             job_id=job.id,
-            artifact_type=ARTIFACT_TYPE_OPENAPI_ANALYSIS,
-            content_type=ARTIFACT_CONTENT_TYPE_JSON,
-            content_sha256=content_sha256,
-            size_bytes=len(encoded),
-            inline_payload=payload,
-        )
-        finished = _utc_now()
-        job = await self._repo.finish_job_success(
-            job,
-            source_format=analysis.source_format,
-            operation_count=len(analysis.operations),
-            server_count=len(analysis.servers),
-            finished_at=finished,
+            created_at=now,
         )
         response = self._job_to_response(job)
         await self._idempotency.create_completed(
@@ -376,7 +397,7 @@ class FactoryService:
             response_body=response.model_dump(mode="json"),
             resource_type=_RESOURCE_TYPE,
             resource_id=job.id,
-            completed_at=finished,
+            completed_at=now,
         )
         return FactoryJobCreateOutcome(
             result=response,
@@ -434,7 +455,6 @@ class FactoryService:
                 message="Idempotency response snapshot id가 resource_id와 불일치합니다.",
                 status_code=status.HTTP_409_CONFLICT,
             )
-        # Prefer live job row for current safe metadata (FAILED/SUCCEEDED).
         live = self._job_to_response(job)
         return FactoryJobCreateOutcome(
             result=live,

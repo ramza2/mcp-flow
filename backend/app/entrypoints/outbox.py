@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import signal
+import uuid
 from dataclasses import dataclass
 
 from app.approval.expiry import ApprovalExpiryService
@@ -13,6 +14,7 @@ from app.db.session import dispose_db, init_db, session_scope
 from app.execution.queue import ExecutionQueueService, OutboxRelayService
 from app.execution.recovery import ExecutionRecoveryService
 from app.infrastructure.queue import CeleryExecutionQueuePublisher
+from app.services.factory_recovery import FactoryRecoveryService
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +30,9 @@ class OutboxIterationResult:
     recovery_failed: int
     approval_expiry_selected: int
     approval_expiry_expired: int
+    factory_recovery_selected: int
+    factory_recovery_published: int
+    factory_recovery_failed: int
 
 
 async def run_iteration(*, settings: Settings | None = None) -> OutboxIterationResult:
@@ -77,6 +82,39 @@ async def run_iteration(*, settings: Settings | None = None) -> OutboxIterationR
                 exc_info=True,
             )
 
+    factory_recovery_selected = 0
+    factory_recovery_published = 0
+    factory_recovery_failed = 0
+    async with session_scope() as session:
+        factory_recovery = FactoryRecoveryService(session)
+        expired_running = await factory_recovery.list_expired_running_ids(
+            limit=cfg.outbox_batch_size
+        )
+        stale_queued = await factory_recovery.list_stale_queued_ids(
+            limit=cfg.outbox_batch_size,
+            min_age_seconds=cfg.factory_queued_republish_age_seconds,
+        )
+        # Prefer unique job ids; expired RUNNING takes precedence in ordering only.
+        seen: set[uuid.UUID] = set()
+        factory_ids: list[uuid.UUID] = []
+        for job_id in (*expired_running, *stale_queued):
+            if job_id in seen:
+                continue
+            seen.add(job_id)
+            factory_ids.append(job_id)
+        factory_recovery_selected = len(factory_ids)
+    for job_id in factory_ids:
+        try:
+            publisher.publish_factory_recovery(job_id=job_id)
+            factory_recovery_published += 1
+        except Exception:
+            factory_recovery_failed += 1
+            logger.warning(
+                "factory recovery publish failed job_id=%s",
+                job_id,
+                exc_info=True,
+            )
+
     return OutboxIterationResult(
         staged=staged,
         selected=result.selected,
@@ -87,6 +125,9 @@ async def run_iteration(*, settings: Settings | None = None) -> OutboxIterationR
         recovery_failed=recovery_failed,
         approval_expiry_selected=approval_expiry_selected,
         approval_expiry_expired=approval_expiry_expired,
+        factory_recovery_selected=factory_recovery_selected,
+        factory_recovery_published=factory_recovery_published,
+        factory_recovery_failed=factory_recovery_failed,
     )
 
 
@@ -111,17 +152,22 @@ async def _run() -> None:
             # failed recovery publish is rediscovered on the next poll.
             # Expired PENDING ApprovalRequests are terminalized by expire_due_batch
             # in the same iteration (no separate scheduler).
+            # Factory: unpublished FACTORY_JOB_DISPATCH is relayed; expired RUNNING /
+            # stale QUEUED Jobs are republished via publish_factory_recovery.
             result = await run_iteration(settings=settings)
             if (
                 result.staged
                 or result.selected
                 or result.recovery_selected
                 or result.approval_expiry_selected
+                or result.factory_recovery_selected
             ):
                 logger.info(
                     "outbox iteration staged=%s selected=%s published=%s failed=%s"
                     " recovery_selected=%s recovery_published=%s recovery_failed=%s"
-                    " approval_expiry_selected=%s approval_expiry_expired=%s",
+                    " approval_expiry_selected=%s approval_expiry_expired=%s"
+                    " factory_recovery_selected=%s factory_recovery_published=%s"
+                    " factory_recovery_failed=%s",
                     result.staged,
                     result.selected,
                     result.published,
@@ -131,6 +177,9 @@ async def _run() -> None:
                     result.recovery_failed,
                     result.approval_expiry_selected,
                     result.approval_expiry_expired,
+                    result.factory_recovery_selected,
+                    result.factory_recovery_published,
+                    result.factory_recovery_failed,
                 )
             try:
                 await asyncio.wait_for(

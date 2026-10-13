@@ -1084,8 +1084,10 @@ Pure in-process OpenAPI **3.0.x / 3.1.x** analyzer at
 
 ### Tool Factory durable OpenAPI analysis foundation (implemented slice)
 
-Authenticated admin file upload → durable `ToolFactoryJob` → bounded synchronous
-analyzer → safe normalized `OPENAPI_ANALYSIS` artifact → list/detail API.
+Authenticated admin file upload → Object Storage source handoff → durable
+`ToolFactoryJob` (`QUEUED`) → Celery `factory` queue → `factory-worker`
+re-fetches/verifies source → pure `analyze_openapi()` → sanitized
+`OPENAPI_ANALYSIS` artifact → list/detail API.
 
 ```text
 POST /api/v1/factory/jobs   (multipart source + Idempotency-Key)
@@ -1094,29 +1096,36 @@ GET  /api/v1/factory/jobs/{job_id}
 ```
 
 - Permissions: `mcp.server.manage` (create), `mcp.server.read` (list/detail); ACTIVE user
-- Canonical `JobStatus` only (`PENDING`/`QUEUED` unused in this sync slice)
+- Canonical `JobStatus` only: create returns `QUEUED`; worker uses
+  `QUEUED`/`RUNNING` → `SUCCEEDED`/`FAILED` (expired `RUNNING` lease reconstructible)
 - `job_type=OPENAPI_ANALYZE`; analyzer_version=`openapi-analyzer-v1`
-- No raw OpenAPI source column; artifact `inline_payload` is sanitized analysis JSON only
-- Expected analyzer failures persist `FAILED` Job (HTTP 201) with safe error_code/message
+- Raw OpenAPI source is **not** a PostgreSQL column; bytes live in Object Storage
+- Job stores safe metadata only: `source_bucket`, `source_object_key`,
+  `source_content_type`, `source_size_bytes`, `source_sha256`
+- API does **not** run the analyzer inline; broker delivery is not business state
+- Create TX writes durable `FACTORY_JOB_DISPATCH` Outbox alongside the `QUEUED` Job;
+  outbox relay publishes `mcpflow.factory.analyze_openapi` at-least-once
+- Outbox poller also republishes expired `RUNNING` leases and stale `QUEUED` Jobs
+- Missing/corrupt source objects fail the Job with bounded
+  `FACTORY_SOURCE_OBJECT_MISSING` / `FACTORY_SOURCE_OBJECT_CORRUPT`
 - Oversize/empty/auth failures do not create Jobs or consume Idempotency-Key
-- Idempotency scope `FACTORY_OPENAPI_ANALYZE_V1`; resource_type `TOOL_FACTORY_JOB`
+- Idempotency scope `FACTORY_OPENAPI_ANALYZE_V1`; resource_type `TOOL_FACTORY_JOB`;
+  duplicate races delete orphan uploaded objects
 
 Analysis success ≠ generated Tool ≠ verified Tool ≠ activated Tool.
 
 **Partial requirement coverage (not complete):**
 
 - REQ-FAC-001: OpenAPI **file** input only (allowlisted URL later)
-- REQ-FAC-009: durable Job resource (synchronous; no queue/Celery yet)
+- REQ-FAC-009: durable async Job + `factory-worker`
 - REQ-FAC-012: source/analyzer/analysis-artifact hashes only
 
 **Not implemented yet:**
 
 - allowlisted URL source fetch
 - generic `/jobs` API
-- async queue / Celery / `factory-worker`
 - sandbox build/test / generated MCP code/package
 - Python source analysis / dependency install
-- Object Storage handoff
 - administrator Publish approval / DRAFT MCP Server creation
 - Connection Test / Discovery / activation
 - version/archive/restore

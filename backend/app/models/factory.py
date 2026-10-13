@@ -1,6 +1,7 @@
 """ORM models for Tool Factory durable Jobs (docs/05 §18).
 
-No raw OpenAPI source, credentials, or Object Storage linkage in this slice.
+Raw OpenAPI source bytes are never stored in PostgreSQL. Async analysis stores
+only safe Object Storage reference metadata on the Job row.
 """
 
 from __future__ import annotations
@@ -75,6 +76,14 @@ class ToolFactoryJob(Base):
             "progress_total >= 1",
             name="ck_tool_factory_jobs_progress_total",
         ),
+        CheckConstraint(
+            "source_size_bytes IS NULL OR source_size_bytes >= 0",
+            name="ck_tool_factory_jobs_source_size_bytes",
+        ),
+        CheckConstraint(
+            "lock_version >= 1",
+            name="ck_tool_factory_jobs_lock_version",
+        ),
         Index(
             "ix_tool_factory_jobs_requested_by_created_at",
             "requested_by",
@@ -82,6 +91,11 @@ class ToolFactoryJob(Base):
         ),
         Index("ix_tool_factory_jobs_status_created_at", "status", "created_at"),
         Index("ix_tool_factory_jobs_created_at", "created_at"),
+        Index(
+            "ix_tool_factory_jobs_status_lease_expires_at",
+            "status",
+            "lease_expires_at",
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -91,6 +105,10 @@ class ToolFactoryJob(Base):
     status: Mapped[str] = mapped_column(String(32), nullable=False)
     source_name: Mapped[str] = mapped_column(String(255), nullable=False)
     source_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    source_bucket: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    source_object_key: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    source_content_type: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    source_size_bytes: Mapped[int | None] = mapped_column(Integer, nullable=True)
     source_format: Mapped[str | None] = mapped_column(String(16), nullable=True)
     analyzer_version: Mapped[str] = mapped_column(String(64), nullable=False)
     operation_count: Mapped[int] = mapped_column(
@@ -112,6 +130,19 @@ class ToolFactoryJob(Base):
         UUID(as_uuid=True),
         ForeignKey("users.id", ondelete="RESTRICT"),
         nullable=False,
+    )
+    queued_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    worker_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    lease_token: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), nullable=True
+    )
+    lease_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    lock_version: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=1, server_default="1"
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False

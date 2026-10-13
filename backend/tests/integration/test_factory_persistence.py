@@ -1,16 +1,22 @@
-"""PostgreSQL concurrency / persistence evidence for Tool Factory idempotency."""
+"""PostgreSQL concurrency / persistence evidence for async Tool Factory."""
 
 from __future__ import annotations
 
 import asyncio
 import json
 import uuid
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
 from app.core.errors import AppError
-from app.domain.enums import UserStatus
+from app.domain.enums import JobStatus, UserStatus
 from app.factory import ARTIFACT_TYPE_OPENAPI_ANALYSIS, JOB_TYPE_OPENAPI_ANALYZE
+from app.factory.errors import (
+    FACTORY_SOURCE_OBJECT_CORRUPT,
+    FACTORY_SOURCE_OBJECT_MISSING,
+)
+from app.infrastructure.object_storage import InMemoryObjectStorage
 from app.repositories.idempotency import IdempotencyRepository
 from app.repositories.role import PermissionRepository
 from app.schemas.auth import (
@@ -20,6 +26,7 @@ from app.schemas.auth import (
     UserRoleReplaceRequest,
 )
 from app.services.factory import FactoryService
+from app.services.factory_worker import FactoryWorkerService
 from app.services.role import RoleService
 from app.services.user import UserService
 from sqlalchemy import text
@@ -96,15 +103,10 @@ def _install_create_completed_barrier(
     *,
     parties: int = 2,
 ) -> asyncio.Barrier:
-    """Hold both callers at the final idempotency insert until both arrive."""
-
     barrier = asyncio.Barrier(parties)
     original = IdempotencyRepository.create_completed
 
-    async def _synced(
-        self: IdempotencyRepository,
-        **kwargs: Any,
-    ) -> Any:
+    async def _synced(self: IdempotencyRepository, **kwargs: Any) -> Any:
         await barrier.wait()
         return await original(self, **kwargs)
 
@@ -123,12 +125,15 @@ async def test_pg_concurrent_same_source_idempotency_one_job(
 
     key = f"fac-race-{uuid.uuid4().hex}"
     filename = "race.json"
+    storage = InMemoryObjectStorage()
     _install_create_completed_barrier(monkeypatch, parties=2)
 
     async def _run() -> Any:
         async with integration_session_factory() as session:
             try:
-                return await FactoryService(session).create_openapi_analyze_job(
+                return await FactoryService(
+                    session, storage=storage
+                ).create_openapi_analyze_job(
                     actor_user_id=user_id,
                     source_bytes=MINIMAL_JSON,
                     filename=filename,
@@ -147,6 +152,8 @@ async def test_pg_concurrent_same_source_idempotency_one_job(
     job_ids = {o.result.id for o in outcomes}
     assert len(job_ids) == 1
     surviving_id = next(iter(job_ids))
+    # Exactly one durable source object remains (loser deleted orphan upload).
+    assert storage.object_count() == 1
 
     async with integration_session_factory() as session:
         job_count = (
@@ -168,21 +175,20 @@ async def test_pg_concurrent_same_source_idempotency_one_job(
         ).scalar_one()
         assert int(job_count) == 1
 
-        artifact_count = (
+        row = (
             await session.execute(
                 text(
                     """
-                    SELECT count(*) FROM tool_factory_artifacts
-                    WHERE job_id = :jid AND artifact_type = :atype
+                    SELECT status, source_bucket, source_object_key, source_size_bytes
+                    FROM tool_factory_jobs WHERE id = :jid
                     """
                 ),
-                {
-                    "jid": str(surviving_id),
-                    "atype": ARTIFACT_TYPE_OPENAPI_ANALYSIS,
-                },
+                {"jid": str(surviving_id)},
             )
-        ).scalar_one()
-        assert int(artifact_count) == 1
+        ).one()
+        assert row[0] == JobStatus.QUEUED.value
+        assert row[1] and row[2]
+        assert int(row[3]) == len(MINIMAL_JSON)
 
         idemp_rows = (
             await session.execute(
@@ -203,18 +209,22 @@ async def test_pg_concurrent_same_source_idempotency_one_job(
             )
         ).all()
         assert len(idemp_rows) == 1
-        resource_type, resource_id, operation_scope = idemp_rows[0]
-        assert operation_scope == _OPERATION_SCOPE
-        assert resource_type == _RESOURCE_TYPE
-        assert resource_id == str(surviving_id)
+        assert idemp_rows[0][0] == _RESOURCE_TYPE
+        assert idemp_rows[0][1] == str(surviving_id)
 
-        orphan_jobs = (
+        outbox_count = (
             await session.execute(
-                text("SELECT count(*) FROM tool_factory_jobs WHERE requested_by = :uid"),
-                {"uid": str(user_id)},
+                text(
+                    """
+                    SELECT count(*) FROM outbox_events
+                    WHERE event_type = 'FACTORY_JOB_DISPATCH'
+                      AND aggregate_id = :jid
+                    """
+                ),
+                {"jid": str(surviving_id)},
             )
         ).scalar_one()
-        assert int(orphan_jobs) == 1
+        assert int(outbox_count) == 1
 
 
 @pytest.mark.integration
@@ -228,12 +238,15 @@ async def test_pg_concurrent_same_key_different_source_one_job(
 
     key = f"fac-diff-{uuid.uuid4().hex}"
     filename = "race.json"
+    storage = InMemoryObjectStorage()
     _install_create_completed_barrier(monkeypatch, parties=2)
 
     async def _run(source: bytes) -> Any:
         async with integration_session_factory() as session:
             try:
-                return await FactoryService(session).create_openapi_analyze_job(
+                return await FactoryService(
+                    session, storage=storage
+                ).create_openapi_analyze_job(
                     actor_user_id=user_id,
                     source_bytes=source,
                     filename=filename,
@@ -249,8 +262,7 @@ async def test_pg_concurrent_same_key_different_source_one_job(
     assert outcomes[0].replayed is False
     assert len(errors) == 1
     assert errors[0].code == "IDEMPOTENCY_KEY_REUSED"
-    assert errors[0].status_code == 409
-    surviving_id = outcomes[0].result.id
+    assert storage.object_count() == 1
 
     async with integration_session_factory() as session:
         job_count = (
@@ -263,7 +275,66 @@ async def test_pg_concurrent_same_key_different_source_one_job(
         ).scalar_one()
         assert int(job_count) == 1
 
-        artifact_count = (
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_pg_worker_restart_reconstructs_from_object(
+    integration_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    storage = InMemoryObjectStorage()
+    async with integration_session_factory() as session:
+        user_id = await _seed_manage_user(session)
+        outcome = await FactoryService(
+            session, storage=storage
+        ).create_openapi_analyze_job(
+            actor_user_id=user_id,
+            source_bytes=MINIMAL_JSON,
+            filename="restart.json",
+            idempotency_key=f"k-{uuid.uuid4().hex}",
+        )
+        await session.execute(
+            text(
+                """
+                UPDATE tool_factory_jobs
+                SET status = 'RUNNING',
+                    worker_id = 'dead',
+                    lease_token = :tok,
+                    lease_expires_at = :exp
+                WHERE id = :jid
+                """
+            ),
+            {
+                "tok": str(uuid.uuid4()),
+                "exp": datetime.now(UTC) - timedelta(seconds=60),
+                "jid": str(outcome.result.id),
+            },
+        )
+        await session.commit()
+        job_id = outcome.result.id
+
+    async with integration_session_factory() as session:
+        worker = FactoryWorkerService(
+            session, storage=storage, worker_id="pg-restart"
+        )
+        result = await worker.process_job(job_id=job_id)
+        await session.commit()
+        assert result.claimed is True
+        assert result.status == JobStatus.SUCCEEDED.value
+
+    async with integration_session_factory() as session:
+        row = (
+            await session.execute(
+                text(
+                    """
+                    SELECT status, operation_count FROM tool_factory_jobs WHERE id = :jid
+                    """
+                ),
+                {"jid": str(job_id)},
+            )
+        ).one()
+        assert row[0] == JobStatus.SUCCEEDED.value
+        assert int(row[1]) == 1
+        art = (
             await session.execute(
                 text(
                     """
@@ -271,33 +342,193 @@ async def test_pg_concurrent_same_key_different_source_one_job(
                     WHERE job_id = :jid AND artifact_type = :atype
                     """
                 ),
-                {
-                    "jid": str(surviving_id),
-                    "atype": ARTIFACT_TYPE_OPENAPI_ANALYSIS,
-                },
+                {"jid": str(job_id), "atype": ARTIFACT_TYPE_OPENAPI_ANALYSIS},
             )
         ).scalar_one()
-        assert int(artifact_count) == 1
+        assert int(art) == 1
 
-        idemp_count = (
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_pg_missing_and_corrupt_object_fail_job(
+    integration_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    storage = InMemoryObjectStorage()
+    async with integration_session_factory() as session:
+        user_id = await _seed_manage_user(session)
+        missing = await FactoryService(
+            session, storage=storage
+        ).create_openapi_analyze_job(
+            actor_user_id=user_id,
+            source_bytes=MINIMAL_JSON,
+            filename="missing.json",
+            idempotency_key=f"k-m-{uuid.uuid4().hex}",
+        )
+        corrupt = await FactoryService(
+            session, storage=storage
+        ).create_openapi_analyze_job(
+            actor_user_id=user_id,
+            source_bytes=MINIMAL_JSON,
+            filename="corrupt.json",
+            idempotency_key=f"k-c-{uuid.uuid4().hex}",
+        )
+        miss_row = (
             await session.execute(
                 text(
-                    """
-                    SELECT count(*) FROM api_idempotency_records
-                    WHERE principal_key = :pk
-                      AND operation_scope = :scope
-                      AND idempotency_key = :key
-                      AND resource_type = :rtype
-                      AND resource_id = :rid
-                    """
+                    "SELECT source_bucket, source_object_key FROM tool_factory_jobs "
+                    "WHERE id = :jid"
                 ),
-                {
-                    "pk": str(user_id),
-                    "scope": _OPERATION_SCOPE,
-                    "key": key,
-                    "rtype": _RESOURCE_TYPE,
-                    "rid": str(surviving_id),
-                },
+                {"jid": str(missing.result.id)},
+            )
+        ).one()
+        await storage.delete_object(bucket=miss_row[0], object_key=miss_row[1])
+        corr_row = (
+            await session.execute(
+                text(
+                    "SELECT source_bucket, source_object_key FROM tool_factory_jobs "
+                    "WHERE id = :jid"
+                ),
+                {"jid": str(corrupt.result.id)},
+            )
+        ).one()
+        await storage.put_bytes(
+            bucket=corr_row[0],
+            object_key=corr_row[1],
+            data=OTHER_JSON,
+            content_type="application/json",
+        )
+        await session.commit()
+        missing_id = missing.result.id
+        corrupt_id = corrupt.result.id
+
+    async with integration_session_factory() as session:
+        worker = FactoryWorkerService(session, storage=storage, worker_id="pg-err")
+        m = await worker.process_job(job_id=missing_id)
+        await session.commit()
+        assert m.status == JobStatus.FAILED.value
+        assert m.reason == FACTORY_SOURCE_OBJECT_MISSING
+
+    async with integration_session_factory() as session:
+        worker = FactoryWorkerService(session, storage=storage, worker_id="pg-err")
+        c = await worker.process_job(job_id=corrupt_id)
+        await session.commit()
+        assert c.status == JobStatus.FAILED.value
+        assert c.reason == FACTORY_SOURCE_OBJECT_CORRUPT
+
+    async with integration_session_factory() as session:
+        codes = (
+            await session.execute(
+                text(
+                    "SELECT error_code FROM tool_factory_jobs "
+                    "WHERE id IN (:a, :b) ORDER BY source_name"
+                ),
+                {"a": str(corrupt_id), "b": str(missing_id)},
+            )
+        ).scalars().all()
+        assert set(codes) == {
+            FACTORY_SOURCE_OBJECT_CORRUPT,
+            FACTORY_SOURCE_OBJECT_MISSING,
+        }
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_pg_outbox_publish_failure_then_recovery_one_analysis(
+    integration_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Broker publish failure leaves unpublished Outbox; relay + worker → one outcome."""
+
+    from app.execution.queue import OutboxRelayService
+
+    class _Pub:
+        def __init__(self) -> None:
+            self.fail_once = True
+            self.calls: list[uuid.UUID] = []
+
+        def publish_execution(self, **_k: Any) -> None:
+            raise AssertionError("unexpected")
+
+        def publish_approval_resume(self, **_k: Any) -> None:
+            raise AssertionError("unexpected")
+
+        def publish_mrtr_resume(self, **_k: Any) -> None:
+            raise AssertionError("unexpected")
+
+        def publish_factory_job(
+            self, *, job_id: uuid.UUID, outbox_event_id: uuid.UUID
+        ) -> None:
+            del outbox_event_id
+            if self.fail_once:
+                self.fail_once = False
+                raise ConnectionError("broker down")
+            self.calls.append(job_id)
+
+    storage = InMemoryObjectStorage()
+    async with integration_session_factory() as session:
+        user_id = await _seed_manage_user(session)
+        outcome = await FactoryService(
+            session, storage=storage
+        ).create_openapi_analyze_job(
+            actor_user_id=user_id,
+            source_bytes=MINIMAL_JSON,
+            filename="recover.json",
+            idempotency_key=f"k-{uuid.uuid4().hex}",
+        )
+        job_id = outcome.result.id
+        await session.commit()
+
+    pub = _Pub()
+    async with integration_session_factory() as session:
+        first = await OutboxRelayService(session).publish_batch(publisher=pub, limit=10)
+        await session.commit()
+        assert first.failed == 1
+        assert first.published == 0
+        unpublished = (
+            await session.execute(
+                text(
+                    "SELECT published_at IS NULL, last_error_code "
+                    "FROM outbox_events WHERE aggregate_id = :jid "
+                    "AND event_type = 'FACTORY_JOB_DISPATCH'"
+                ),
+                {"jid": str(job_id)},
+            )
+        ).one()
+        assert unpublished[0] is True
+        assert unpublished[1] == "PUBLISH_FAILED"
+
+    async with integration_session_factory() as session:
+        second = await OutboxRelayService(session).publish_batch(publisher=pub, limit=10)
+        await session.commit()
+        assert second.published == 1
+        assert pub.calls == [job_id]
+
+    async with integration_session_factory() as session:
+        worker = FactoryWorkerService(session, storage=storage, worker_id="pg-ob")
+        result = await worker.process_job(job_id=job_id)
+        await session.commit()
+        assert result.claimed is True
+        assert result.status == JobStatus.SUCCEEDED.value
+
+    async with integration_session_factory() as session:
+        # Duplicate delivery / recovery republish is a no-op after terminal.
+        worker = FactoryWorkerService(session, storage=storage, worker_id="pg-ob-2")
+        again = await worker.process_job(job_id=job_id)
+        await session.commit()
+        assert again.claimed is False
+        art = (
+            await session.execute(
+                text(
+                    "SELECT count(*) FROM tool_factory_artifacts "
+                    "WHERE job_id = :jid AND artifact_type = :atype"
+                ),
+                {"jid": str(job_id), "atype": ARTIFACT_TYPE_OPENAPI_ANALYSIS},
             )
         ).scalar_one()
-        assert int(idemp_count) == 1
+        assert int(art) == 1
+        jobs = (
+            await session.execute(
+                text("SELECT count(*) FROM tool_factory_jobs WHERE id = :jid"),
+                {"jid": str(job_id)},
+            )
+        ).scalar_one()
+        assert int(jobs) == 1

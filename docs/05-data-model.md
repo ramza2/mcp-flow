@@ -1722,10 +1722,29 @@ dedupe_key     = execution:{execution_id}:mrtr:{input_request_id}:resume
 payload        = {"execution_id": "...", "input_request_id": "..."}
 ```
 
-Outbox relay supports exactly `EXECUTION_DISPATCH`, `EXECUTION_APPROVAL_RESUME`, and
-`EXECUTION_MRTR_RESUME` (unknown/corrupt fail closed).
+Tool Factory OpenAPI analysis dispatch (Issue #82 / PR #83):
 
-`published_at IS NULL`이면 미발행/재시도 대상이며 별도 Outbox status enum을 만들지 않는다. broker publish 성공 후 DB mark 전에 process가 종료될 수 있으므로 같은 event가 재전달될 수 있다. Consumer는 `outbox_event_id` lineage를 확인하고 DB Execution claim으로 중복을 제거한다.
+```text
+event_type     = FACTORY_JOB_DISPATCH
+aggregate_type = TOOL_FACTORY_JOB
+aggregate_id   = tool_factory_jobs.id
+dedupe_key     = factory_job:{job_id}:openapi_analyze
+payload        = {"job_id": "..."}
+```
+
+Created in the same transaction as the durable `QUEUED` Factory Job + source
+object metadata. Broker delivery is not business state.
+
+Outbox relay supports exactly `EXECUTION_DISPATCH`, `EXECUTION_APPROVAL_RESUME`,
+`EXECUTION_MRTR_RESUME`, and `FACTORY_JOB_DISPATCH` (unknown/corrupt fail closed).
+
+`published_at IS NULL`이면 미발행/재시도 대상이며 별도 Outbox status enum을 만들지 않는다. broker publish 성공 후 DB mark 전에 process가 종료될 수 있으므로 같은 event가 재전달될 수 있다. Consumer는 `outbox_event_id` lineage를 확인하고 DB Execution/Factory Job claim으로 중복을 제거한다.
+
+Factory recovery (outbox poller, no new JobStatus):
+
+- unpublished `FACTORY_JOB_DISPATCH` → normal Outbox relay retry
+- expired `RUNNING` Factory lease → republish analyze delivery (claim fencing)
+- stale `QUEUED` Factory Job (message loss after mark-published) → bounded republish
 
 Broker/network 실패 시 exception 원문이나 Redis credential을 저장하지 않고 `last_error_code=PUBLISH_FAILED` 수준만 남긴다. published row는 즉시 삭제하지 않으며 retention은 별도 maintenance 정책으로 처리한다.
 
@@ -1947,18 +1966,23 @@ tool_factory_test_results
 
 생성 artifact hash, generator version, sandbox policy, 시험 결과를 보존한다. 운영 활성화는 관리자 승인 후 별도 MCP Server 등록 흐름을 사용한다.
 
-**Implemented durable foundation (migration `20261008_0028`):**
+**Implemented durable foundation (migrations `20261008_0028`, `20261013_0029`):**
 
 - `tool_factory_jobs` — OpenAPI analysis Jobs; canonical `JobStatus` CHECK;
-  **no** raw source/body column; stores `source_sha256`, `analyzer_version`,
-  counts, progress, safe error fields, `requested_by`
+  **no** raw source/body column; stores `source_sha256`, Object Storage
+  reference metadata (`source_bucket`, `source_object_key`,
+  `source_content_type`, `source_size_bytes`), claim fencing
+  (`queued_at`, `worker_id`, `lease_token`, `lease_expires_at`, `lock_version`),
+  `analyzer_version`, counts, progress, safe error fields, `requested_by`
 - `tool_factory_artifacts` — current slice uses `artifact_type=OPENAPI_ANALYSIS`
   with sanitized JSON `inline_payload` only; unique `(job_id, artifact_type)`
 - `tool_factory_test_results` — forward-compatible evidence table (unused by
   the analysis flow in this slice)
 
 Do not duplicate product-wide `JobStatus` with Factory-local analysis issue
-severities. Object Storage linkage / generated packages remain later.
+severities. Generated packages / Publish remain later. Product-wide
+`object_blobs` catalog is still deferred; Factory Jobs store safe object
+reference columns directly.
 
 ---
 

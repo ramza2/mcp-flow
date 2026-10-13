@@ -41,9 +41,9 @@ def _check_constraint_definition(check_map: dict[str, str], logical_name: str) -
 def test_alembic_factory_downgrade_upgrade(integration_database_url: str) -> None:
     cfg = _cfg(integration_database_url)
     command.upgrade(cfg, "head")
-    command.downgrade(cfg, "20261008_0027")
-    command.upgrade(cfg, "20261008_0028")
-    command.downgrade(cfg, "20261008_0027")
+    command.downgrade(cfg, "20261008_0028")
+    command.upgrade(cfg, "20261013_0029")
+    command.downgrade(cfg, "20261008_0028")
     command.upgrade(cfg, "head")
 
 
@@ -77,6 +77,18 @@ async def test_factory_schema_constraints(
         ).scalars().all()
         colset = {c.lower() for c in cols}
         assert "source_sha256" in colset
+        for required in (
+            "source_bucket",
+            "source_object_key",
+            "source_content_type",
+            "source_size_bytes",
+            "queued_at",
+            "worker_id",
+            "lease_token",
+            "lease_expires_at",
+            "lock_version",
+        ):
+            assert required in colset
         for forbidden in ("source_body", "source_content", "raw_source", "content"):
             assert forbidden not in colset
 
