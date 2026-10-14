@@ -894,3 +894,102 @@ async def test_pg_concurrent_test_run_same_idempotency_key(
         ).scalar_one()
         assert int(tools) == 0
         assert int(servers) == 0
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_pg_concurrent_review_approve_vs_reject(
+    integration_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from app.services.factory_test_worker import FactoryTestWorkerService
+
+    storage = InMemoryObjectStorage()
+    async with integration_session_factory() as session:
+        user_id = await _seed_manage_user(session)
+        # grant read too for get paths if needed — manage is enough for create
+        outcome = await FactoryService(
+            session, storage=storage
+        ).create_openapi_analyze_job(
+            actor_user_id=user_id,
+            source_bytes=MINIMAL_JSON,
+            filename="rv.json",
+            idempotency_key=f"job-{uuid.uuid4().hex}",
+        )
+        await session.commit()
+        job_id = outcome.result.id
+
+    async with integration_session_factory() as session:
+        worker = FactoryWorkerService(session, storage=storage, worker_id="pg-rv")
+        result = await worker.process_job(job_id=job_id)
+        await session.commit()
+        assert result.status == JobStatus.SUCCEEDED.value
+        cand_id = (
+            await session.execute(
+                text(
+                    "SELECT id FROM tool_factory_candidates WHERE job_id = :jid LIMIT 1"
+                ),
+                {"jid": str(job_id)},
+            )
+        ).scalar_one()
+        build = await FactoryService(session, storage=storage).create_build(
+            actor_user_id=user_id,
+            job_id=job_id,
+            candidate_ids=[uuid.UUID(str(cand_id))],
+            idempotency_key=f"build-{uuid.uuid4().hex}",
+        )
+        pkg = await FactoryService(session, storage=storage).generate_package(
+            actor_user_id=user_id,
+            build_id=build.result.id,
+            idempotency_key=f"pkg-{uuid.uuid4().hex}",
+        )
+        tr = await FactoryService(session, storage=storage).create_test_run(
+            actor_user_id=user_id,
+            package_id=pkg.result.id,
+            idempotency_key=f"tr-{uuid.uuid4().hex}",
+        )
+        done = await FactoryTestWorkerService(
+            session, storage=storage, worker_id="pg-rv-t"
+        ).process_test_run(test_run_id=tr.result.id)
+        await session.commit()
+        assert done.status == JobStatus.SUCCEEDED.value
+        test_run_id = tr.result.id
+
+    async def _run(decision: str) -> Any:
+        async with integration_session_factory() as session:
+            try:
+                return await FactoryService(session, storage=storage).create_review(
+                    actor_user_id=user_id,
+                    test_run_id=test_run_id,
+                    decision=decision,
+                    comment=decision,
+                    idempotency_key=f"rv-{decision}-{uuid.uuid4().hex}",
+                )
+            except AppError as exc:
+                return exc
+
+    results = await asyncio.gather(_run("APPROVE"), _run("REJECT"))
+    outcomes = [r for r in results if not isinstance(r, AppError)]
+    errors = [r for r in results if isinstance(r, AppError)]
+    assert len(outcomes) == 1
+    assert len(errors) == 1
+    assert errors[0].code == "FACTORY_REVIEW_ALREADY_EXISTS"
+
+    async with integration_session_factory() as session:
+        count = (
+            await session.execute(
+                text(
+                    "SELECT count(*) FROM tool_factory_reviews "
+                    "WHERE test_run_id = :tid"
+                ),
+                {"tid": str(test_run_id)},
+            )
+        ).scalar_one()
+        assert int(count) == 1
+        tools = (
+            await session.execute(text("SELECT count(*) FROM mcp_tools"))
+        ).scalar_one()
+        servers = (
+            await session.execute(text("SELECT count(*) FROM mcp_servers"))
+        ).scalar_one()
+        assert int(tools) == 0
+        assert int(servers) == 0

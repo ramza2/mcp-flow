@@ -1217,6 +1217,28 @@ GET  /api/v1/factory/test-runs/{test_run_id}
 - API responses expose safe projections only (no Object Storage keys, no raw
   evidence blob secrets, no package exec)
 
+### Tool Factory Review foundation (implemented slice)
+
+Durable terminal Review (`APPROVE` / `REJECT`) for a PASS Sandbox TestRun.
+Does **not** Publish/Import, create MCPTool/MCPServer, or execute package code.
+
+```text
+POST /api/v1/factory/test-runs/{test_run_id}/review
+GET  /api/v1/factory/reviews/{review_id}
+GET  /api/v1/factory/test-runs/{test_run_id}/review
+```
+
+- Auth: `mcp.server.manage` (create), `mcp.server.read` (detail); ACTIVE user
+- Eligibility: TestRun `SUCCEEDED` + `result=PASS` + `security_result.passed` +
+  `contract_result.passed` + `evidence_hash` match + TestRun↔Package lineage +
+  Object Storage size/hash revalidation; otherwise fail closed
+- Unique one Review per `test_run_id`; Idempotency scope
+  `FACTORY_REVIEW_CREATE_V1`; resource_type `TOOL_FACTORY_REVIEW`
+- Same TX: Review row + idempotency record; terminal Review immutable (no overwrite)
+- Concurrent APPROVE vs REJECT → single terminal row; loser `FACTORY_REVIEW_ALREADY_EXISTS`
+- Safe responses: decision, lineage hashes, `test_evidence_hash`,
+  `review_evidence_hash`, reviewer/timestamps — no Object Storage keys
+
 **Not implemented yet:**
 
 - allowlisted URL source fetch
@@ -1232,8 +1254,8 @@ GET  /api/v1/factory/test-runs/{test_run_id}
 ## FNC-FAC-002. 생성
 
 선택 operation을 Tool로 생성하고 credential은 Secret reference placeholder로만 표현한다.
-(현재 slice는 Build snapshot + declarative Generated Package artifact + sandbox
-Security/Contract Test foundation까지 수행하며 executable codegen/Publish는 후속.)
+(현재 slice는 Build + Generated Package + sandbox Test + Review foundation까지
+수행하며 executable codegen/Publish는 후속.)
 
 ## FNC-FAC-003. Sandbox Build/Test
 
@@ -1244,7 +1266,8 @@ declarative validation path로 실행한다 (현재 slice는 executable MCP sand
 
 ## FNC-FAC-004. 검증/배포 승인
 
-구조검사, 기동, MCP Discovery, Tool test, 보안시험을 통과하고 관리자 승인 후 Draft MCP Server 등록으로 handoff한다.
+PASS TestRun에 대한 Factory Review(`APPROVE`/`REJECT`) foundation이 구현된다.
+Publish/Import 및 Draft MCP Server 등록 handoff는 후속 slice이다.
 
 ## FNC-FAC-005. Version/Evidence
 

@@ -26,6 +26,7 @@ from app.models.factory import (
     ToolFactoryCandidate,
     ToolFactoryGeneratedPackage,
     ToolFactoryJob,
+    ToolFactoryReview,
     ToolFactoryTestResult,
     ToolFactoryTestRun,
 )
@@ -81,6 +82,7 @@ __all__ = [
     "ToolFactoryCandidate",
     "ToolFactoryGeneratedPackage",
     "ToolFactoryJob",
+    "ToolFactoryReview",
     "ToolFactoryTestResult",
     "ToolFactoryTestRun",
     "StepAttempt",

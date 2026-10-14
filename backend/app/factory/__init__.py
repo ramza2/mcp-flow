@@ -1,11 +1,12 @@
 """Tool Factory package boundary (docs/03).
 
 OpenAPI analyzer, durable analysis Job/API, Candidate Tools, Build snapshots,
-Generated Package artifacts, and sandbox Security/Contract TestRuns.
+Generated Package artifacts, sandbox Security/Contract TestRuns, and Review.
 factory-worker runs analysis and declarative package tests; this package does
 not execute generated code or hand off MCP Servers.
 
 Generated Tool ≠ activated Tool. Analysis success ≠ generated Tool.
+Review APPROVE ≠ Publish/Import ≠ MCPTool/MCPServer.
 """
 
 from app.factory.contracts import FactoryOpenAPIAnalysis
@@ -30,6 +31,9 @@ ARTIFACT_TYPE_GENERATED_PACKAGE = "GENERATED_PACKAGE"
 ARTIFACT_CONTENT_TYPE_JSON = "application/json"
 PHASE_ANALYZE = "ANALYZE"
 PHASE_SANDBOX_TEST = "SANDBOX_TEST"
+PHASE_REVIEW = "REVIEW"
+FACTORY_REVIEW_EVIDENCE_KIND = "FACTORY_REVIEW_EVIDENCE"
+FACTORY_REVIEW_EVIDENCE_SCHEMA_VERSION = 1
 
 __all__ = [
     "ARTIFACT_CONTENT_TYPE_JSON",
@@ -38,12 +42,15 @@ __all__ = [
     "FACTORY_BUILD_GENERATOR_VERSION",
     "FACTORY_CONTRACT_POLICY_VERSION",
     "FACTORY_PACKAGE_GENERATOR_VERSION",
+    "FACTORY_REVIEW_EVIDENCE_KIND",
+    "FACTORY_REVIEW_EVIDENCE_SCHEMA_VERSION",
     "FACTORY_SECURITY_POLICY_VERSION",
     "FactoryOpenAPIAnalysis",
     "JOB_TYPE_OPENAPI_ANALYZE",
     "OPENAPI_ANALYZER_VERSION",
     "PACKAGE_SCHEMA_VERSION",
     "PHASE_ANALYZE",
+    "PHASE_REVIEW",
     "PHASE_SANDBOX_TEST",
     "analyze_openapi",
     "build_generated_package",

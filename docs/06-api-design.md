@@ -1412,6 +1412,23 @@ GET  /factory/builds/{build_id}
   Docker/network/MCP startup
 - Does **not** Publish/Import or create `MCPTool` / `MCPServer`
 
+### Reviews (foundation)
+
+- `POST /factory/test-runs/{test_run_id}/review` — create terminal
+  `APPROVE`/`REJECT` Review + required `Idempotency-Key`
+  (`FACTORY_REVIEW_CREATE_V1`); body `{decision, comment?}`; unique one Review
+  per `test_run_id`; same TX with idempotency record
+- `GET /factory/reviews/{review_id}` — Review detail
+- `GET /factory/test-runs/{test_run_id}/review` — Review for a TestRun
+- Auth: `mcp.server.manage` create; `mcp.server.read` detail; ACTIVE user
+- Before accept: revalidate TestRun PASS eligibility, evidence_hash,
+  security/contract passed flags, TestRun↔Package lineage, Object Storage
+  size/hash; fail closed on mismatch
+- Responses expose decision, lineage hashes, `test_evidence_hash`,
+  `review_evidence_hash`, reviewer/timestamps — never Object Storage keys,
+  raw package bytes, or full `review_evidence` secrets
+- Does **not** Publish/Import or create `MCPTool` / `MCPServer`
+
 ### Aspirational (not implemented by this slice)
 
 ```text

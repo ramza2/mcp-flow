@@ -26,11 +26,14 @@ from app.factory import (
     FACTORY_BUILD_GENERATOR_VERSION,
     FACTORY_CONTRACT_POLICY_VERSION,
     FACTORY_PACKAGE_GENERATOR_VERSION,
+    FACTORY_REVIEW_EVIDENCE_KIND,
+    FACTORY_REVIEW_EVIDENCE_SCHEMA_VERSION,
     FACTORY_SECURITY_POLICY_VERSION,
     JOB_TYPE_OPENAPI_ANALYZE,
     OPENAPI_ANALYZER_VERSION,
     PACKAGE_SCHEMA_VERSION,
     PHASE_ANALYZE,
+    PHASE_REVIEW,
 )
 from app.factory.contracts import FactoryOpenAPIAnalysis
 from app.factory.errors import (
@@ -38,6 +41,9 @@ from app.factory.errors import (
     FACTORY_PACKAGE_LINEAGE_MISMATCH,
     FACTORY_PACKAGE_OBJECT_STORE_FAILED,
     FACTORY_PACKAGE_SNAPSHOT_INVALID,
+    FACTORY_REVIEW_ALREADY_EXISTS,
+    FACTORY_REVIEW_EVIDENCE_MISMATCH,
+    FACTORY_REVIEW_NOT_ELIGIBLE,
     FACTORY_SOURCE_OBJECT_STORE_FAILED,
 )
 from app.factory.openapi_analyzer import MAX_OPERATIONS, MAX_SOURCE_BYTES
@@ -78,6 +84,7 @@ from app.schemas.factory import (
     FactoryJobDetailResponse,
     FactoryJobListResponse,
     FactoryJobResponse,
+    FactoryReviewResponse,
     FactoryTestRunListResponse,
     FactoryTestRunResponse,
 )
@@ -96,6 +103,10 @@ _PACKAGE_UNIQUE_NAME = "uq_tool_factory_generated_packages_build_generator"
 _TEST_RUN_OPERATION_SCOPE = "FACTORY_TEST_RUN_CREATE_V1"
 _TEST_RUN_RESOURCE_TYPE = "TOOL_FACTORY_TEST_RUN"
 _TEST_RUN_UNIQUE_NAME = "uq_tool_factory_test_runs_package_policies"
+_REVIEW_OPERATION_SCOPE = "FACTORY_REVIEW_CREATE_V1"
+_REVIEW_RESOURCE_TYPE = "TOOL_FACTORY_REVIEW"
+_REVIEW_UNIQUE_NAME = "uq_tool_factory_reviews_test_run_id"
+_REVIEW_DECISIONS = frozenset({"APPROVE", "REJECT"})
 _IDEMPOTENCY_KEY_MAX_LEN = 128
 _IDEMPOTENCY_PK_NAME = "pk_api_idempotency_records"
 
@@ -128,6 +139,13 @@ class FactoryPackageGenerateOutcome:
 @dataclass(frozen=True, slots=True)
 class FactoryTestRunCreateOutcome:
     result: FactoryTestRunResponse
+    http_status: int
+    replayed: bool
+
+
+@dataclass(frozen=True, slots=True)
+class FactoryReviewCreateOutcome:
+    result: FactoryReviewResponse
     http_status: int
     replayed: bool
 
@@ -365,6 +383,52 @@ def _test_run_request_hash(
             "generated_package_id": str(package_id),
             "security_policy_version": security_policy_version,
             "contract_policy_version": contract_policy_version,
+        }
+    )
+
+
+def _is_review_unique_violation(exc: IntegrityError) -> bool:
+    name = _constraint_name(exc)
+    if name == _REVIEW_UNIQUE_NAME:
+        return True
+    orig = getattr(exc, "orig", None)
+    msg = str(orig if orig is not None else exc)
+    if _REVIEW_UNIQUE_NAME in msg:
+        return True
+    lower = msg.lower()
+    return (
+        "unique constraint failed" in lower
+        and "tool_factory_reviews" in lower
+        and "test_run_id" in lower
+    )
+
+
+def _normalize_review_comment(comment: str | None) -> str | None:
+    if comment is None:
+        return None
+    cleaned = _CONTROL_RE.sub("", comment).strip()
+    if not cleaned:
+        return None
+    if len(cleaned) > 500:
+        raise AppError(
+            code="VALIDATION_ERROR",
+            message="Review comment must be at most 500 characters.",
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        )
+    return cleaned
+
+
+def _review_request_hash(
+    *,
+    test_run_id: uuid.UUID,
+    decision: str,
+    comment: str | None,
+) -> str:
+    return compute_canonical_json_hash(
+        {
+            "test_run_id": str(test_run_id),
+            "decision": decision,
+            "comment": comment,
         }
     )
 
@@ -2117,3 +2181,403 @@ class FactoryService:
             has_next=(page * page_size) < total,
             generated_package_id=package.id,
         )
+
+
+    def _review_to_response(self, row: Any) -> FactoryReviewResponse:
+        return FactoryReviewResponse(
+            id=row.id,
+            test_run_id=row.test_run_id,
+            generated_package_id=row.generated_package_id,
+            build_id=row.build_id,
+            job_id=row.job_id,
+            analysis_artifact_id=row.analysis_artifact_id,
+            package_content_sha256=row.package_content_sha256,
+            generator_version=row.generator_version,
+            package_schema_version=row.package_schema_version,
+            source_sha256=row.source_sha256,
+            analyzer_version=row.analyzer_version,
+            build_input_hash=row.build_input_hash,
+            security_policy_version=row.security_policy_version,
+            contract_policy_version=row.contract_policy_version,
+            test_evidence_hash=row.test_evidence_hash,
+            decision=row.decision,
+            comment=row.comment,
+            review_evidence_hash=row.review_evidence_hash,
+            reviewed_by=row.reviewed_by,
+            reviewed_at=row.reviewed_at,
+            created_at=row.created_at,
+        )
+
+    async def _replay_or_conflict_review(
+        self,
+        record: Any,
+        request_hash: str,
+    ) -> FactoryReviewCreateOutcome:
+        if record.request_hash != request_hash:
+            raise AppError(
+                code="IDEMPOTENCY_KEY_REUSED",
+                message="Idempotency-Key가 다른 요청에 재사용되었습니다.",
+                status_code=status.HTTP_409_CONFLICT,
+            )
+        if record.status != "COMPLETED":
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message="Idempotency record가 COMPLETED가 아닙니다.",
+                status_code=status.HTTP_409_CONFLICT,
+            )
+        if (
+            record.resource_type != _REVIEW_RESOURCE_TYPE
+            or record.resource_id is None
+        ):
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message="Idempotency resource metadata가 손상되었습니다.",
+                status_code=status.HTTP_409_CONFLICT,
+            )
+        row = await self._repo.get_review(record.resource_id)
+        if row is None:
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message="Idempotency가 가리키는 Factory Review가 없습니다.",
+                status_code=status.HTTP_409_CONFLICT,
+            )
+        if (
+            record.response_status != status.HTTP_201_CREATED
+            or record.response_body is None
+        ):
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message="Idempotency response snapshot이 손상되었습니다.",
+                status_code=status.HTTP_409_CONFLICT,
+            )
+        try:
+            cached = FactoryReviewResponse.model_validate(record.response_body)
+        except ValidationError as exc:
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message="Idempotency response snapshot이 유효하지 않습니다.",
+                status_code=status.HTTP_409_CONFLICT,
+            ) from exc
+        if cached.id != record.resource_id:
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message="Idempotency response snapshot이 손상되었습니다.",
+                status_code=status.HTTP_409_CONFLICT,
+            )
+        return FactoryReviewCreateOutcome(
+            result=self._review_to_response(row),
+            http_status=status.HTTP_201_CREATED,
+            replayed=True,
+        )
+
+    async def _assert_package_bytes_match(
+        self,
+        package: ToolFactoryGeneratedPackage,
+        *,
+        expected_content_sha256: str,
+    ) -> None:
+        """Fail-closed Object Storage size/hash revalidation for Review."""
+
+        storage = self._storage_client()
+        try:
+            raw = await storage.get_bytes(
+                bucket=package.object_bucket,
+                object_key=package.object_key,
+            )
+        except ObjectStorageError as exc:
+            raise AppError(
+                code=exc.code or FACTORY_PACKAGE_OBJECT_STORE_FAILED,
+                message=exc.message,
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            ) from exc
+        if len(raw) != int(package.package_size_bytes):
+            raise AppError(
+                code=FACTORY_PACKAGE_HASH_MISMATCH,
+                message=(
+                    "Generated Package object size does not match "
+                    "persisted package_size_bytes."
+                ),
+                status_code=status.HTTP_409_CONFLICT,
+            )
+        try:
+            payload = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise AppError(
+                code=FACTORY_PACKAGE_SNAPSHOT_INVALID,
+                message="Generated Package object payload is corrupt.",
+                status_code=status.HTTP_409_CONFLICT,
+            ) from exc
+        actual = compute_canonical_json_hash(payload)
+        if actual != package.package_content_sha256:
+            raise AppError(
+                code=FACTORY_PACKAGE_HASH_MISMATCH,
+                message="Generated Package object hash does not match evidence.",
+                status_code=status.HTTP_409_CONFLICT,
+            )
+        if actual != expected_content_sha256:
+            raise AppError(
+                code=FACTORY_PACKAGE_LINEAGE_MISMATCH,
+                message="Generated Package hash does not match TestRun snapshot.",
+                status_code=status.HTTP_409_CONFLICT,
+            )
+
+    async def create_review(
+        self,
+        *,
+        actor_user_id: uuid.UUID,
+        test_run_id: uuid.UUID,
+        decision: str,
+        comment: str | None,
+        idempotency_key: str,
+    ) -> FactoryReviewCreateOutcome:
+        """Create one immutable APPROVE/REJECT Review for a PASS TestRun."""
+
+        await self._assert_manage(actor_user_id)
+        if decision not in _REVIEW_DECISIONS:
+            raise AppError(
+                code="VALIDATION_ERROR",
+                message="Review decision must be APPROVE or REJECT.",
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            )
+        key = _normalize_idempotency_key(idempotency_key)
+        safe_comment = _normalize_review_comment(comment)
+        req_hash = _review_request_hash(
+            test_run_id=test_run_id,
+            decision=decision,
+            comment=safe_comment,
+        )
+        principal_key = str(actor_user_id)
+
+        existing = await self._idempotency.get(
+            principal_key=principal_key,
+            operation_scope=_REVIEW_OPERATION_SCOPE,
+            idempotency_key=key,
+        )
+        if existing is not None:
+            return await self._replay_or_conflict_review(existing, req_hash)
+
+        test_run = await self._repo.get_test_run_for_update(test_run_id)
+        if test_run is None:
+            raise AppError(
+                code="NOT_FOUND",
+                message="Factory TestRun을 찾을 수 없습니다.",
+                status_code=status.HTTP_404_NOT_FOUND,
+            )
+
+        already = await self._repo.get_review_for_test_run(test_run.id)
+        if already is not None:
+            raise AppError(
+                code=FACTORY_REVIEW_ALREADY_EXISTS,
+                message="이 TestRun에 대한 Review가 이미 존재합니다.",
+                status_code=status.HTTP_409_CONFLICT,
+            )
+
+        if test_run.status != JobStatus.SUCCEEDED.value or test_run.result != "PASS":
+            raise AppError(
+                code=FACTORY_REVIEW_NOT_ELIGIBLE,
+                message="Review는 SUCCEEDED/PASS TestRun에서만 허용됩니다.",
+                status_code=status.HTTP_409_CONFLICT,
+            )
+        if not test_run.evidence_hash or len(test_run.evidence_hash) != 64:
+            raise AppError(
+                code=FACTORY_REVIEW_NOT_ELIGIBLE,
+                message="TestRun evidence_hash가 없어 Review할 수 없습니다.",
+                status_code=status.HTTP_409_CONFLICT,
+            )
+        if not isinstance(test_run.evidence, dict):
+            raise AppError(
+                code=FACTORY_REVIEW_EVIDENCE_MISMATCH,
+                message="TestRun evidence가 손상되었습니다.",
+                status_code=status.HTTP_409_CONFLICT,
+            )
+        recomputed = compute_canonical_json_hash(test_run.evidence)
+        if recomputed != test_run.evidence_hash:
+            raise AppError(
+                code=FACTORY_REVIEW_EVIDENCE_MISMATCH,
+                message="TestRun evidence_hash가 evidence와 일치하지 않습니다.",
+                status_code=status.HTTP_409_CONFLICT,
+            )
+        security = test_run.security_result
+        contract = test_run.contract_result
+        if not isinstance(security, dict) or security.get("passed") is not True:
+            raise AppError(
+                code=FACTORY_REVIEW_NOT_ELIGIBLE,
+                message="security_result.passed가 true가 아닙니다.",
+                status_code=status.HTTP_409_CONFLICT,
+            )
+        if not isinstance(contract, dict) or contract.get("passed") is not True:
+            raise AppError(
+                code=FACTORY_REVIEW_NOT_ELIGIBLE,
+                message="contract_result.passed가 true가 아닙니다.",
+                status_code=status.HTTP_409_CONFLICT,
+            )
+
+        package = await self._repo.get_generated_package(test_run.generated_package_id)
+        if package is None:
+            raise AppError(
+                code="NOT_FOUND",
+                message="Generated Package를 찾을 수 없습니다.",
+                status_code=status.HTTP_404_NOT_FOUND,
+            )
+        if (
+            package.build_id != test_run.build_id
+            or package.job_id != test_run.job_id
+            or package.analysis_artifact_id != test_run.analysis_artifact_id
+            or package.package_content_sha256 != test_run.package_content_sha256
+            or package.generator_version != test_run.generator_version
+            or package.package_schema_version != test_run.package_schema_version
+            or package.source_sha256 != test_run.source_sha256
+            or package.analyzer_version != test_run.analyzer_version
+            or package.build_input_hash != test_run.build_input_hash
+        ):
+            raise AppError(
+                code=FACTORY_PACKAGE_LINEAGE_MISMATCH,
+                message="TestRun lineage가 Generated Package evidence와 일치하지 않습니다.",
+                status_code=status.HTTP_409_CONFLICT,
+            )
+        if security.get("policy_version") not in (
+            None,
+            test_run.security_policy_version,
+        ) or contract.get("policy_version") not in (
+            None,
+            test_run.contract_policy_version,
+        ):
+            raise AppError(
+                code=FACTORY_REVIEW_EVIDENCE_MISMATCH,
+                message="TestRun policy versions가 security/contract evidence와 불일치합니다.",
+                status_code=status.HTTP_409_CONFLICT,
+            )
+
+        await self._assert_package_bytes_match(
+            package,
+            expected_content_sha256=test_run.package_content_sha256,
+        )
+
+        review_id = uuid.uuid4()
+        now = _utc_now()
+        evidence = {
+            "schema_version": FACTORY_REVIEW_EVIDENCE_SCHEMA_VERSION,
+            "kind": FACTORY_REVIEW_EVIDENCE_KIND,
+            "phase": PHASE_REVIEW,
+            "review_id": str(review_id),
+            "test_run_id": str(test_run.id),
+            "generated_package_id": str(test_run.generated_package_id),
+            "build_id": str(test_run.build_id),
+            "job_id": str(test_run.job_id),
+            "analysis_artifact_id": str(test_run.analysis_artifact_id),
+            "package_content_sha256": test_run.package_content_sha256,
+            "generator_version": test_run.generator_version,
+            "package_schema_version": test_run.package_schema_version,
+            "security_policy_version": test_run.security_policy_version,
+            "contract_policy_version": test_run.contract_policy_version,
+            "test_evidence_hash": test_run.evidence_hash,
+            "decision": decision,
+            "comment": safe_comment,
+            "reviewed_by": str(actor_user_id),
+            "reviewed_at": now.isoformat(),
+        }
+        evidence_hash = compute_canonical_json_hash(evidence)
+
+        try:
+            row = await self._repo.create_review(
+                review_id=review_id,
+                test_run_id=test_run.id,
+                generated_package_id=test_run.generated_package_id,
+                build_id=test_run.build_id,
+                job_id=test_run.job_id,
+                analysis_artifact_id=test_run.analysis_artifact_id,
+                package_content_sha256=test_run.package_content_sha256,
+                generator_version=test_run.generator_version,
+                package_schema_version=test_run.package_schema_version,
+                source_sha256=test_run.source_sha256,
+                analyzer_version=test_run.analyzer_version,
+                build_input_hash=test_run.build_input_hash,
+                security_policy_version=test_run.security_policy_version,
+                contract_policy_version=test_run.contract_policy_version,
+                test_evidence_hash=test_run.evidence_hash,
+                decision=decision,
+                comment=safe_comment,
+                review_evidence=evidence,
+                review_evidence_hash=evidence_hash,
+                reviewed_by=actor_user_id,
+                reviewed_at=now,
+            )
+            response = self._review_to_response(row)
+            await self._idempotency.create_completed(
+                principal_key=principal_key,
+                operation_scope=_REVIEW_OPERATION_SCOPE,
+                idempotency_key=key,
+                request_hash=req_hash,
+                response_status=status.HTTP_201_CREATED,
+                response_body=response.model_dump(mode="json"),
+                resource_type=_REVIEW_RESOURCE_TYPE,
+                resource_id=row.id,
+                completed_at=now,
+            )
+            await self._session.commit()
+        except IntegrityError as exc:
+            await self._session.rollback()
+            if _is_idempotency_pk_violation(exc) or _is_review_unique_violation(exc):
+                raced = await self._idempotency.get(
+                    principal_key=principal_key,
+                    operation_scope=_REVIEW_OPERATION_SCOPE,
+                    idempotency_key=key,
+                )
+                if raced is not None:
+                    return await self._replay_or_conflict_review(raced, req_hash)
+                existing_review = await self._repo.get_review_for_test_run(test_run_id)
+                if existing_review is not None:
+                    raise AppError(
+                        code=FACTORY_REVIEW_ALREADY_EXISTS,
+                        message="이 TestRun에 대한 Review가 이미 존재합니다.",
+                        status_code=status.HTTP_409_CONFLICT,
+                    ) from exc
+                raise AppError(
+                    code="RESOURCE_CONFLICT",
+                    message="Factory Review 생성 중 충돌이 발생했습니다.",
+                    status_code=status.HTTP_409_CONFLICT,
+                ) from exc
+            raise
+
+        return FactoryReviewCreateOutcome(
+            result=response,
+            http_status=status.HTTP_201_CREATED,
+            replayed=False,
+        )
+
+    async def get_review(
+        self,
+        actor_user_id: uuid.UUID,
+        review_id: uuid.UUID,
+    ) -> FactoryReviewResponse:
+        await self._assert_read(actor_user_id)
+        row = await self._repo.get_review(review_id)
+        if row is None:
+            raise AppError(
+                code="NOT_FOUND",
+                message="Factory Review를 찾을 수 없습니다.",
+                status_code=status.HTTP_404_NOT_FOUND,
+            )
+        return self._review_to_response(row)
+
+    async def get_review_for_test_run(
+        self,
+        actor_user_id: uuid.UUID,
+        test_run_id: uuid.UUID,
+    ) -> FactoryReviewResponse:
+        await self._assert_read(actor_user_id)
+        test_run = await self._repo.get_test_run(test_run_id)
+        if test_run is None:
+            raise AppError(
+                code="NOT_FOUND",
+                message="Factory TestRun을 찾을 수 없습니다.",
+                status_code=status.HTTP_404_NOT_FOUND,
+            )
+        row = await self._repo.get_review_for_test_run(test_run.id)
+        if row is None:
+            raise AppError(
+                code="NOT_FOUND",
+                message="이 TestRun에 대한 Factory Review가 없습니다.",
+                status_code=status.HTTP_404_NOT_FOUND,
+            )
+        return self._review_to_response(row)

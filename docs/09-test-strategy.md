@@ -1546,9 +1546,20 @@ boundary (no network, no filesystem, no migration/API):
 - `backend/tests/integration/test_factory_migration.py` — Alembic through
   `20261014_0033`; `tool_factory_test_runs` constraints/indexes
 
+- `backend/tests/unit/test_factory_review.py` — APPROVE/REJECT happy paths;
+  non-PASS / evidence-hash mismatch / package missing-tamper / lineage mismatch
+  fail-closed; same-key replay + conflict; concurrent APPROVE vs REJECT → one
+  row; no MCPTool/MCPServer side effects
+- `backend/tests/api/test_factory.py` — Review create/detail/by-test-run;
+  Idempotency-Key replay; safe projections
+- `backend/tests/integration/test_factory_persistence.py` — concurrent
+  APPROVE vs REJECT race on PostgreSQL
+- `backend/tests/integration/test_factory_migration.py` — Alembic through
+  `20261014_0034`; `tool_factory_reviews` unique/indexes
+
 Executable MCP codegen / Docker / Python exec / Publish / DRAFT MCP Server /
-frontend wiring remain out of scope. Declarative Security/Contract TestRun
-foundation is in scope for Issue #91.
+frontend wiring remain out of scope. Declarative Security/Contract TestRun +
+Review foundations are in scope for Issues #91/#93.
 
 ---
 

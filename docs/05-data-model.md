@@ -1965,12 +1965,13 @@ tool_factory_candidates
 tool_factory_builds
 tool_factory_generated_packages
 tool_factory_test_runs
+tool_factory_reviews
 tool_factory_test_results
 ```
 
 생성 artifact hash, generator version, sandbox policy, 시험 결과를 보존한다. 운영 활성화는 관리자 승인 후 별도 MCP Server 등록 흐름을 사용한다.
 
-**Implemented durable foundation (migrations `20261008_0028`, `20261013_0029`, `20261013_0030`, `20261013_0031`, `20261013_0032`, `20261014_0033`):**
+**Implemented durable foundation (migrations `20261008_0028`, `20261013_0029`, `20261013_0030`, `20261013_0031`, `20261013_0032`, `20261014_0033`, `20261014_0034`):**
 
 - `tool_factory_jobs` — OpenAPI analysis Jobs; canonical `JobStatus` CHECK;
   **no** raw source/body column; stores `source_sha256`, Object Storage
@@ -2014,6 +2015,12 @@ tool_factory_test_results
   `security_result` / `contract_result` / `evidence` + `evidence_hash`;
   claim fencing (`queued_at`, `worker_id`, `lease_token`, `lease_expires_at`,
   `lock_version`); **no** FK to `mcp_tools` / `mcp_servers`
+- `tool_factory_reviews` — durable terminal Review for a PASS TestRun;
+  unique `test_run_id`; decision `APPROVE`/`REJECT`; snapshotted lineage +
+  `test_evidence_hash` + policy versions; `review_evidence` JSONB +
+  `review_evidence_hash`; `reviewed_by` / `reviewed_at`; optional safe
+  `comment` (≤500); **no** FK to `mcp_tools` / `mcp_servers`; APPROVE does
+  not Publish/Import
 - `tool_factory_test_results` — forward-compatible evidence table (legacy
   placeholder; sandbox TestRun evidence uses `tool_factory_test_runs`)
 
