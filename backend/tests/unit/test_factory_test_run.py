@@ -7,6 +7,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from app.core.canonical_hash import compute_canonical_json_hash
 from app.core.errors import AppError
 from app.domain.enums import JobStatus, UserStatus
 from app.factory import (
@@ -386,3 +387,106 @@ async def test_create_test_run_rejects_missing_package(
             idempotency_key=f"tr-{uuid.uuid4().hex}",
         )
     assert exc.value.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_missing_package_row_fails_with_evidence(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.repositories.factory import FactoryRepository
+
+    svc, store, user_id, package_id = await _package_ready(db_session)
+    outcome = await svc.create_test_run(
+        actor_user_id=user_id,
+        package_id=package_id,
+        idempotency_key=f"tr-ev-{uuid.uuid4().hex}",
+    )
+
+    async def _missing(
+        self: FactoryRepository, package_id: uuid.UUID
+    ) -> ToolFactoryGeneratedPackage | None:
+        del self, package_id
+        return None
+
+    monkeypatch.setattr(FactoryRepository, "get_generated_package", _missing)
+    worker = FactoryTestWorkerService(db_session, storage=store, worker_id="u-miss-row")
+    result = await worker.process_test_run(test_run_id=outcome.result.id)
+    await db_session.commit()
+    assert result.status == JobStatus.FAILED.value
+    assert result.reason == "PACKAGE_MISSING"
+
+    row = await db_session.get(ToolFactoryTestRun, outcome.result.id)
+    assert row is not None
+    assert row.result == "FAIL"
+    assert row.error_code == "NOT_FOUND"
+    assert row.evidence_hash is not None
+    assert len(row.evidence_hash) == 64
+    assert isinstance(row.evidence, dict)
+    assert row.evidence.get("result") == "FAIL"
+    assert row.evidence.get("error_code") == "NOT_FOUND"
+
+
+@pytest.mark.asyncio
+async def test_enqueue_rejects_lineage_and_schema_mismatch(
+    db_session: AsyncSession,
+) -> None:
+    svc, store, user_id, package_id = await _package_ready(db_session)
+    package_row = await db_session.get(ToolFactoryGeneratedPackage, package_id)
+    assert package_row is not None
+    original = await store.get_bytes(
+        bucket=package_row.object_bucket,
+        object_key=package_row.object_key,
+    )
+    payload = json.loads(original.decode("utf-8"))
+    payload["kind"] = "NOT_A_PACKAGE"
+    tampered = encode_canonical_json_bytes(payload)
+    await store.put_bytes(
+        bucket=package_row.object_bucket,
+        object_key=package_row.object_key,
+        data=tampered,
+        content_type="application/json",
+    )
+    # Keep size/hash DB columns aligned so integrity reaches kind check.
+    package_row.package_size_bytes = len(tampered)
+    package_row.package_content_sha256 = compute_canonical_json_hash(payload)
+    await db_session.commit()
+
+    with pytest.raises(AppError) as exc:
+        await svc.create_test_run(
+            actor_user_id=user_id,
+            package_id=package_id,
+            idempotency_key=f"tr-kind-{uuid.uuid4().hex}",
+        )
+    assert exc.value.status_code == 409
+    assert exc.value.code == "FACTORY_PACKAGE_SCHEMA_INVALID"
+
+    # Restore valid bytes then break embedded job lineage.
+    svc2, store2, user_id2, package_id2 = await _package_ready(db_session)
+    package_row2 = await db_session.get(ToolFactoryGeneratedPackage, package_id2)
+    assert package_row2 is not None
+    original2 = await store2.get_bytes(
+        bucket=package_row2.object_bucket,
+        object_key=package_row2.object_key,
+    )
+    payload2 = json.loads(original2.decode("utf-8"))
+    payload2["build"]["job_id"] = str(uuid.uuid4())
+    tampered2 = encode_canonical_json_bytes(payload2)
+    await store2.put_bytes(
+        bucket=package_row2.object_bucket,
+        object_key=package_row2.object_key,
+        data=tampered2,
+        content_type="application/json",
+    )
+    package_row2.package_size_bytes = len(tampered2)
+    package_row2.package_content_sha256 = compute_canonical_json_hash(payload2)
+    await db_session.commit()
+
+    with pytest.raises(AppError) as lin_exc:
+        await svc2.create_test_run(
+            actor_user_id=user_id2,
+            package_id=package_id2,
+            idempotency_key=f"tr-lin-enq-{uuid.uuid4().hex}",
+        )
+    assert lin_exc.value.status_code == 409
+    assert lin_exc.value.code == "FACTORY_PACKAGE_LINEAGE_MISMATCH"

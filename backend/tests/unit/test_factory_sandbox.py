@@ -23,6 +23,7 @@ from app.factory.sandbox_security import (
     FACTORY_SECURITY_POLICY_VERSION,
     SandboxSecurityError,
     run_security_checks,
+    validate_package_integrity,
 )
 
 
@@ -286,3 +287,53 @@ def test_policy_versions_are_stable() -> None:
     dumped = json.dumps(package)
     assert "Authorization" not in dumped
     assert "Bearer" not in dumped
+
+
+def test_validate_package_integrity_shared_enqueue_worker_gate() -> None:
+    package = _package()
+    raw, meta = _raw_and_meta(package)
+    checks = validate_package_integrity(
+        raw=raw,
+        package=package,
+        expected_size_bytes=meta["size"],
+        expected_content_sha256=meta["sha"],
+        expected_generator_version=meta["generator"],
+        expected_package_schema_version=meta["schema"],
+        expected_build_id=meta["build_id"],
+        expected_build_input_hash=meta["build_input_hash"],
+        expected_job_id=meta["job_id"],
+        expected_analysis_artifact_id=meta["analysis_artifact_id"],
+        expected_source_sha256=meta["source_sha256"],
+        expected_analyzer_version=meta["analyzer_version"],
+        expected_tool_count=meta["tool_count"],
+    )
+    names = {c["name"] for c in checks}
+    assert {
+        "object_size_match",
+        "object_sha256_match",
+        "package_kind",
+        "package_schema_version",
+        "generator_version",
+        "embedded_build_lineage",
+        "tool_count",
+    } <= names
+
+    package["tool_count"] = 99
+    bad_raw, bad_meta = _raw_and_meta(package)
+    with pytest.raises(SandboxSecurityError) as exc:
+        validate_package_integrity(
+            raw=bad_raw,
+            package=package,
+            expected_size_bytes=bad_meta["size"],
+            expected_content_sha256=bad_meta["sha"],
+            expected_generator_version=bad_meta["generator"],
+            expected_package_schema_version=bad_meta["schema"],
+            expected_build_id=bad_meta["build_id"],
+            expected_build_input_hash=bad_meta["build_input_hash"],
+            expected_job_id=bad_meta["job_id"],
+            expected_analysis_artifact_id=bad_meta["analysis_artifact_id"],
+            expected_source_sha256=bad_meta["source_sha256"],
+            expected_analyzer_version=bad_meta["analyzer_version"],
+            expected_tool_count=1,  # DB evidence still expects original count
+        )
+    assert exc.value.code == "FACTORY_PACKAGE_TOOL_COUNT_MISMATCH"

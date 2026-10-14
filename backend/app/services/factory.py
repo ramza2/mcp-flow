@@ -45,6 +45,10 @@ from app.factory.package_generator import (
     PackageGenerationError,
     build_generated_package,
 )
+from app.factory.sandbox_security import (
+    SandboxSecurityError,
+    validate_package_integrity,
+)
 from app.infrastructure.object_storage import (
     ObjectStorageClient,
     ObjectStorageError,
@@ -1358,6 +1362,71 @@ class FactoryService:
             )
         return tools
 
+    async def _validate_package_for_test_enqueue(
+        self,
+        row: ToolFactoryGeneratedPackage,
+    ) -> None:
+        """Reload Object Storage and run side-effect-free integrity checks.
+
+        Enqueue gate mirrors worker integrity (size/hash/kind/schema/generator/
+        embedded Build/Job/Artifact/source/analyzer lineage/tool_count) before
+        creating a durable TestRun + Outbox. Does not execute package content.
+        """
+
+        storage = self._storage_client()
+        try:
+            raw = await storage.get_bytes(
+                bucket=row.object_bucket,
+                object_key=row.object_key,
+            )
+        except ObjectStorageError as exc:
+            raise AppError(
+                code=exc.code or FACTORY_PACKAGE_OBJECT_STORE_FAILED,
+                message=exc.message,
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            ) from exc
+        try:
+            payload = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise AppError(
+                code=FACTORY_PACKAGE_SNAPSHOT_INVALID,
+                message="Generated Package object payload is corrupt.",
+                status_code=status.HTTP_409_CONFLICT,
+            ) from exc
+        if not isinstance(payload, dict):
+            raise AppError(
+                code=FACTORY_PACKAGE_SNAPSHOT_INVALID,
+                message="Generated Package object payload must be a JSON object.",
+                status_code=status.HTTP_409_CONFLICT,
+            )
+        try:
+            validate_package_integrity(
+                raw=raw,
+                package=payload,
+                expected_size_bytes=row.package_size_bytes,
+                expected_content_sha256=row.package_content_sha256,
+                expected_generator_version=row.generator_version,
+                expected_package_schema_version=row.package_schema_version,
+                expected_build_id=str(row.build_id),
+                expected_build_input_hash=row.build_input_hash,
+                expected_job_id=str(row.job_id),
+                expected_analysis_artifact_id=str(row.analysis_artifact_id),
+                expected_source_sha256=row.source_sha256,
+                expected_analyzer_version=row.analyzer_version,
+                expected_tool_count=row.tool_count,
+            )
+        except SandboxSecurityError as exc:
+            status_code = (
+                status.HTTP_503_SERVICE_UNAVAILABLE
+                if exc.code == FACTORY_PACKAGE_OBJECT_STORE_FAILED
+                else status.HTTP_409_CONFLICT
+            )
+            raise AppError(
+                code=exc.code,
+                message=exc.message,
+                status_code=status_code,
+            ) from exc
+
     async def _cleanup_package_object_if_unowned(
         self,
         *,
@@ -1927,11 +1996,8 @@ class FactoryService:
                 replayed=True,
             )
 
-        # Pre-dispatch integrity: package object must still match evidence.
-        try:
-            await self._load_package_tools(package)
-        except AppError:
-            raise
+        # Pre-dispatch integrity: same side-effect-free checks as the worker.
+        await self._validate_package_for_test_enqueue(package)
 
         test_run_id = uuid.uuid4()
         now = _utc_now()

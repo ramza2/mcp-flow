@@ -66,15 +66,16 @@ class FakePublisher:
         self.calls.append((job_id, outbox_event_id))
         if self.fail:
             raise ConnectionError("broker unavailable")
+
     def publish_factory_test_run(
         self,
         *,
-        test_run_id: object = None,
-        outbox_event_id: object = None,
-        **_kwargs: object,
+        test_run_id: uuid.UUID,
+        outbox_event_id: uuid.UUID,
     ) -> None:
-        return None
-
+        self.calls.append((test_run_id, outbox_event_id))
+        if self.fail:
+            raise ConnectionError("broker unavailable")
 
 
 async def _created_execution(session: AsyncSession) -> tuple[uuid.UUID, str]:

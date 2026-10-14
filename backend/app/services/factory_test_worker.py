@@ -7,7 +7,6 @@ import logging
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -206,10 +205,10 @@ class FactoryTestWorkerService:
         )
         if package_row is None:
             finished = _utc_now()
-            await self._repo.finish_test_run_failed(
+            await self._fail(
                 current,
-                error_code="NOT_FOUND",
-                error_message="Generated Package for TestRun is missing.",
+                code="NOT_FOUND",
+                message="Generated Package for TestRun is missing.",
                 finished_at=finished,
             )
             return FactoryTestRunOutcome(

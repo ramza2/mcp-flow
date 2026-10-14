@@ -94,7 +94,7 @@ def _walk_forbidden(node: Any, *, path: str = "$") -> str | None:
     return None
 
 
-def run_security_checks(
+def validate_package_integrity(
     *,
     raw: bytes,
     package: dict[str, Any],
@@ -109,9 +109,12 @@ def run_security_checks(
     expected_source_sha256: str,
     expected_analyzer_version: str,
     expected_tool_count: int,
-    policy_version: str = FACTORY_SECURITY_POLICY_VERSION,
-) -> dict[str, Any]:
-    """Return structured security evidence or raise SandboxSecurityError."""
+) -> list[dict[str, Any]]:
+    """Side-effect-free Object Storage + package lineage integrity checks.
+
+    Shared by enqueue-time gating and versioned security policy. Never executes
+    package content.
+    """
 
     checks: list[dict[str, Any]] = []
 
@@ -206,7 +209,46 @@ def run_security_checks(
             "Generated Package tools length does not match tool_count.",
         )
     _ok("tool_count", str(expected_tool_count))
+    return checks
 
+
+def run_security_checks(
+    *,
+    raw: bytes,
+    package: dict[str, Any],
+    expected_size_bytes: int,
+    expected_content_sha256: str,
+    expected_generator_version: str,
+    expected_package_schema_version: str,
+    expected_build_id: str,
+    expected_build_input_hash: str,
+    expected_job_id: str,
+    expected_analysis_artifact_id: str,
+    expected_source_sha256: str,
+    expected_analyzer_version: str,
+    expected_tool_count: int,
+    policy_version: str = FACTORY_SECURITY_POLICY_VERSION,
+) -> dict[str, Any]:
+    """Return structured security evidence or raise SandboxSecurityError."""
+
+    checks = validate_package_integrity(
+        raw=raw,
+        package=package,
+        expected_size_bytes=expected_size_bytes,
+        expected_content_sha256=expected_content_sha256,
+        expected_generator_version=expected_generator_version,
+        expected_package_schema_version=expected_package_schema_version,
+        expected_build_id=expected_build_id,
+        expected_build_input_hash=expected_build_input_hash,
+        expected_job_id=expected_job_id,
+        expected_analysis_artifact_id=expected_analysis_artifact_id,
+        expected_source_sha256=expected_source_sha256,
+        expected_analyzer_version=expected_analyzer_version,
+        expected_tool_count=expected_tool_count,
+    )
+
+    tools = package.get("tools")
+    assert isinstance(tools, list)  # validated by integrity
     for idx, tool in enumerate(tools):
         if not isinstance(tool, dict):
             raise SandboxSecurityError(
@@ -219,7 +261,7 @@ def run_security_checks(
                 "FACTORY_PACKAGE_FORBIDDEN_CONTENT",
                 f"Forbidden executable/secret-bearing content at {forbidden}.",
             )
-    _ok("declarative_tools_only")
+    checks.append({"name": "declarative_tools_only", "passed": True})
 
     return {
         "policy_version": policy_version,

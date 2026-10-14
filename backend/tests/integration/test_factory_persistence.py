@@ -462,15 +462,9 @@ async def test_pg_outbox_publish_failure_then_recovery_one_analysis(
                 self.fail_once = False
                 raise ConnectionError("broker down")
             self.calls.append(job_id)
-    def publish_factory_test_run(
-        self,
-        *,
-        test_run_id: object = None,
-        outbox_event_id: object = None,
-        **_kwargs: object,
-    ) -> None:
-        return None
 
+        def publish_factory_test_run(self, **_k: Any) -> None:
+            raise AssertionError("unexpected test-run publish")
 
     storage = InMemoryObjectStorage()
     async with integration_session_factory() as session:
