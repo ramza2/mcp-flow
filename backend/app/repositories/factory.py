@@ -15,6 +15,7 @@ from app.models.factory import (
     ToolFactoryCandidate,
     ToolFactoryGeneratedPackage,
     ToolFactoryJob,
+    ToolFactoryReview,
     ToolFactoryTestRun,
 )
 from app.schemas.common_page import parse_sort
@@ -667,3 +668,68 @@ class FactoryRepository:
         await self._session.flush()
         await self._session.refresh(row)
         return row
+
+    async def create_review(
+        self,
+        *,
+        review_id: uuid.UUID,
+        test_run_id: uuid.UUID,
+        generated_package_id: uuid.UUID,
+        build_id: uuid.UUID,
+        job_id: uuid.UUID,
+        analysis_artifact_id: uuid.UUID,
+        package_content_sha256: str,
+        generator_version: str,
+        package_schema_version: str,
+        source_sha256: str,
+        analyzer_version: str,
+        build_input_hash: str,
+        security_policy_version: str,
+        contract_policy_version: str,
+        test_evidence_hash: str,
+        decision: str,
+        comment: str | None,
+        review_evidence: dict[str, Any],
+        review_evidence_hash: str,
+        reviewed_by: uuid.UUID,
+        reviewed_at: datetime,
+    ) -> ToolFactoryReview:
+        row = ToolFactoryReview(
+            id=review_id,
+            test_run_id=test_run_id,
+            generated_package_id=generated_package_id,
+            build_id=build_id,
+            job_id=job_id,
+            analysis_artifact_id=analysis_artifact_id,
+            package_content_sha256=package_content_sha256,
+            generator_version=generator_version,
+            package_schema_version=package_schema_version,
+            source_sha256=source_sha256,
+            analyzer_version=analyzer_version,
+            build_input_hash=build_input_hash,
+            security_policy_version=security_policy_version,
+            contract_policy_version=contract_policy_version,
+            test_evidence_hash=test_evidence_hash,
+            decision=decision,
+            comment=comment,
+            review_evidence=review_evidence,
+            review_evidence_hash=review_evidence_hash,
+            reviewed_by=reviewed_by,
+            reviewed_at=reviewed_at,
+            lock_version=1,
+        )
+        self._session.add(row)
+        await self._session.flush()
+        await self._session.refresh(row)
+        return row
+
+    async def get_review(self, review_id: uuid.UUID) -> ToolFactoryReview | None:
+        return await self._session.get(ToolFactoryReview, review_id)
+
+    async def get_review_for_test_run(
+        self, test_run_id: uuid.UUID
+    ) -> ToolFactoryReview | None:
+        stmt = select(ToolFactoryReview).where(
+            ToolFactoryReview.test_run_id == test_run_id
+        )
+        return (await self._session.execute(stmt)).scalar_one_or_none()

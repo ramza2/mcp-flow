@@ -613,6 +613,127 @@ class ToolFactoryTestRun(Base):
     )
 
 
+class ToolFactoryReview(Base):
+    """Durable terminal Review for a PASS Sandbox TestRun.
+
+    Factory-local evidence only. APPROVE does not Publish/Import or create
+    MCPTool/MCPServer rows. One Review per TestRun (immutable).
+    """
+
+    __tablename__ = "tool_factory_reviews"
+    __table_args__ = (
+        UniqueConstraint(
+            "test_run_id",
+            name="uq_tool_factory_reviews_test_run_id",
+        ),
+        CheckConstraint(
+            "decision IN ('APPROVE', 'REJECT')",
+            name="ck_tool_factory_reviews_decision",
+        ),
+        CheckConstraint(
+            "length(package_content_sha256) = 64",
+            name="ck_tool_factory_reviews_package_sha_len",
+        ),
+        CheckConstraint(
+            "length(source_sha256) = 64",
+            name="ck_tool_factory_reviews_source_sha_len",
+        ),
+        CheckConstraint(
+            "length(build_input_hash) = 64",
+            name="ck_tool_factory_reviews_build_input_hash_len",
+        ),
+        CheckConstraint(
+            "length(test_evidence_hash) = 64",
+            name="ck_tool_factory_reviews_test_evidence_hash_len",
+        ),
+        CheckConstraint(
+            "length(review_evidence_hash) = 64",
+            name="ck_tool_factory_reviews_review_evidence_hash_len",
+        ),
+        CheckConstraint(
+            "length(trim(generator_version)) > 0",
+            name="ck_tool_factory_reviews_generator_version_ne",
+        ),
+        CheckConstraint(
+            "length(trim(security_policy_version)) > 0",
+            name="ck_tool_factory_reviews_security_policy_ne",
+        ),
+        CheckConstraint(
+            "length(trim(contract_policy_version)) > 0",
+            name="ck_tool_factory_reviews_contract_policy_ne",
+        ),
+        CheckConstraint(
+            "lock_version >= 1",
+            name="ck_tool_factory_reviews_lock_version",
+        ),
+        Index("ix_tool_factory_reviews_generated_package_id", "generated_package_id"),
+        Index(
+            "ix_tool_factory_reviews_reviewed_by_reviewed_at",
+            "reviewed_by",
+            "reviewed_at",
+        ),
+        Index("ix_tool_factory_reviews_created_at", "created_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    test_run_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("tool_factory_test_runs.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    generated_package_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("tool_factory_generated_packages.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    build_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("tool_factory_builds.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    job_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("tool_factory_jobs.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    analysis_artifact_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("tool_factory_artifacts.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    package_content_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    generator_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    package_schema_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    source_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    analyzer_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    build_input_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    security_policy_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    contract_policy_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    test_evidence_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    decision: Mapped[str] = mapped_column(String(16), nullable=False)
+    comment: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    review_evidence: Mapped[dict[str, Any]] = mapped_column(
+        JSONB(none_as_null=True), nullable=False
+    )
+    review_evidence_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    reviewed_by: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    reviewed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    lock_version: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=1, server_default="1"
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
 class ToolFactoryTestResult(Base):
     """Forward-compatible evidence table — unused by OpenAPI analysis in this slice."""
 

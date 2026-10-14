@@ -21,6 +21,8 @@ from app.schemas.factory import (
     FactoryJobDetailResponse,
     FactoryJobListResponse,
     FactoryJobResponse,
+    FactoryReviewCreateRequest,
+    FactoryReviewResponse,
     FactoryTestRunListResponse,
     FactoryTestRunResponse,
 )
@@ -305,3 +307,54 @@ async def get_factory_test_run(
     principal: CurrentPrincipalDep,
 ) -> FactoryTestRunResponse:
     return await _service(session).get_test_run(principal.user_id, test_run_id)
+
+
+@router.post(
+    "/test-runs/{test_run_id}/review",
+    response_model=FactoryReviewResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_factory_review(
+    test_run_id: uuid.UUID,
+    body: FactoryReviewCreateRequest,
+    response: Response,
+    session: DbSessionDep,
+    principal: CurrentPrincipalDep,
+    idempotency_key: Annotated[str, Header(alias="Idempotency-Key")],
+) -> FactoryReviewResponse:
+    outcome = await _service(session).create_review(
+        actor_user_id=principal.user_id,
+        test_run_id=test_run_id,
+        decision=body.decision,
+        comment=body.comment,
+        idempotency_key=idempotency_key,
+    )
+    response.status_code = outcome.http_status
+    return outcome.result
+
+
+@router.get(
+    "/test-runs/{test_run_id}/review",
+    response_model=FactoryReviewResponse,
+)
+async def get_factory_review_for_test_run(
+    test_run_id: uuid.UUID,
+    session: DbSessionDep,
+    principal: CurrentPrincipalDep,
+) -> FactoryReviewResponse:
+    return await _service(session).get_review_for_test_run(
+        principal.user_id,
+        test_run_id,
+    )
+
+
+@router.get(
+    "/reviews/{review_id}",
+    response_model=FactoryReviewResponse,
+)
+async def get_factory_review(
+    review_id: uuid.UUID,
+    session: DbSessionDep,
+    principal: CurrentPrincipalDep,
+) -> FactoryReviewResponse:
+    return await _service(session).get_review(principal.user_id, review_id)

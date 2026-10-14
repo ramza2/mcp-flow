@@ -244,3 +244,41 @@ class FactoryTestRunResponse(BaseModel):
 class FactoryTestRunListResponse(Page):
     items: list[FactoryTestRunResponse]
     generated_package_id: uuid.UUID
+
+
+FactoryReviewDecision = Literal["APPROVE", "REJECT"]
+
+
+class FactoryReviewCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    decision: FactoryReviewDecision
+    comment: str | None = Field(default=None, max_length=500)
+
+
+class FactoryReviewResponse(BaseModel):
+    """Safe Factory Review projection (no Object Storage keys/secrets)."""
+
+    model_config = ConfigDict(extra="forbid", from_attributes=True)
+
+    id: uuid.UUID
+    test_run_id: uuid.UUID
+    generated_package_id: uuid.UUID
+    build_id: uuid.UUID
+    job_id: uuid.UUID
+    analysis_artifact_id: uuid.UUID
+    package_content_sha256: str
+    generator_version: str
+    package_schema_version: str
+    source_sha256: str
+    analyzer_version: str
+    build_input_hash: str
+    security_policy_version: str
+    contract_policy_version: str
+    test_evidence_hash: str
+    decision: FactoryReviewDecision
+    comment: str | None = None
+    review_evidence_hash: str
+    reviewed_by: uuid.UUID
+    reviewed_at: datetime
+    created_at: datetime
