@@ -1446,7 +1446,32 @@ GET  /factory/builds/{build_id}
   declarative descriptors (`operation_key`/`method`/`path`/schemas)
 - Responses expose lineage hashes, `mcp_server_id`, `mcp_tool_ids`,
   `publish_evidence_hash` — never Object Storage keys or raw evidence blobs
-- Does **not** Activate / Connection Test / Discovery / package execution
+- Publish itself does **not** Activate / Connection Test / Discovery / package
+  execution
+
+### Factory connection configuration + Connection Test (reuses MCP Server API)
+
+Factory-imported DRAFT servers continue on the canonical MCP Server routes
+(no Factory-only transport model):
+
+```text
+PATCH /mcp/servers/{server_id}
+POST  /mcp/servers/{server_id}/connection-tests
+POST  /mcp/servers/{server_id}/activate
+```
+
+- Configure real `endpoint_url` (and optional canonical `auth_type` /
+  `auth_secret_id`) with existing optimistic locking (`If-Match` /
+  `lock_version`)
+- Valid endpoint persist clears effective `connection_deferred` in
+  `transport_config` while preserving Factory lineage metadata
+- Deferred / missing endpoint → Connection Test `RESOURCE_CONFLICT`
+- Connection Test writes `MCPServerCheck` evidence only (no Discovery, no Tool
+  mutation, no auto-Activate)
+- Factory Activate requires configured non-deferred endpoint + verified
+  Connection Test fingerprint matching current connection config + latest
+  Check `SUCCEEDED` (Discovery not required here; historical Checks retained)
+- Non-Factory MCP Server routes keep prior semantics
 
 ### Aspirational (not implemented by this slice)
 

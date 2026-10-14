@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import func, select
@@ -106,9 +106,10 @@ class MCPDiscoveryRepository:
             error_code=error_code,
             error_message=error_message,
             checked_by=checked_by,
+            # Explicit UTC timestamp (µs) so successive checks order stably
+            # even when DB server_default only has second precision.
+            checked_at=checked_at if checked_at is not None else datetime.now(UTC),
         )
-        if checked_at is not None:
-            check.checked_at = checked_at
         self._session.add(check)
         await self._session.flush()
         await self._session.refresh(check)
@@ -135,6 +136,23 @@ class MCPDiscoveryRepository:
         )
         rows = list((await self._session.execute(rows_stmt)).scalars().all())
         return rows, total
+
+    async def get_latest_check(
+        self, mcp_server_id: uuid.UUID
+    ) -> MCPServerCheck | None:
+        """Latest Connection Test evidence by checked_at (then id)."""
+
+        stmt = (
+            select(MCPServerCheck)
+            .where(MCPServerCheck.mcp_server_id == mcp_server_id)
+            .order_by(
+                MCPServerCheck.checked_at.desc(),
+                MCPServerCheck.id.desc(),
+            )
+            .limit(1)
+        )
+        result = await self._session.execute(stmt)
+        return result.scalar_one_or_none()
 
     async def has_succeeded_check(self, mcp_server_id: uuid.UUID) -> bool:
         stmt = (

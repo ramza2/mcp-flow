@@ -1242,7 +1242,8 @@ GET  /api/v1/factory/test-runs/{test_run_id}/review
 ### Tool Factory Publish/Import foundation (implemented slice)
 
 Durable Publish/Import from an **APPROVE** Review into **DRAFT** MCP assets.
-Does **not** Activate, Connection Test, Discovery, or execute package code.
+Publish itself does **not** Activate, Connection Test, Discovery, or execute
+package code.
 
 ```text
 POST /api/v1/factory/reviews/{review_id}/publish
@@ -1266,13 +1267,38 @@ GET  /api/v1/factory/reviews/{review_id}/publish
 - Safe responses: lineage hashes, `mcp_server_id`, `mcp_tool_ids`,
   `publish_evidence_hash` — no Object Storage keys / raw evidence blob
 
+### Tool Factory connection configuration + Connection Test (implemented slice)
+
+After Publish/Import, operators configure a real endpoint on the Factory DRAFT
+MCP Server through the canonical MCP Server API, then run Connection Test:
+
+```text
+PATCH /api/v1/mcp/servers/{server_id}              # endpoint_url (+ optional auth_*)
+POST  /api/v1/mcp/servers/{server_id}/connection-tests
+POST  /api/v1/mcp/servers/{server_id}/activate     # Factory: after latest Check SUCCEEDED
+```
+
+- Uses existing `MCPServerService` / `MCPDiscoveryService` (no repository bypass)
+- Preserves `validate_mcp_endpoint_url` / SSRF protections and `lock_version`
+- Does **not** fabricate endpoints from OpenAPI source URLs
+- On valid endpoint persist: `transport_config.connection_deferred=false` while
+  Factory lineage keys (`factory_publish`, `publish_id`, …) are retained
+- Deferred / missing endpoint → Connection Test `RESOURCE_CONFLICT` (no Check)
+- Connection Test persists `MCPServerCheck` only; no Discovery rows, no Tool
+  mutation, no automatic Activate; failures leave Server `DRAFT`
+- Factory-imported Activate requires non-deferred usable endpoint + Connection
+  Test success evidence bound to the current connection-config fingerprint
+  (`transport_config.connection_test_verified_fingerprint`) + latest Check
+  `SUCCEEDED` (Discovery not required in this slice)
+- Non-Factory MCP Server activate/update/test behavior is unchanged
+
 **Not implemented yet:**
 
 - allowlisted URL source fetch
 - generic `/jobs` API
 - executable MCP code / Docker image / Python import/exec / dependency install
 - subprocess / host process / Docker-in-Docker / external network from package
-- real MCP server startup / Discovery / Connection Test / Activate
+- Discovery execution / Tool reconciliation / automatic Tool ACTIVE
 - version/archive/restore
 - frontend real API wiring
 - aspirational `/factory/projects` routes and build tests/rollback
@@ -1281,7 +1307,8 @@ GET  /api/v1/factory/reviews/{review_id}/publish
 
 선택 operation을 Tool로 생성하고 credential은 Secret reference placeholder로만 표현한다.
 (현재 slice는 Build + Generated Package + sandbox Test + Review + Publish/Import
-DRAFT MCP handoff까지 수행하며 executable codegen/Activate는 후속.)
+DRAFT MCP handoff + connection configuration/Connection Test foundation까지
+수행하며 Discovery/executable codegen은 후속.)
 
 ## FNC-FAC-003. Sandbox Build/Test
 
@@ -1293,8 +1320,9 @@ declarative validation path로 실행한다 (현재 slice는 executable MCP sand
 ## FNC-FAC-004. 검증/배포 승인
 
 PASS TestRun에 대한 Factory Review(`APPROVE`/`REJECT`) foundation과 APPROVE
-Review의 Publish/Import → DRAFT MCP Server/INACTIVE Tools foundation이 구현된다.
-Connection Test / Discovery / Activate는 후속 slice이다.
+Review의 Publish/Import → DRAFT MCP Server/INACTIVE Tools foundation, 그리고
+canonical MCP PATCH + Connection Test + Factory Activate precondition
+hardening이 구현된다. Discovery / Tool ACTIVE reconciliation은 후속 slice이다.
 
 ## FNC-FAC-005. Version/Evidence
 

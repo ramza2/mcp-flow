@@ -9,6 +9,7 @@ from typing import Any
 from fastapi import status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.canonical_hash import compute_canonical_json_hash
 from app.core.errors import AppError
 from app.core.url_validation import validate_mcp_endpoint_url
 from app.domain.enums import (
@@ -22,6 +23,9 @@ from app.repositories.mcp_server import MCPServerRepository
 from app.schemas.mcp_server import MCPServerCreate, MCPServerUpdate
 
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
+# transport_config key: sha256 of connection-relevant fields verified by
+# a SUCCEEDED Factory Connection Test (does not delete historical Checks).
+_CONNECTION_TEST_VERIFIED_FP_KEY = "connection_test_verified_fingerprint"
 
 
 def _slugify_name(name: str) -> str:
@@ -40,14 +44,105 @@ def _protocol_era_for_transport(transport: MCPTransportType) -> MCPProtocolEra:
 
 
 def is_connection_deferred(server: MCPServer) -> bool:
-    """True when transport_config marks a Factory deferred-DRAFT import."""
+    """True when transport_config marks connection as still deferred."""
 
     cfg = server.transport_config
     return isinstance(cfg, dict) and cfg.get("connection_deferred") is True
 
 
+def is_factory_imported(server: MCPServer) -> bool:
+    """True for MCP Servers created by Tool Factory Publish/Import."""
+
+    cfg = server.transport_config
+    if not isinstance(cfg, dict):
+        return False
+    return (
+        cfg.get("factory_publish") is True
+        or cfg.get("source") == "TOOL_FACTORY_PUBLISH"
+    )
+
+
 def has_usable_endpoint(server: MCPServer) -> bool:
     return bool(server.endpoint_url and str(server.endpoint_url).strip())
+
+
+def connection_deferred_effective(server: MCPServer) -> bool:
+    """Deferred Factory DRAFT still blocked from Connection Test / Activate."""
+
+    return is_connection_deferred(server) and not has_usable_endpoint(server)
+
+
+def _transport_config_with_deferred_cleared(
+    transport_config: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Clear connection_deferred while preserving Factory lineage metadata."""
+
+    cfg = dict(transport_config) if isinstance(transport_config, dict) else {}
+    cfg["connection_deferred"] = False
+    return cfg
+
+
+def connection_config_fingerprint(
+    *,
+    transport_type: str,
+    endpoint_url: str | None,
+    auth_type: str,
+    auth_secret_id: uuid.UUID | str | None,
+    connect_timeout_ms: int,
+    call_timeout_ms: int,
+) -> str:
+    """Deterministic fingerprint of connection-relevant MCP Server fields.
+
+    Includes transport/endpoint/auth and timeouts used by Connection Test.
+    Excludes non-connection metadata such as name/description.
+    """
+
+    endpoint = str(endpoint_url).strip() if endpoint_url else None
+    if endpoint == "":
+        endpoint = None
+    return compute_canonical_json_hash(
+        {
+            "transport_type": str(transport_type),
+            "endpoint_url": endpoint,
+            "auth_type": str(auth_type),
+            "auth_secret_id": str(auth_secret_id) if auth_secret_id else None,
+            "connect_timeout_ms": int(connect_timeout_ms),
+            "call_timeout_ms": int(call_timeout_ms),
+        }
+    )
+
+
+def connection_config_fingerprint_for_server(server: MCPServer) -> str:
+    return connection_config_fingerprint(
+        transport_type=server.transport_type,
+        endpoint_url=server.endpoint_url,
+        auth_type=server.auth_type,
+        auth_secret_id=server.auth_secret_id,
+        connect_timeout_ms=int(server.connect_timeout_ms),
+        call_timeout_ms=int(server.call_timeout_ms),
+    )
+
+
+def get_verified_connection_fingerprint(server: MCPServer) -> str | None:
+    cfg = server.transport_config
+    if not isinstance(cfg, dict):
+        return None
+    value = cfg.get(_CONNECTION_TEST_VERIFIED_FP_KEY)
+    if isinstance(value, str) and len(value) == 64:
+        return value
+    return None
+
+
+def transport_config_with_verified_fingerprint(
+    transport_config: dict[str, Any] | None,
+    *,
+    fingerprint: str,
+) -> dict[str, Any]:
+    """Store verified Connection Test fingerprint; preserve lineage keys."""
+
+    cfg = dict(transport_config) if isinstance(transport_config, dict) else {}
+    cfg[_CONNECTION_TEST_VERIFIED_FP_KEY] = fingerprint
+    return cfg
 
 
 class MCPServerService:
@@ -311,6 +406,18 @@ class MCPServerService:
                 fields["stdio_manifest_id"] = None
                 fields["endpoint_url"] = normalized
 
+        # Effective endpoint after this update (fields may omit endpoint_url).
+        effective_endpoint = fields.get("endpoint_url", normalized)
+        usable_after = bool(
+            effective_endpoint and str(effective_endpoint).strip()
+        )
+        if usable_after and is_connection_deferred(server):
+            # Valid connection configuration persisted → deferred no longer
+            # effective. Preserve Factory lineage keys in transport_config.
+            fields["transport_config"] = _transport_config_with_deferred_cleared(
+                server.transport_config
+            )
+
         updated = await self._servers.update_atomic(
             server_id,
             expected_lock_version=expected_lock_version,
@@ -331,6 +438,8 @@ class MCPServerService:
         return updated
 
     async def activate(self, server_id: uuid.UUID) -> MCPServer:
+        from app.repositories.mcp_discovery import MCPDiscoveryRepository
+
         server = await self._require(server_id)
         if server.status not in {
             MCPServerStatus.DRAFT,
@@ -344,7 +453,7 @@ class MCPServerService:
                 ),
                 status_code=status.HTTP_409_CONFLICT,
             )
-        if is_connection_deferred(server) and not has_usable_endpoint(server):
+        if connection_deferred_effective(server):
             raise AppError(
                 code="RESOURCE_CONFLICT",
                 message=(
@@ -354,6 +463,43 @@ class MCPServerService:
                 ),
                 status_code=status.HTTP_409_CONFLICT,
             )
+        if is_factory_imported(server):
+            # Factory lifecycle: require configured endpoint + deferred cleared
+            # + verified Connection Test fingerprint matching current connection
+            # config + latest Check SUCCEEDED. Discovery is a later slice.
+            if is_connection_deferred(server) or not has_usable_endpoint(server):
+                raise AppError(
+                    code="RESOURCE_CONFLICT",
+                    message=(
+                        "Cannot activate Factory-imported MCP Server without a "
+                        "configured non-deferred endpoint_url."
+                    ),
+                    status_code=status.HTTP_409_CONFLICT,
+                )
+            current_fp = connection_config_fingerprint_for_server(server)
+            verified_fp = get_verified_connection_fingerprint(server)
+            if verified_fp is None or verified_fp != current_fp:
+                raise AppError(
+                    code="RESOURCE_CONFLICT",
+                    message=(
+                        "Cannot activate Factory-imported MCP Server without a "
+                        "SUCCEEDED Connection Test for the current connection "
+                        "configuration."
+                    ),
+                    status_code=status.HTTP_409_CONFLICT,
+                )
+            latest = await MCPDiscoveryRepository(self._session).get_latest_check(
+                server.id
+            )
+            if latest is None or latest.status != "SUCCEEDED":
+                raise AppError(
+                    code="RESOURCE_CONFLICT",
+                    message=(
+                        "Cannot activate Factory-imported MCP Server without a "
+                        "latest SUCCEEDED Connection Test."
+                    ),
+                    status_code=status.HTTP_409_CONFLICT,
+                )
         updated = await self._servers.update(
             server,
             status=MCPServerStatus.ACTIVE,

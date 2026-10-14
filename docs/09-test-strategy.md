@@ -1568,10 +1568,20 @@ boundary (no network, no filesystem, no migration/API):
 - `backend/tests/integration/test_factory_migration.py` — Alembic through
   `20261014_0035`; `tool_factory_publishes` unique/indexes
 
-Executable MCP codegen / Docker / Python exec / Activate / Connection Test /
-Discovery / frontend wiring remain out of scope. Declarative Security/Contract
-TestRun + Review + Publish/Import DRAFT foundations are in scope for
-Issues #91/#93/#95.
+- `backend/tests/unit/test_factory_connection_config.py` — Factory deferred
+  DRAFT endpoint PATCH (clears `connection_deferred`, preserves lineage);
+  invalid/unsafe endpoint + stale `lock_version` rejected; Connection Test
+  blocked while deferred; success → one `MCPServerCheck`, zero Discovery, Tools
+  stay INACTIVE, Server stays DRAFT; failure → DRAFT + Activate blocked;
+  Factory Activate requires latest SUCCEEDED Check; non-Factory Activate
+  without Check still allowed
+- `backend/tests/unit/test_mcp_server_deferred_draft.py` — deferred create /
+  Activate / Connection Test gates without endpoint
+
+Executable MCP codegen / Docker / Python exec / Discovery reconciliation /
+frontend wiring remain out of scope. Declarative Security/Contract TestRun +
+Review + Publish/Import DRAFT + connection configuration/Connection Test
+foundations are in scope for Issues #91/#93/#95/#97.
 
 ---
 
