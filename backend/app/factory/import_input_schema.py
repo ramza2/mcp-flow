@@ -74,7 +74,11 @@ def build_mcp_callable_input_schema(
                 "Package parameter name collision after normalize "
                 f"(strip/casefold): {name!r} conflicts with {prior!r}."
             )
-        if normalized == _normalize_property_name(_BODY_PROPERTY):
+        # Reserved only when requestBody maps to top-level "body".
+        if (
+            request_schema is not None
+            and normalized == _normalize_property_name(_BODY_PROPERTY)
+        ):
             raise FactoryImportSchemaError(
                 "Package parameter name 'body' conflicts with request body mapping."
             )

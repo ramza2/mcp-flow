@@ -158,3 +158,55 @@ def test_input_schema_normalized_name_collision_fail_closed() -> None:
         )
     assert exc.value.code == "FACTORY_PACKAGE_SCHEMA_INVALID"
     assert "normalize" in exc.value.message.lower() or "casefold" in exc.value.message.lower()
+
+
+def test_no_request_body_allows_query_parameter_named_body() -> None:
+    schema = build_mcp_callable_input_schema(
+        parameters=[
+            {
+                "name": "body",
+                "location": "query",
+                "required": True,
+                "schema": {"type": "string"},
+            }
+        ],
+        request_schema=None,
+    )
+    assert set(schema["properties"]) == {"body"}
+    assert schema["properties"]["body"]["x-mcpflow-param-in"] == "query"
+    assert schema["required"] == ["body"]
+    properties, required = _validate_input_schema(schema)
+    assert "body" in properties
+    assert required == ["body"]
+
+
+def test_request_body_rejects_parameter_named_body() -> None:
+    with pytest.raises(AppError) as exc:
+        build_mcp_callable_input_schema(
+            parameters=[
+                {
+                    "name": "body",
+                    "location": "query",
+                    "required": False,
+                    "schema": {"type": "string"},
+                }
+            ],
+            request_schema={"type": "object"},
+        )
+    assert exc.value.code == "FACTORY_PACKAGE_SCHEMA_INVALID"
+
+
+def test_request_body_rejects_parameter_named_BODY_normalized() -> None:
+    with pytest.raises(AppError) as exc:
+        build_mcp_callable_input_schema(
+            parameters=[
+                {
+                    "name": "BODY",
+                    "location": "query",
+                    "required": False,
+                    "schema": {"type": "string"},
+                }
+            ],
+            request_schema={"type": "object"},
+        )
+    assert exc.value.code == "FACTORY_PACKAGE_SCHEMA_INVALID"
