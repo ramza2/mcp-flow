@@ -1582,11 +1582,23 @@ boundary (no network, no filesystem, no migration/API):
   Activate requires Discovery; config drift needs retest+rediscovery;
   non-Factory discovery apply unchanged
 
+- `backend/tests/unit/test_factory_runtime_adapter.py` — declarative HTTP
+  mapping (path/query/JSON body/required body); invalid input blocked before
+  HTTP; method/path/header override impossible; SSRF/private/loopback/metadata
+  blocked; redirects disabled; response size + timeout; non-2xx safe error
+  (no secret leak); `tools/list` exact set; initialize capability negotiation;
+  no subprocess/shell imports in runtime modules
+- `backend/tests/unit/test_factory_runtime_binding.py` — invalid Publish blocked;
+  lineage mismatch fail-closed; DRAFT endpoint unavailable; READY endpoint +
+  exact `GET /pets` tools/list; Connection Test SUCCEEDED + Discovery CLEAN
+  apply keeps Tools INACTIVE; duplicate binding uniqueness; non-Factory
+  discovery regression unchanged
+
 Executable MCP codegen / Docker / Python exec / Tool auto-ACTIVE / frontend
 wiring remain out of scope. Declarative Security/Contract TestRun + Review +
 Publish/Import DRAFT + connection configuration/Connection Test + Factory
-Discovery reconciliation foundations are in scope for Issues
-#91/#93/#95/#97/#99.
+Discovery reconciliation + safe Runtime Adapter foundations are in scope for
+Issues #91/#93/#95/#97/#99/#101.
 
 ---
 

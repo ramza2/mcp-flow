@@ -8,7 +8,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.domain.enums import JobStatus
+from app.domain.enums import FactoryRuntimeBindingStatus, JobStatus, MCPAuthType
 from app.factory.contracts import FactoryOpenAPIAnalysis, FactoryParameterCandidate
 from app.factory.openapi_analyzer import MAX_OPERATIONS
 from app.schemas.common_page import Page
@@ -310,3 +310,46 @@ class FactoryPublishResponse(BaseModel):
     publish_evidence_hash: str
     requested_by: uuid.UUID
     created_at: datetime
+
+
+class FactoryRuntimeBindingCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class FactoryRuntimeBindingUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    base_url: str | None = None
+    auth_type: MCPAuthType | None = None
+    auth_secret_id: uuid.UUID | None = None
+    connect_timeout_ms: int | None = Field(default=None, ge=100, le=120_000)
+    call_timeout_ms: int | None = Field(default=None, ge=100, le=300_000)
+    max_response_bytes: int | None = Field(default=None, ge=1024, le=10_485_760)
+    lock_version: int = Field(ge=1)
+
+
+class FactoryRuntimeBindingResponse(BaseModel):
+    """Safe RuntimeBinding projection (no secrets / package bytes)."""
+
+    model_config = ConfigDict(extra="forbid", from_attributes=True)
+
+    id: uuid.UUID
+    publish_id: uuid.UUID
+    mcp_server_id: uuid.UUID
+    review_id: uuid.UUID
+    generated_package_id: uuid.UUID
+    package_content_sha256: str
+    status: FactoryRuntimeBindingStatus
+    base_url: str | None = None
+    auth_type: MCPAuthType
+    auth_secret_id: uuid.UUID | None = None
+    connect_timeout_ms: int
+    call_timeout_ms: int
+    max_response_bytes: int
+    mcp_endpoint_url: str | None = None
+    last_error_code: str | None = None
+    last_error_message: str | None = None
+    created_by: uuid.UUID
+    lock_version: int
+    created_at: datetime
+    updated_at: datetime

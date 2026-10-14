@@ -2,7 +2,8 @@ name: mcpflow
 
 # Base Compose — local/test/pilot should layer overrides (no Compose Profiles in this baseline).
 # Canonical services in this PR: traefik, frontend, api, worker, factory-worker,
-# outbox, scheduler, postgres, redis, object-storage, migration.
+# factory-runtime, factory-mock-upstream, outbox, scheduler, postgres, redis,
+# object-storage, migration.
 # Deferred (no placeholder containers): mcp-worker.
 
 x-backend-build: &backend-build
@@ -226,6 +227,92 @@ services:
         "factory",
         "--loglevel=INFO",
       ]
+
+  factory-runtime:
+    image: mcpflow-backend:${MCPFLOW_IMAGE_TAG:-local}
+    build: *backend-build
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    environment:
+      MCPFLOW_ENVIRONMENT: ${MCPFLOW_ENVIRONMENT:-development}
+      MCPFLOW_LOG_LEVEL: ${MCPFLOW_LOG_LEVEL:-INFO}
+      MCPFLOW_DB_HOST: postgres
+      MCPFLOW_DB_PORT: "5432"
+      MCPFLOW_DB_NAME: mcpflow
+      MCPFLOW_DB_USER: mcpflow_app
+      MCPFLOW_DB_PASSWORD_FILE: /run/secrets/postgres_app_password
+      MCPFLOW_OBJECT_STORAGE_ENDPOINT: http://object-storage:9000
+      MCPFLOW_OBJECT_STORAGE_BACKEND: minio
+      MCPFLOW_OBJECT_STORAGE_BUCKET: mcpflow-factory
+      MCPFLOW_OBJECT_STORAGE_ACCESS_KEY_FILE: /run/secrets/minio_root_user
+      MCPFLOW_OBJECT_STORAGE_SECRET_KEY_FILE: /run/secrets/minio_root_password
+      MCPFLOW_FACTORY_RUNTIME_PUBLIC_BASE_URL: http://factory-runtime:8090
+      MCPFLOW_FACTORY_RUNTIME_OUTBOUND_HOST_ALLOWLIST: factory-mock-upstream
+      MCPFLOW_SECRET_MASTER_KEY_FILE: /run/secrets/secret_master_key
+    secrets:
+      - postgres_app_password
+      - minio_root_user
+      - minio_root_password
+      - secret_master_key
+    networks:
+      - app
+      - data
+      - factory
+    depends_on:
+      postgres:
+        condition: service_healthy
+      object-storage:
+        condition: service_healthy
+      migration:
+        condition: service_completed_successfully
+      factory-mock-upstream:
+        condition: service_healthy
+    command: ["python", "-m", "app.entrypoints.factory_runtime"]
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/health/live', timeout=3)",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 15s
+
+  factory-mock-upstream:
+    image: mcpflow-backend:${MCPFLOW_IMAGE_TAG:-local}
+    build: *backend-build
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    networks:
+      - factory
+    command: ["python", "-m", "app.entrypoints.factory_mock_upstream"]
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8091/health/live', timeout=3)",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
 
   outbox:
     image: mcpflow-backend:${MCPFLOW_IMAGE_TAG:-local}

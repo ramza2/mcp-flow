@@ -348,6 +348,9 @@ flowchart TD
     W --> OS[Object Storage]
     W --> RM[Remote MCP / LLM]
     MW --> LM[Allowlisted Local MCP]
+    FR[factory-runtime] --> PG
+    FR --> OS
+    FR --> MU[factory-mock-upstream / reviewed upstream]
     O[outbox] --> PG
     O --> R
 ```
@@ -359,10 +362,16 @@ api
 worker
 mcp-worker
 factory-worker
+factory-runtime
 scheduler
 outbox
 migration
 ```
+
+`factory-runtime`은 shared Current MCP adapter process다. API가 container를
+동적으로 생성하지 않으며, READY `RuntimeBinding`을
+`/factory-runtime/{binding_id}/mcp` secure route로 제공한다. Pilot용
+deterministic mock upstream은 `factory-mock-upstream`이다.
 
 `outbox-worker`, `outbox-relay`, `mcp-stdio-worker` 같은 별도 명칭을 문서에서 혼용하지 않는다.
 

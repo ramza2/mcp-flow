@@ -49,6 +49,20 @@ class Settings(BaseSettings):
         description="Path to Object Storage secret key secret file.",
     )
     factory_lease_seconds: int = Field(default=120, gt=0)
+    factory_runtime_public_base_url: str = Field(
+        default="http://factory-runtime:8090",
+        description=(
+            "Base URL used to advertise READY Factory Runtime MCP endpoints "
+            "(compose-internal by default)."
+        ),
+    )
+    factory_runtime_outbound_host_allowlist: str = Field(
+        default="factory-mock-upstream",
+        description=(
+            "Comma-separated hostnames allowed as Factory runtime outbound "
+            "base_url even when they resolve to private networks (pilot mock)."
+        ),
+    )
     factory_queued_republish_age_seconds: int = Field(
         default=30,
         ge=0,

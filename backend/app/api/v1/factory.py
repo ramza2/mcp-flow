@@ -6,6 +6,7 @@ import uuid
 from typing import Annotated
 
 from fastapi import APIRouter, File, Header, Query, Response, UploadFile, status
+from pydantic import BaseModel, ConfigDict, Field
 
 from app.api.dependencies import CurrentPrincipalDep, DbSessionDep
 from app.factory.openapi_analyzer import MAX_SOURCE_BYTES
@@ -24,10 +25,13 @@ from app.schemas.factory import (
     FactoryPublishResponse,
     FactoryReviewCreateRequest,
     FactoryReviewResponse,
+    FactoryRuntimeBindingResponse,
+    FactoryRuntimeBindingUpdate,
     FactoryTestRunListResponse,
     FactoryTestRunResponse,
 )
 from app.services.factory import FactoryService
+from app.services.factory_runtime import FactoryRuntimeService
 
 router = APIRouter(prefix="/factory", tags=["factory"])
 
@@ -407,3 +411,107 @@ async def get_factory_publish(
     principal: CurrentPrincipalDep,
 ) -> FactoryPublishResponse:
     return await _service(session).get_publish(principal.user_id, publish_id)
+
+
+class _RuntimeReadyRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    lock_version: int = Field(ge=1)
+
+
+def _runtime_service(session: DbSessionDep) -> FactoryRuntimeService:
+    return FactoryRuntimeService(session)
+
+
+@router.post(
+    "/publishes/{publish_id}/runtime-bindings",
+    response_model=FactoryRuntimeBindingResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_factory_runtime_binding(
+    publish_id: uuid.UUID,
+    session: DbSessionDep,
+    principal: CurrentPrincipalDep,
+) -> FactoryRuntimeBindingResponse:
+    return await _runtime_service(session).create_binding(
+        actor_user_id=principal.user_id,
+        publish_id=publish_id,
+    )
+
+
+@router.get(
+    "/publishes/{publish_id}/runtime-binding",
+    response_model=FactoryRuntimeBindingResponse,
+)
+async def get_factory_runtime_binding_for_publish(
+    publish_id: uuid.UUID,
+    session: DbSessionDep,
+    principal: CurrentPrincipalDep,
+) -> FactoryRuntimeBindingResponse:
+    return await _runtime_service(session).get_binding_for_publish(
+        principal.user_id,
+        publish_id,
+    )
+
+
+@router.get(
+    "/runtime-bindings/{binding_id}",
+    response_model=FactoryRuntimeBindingResponse,
+)
+async def get_factory_runtime_binding(
+    binding_id: uuid.UUID,
+    session: DbSessionDep,
+    principal: CurrentPrincipalDep,
+) -> FactoryRuntimeBindingResponse:
+    return await _runtime_service(session).get_binding(principal.user_id, binding_id)
+
+
+@router.patch(
+    "/runtime-bindings/{binding_id}",
+    response_model=FactoryRuntimeBindingResponse,
+)
+async def update_factory_runtime_binding(
+    binding_id: uuid.UUID,
+    body: FactoryRuntimeBindingUpdate,
+    session: DbSessionDep,
+    principal: CurrentPrincipalDep,
+) -> FactoryRuntimeBindingResponse:
+    return await _runtime_service(session).update_binding(
+        actor_user_id=principal.user_id,
+        binding_id=binding_id,
+        data=body,
+    )
+
+
+@router.post(
+    "/runtime-bindings/{binding_id}/ready",
+    response_model=FactoryRuntimeBindingResponse,
+)
+async def ready_factory_runtime_binding(
+    binding_id: uuid.UUID,
+    body: _RuntimeReadyRequest,
+    session: DbSessionDep,
+    principal: CurrentPrincipalDep,
+) -> FactoryRuntimeBindingResponse:
+    return await _runtime_service(session).mark_ready(
+        actor_user_id=principal.user_id,
+        binding_id=binding_id,
+        lock_version=body.lock_version,
+    )
+
+
+@router.post(
+    "/runtime-bindings/{binding_id}/disable",
+    response_model=FactoryRuntimeBindingResponse,
+)
+async def disable_factory_runtime_binding(
+    binding_id: uuid.UUID,
+    body: _RuntimeReadyRequest,
+    session: DbSessionDep,
+    principal: CurrentPrincipalDep,
+) -> FactoryRuntimeBindingResponse:
+    return await _runtime_service(session).disable_binding(
+        actor_user_id=principal.user_id,
+        binding_id=binding_id,
+        lock_version=body.lock_version,
+    )

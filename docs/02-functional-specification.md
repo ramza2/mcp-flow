@@ -1349,6 +1349,38 @@ Factory Activate precondition hardening이 구현된다. Tool auto-ACTIVE는 후
 
 source hash, generator version, dependency lock, image/artifact hash, test report를 보존한다.
 
+## FNC-FAC-006. Safe Runtime Adapter (declarative OpenAPI → MCP)
+
+Reviewed/Published declarative OpenAPI package를 executable code로 취급하지
+않고, durable `RuntimeBinding` + shared `factory-runtime` 프로세스가 Current MCP
+`initialize` / `tools/list` / `tools/call` 표면을 제공한다.
+
+```text
+FactoryPublish
+→ RuntimeBinding DRAFT
+→ explicit base_url (+ optional Secret reference auth)
+→ RuntimeBinding READY
+→ deterministic MCP endpoint
+→ (별도 명시 호출) Connection Test / Discovery / Activate
+```
+
+제약:
+
+- package는 JSON/declarative data만 사용 (generated Python/JS, shell/subprocess,
+  dependency install, Docker socket, privileged container 금지)
+- RuntimeBinding 생성/load 시 FactoryPublish + APPROVE Review + GeneratedPackage
+  + package bytes SHA-256 + MCP Server lineage + `mcp_tool_ids` 교차검증
+  (client-supplied lineage 불신)
+- `tools/list`는 `FactoryPublish.mcp_tool_ids`의 reviewed `remote_name` exact set만
+  노출 (helper/debug/admin Tool 금지)
+- `tools/call`은 reviewed method/path/`x-mcpflow-param-in`/body mapping만으로
+  outbound HTTP 구성 (caller가 host/method/path/arbitrary header 변경 불가)
+- `base_url`은 명시 설정만 허용 (OpenAPI servers 추론 금지); SSRF fail-closed
+  (localhost/loopback/link-local/metadata/private + redirect disable)
+- raw secret은 package/DB JSON/log/API에 저장·노출하지 않음 (Secret reference만)
+- READY 이후에만 MCP endpoint advertise; Connection Test / Discovery /
+  reconciliation / Server·Tool Activate는 자동 실행하지 않음
+
 ---
 
 ## 16. 완료 정의

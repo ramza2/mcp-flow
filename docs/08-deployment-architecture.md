@@ -105,6 +105,7 @@ api
 worker
 mcp-worker
 factory-worker
+factory-runtime
 scheduler
 outbox
 postgres
@@ -112,6 +113,9 @@ redis
 object-storage
 migration
 ```
+
+Pilot/local Compose may also run `factory-mock-upstream` (deterministic HTTP
+upstream for Factory runtime E2E; not a product-facing public service).
 
 다른 문서에서 `mcp-stdio-worker`, `outbox-worker`, `outbox-relay`를 별도 서비스명으로 사용하지 않는다.
 
@@ -127,6 +131,7 @@ migration
 | `worker` | Execution queue consumer/DB lease claim; 향후 Agent planning·Tool runner 확장 | 없음 |
 | `mcp-worker` | 승인된 local stdio MCP 실행 | 없음 |
 | `factory-worker` | untrusted Factory build/test | 임시 workspace |
+| `factory-runtime` | shared declarative OpenAPI→MCP adapter (`RuntimeBinding` routes) | 없음 |
 | `scheduler` | occurrence claim/Execution 생성 | 없음 |
 | `outbox` | CREATED staging + DB Outbox → Celery execution queue at-least-once publish | 없음 |
 | `postgres` | 업무/실행/감사 원본 | 필수 |
@@ -151,6 +156,7 @@ api            -> python -m mcpflow.entrypoints.api
 worker         -> celery -A app.infrastructure.celery_app:celery_app worker -Q execution --loglevel=INFO
 mcp-worker     -> celery -A mcpflow.infrastructure.celery worker -Q mcp_stdio
 factory-worker -> celery -A app.infrastructure.celery_app:celery_app worker -Q factory --loglevel=INFO
+factory-runtime -> python -m app.entrypoints.factory_runtime
 scheduler      -> python -m app.entrypoints.scheduler
 outbox         -> python -m app.entrypoints.outbox
 migration      -> alembic upgrade head
@@ -233,7 +239,7 @@ Factory는 별도 profile에서 기동할 수 있다.
 | `app` | api, worker, scheduler, outbox, redis | 내부 application |
 | `data` | api, worker, scheduler, outbox, postgres, object-storage | 영속 데이터 |
 | `mcp` | worker, mcp-worker | MCP outbound/local boundary |
-| `factory` | factory-worker, object-storage | 생성코드 격리 |
+| `factory` | factory-worker, factory-runtime, factory-mock-upstream, object-storage | 생성코드/런타임 격리 |
 
 필요 없는 서비스는 network에 연결하지 않는다.
 

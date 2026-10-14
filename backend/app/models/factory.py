@@ -860,6 +860,119 @@ class ToolFactoryPublish(Base):
     )
 
 
+class ToolFactoryRuntimeBinding(Base):
+    """Durable Factory Publish → declarative MCP runtime adapter binding.
+
+    Package bytes remain data only. Binding does not Activate MCP Server/Tools
+    or run Connection Test / Discovery.
+    """
+
+    __tablename__ = "tool_factory_runtime_bindings"
+    __table_args__ = (
+        UniqueConstraint(
+            "publish_id",
+            name="uq_tool_factory_runtime_bindings_publish_id",
+        ),
+        UniqueConstraint(
+            "mcp_server_id",
+            name="uq_tool_factory_runtime_bindings_mcp_server_id",
+        ),
+        CheckConstraint(
+            "status IN ('DRAFT', 'READY', 'DISABLED')",
+            name="ck_tool_factory_runtime_bindings_status",
+        ),
+        CheckConstraint(
+            "length(package_content_sha256) = 64",
+            name="ck_tool_factory_runtime_bindings_package_sha_len",
+        ),
+        CheckConstraint(
+            "base_url IS NULL OR length(trim(base_url)) > 0",
+            name="ck_tool_factory_runtime_bindings_base_url_ne",
+        ),
+        CheckConstraint(
+            "connect_timeout_ms >= 100 AND connect_timeout_ms <= 120000",
+            name="ck_tool_factory_runtime_bindings_connect_timeout",
+        ),
+        CheckConstraint(
+            "call_timeout_ms >= 100 AND call_timeout_ms <= 300000",
+            name="ck_tool_factory_runtime_bindings_call_timeout",
+        ),
+        CheckConstraint(
+            "max_response_bytes >= 1024 AND max_response_bytes <= 10485760",
+            name="ck_tool_factory_runtime_bindings_max_response",
+        ),
+        CheckConstraint(
+            "lock_version >= 1",
+            name="ck_tool_factory_runtime_bindings_lock_version",
+        ),
+        Index("ix_tool_factory_runtime_bindings_generated_package_id", "generated_package_id"),
+        Index("ix_tool_factory_runtime_bindings_created_at", "created_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    publish_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("tool_factory_publishes.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    mcp_server_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("mcp_servers.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    review_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("tool_factory_reviews.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    generated_package_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("tool_factory_generated_packages.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    package_content_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="DRAFT")
+    base_url: Mapped[str | None] = mapped_column(String(2048), nullable=True)
+    auth_type: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="NONE", server_default="NONE"
+    )
+    auth_secret_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("secret_records.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    connect_timeout_ms: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=5000, server_default="5000"
+    )
+    call_timeout_ms: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=30000, server_default="30000"
+    )
+    max_response_bytes: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=262144, server_default="262144"
+    )
+    last_error_code: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    last_error_message: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    created_by: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    lock_version: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=1, server_default="1"
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+
 class ToolFactoryTestResult(Base):
     """Forward-compatible evidence table — unused by OpenAPI analysis in this slice."""
 
