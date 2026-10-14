@@ -224,10 +224,10 @@ class MCPDiscoveryService:
         return resolved is None
 
     async def connection_test(self, server_id: uuid.UUID) -> ConnectionTestResponse:
-        from app.services.mcp_server import has_usable_endpoint, is_connection_deferred
+        from app.services.mcp_server import connection_deferred_effective
 
         server = await self._require_server(server_id)
-        if is_connection_deferred(server) and not has_usable_endpoint(server):
+        if connection_deferred_effective(server):
             raise AppError(
                 code="RESOURCE_CONFLICT",
                 message=(

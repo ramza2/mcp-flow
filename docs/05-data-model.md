@@ -2028,14 +2028,21 @@ tool_factory_test_results
   `publish_evidence` JSONB + `publish_evidence_hash`; `requested_by`;
   creates exactly one `MCPServer` (`DRAFT`, `endpoint_url` null / connection
   deferred) and `tool_count` `MCPTool` rows (`INACTIVE`) with ToolVersion
-  declarative descriptors; does **not** Activate / Connection Test / Discovery
+  declarative descriptors; Publish itself does **not** Activate / Connection
+  Test / Discovery
 - `tool_factory_test_results` — forward-compatible evidence table (legacy
   placeholder; sandbox TestRun evidence uses `tool_factory_test_runs`)
 
+Factory-imported `mcp_servers.transport_config` retains lineage
+(`factory_publish`, `source=TOOL_FACTORY_PUBLISH`, publish/review ids) and
+`connection_deferred`. After a valid endpoint is persisted via
+`MCPServerService.update`, `connection_deferred` is set `false` (lineage keys
+kept). Connection Test evidence remains `mcp_server_checks` only. Factory
+Activate requires latest check `SUCCEEDED`; Discovery remains a later slice.
+
 Do not duplicate product-wide `JobStatus` with Factory-local analysis issue
-severities. Connection Test / Discovery / Activate remain later. Product-wide
-`object_blobs` catalog is still deferred; Factory Jobs/packages store safe
-object reference columns directly.
+severities. Product-wide `object_blobs` catalog is still deferred; Factory
+Jobs/packages store safe object reference columns directly.
 
 ---
 

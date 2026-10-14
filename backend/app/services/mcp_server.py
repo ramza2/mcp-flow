@@ -40,14 +40,42 @@ def _protocol_era_for_transport(transport: MCPTransportType) -> MCPProtocolEra:
 
 
 def is_connection_deferred(server: MCPServer) -> bool:
-    """True when transport_config marks a Factory deferred-DRAFT import."""
+    """True when transport_config marks connection as still deferred."""
 
     cfg = server.transport_config
     return isinstance(cfg, dict) and cfg.get("connection_deferred") is True
 
 
+def is_factory_imported(server: MCPServer) -> bool:
+    """True for MCP Servers created by Tool Factory Publish/Import."""
+
+    cfg = server.transport_config
+    if not isinstance(cfg, dict):
+        return False
+    return (
+        cfg.get("factory_publish") is True
+        or cfg.get("source") == "TOOL_FACTORY_PUBLISH"
+    )
+
+
 def has_usable_endpoint(server: MCPServer) -> bool:
     return bool(server.endpoint_url and str(server.endpoint_url).strip())
+
+
+def connection_deferred_effective(server: MCPServer) -> bool:
+    """Deferred Factory DRAFT still blocked from Connection Test / Activate."""
+
+    return is_connection_deferred(server) and not has_usable_endpoint(server)
+
+
+def _transport_config_with_deferred_cleared(
+    transport_config: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Clear connection_deferred while preserving Factory lineage metadata."""
+
+    cfg = dict(transport_config) if isinstance(transport_config, dict) else {}
+    cfg["connection_deferred"] = False
+    return cfg
 
 
 class MCPServerService:
@@ -311,6 +339,18 @@ class MCPServerService:
                 fields["stdio_manifest_id"] = None
                 fields["endpoint_url"] = normalized
 
+        # Effective endpoint after this update (fields may omit endpoint_url).
+        effective_endpoint = fields.get("endpoint_url", normalized)
+        usable_after = bool(
+            effective_endpoint and str(effective_endpoint).strip()
+        )
+        if usable_after and is_connection_deferred(server):
+            # Valid connection configuration persisted → deferred no longer
+            # effective. Preserve Factory lineage keys in transport_config.
+            fields["transport_config"] = _transport_config_with_deferred_cleared(
+                server.transport_config
+            )
+
         updated = await self._servers.update_atomic(
             server_id,
             expected_lock_version=expected_lock_version,
@@ -331,6 +371,8 @@ class MCPServerService:
         return updated
 
     async def activate(self, server_id: uuid.UUID) -> MCPServer:
+        from app.repositories.mcp_discovery import MCPDiscoveryRepository
+
         server = await self._require(server_id)
         if server.status not in {
             MCPServerStatus.DRAFT,
@@ -344,7 +386,7 @@ class MCPServerService:
                 ),
                 status_code=status.HTTP_409_CONFLICT,
             )
-        if is_connection_deferred(server) and not has_usable_endpoint(server):
+        if connection_deferred_effective(server):
             raise AppError(
                 code="RESOURCE_CONFLICT",
                 message=(
@@ -354,6 +396,30 @@ class MCPServerService:
                 ),
                 status_code=status.HTTP_409_CONFLICT,
             )
+        if is_factory_imported(server):
+            # Factory lifecycle: require configured endpoint + deferred cleared
+            # + latest Connection Test SUCCEEDED. Discovery is a later slice.
+            if is_connection_deferred(server) or not has_usable_endpoint(server):
+                raise AppError(
+                    code="RESOURCE_CONFLICT",
+                    message=(
+                        "Cannot activate Factory-imported MCP Server without a "
+                        "configured non-deferred endpoint_url."
+                    ),
+                    status_code=status.HTTP_409_CONFLICT,
+                )
+            latest = await MCPDiscoveryRepository(self._session).get_latest_check(
+                server.id
+            )
+            if latest is None or latest.status != "SUCCEEDED":
+                raise AppError(
+                    code="RESOURCE_CONFLICT",
+                    message=(
+                        "Cannot activate Factory-imported MCP Server without a "
+                        "latest SUCCEEDED Connection Test."
+                    ),
+                    status_code=status.HTTP_409_CONFLICT,
+                )
         updated = await self._servers.update(
             server,
             status=MCPServerStatus.ACTIVE,
