@@ -488,6 +488,7 @@ def _parse_operations(
 
             parameters: list[FactoryParameterCandidate] = []
             request_schema: dict[str, Any] | None = None
+            request_body_required = False
             response_schema: dict[str, Any] | None = None
             try:
                 parameters = _extract_parameters(
@@ -495,7 +496,9 @@ def _parse_operations(
                     op.get("parameters"),
                     resolver,
                 )
-                request_schema = _extract_request_schema(op, resolver)
+                request_schema, request_body_required = _extract_request_schema(
+                    op, resolver
+                )
                 response_schema = _extract_response_schema(op, resolver)
             except FactoryAnalysisError as exc:
                 if exc.code in {
@@ -526,6 +529,7 @@ def _parse_operations(
                     deprecated=bool(op.get("deprecated", False)),
                     parameters=parameters,
                     request_schema=request_schema,
+                    request_body_required=request_body_required,
                     response_schema=response_schema,
                 )
             )
@@ -658,16 +662,26 @@ def _normalize_parameter(
 def _extract_request_schema(
     operation: dict[str, Any],
     resolver: _RefResolver,
-) -> dict[str, Any] | None:
+) -> tuple[dict[str, Any] | None, bool]:
+    """Return (request_schema, request_body_required).
+
+    OpenAPI ``requestBody.required`` defaults to false when omitted.
+    When no usable request schema exists, requiredness is false and schema
+    is None (no MCP ``body`` property will be created).
+    """
+
     body = operation.get("requestBody")
     if body is None:
-        return None
+        return None, False
     body_obj = resolver.resolve_node(body, context="requestBody")
     if not isinstance(body_obj, dict):
-        return None
+        return None, False
+    # OpenAPI 3.x: requestBody.required defaults to false.
+    required_raw = body_obj.get("required", False)
+    request_body_required = bool(required_raw) if isinstance(required_raw, bool) else False
     content = body_obj.get("content")
     if not isinstance(content, dict) or not content:
-        return None
+        return None, False
     # Prefer application/json, else first media type in sorted order.
     media_key = (
         "application/json"
@@ -676,11 +690,11 @@ def _extract_request_schema(
     )
     media = content.get(media_key)
     if not isinstance(media, dict):
-        return None
+        return None, False
     schema = media.get("schema")
     if schema is None:
-        return None
-    return resolver.normalize_schema(schema)
+        return None, False
+    return resolver.normalize_schema(schema), request_body_required
 
 
 def _canonical_http_status(key: Any) -> str | None:

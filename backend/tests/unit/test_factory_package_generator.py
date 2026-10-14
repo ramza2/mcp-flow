@@ -28,6 +28,7 @@ def _snap(*, op: str, cid: str = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa") -> dict
         "deprecated": False,
         "parameters": [],
         "request_schema": None,
+        "request_body_required": False,
         "response_schema": {"type": "object"},
     }
 

@@ -275,6 +275,9 @@ class ToolFactoryCandidate(Base):
     request_schema: Mapped[dict[str, Any] | None] = mapped_column(
         JSONB(none_as_null=True), nullable=True
     )
+    request_body_required: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
     response_schema: Mapped[dict[str, Any] | None] = mapped_column(
         JSONB(none_as_null=True), nullable=True
     )
@@ -725,6 +728,129 @@ class ToolFactoryReview(Base):
     )
     reviewed_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False
+    )
+    lock_version: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=1, server_default="1"
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class ToolFactoryPublish(Base):
+    """Durable Publish/Import from an APPROVE Review into DRAFT MCP assets.
+
+    Exactly one successful publish per Review. Creates DRAFT MCP Server +
+    INACTIVE MCP Tools from declarative package contracts only. Never
+    activates, discovers, connection-tests, or executes package code.
+    """
+
+    __tablename__ = "tool_factory_publishes"
+    __table_args__ = (
+        UniqueConstraint(
+            "review_id",
+            name="uq_tool_factory_publishes_review_id",
+        ),
+        UniqueConstraint(
+            "mcp_server_id",
+            name="uq_tool_factory_publishes_mcp_server_id",
+        ),
+        CheckConstraint(
+            "length(package_content_sha256) = 64",
+            name="ck_tool_factory_publishes_package_sha_len",
+        ),
+        CheckConstraint(
+            "length(test_evidence_hash) = 64",
+            name="ck_tool_factory_publishes_test_evidence_hash_len",
+        ),
+        CheckConstraint(
+            "length(review_evidence_hash) = 64",
+            name="ck_tool_factory_publishes_review_evidence_hash_len",
+        ),
+        CheckConstraint(
+            "length(publish_evidence_hash) = 64",
+            name="ck_tool_factory_publishes_publish_evidence_hash_len",
+        ),
+        CheckConstraint(
+            "length(trim(generator_version)) > 0",
+            name="ck_tool_factory_publishes_generator_version_ne",
+        ),
+        CheckConstraint(
+            "length(trim(package_schema_version)) > 0",
+            name="ck_tool_factory_publishes_package_schema_ne",
+        ),
+        CheckConstraint(
+            "tool_count >= 1",
+            name="ck_tool_factory_publishes_tool_count",
+        ),
+        CheckConstraint(
+            "lock_version >= 1",
+            name="ck_tool_factory_publishes_lock_version",
+        ),
+        Index("ix_tool_factory_publishes_generated_package_id", "generated_package_id"),
+        Index(
+            "ix_tool_factory_publishes_requested_by_created_at",
+            "requested_by",
+            "created_at",
+        ),
+        Index("ix_tool_factory_publishes_created_at", "created_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    review_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("tool_factory_reviews.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    test_run_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("tool_factory_test_runs.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    generated_package_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("tool_factory_generated_packages.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    build_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("tool_factory_builds.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    job_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("tool_factory_jobs.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    analysis_artifact_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("tool_factory_artifacts.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    package_content_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    generator_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    package_schema_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    test_evidence_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    review_evidence_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    mcp_server_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("mcp_servers.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    mcp_tool_ids: Mapped[list[Any]] = mapped_column(
+        JSONB(none_as_null=True), nullable=False
+    )
+    tool_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    publish_evidence: Mapped[dict[str, Any]] = mapped_column(
+        JSONB(none_as_null=True), nullable=False
+    )
+    publish_evidence_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    requested_by: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="RESTRICT"),
+        nullable=False,
     )
     lock_version: Mapped[int] = mapped_column(
         Integer, nullable=False, default=1, server_default="1"

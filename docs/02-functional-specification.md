@@ -1220,7 +1220,7 @@ GET  /api/v1/factory/test-runs/{test_run_id}
 ### Tool Factory Review foundation (implemented slice)
 
 Durable terminal Review (`APPROVE` / `REJECT`) for a PASS Sandbox TestRun.
-Does **not** Publish/Import, create MCPTool/MCPServer, or execute package code.
+Does **not** activate MCP assets or execute package code.
 
 ```text
 POST /api/v1/factory/test-runs/{test_run_id}/review
@@ -1239,23 +1239,49 @@ GET  /api/v1/factory/test-runs/{test_run_id}/review
 - Safe responses: decision, lineage hashes, `test_evidence_hash`,
   `review_evidence_hash`, reviewer/timestamps — no Object Storage keys
 
+### Tool Factory Publish/Import foundation (implemented slice)
+
+Durable Publish/Import from an **APPROVE** Review into **DRAFT** MCP assets.
+Does **not** Activate, Connection Test, Discovery, or execute package code.
+
+```text
+POST /api/v1/factory/reviews/{review_id}/publish
+GET  /api/v1/factory/publishes/{publish_id}
+GET  /api/v1/factory/reviews/{review_id}/publish
+```
+
+- Auth: `mcp.server.manage` (create), `mcp.server.read` (detail); ACTIVE user
+- Eligibility: Review `decision=APPROVE` + sealed Review evidence + TestRun
+  `SUCCEEDED`/`PASS` sealed evidence + Review↔TestRun↔Package lineage +
+  Object Storage size/hash + package schema/kind/generator/tool_count; fail closed
+- REJECT Review → `FACTORY_PUBLISH_REJECTED_REVIEW` and zero MCP side effects
+- Unique one Publish per `review_id`; Idempotency scope `FACTORY_PUBLISH_IMPORT_V1`;
+  resource_type `TOOL_FACTORY_PUBLISH`
+- Same TX: publish record + DRAFT MCP Server + INACTIVE MCP Tools + idempotency
+- Concurrent publish race → single publish + single MCP Server; loser
+  `FACTORY_PUBLISH_ALREADY_EXISTS`
+- MCP Server: `status=DRAFT`, `endpoint_url=null` (connection deferred; no
+  fabricated runtime endpoint); Tools: `status=INACTIVE`, declarative
+  operation_key/method/path/schemas only
+- Safe responses: lineage hashes, `mcp_server_id`, `mcp_tool_ids`,
+  `publish_evidence_hash` — no Object Storage keys / raw evidence blob
+
 **Not implemented yet:**
 
 - allowlisted URL source fetch
 - generic `/jobs` API
 - executable MCP code / Docker image / Python import/exec / dependency install
 - subprocess / host process / Docker-in-Docker / external network from package
-- real MCP server startup / Discovery / Tool test call
-- Publish / Import / DRAFT MCP Server creation / activation
+- real MCP server startup / Discovery / Connection Test / Activate
 - version/archive/restore
 - frontend real API wiring
-- aspirational `/factory/projects` routes and build tests/publish/rollback
+- aspirational `/factory/projects` routes and build tests/rollback
 
 ## FNC-FAC-002. 생성
 
 선택 operation을 Tool로 생성하고 credential은 Secret reference placeholder로만 표현한다.
-(현재 slice는 Build + Generated Package + sandbox Test + Review foundation까지
-수행하며 executable codegen/Publish는 후속.)
+(현재 slice는 Build + Generated Package + sandbox Test + Review + Publish/Import
+DRAFT MCP handoff까지 수행하며 executable codegen/Activate는 후속.)
 
 ## FNC-FAC-003. Sandbox Build/Test
 
@@ -1266,8 +1292,9 @@ declarative validation path로 실행한다 (현재 slice는 executable MCP sand
 
 ## FNC-FAC-004. 검증/배포 승인
 
-PASS TestRun에 대한 Factory Review(`APPROVE`/`REJECT`) foundation이 구현된다.
-Publish/Import 및 Draft MCP Server 등록 handoff는 후속 slice이다.
+PASS TestRun에 대한 Factory Review(`APPROVE`/`REJECT`) foundation과 APPROVE
+Review의 Publish/Import → DRAFT MCP Server/INACTIVE Tools foundation이 구현된다.
+Connection Test / Discovery / Activate는 후속 slice이다.
 
 ## FNC-FAC-005. Version/Evidence
 

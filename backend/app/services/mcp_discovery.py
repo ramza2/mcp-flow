@@ -224,7 +224,18 @@ class MCPDiscoveryService:
         return resolved is None
 
     async def connection_test(self, server_id: uuid.UUID) -> ConnectionTestResponse:
+        from app.services.mcp_server import has_usable_endpoint, is_connection_deferred
+
         server = await self._require_server(server_id)
+        if is_connection_deferred(server) and not has_usable_endpoint(server):
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message=(
+                    "Cannot Connection Test connection_deferred DRAFT MCP Server "
+                    "without endpoint_url. Set a real endpoint first."
+                ),
+                status_code=status.HTTP_409_CONFLICT,
+            )
         config = _server_config(server)
         prior_discovery_mode = server.discovery_mode
         _reject_unsupported_transport(config)

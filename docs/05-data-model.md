@@ -1966,12 +1966,13 @@ tool_factory_builds
 tool_factory_generated_packages
 tool_factory_test_runs
 tool_factory_reviews
+tool_factory_publishes
 tool_factory_test_results
 ```
 
 생성 artifact hash, generator version, sandbox policy, 시험 결과를 보존한다. 운영 활성화는 관리자 승인 후 별도 MCP Server 등록 흐름을 사용한다.
 
-**Implemented durable foundation (migrations `20261008_0028`, `20261013_0029`, `20261013_0030`, `20261013_0031`, `20261013_0032`, `20261014_0033`, `20261014_0034`):**
+**Implemented durable foundation (migrations `20261008_0028`, `20261013_0029`, `20261013_0030`, `20261013_0031`, `20261013_0032`, `20261014_0033`, `20261014_0034`, `20261014_0035`):**
 
 - `tool_factory_jobs` — OpenAPI analysis Jobs; canonical `JobStatus` CHECK;
   **no** raw source/body column; stores `source_sha256`, Object Storage
@@ -2019,13 +2020,20 @@ tool_factory_test_results
   unique `test_run_id`; decision `APPROVE`/`REJECT`; snapshotted lineage +
   `test_evidence_hash` + policy versions; `review_evidence` JSONB +
   `review_evidence_hash`; `reviewed_by` / `reviewed_at`; optional safe
-  `comment` (≤500); **no** FK to `mcp_tools` / `mcp_servers`; APPROVE does
-  not Publish/Import
+  `comment` (≤500)
+- `tool_factory_publishes` — durable Publish/Import from an APPROVE Review;
+  unique `review_id` + unique `mcp_server_id`; snapshotted lineage +
+  `package_content_sha256` / `test_evidence_hash` / `review_evidence_hash` /
+  generator + package schema versions; `mcp_tool_ids` JSONB + `tool_count`;
+  `publish_evidence` JSONB + `publish_evidence_hash`; `requested_by`;
+  creates exactly one `MCPServer` (`DRAFT`, `endpoint_url` null / connection
+  deferred) and `tool_count` `MCPTool` rows (`INACTIVE`) with ToolVersion
+  declarative descriptors; does **not** Activate / Connection Test / Discovery
 - `tool_factory_test_results` — forward-compatible evidence table (legacy
   placeholder; sandbox TestRun evidence uses `tool_factory_test_runs`)
 
 Do not duplicate product-wide `JobStatus` with Factory-local analysis issue
-severities. Executable MCP sandbox packages / Publish remain later. Product-wide
+severities. Connection Test / Discovery / Activate remain later. Product-wide
 `object_blobs` catalog is still deferred; Factory Jobs/packages store safe
 object reference columns directly.
 

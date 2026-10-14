@@ -80,6 +80,7 @@ def _tool_contract_from_snapshot(entry: Any) -> dict[str, Any]:
         "deprecated": bool(entry.get("deprecated", False)),
         "parameters": parameters,
         "request_schema": entry.get("request_schema"),
+        "request_body_required": bool(entry.get("request_body_required", False)),
         "response_schema": entry.get("response_schema"),
     }
 

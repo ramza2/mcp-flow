@@ -993,3 +993,115 @@ async def test_pg_concurrent_review_approve_vs_reject(
         ).scalar_one()
         assert int(tools) == 0
         assert int(servers) == 0
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_pg_concurrent_publish_one_server_tools(
+    integration_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from app.services.factory_test_worker import FactoryTestWorkerService
+
+    storage = InMemoryObjectStorage()
+    async with integration_session_factory() as session:
+        user_id = await _seed_manage_user(session)
+        outcome = await FactoryService(
+            session, storage=storage
+        ).create_openapi_analyze_job(
+            actor_user_id=user_id,
+            source_bytes=MINIMAL_JSON,
+            filename="pub.json",
+            idempotency_key=f"job-{uuid.uuid4().hex}",
+        )
+        await session.commit()
+        job_id = outcome.result.id
+
+    async with integration_session_factory() as session:
+        worker = FactoryWorkerService(session, storage=storage, worker_id="pg-pub")
+        result = await worker.process_job(job_id=job_id)
+        await session.commit()
+        assert result.status == JobStatus.SUCCEEDED.value
+        cand_id = (
+            await session.execute(
+                text(
+                    "SELECT id FROM tool_factory_candidates WHERE job_id = :jid LIMIT 1"
+                ),
+                {"jid": str(job_id)},
+            )
+        ).scalar_one()
+        build = await FactoryService(session, storage=storage).create_build(
+            actor_user_id=user_id,
+            job_id=job_id,
+            candidate_ids=[uuid.UUID(str(cand_id))],
+            idempotency_key=f"build-{uuid.uuid4().hex}",
+        )
+        pkg = await FactoryService(session, storage=storage).generate_package(
+            actor_user_id=user_id,
+            build_id=build.result.id,
+            idempotency_key=f"pkg-{uuid.uuid4().hex}",
+        )
+        tr = await FactoryService(session, storage=storage).create_test_run(
+            actor_user_id=user_id,
+            package_id=pkg.result.id,
+            idempotency_key=f"tr-{uuid.uuid4().hex}",
+        )
+        done = await FactoryTestWorkerService(
+            session, storage=storage, worker_id="pg-pub-t"
+        ).process_test_run(test_run_id=tr.result.id)
+        await session.commit()
+        assert done.status == JobStatus.SUCCEEDED.value
+        review = await FactoryService(session, storage=storage).create_review(
+            actor_user_id=user_id,
+            test_run_id=tr.result.id,
+            decision="APPROVE",
+            comment="ok",
+            idempotency_key=f"rv-{uuid.uuid4().hex}",
+        )
+        review_id = review.result.id
+        package_tool_count = pkg.result.tool_count
+
+    async def _run(tag: str) -> Any:
+        async with integration_session_factory() as session:
+            try:
+                return await FactoryService(session, storage=storage).publish_review(
+                    actor_user_id=user_id,
+                    review_id=review_id,
+                    idempotency_key=f"pub-{tag}-{uuid.uuid4().hex}",
+                )
+            except AppError as exc:
+                return exc
+
+    results = await asyncio.gather(_run("a"), _run("b"))
+    outcomes = [r for r in results if not isinstance(r, AppError)]
+    errors = [r for r in results if isinstance(r, AppError)]
+    assert len(outcomes) == 1
+    assert len(errors) == 1
+    assert errors[0].code == "FACTORY_PUBLISH_ALREADY_EXISTS"
+
+    async with integration_session_factory() as session:
+        pub_count = (
+            await session.execute(
+                text(
+                    "SELECT count(*) FROM tool_factory_publishes "
+                    "WHERE review_id = :rid"
+                ),
+                {"rid": str(review_id)},
+            )
+        ).scalar_one()
+        assert int(pub_count) == 1
+        servers = (
+            await session.execute(text("SELECT count(*) FROM mcp_servers"))
+        ).scalar_one()
+        tools = (
+            await session.execute(text("SELECT count(*) FROM mcp_tools"))
+        ).scalar_one()
+        assert int(servers) == 1
+        assert int(tools) == package_tool_count
+        server_status = (
+            await session.execute(text("SELECT status FROM mcp_servers LIMIT 1"))
+        ).scalar_one()
+        assert server_status == "DRAFT"
+        tool_statuses = (
+            await session.execute(text("SELECT DISTINCT status FROM mcp_tools"))
+        ).scalars().all()
+        assert set(tool_statuses) == {"INACTIVE"}

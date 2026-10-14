@@ -181,9 +181,42 @@ def test_multiple_operations_and_schemas() -> None:
     assert create.request_schema is not None
     assert create.request_schema["type"] == "object"
     assert "name" in create.request_schema["properties"]
+    # requestBody.required omitted → OpenAPI default false
+    assert create.request_body_required is False
     assert create.response_schema is not None
     assert create.response_schema["type"] == "object"
     assert "id" in create.response_schema["properties"]
+
+
+def test_request_body_required_true_preserved() -> None:
+    doc = {
+        "openapi": "3.0.3",
+        "info": {"title": "t", "version": "1"},
+        "paths": {
+            "/x": {
+                "post": {
+                    "operationId": "createX",
+                    "requestBody": {
+                        "required": True,
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "properties": {"n": {"type": "string"}},
+                                }
+                            }
+                        },
+                    },
+                    "responses": {"200": {"description": "ok"}},
+                }
+            }
+        },
+    }
+    result = analyze_openapi(_json_bytes(doc))
+    assert len(result.operations) == 1
+    op = result.operations[0]
+    assert op.request_schema is not None
+    assert op.request_body_required is True
 
 
 def test_missing_operation_id_safe() -> None:
