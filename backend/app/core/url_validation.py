@@ -68,7 +68,11 @@ def validate_model_base_url(url: str) -> str:
     return validate_http_url(url, field_name="base_url")
 
 
-def _is_forbidden_ip(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+def is_forbidden_outbound_ip(
+    address: ipaddress.IPv4Address | ipaddress.IPv6Address,
+) -> bool:
+    """True when a connect destination IP is blocked for Factory outbound SSRF."""
+
     return bool(
         address.is_private
         or address.is_loopback
@@ -82,6 +86,10 @@ def _is_forbidden_ip(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> 
             and address in ipaddress.ip_network("fd00::/8")
         )
     )
+
+
+# Backward-compatible private alias used inside this module.
+_is_forbidden_ip = is_forbidden_outbound_ip
 
 
 def validate_outbound_base_url(

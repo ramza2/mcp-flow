@@ -181,6 +181,49 @@ def _render_path(template: str, path_params: dict[str, str]) -> str:
     return _PATH_PARAM_RE.sub(repl, template)
 
 
+async def _read_response_bounded(
+    response: httpx.Response,
+    *,
+    max_response_bytes: int,
+) -> bytes:
+    """Stream response body; abort as soon as max_response_bytes is exceeded.
+
+    Accumulates at most ``max_response_bytes`` bytes for parsing. Never loads
+    an unbounded full upstream payload into memory.
+    """
+
+    chunks: list[bytes] = []
+    total = 0
+    try:
+        async for chunk in response.aiter_bytes():
+            if not chunk:
+                continue
+            # Room left before exceeding the hard cap.
+            room = max_response_bytes - total
+            if len(chunk) > room:
+                # Read only enough to prove overflow, then abort the stream.
+                if room > 0:
+                    chunks.append(chunk[:room])
+                    total += room
+                await response.aclose()
+                raise FactoryRuntimeAdapterError(
+                    FACTORY_RUNTIME_RESPONSE_TOO_LARGE,
+                    "Outbound HTTP response exceeds maximum allowed size.",
+                )
+            chunks.append(chunk)
+            total += len(chunk)
+    except FactoryRuntimeAdapterError:
+        raise
+    except httpx.TimeoutException:
+        raise
+    except httpx.HTTPError as exc:
+        raise FactoryRuntimeAdapterError(
+            FACTORY_RUNTIME_HTTP_FAILED,
+            "Outbound HTTP transport failed while reading response.",
+        ) from exc
+    return b"".join(chunks)
+
+
 async def execute_declarative_http(
     *,
     base_url: str,
@@ -191,6 +234,7 @@ async def execute_declarative_http(
     call_timeout_ms: int,
     max_response_bytes: int,
     max_request_body_bytes: int = DEFAULT_MAX_REQUEST_BODY_BYTES,
+    hostname_allowlist: list[str] | None = None,
     http_client: httpx.AsyncClient | None = None,
 ) -> OutboundHttpResult:
     """Execute reviewed declarative HTTP call. Redirects disabled."""
@@ -212,7 +256,6 @@ async def execute_declarative_http(
                 req_headers[k] = v
 
     content: bytes | None = None
-    json_body = None
     if body is not None:
         try:
             content = json.dumps(body, separators=(",", ":"), ensure_ascii=False).encode(
@@ -229,9 +272,6 @@ async def execute_declarative_http(
                 "Request body exceeds maximum allowed size.",
             )
         req_headers.setdefault("Content-Type", "application/json")
-        json_body = None  # send raw content
-    else:
-        content = None
 
     timeout = httpx.Timeout(
         connect=connect_timeout_ms / 1000.0,
@@ -240,27 +280,46 @@ async def execute_declarative_http(
         pool=connect_timeout_ms / 1000.0,
     )
     owns_client = http_client is None
-    client = http_client or httpx.AsyncClient(follow_redirects=FOLLOW_REDIRECTS)
+    if owns_client:
+        # Lazy import avoids circular dependency with SafeOutboundAsyncTransport.
+        from app.factory.runtime_outbound_transport import build_safe_async_client
+
+        client = build_safe_async_client(
+            hostname_allowlist=hostname_allowlist,
+            follow_redirects=FOLLOW_REDIRECTS,
+            timeout=timeout,
+        )
+    else:
+        client = http_client
     import time
 
     t0 = time.perf_counter()
+    status_code = 0
+    ctype = ""
+    raw = b""
     try:
         logger.info(
             "factory_runtime_http method=%s path_template=%s",
             contract.method,
             contract.path_template,
         )
-        response = await client.request(
+        async with client.stream(
             method=contract.method.upper(),
             url=url,
             params=query or None,
             headers=req_headers,
             cookies=cookies or None,
             content=content,
-            json=json_body,
             timeout=timeout,
-        )
+        ) as response:
+            status_code = response.status_code
+            ctype = (response.headers.get("content-type") or "").lower()
+            raw = await _read_response_bounded(
+                response, max_response_bytes=max_response_bytes
+            )
         latency_ms = int((time.perf_counter() - t0) * 1000)
+    except FactoryRuntimeAdapterError:
+        raise
     except httpx.TimeoutException as exc:
         raise FactoryRuntimeAdapterError(
             FACTORY_RUNTIME_TIMEOUT,
@@ -274,16 +333,9 @@ async def execute_declarative_http(
     finally:
         if owns_client:
             await client.aclose()
-    raw = response.content
-    if len(raw) > max_response_bytes:
-        raise FactoryRuntimeAdapterError(
-            FACTORY_RUNTIME_RESPONSE_TOO_LARGE,
-            "Outbound HTTP response exceeds maximum allowed size.",
-        )
 
     body_json: Any | None = None
     body_text: str | None = None
-    ctype = (response.headers.get("content-type") or "").lower()
     if "application/json" in ctype or raw[:1] in (b"{", b"["):
         try:
             body_json = json.loads(raw.decode("utf-8"))
@@ -294,14 +346,14 @@ async def execute_declarative_http(
     else:
         body_text = raw.decode("utf-8", errors="replace")[:DEFAULT_MAX_TEXT_PREVIEW_CHARS]
 
-    ok = 200 <= response.status_code < 300
+    ok = 200 <= status_code < 300
     return OutboundHttpResult(
         ok=ok,
-        http_status=response.status_code,
+        http_status=status_code,
         body_json=body_json,
         body_text=body_text,
         error_category=None if ok else "HTTP_ERROR",
-        error_message=None if ok else f"Upstream returned HTTP {response.status_code}.",
+        error_message=None if ok else f"Upstream returned HTTP {status_code}.",
         latency_ms=latency_ms,
     )
 

@@ -65,6 +65,7 @@ class FactoryRuntimeMcpHandler:
         connect_timeout_ms: int,
         call_timeout_ms: int,
         max_response_bytes: int,
+        hostname_allowlist: list[str] | None = None,
         http_client: Any | None = None,
     ) -> None:
         self._binding_id = binding_id
@@ -75,6 +76,7 @@ class FactoryRuntimeMcpHandler:
         self._connect_timeout_ms = connect_timeout_ms
         self._call_timeout_ms = call_timeout_ms
         self._max_response_bytes = max_response_bytes
+        self._hostname_allowlist = hostname_allowlist
         self._http_client = http_client
 
     def ensure_ready(self) -> None:
@@ -218,6 +220,7 @@ class FactoryRuntimeMcpHandler:
                 connect_timeout_ms=self._connect_timeout_ms,
                 call_timeout_ms=self._call_timeout_ms,
                 max_response_bytes=self._max_response_bytes,
+                hostname_allowlist=self._hostname_allowlist,
                 http_client=self._http_client,
             )
         except FactoryRuntimeAdapterError as exc:

@@ -139,6 +139,14 @@ async def factory_runtime_mcp(binding_id: uuid.UUID, request: Request) -> Respon
                     },
                 )
 
+        settings = get_settings()
+        allowlist = [
+            part.strip()
+            for part in (settings.factory_runtime_outbound_host_allowlist or "").split(
+                ","
+            )
+            if part.strip()
+        ]
         handler = FactoryRuntimeMcpHandler(
             binding_id=row.id,
             status_value=row.status,
@@ -148,6 +156,7 @@ async def factory_runtime_mcp(binding_id: uuid.UUID, request: Request) -> Respon
             connect_timeout_ms=int(row.connect_timeout_ms),
             call_timeout_ms=int(row.call_timeout_ms),
             max_response_bytes=int(row.max_response_bytes),
+            hostname_allowlist=allowlist or None,
         )
         async with _CALL_SEMAPHORE:
             result = await handler.handle(payload)

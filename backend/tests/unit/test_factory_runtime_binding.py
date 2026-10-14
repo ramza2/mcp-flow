@@ -12,6 +12,7 @@ from app.core.errors import AppError
 from app.domain.enums import (
     FactoryRuntimeBindingStatus,
     JobStatus,
+    MCPServerStatus,
     MCPToolStatus,
     UserStatus,
 )
@@ -33,7 +34,11 @@ from app.services.factory_runtime import FactoryRuntimeService
 from app.services.factory_test_worker import FactoryTestWorkerService
 from app.services.factory_worker import FactoryWorkerService
 from app.services.mcp_discovery import MCPDiscoveryService
-from app.services.mcp_server import MCPServerService, get_verified_discovery_fingerprint
+from app.services.mcp_server import (
+    MCPServerService,
+    get_verified_connection_fingerprint,
+    get_verified_discovery_fingerprint,
+)
 from app.services.role import RoleService
 from app.services.user import UserService
 from sqlalchemy import func, select
@@ -398,3 +403,156 @@ async def test_non_factory_discovery_unchanged(db_session: AsyncSession) -> None
     assert result.success is True
     assert result.factory_diff is None
     assert result.diff.added == 1
+
+
+async def _ready_binding_with_active_factory_server(
+    db_session: AsyncSession,
+) -> tuple[FactoryRuntimeService, uuid.UUID, uuid.UUID, object]:
+    """Publish → RuntimeBinding READY → Connection/Discovery → ACTIVE."""
+
+    svc, store, user_id, publish_id = await _publish_pets(db_session)
+    runtime = FactoryRuntimeService(db_session, storage=store)
+    created = await runtime.create_binding(
+        actor_user_id=user_id, publish_id=publish_id
+    )
+    updated = await runtime.update_binding(
+        actor_user_id=user_id,
+        binding_id=created.id,
+        data=FactoryRuntimeBindingUpdate(
+            base_url="http://factory-mock-upstream:8091",
+            lock_version=created.lock_version,
+        ),
+    )
+    ready = await runtime.mark_ready(
+        actor_user_id=user_id,
+        binding_id=updated.id,
+        lock_version=updated.lock_version,
+    )
+    pub = await svc.get_publish(user_id, publish_id)
+    server_svc = MCPServerService(db_session)
+    server = await server_svc.get(pub.mcp_server_id)
+    server = await server_svc.update(
+        server.id,
+        MCPServerUpdate(endpoint_url=ready.mcp_endpoint_url),
+        expected_lock_version=int(server.lock_version),
+    )
+    _row, contracts = await runtime.load_handler_context(ready.id)
+    tool_schema = contracts["GET /pets"].input_schema
+
+    async def _rpc(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content.decode())
+        method = body.get("method")
+        if method == "server/discover":
+            return httpx.Response(
+                200,
+                json={
+                    "jsonrpc": "2.0",
+                    "id": body["id"],
+                    "error": {"code": -32601, "message": "not found"},
+                },
+            )
+        if method == "tools/list":
+            return httpx.Response(
+                200,
+                json={
+                    "jsonrpc": "2.0",
+                    "id": body["id"],
+                    "result": {
+                        "tools": [
+                            {"name": "GET /pets", "inputSchema": tool_schema}
+                        ]
+                    },
+                },
+            )
+        return httpx.Response(500, json={"error": "unexpected"})
+
+    from app.mcp.client import MCPHttpClient
+
+    mcp = MCPHttpClient(
+        http=httpx.AsyncClient(transport=httpx.MockTransport(_rpc))
+    )
+    check = await MCPDiscoveryService(db_session, mcp).connection_test(server.id)
+    assert check.status == "SUCCEEDED"
+    result = await MCPDiscoveryService(db_session, mcp).discover(
+        server.id, apply_changes=True
+    )
+    assert result.success is True
+    activated = await server_svc.activate(server.id)
+    assert activated.status == MCPServerStatus.ACTIVE.value
+    assert get_verified_connection_fingerprint(activated) is not None
+    assert get_verified_discovery_fingerprint(activated) is not None
+    return runtime, user_id, ready.id, mcp
+
+
+@pytest.mark.asyncio
+async def test_runtime_binding_base_url_change_invalidates_factory_lifecycle(
+    db_session: AsyncSession,
+) -> None:
+    runtime, user_id, binding_id, mcp = await _ready_binding_with_active_factory_server(
+        db_session
+    )
+    before = await runtime.get_binding(user_id, binding_id)
+    assert before.status == FactoryRuntimeBindingStatus.READY
+
+    changed = await runtime.update_binding(
+        actor_user_id=user_id,
+        binding_id=binding_id,
+        data=FactoryRuntimeBindingUpdate(
+            base_url="http://factory-mock-upstream:8091/v2",
+            lock_version=before.lock_version,
+        ),
+    )
+    assert changed.status == FactoryRuntimeBindingStatus.DRAFT
+    assert changed.mcp_endpoint_url is None
+
+    server = await MCPServerService(db_session).get(changed.mcp_server_id)
+    assert server.status == MCPServerStatus.INACTIVE.value
+    assert get_verified_connection_fingerprint(server) is None
+    assert get_verified_discovery_fingerprint(server) is None
+
+    # re-READY alone must not allow Activate without fresh evidence.
+    ready_again = await runtime.mark_ready(
+        actor_user_id=user_id,
+        binding_id=binding_id,
+        lock_version=changed.lock_version,
+    )
+    assert ready_again.status == FactoryRuntimeBindingStatus.READY
+    with pytest.raises(AppError) as act:
+        await MCPServerService(db_session).activate(changed.mcp_server_id)
+    assert act.value.code == "RESOURCE_CONFLICT"
+
+    # Fresh Connection Test + Discovery restores Activate path.
+    server = await MCPServerService(db_session).get(changed.mcp_server_id)
+    server = await MCPServerService(db_session).update(
+        server.id,
+        MCPServerUpdate(endpoint_url=ready_again.mcp_endpoint_url),
+        expected_lock_version=int(server.lock_version),
+    )
+    check = await MCPDiscoveryService(db_session, mcp).connection_test(server.id)
+    assert check.status == "SUCCEEDED"
+    disc = await MCPDiscoveryService(db_session, mcp).discover(
+        server.id, apply_changes=True
+    )
+    assert disc.success is True
+    activated = await MCPServerService(db_session).activate(server.id)
+    assert activated.status == MCPServerStatus.ACTIVE.value
+
+
+@pytest.mark.asyncio
+async def test_runtime_binding_disable_invalidates_factory_lifecycle(
+    db_session: AsyncSession,
+) -> None:
+    runtime, user_id, binding_id, _mcp = await _ready_binding_with_active_factory_server(
+        db_session
+    )
+    before = await runtime.get_binding(user_id, binding_id)
+    disabled = await runtime.disable_binding(
+        actor_user_id=user_id,
+        binding_id=binding_id,
+        lock_version=before.lock_version,
+    )
+    assert disabled.status == FactoryRuntimeBindingStatus.DISABLED
+    server = await MCPServerService(db_session).get(disabled.mcp_server_id)
+    assert server.status == MCPServerStatus.INACTIVE.value
+    assert get_verified_connection_fingerprint(server) is None
+    assert get_verified_discovery_fingerprint(server) is None

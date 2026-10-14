@@ -53,8 +53,23 @@ from app.schemas.factory import (
     FactoryRuntimeBindingUpdate,
 )
 from app.services.factory import FactoryService
+from app.services.mcp_server import MCPServerService
 
 logger = logging.getLogger(__name__)
+
+# RuntimeBinding fields that change outbound execution semantics. Mutations
+# invalidate Factory MCPServer Activate evidence (#97/#99) because the MCP
+# endpoint URL stays stable on binding_id.
+_EXECUTION_RELEVANT_KEYS = frozenset(
+    {
+        "base_url",
+        "auth_type",
+        "auth_secret_id",
+        "connect_timeout_ms",
+        "call_timeout_ms",
+        "max_response_bytes",
+    }
+)
 
 
 class FactoryRuntimeService:
@@ -69,6 +84,7 @@ class FactoryRuntimeService:
         self._repo = FactoryRepository(session)
         self._servers = MCPServerRepository(session)
         self._tools = MCPToolRepository(session)
+        self._mcp_servers = MCPServerService(session)
         self._factory = FactoryService(session, storage=storage)
         self._storage = storage
         self._settings = settings or get_settings()
@@ -262,12 +278,25 @@ class FactoryRuntimeService:
                     status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 )
 
+        execution_changed = False
         for key, value in payload.items():
+            if key in _EXECUTION_RELEVANT_KEYS and getattr(row, key) != value:
+                execution_changed = True
             setattr(row, key, value)
-        # Any config change from READY drops back to DRAFT (endpoint unavailable).
-        if row.status == FactoryRuntimeBindingStatus.READY.value:
+        # Execution-relevant change from READY drops back to DRAFT
+        # (stable binding_id MCP URL must not keep prior Activate evidence).
+        if (
+            execution_changed
+            and row.status == FactoryRuntimeBindingStatus.READY.value
+        ):
             row.status = FactoryRuntimeBindingStatus.DRAFT.value
         row.lock_version = int(row.lock_version) + 1
+        if execution_changed:
+            # Same TX: clear Factory Activate evidence for the associated server.
+            await self._mcp_servers.invalidate_factory_runtime_evidence(
+                row.mcp_server_id,
+                commit=False,
+            )
         await self._session.commit()
         await self._session.refresh(row)
         return self._to_response(row)
@@ -343,6 +372,10 @@ class FactoryRuntimeService:
             )
         row.status = FactoryRuntimeBindingStatus.DISABLED.value
         row.lock_version = int(row.lock_version) + 1
+        await self._mcp_servers.invalidate_factory_runtime_evidence(
+            row.mcp_server_id,
+            commit=False,
+        )
         await self._session.commit()
         await self._session.refresh(row)
         return self._to_response(row)

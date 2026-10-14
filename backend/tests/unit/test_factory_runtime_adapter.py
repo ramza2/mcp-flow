@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import socket
+
 import httpx
 import pytest
 from app.core.errors import AppError
@@ -153,13 +155,30 @@ async def test_execute_http_uses_contract_method_and_disables_redirects() -> Non
 
 
 @pytest.mark.asyncio
-async def test_response_size_limit() -> None:
+async def test_response_size_limit_streams_and_aborts() -> None:
     contract = _contract(
         path="/pets",
         schema={"type": "object", "properties": {}, "additionalProperties": False},
     )
+    chunk_size = 32
+    max_bytes = 100
+    total_upstream = 50_000
+
+    class _CountingStream(httpx.AsyncByteStream):
+        def __init__(self) -> None:
+            self.produced = 0
+
+        async def __aiter__(self):  # noqa: ANN204
+            remaining = total_upstream
+            while remaining > 0:
+                n = min(chunk_size, remaining)
+                self.produced += n
+                remaining -= n
+                yield b"x" * n
+
+    stream = _CountingStream()
     transport = httpx.MockTransport(
-        lambda request: httpx.Response(200, content=b"x" * 5000)
+        lambda request: httpx.Response(200, stream=stream)
     )
     client = httpx.AsyncClient(transport=transport, follow_redirects=False)
     with pytest.raises(FactoryRuntimeAdapterError) as exc:
@@ -170,10 +189,13 @@ async def test_response_size_limit() -> None:
             auth_headers=None,
             connect_timeout_ms=1000,
             call_timeout_ms=1000,
-            max_response_bytes=100,
+            max_response_bytes=max_bytes,
             http_client=client,
         )
     assert exc.value.code == "FACTORY_RUNTIME_RESPONSE_TOO_LARGE"
+    # Stream aborted near the limit — full upstream payload must not be buffered.
+    assert stream.produced <= max_bytes + chunk_size
+    assert stream.produced < total_upstream
 
 
 @pytest.mark.asyncio
@@ -341,6 +363,116 @@ async def test_mcp_initialize_capability_negotiation() -> None:
     assert "result" in init
     assert init["result"]["protocolVersion"] == "2026-07-28"
     assert "tools" in init["result"]["capabilities"]
+
+
+def test_resolve_pin_blocks_rebinding_to_loopback(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.factory.runtime_outbound_transport import resolve_and_pin_destination
+
+    def _loopback(host, port, *args, **kwargs):  # noqa: ANN001
+        return [
+            (socket.AF_INET, socket.SOCK_STREAM, 0, "", ("127.0.0.1", port)),
+        ]
+
+    monkeypatch.setattr("socket.getaddrinfo", _loopback)
+    with pytest.raises(FactoryRuntimeAdapterError) as exc:
+        resolve_and_pin_destination(hostname="api.example.com", port=443)
+    assert exc.value.code == "FACTORY_RUNTIME_BASE_URL_FORBIDDEN"
+
+
+def test_resolve_pin_blocks_private_and_allows_public(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.factory.runtime_outbound_transport import resolve_and_pin_destination
+
+    def _private(host, port, *args, **kwargs):  # noqa: ANN001
+        return [(socket.AF_INET, socket.SOCK_STREAM, 0, "", ("10.1.2.3", port))]
+
+    monkeypatch.setattr("socket.getaddrinfo", _private)
+    with pytest.raises(FactoryRuntimeAdapterError):
+        resolve_and_pin_destination(hostname="api.example.com", port=443)
+
+    def _public(host, port, *args, **kwargs):  # noqa: ANN001
+        # Use a globally routable address (avoid TEST-NET reserved ranges).
+        return [(socket.AF_INET, socket.SOCK_STREAM, 0, "", ("8.8.8.8", port))]
+
+    monkeypatch.setattr("socket.getaddrinfo", _public)
+    assert (
+        resolve_and_pin_destination(hostname="api.example.com", port=443) == "8.8.8.8"
+    )
+
+
+def test_resolve_pin_allowlist_mock_upstream(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.factory.runtime_outbound_transport import resolve_and_pin_destination
+
+    def _private(host, port, *args, **kwargs):  # noqa: ANN001
+        return [(socket.AF_INET, socket.SOCK_STREAM, 0, "", ("10.0.0.5", port))]
+
+    monkeypatch.setattr("socket.getaddrinfo", _private)
+    assert (
+        resolve_and_pin_destination(
+            hostname="factory-mock-upstream",
+            port=8091,
+            hostname_allowlist=["factory-mock-upstream"],
+        )
+        == "10.0.0.5"
+    )
+
+
+@pytest.mark.asyncio
+async def test_safe_transport_pins_ip_preserves_host_sni(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.factory.runtime_outbound_transport import SafeOutboundAsyncTransport
+
+    captured: dict = {}
+
+    async def _fake_super(self, request: httpx.Request) -> httpx.Response:  # noqa: ANN001
+        captured["url"] = str(request.url)
+        captured["host"] = request.headers.get("Host")
+        captured["sni"] = request.extensions.get("sni_hostname")
+        return httpx.Response(200, json={"ok": True})
+
+    monkeypatch.setattr(
+        "app.factory.runtime_outbound_transport.resolve_and_pin_destination",
+        lambda **kwargs: "8.8.8.8",
+    )
+    monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", _fake_super)
+    transport = SafeOutboundAsyncTransport()
+    request = httpx.Request("GET", "https://api.example.com/v1/pets")
+    response = await transport.handle_async_request(request)
+    assert response.status_code == 200
+    assert "8.8.8.8" in captured["url"]
+    assert captured["host"] == "api.example.com"
+    assert captured["sni"] == "api.example.com"
+
+
+@pytest.mark.asyncio
+async def test_safe_transport_blocks_before_connect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.factory.errors import FACTORY_RUNTIME_BASE_URL_FORBIDDEN
+    from app.factory.runtime_outbound_transport import SafeOutboundAsyncTransport
+
+    connected = {"called": False}
+
+    async def _should_not_run(self, request: httpx.Request) -> httpx.Response:  # noqa: ANN001
+        connected["called"] = True
+        return httpx.Response(200)
+
+    def _loopback(host, port, *args, **kwargs):  # noqa: ANN001
+        return [(socket.AF_INET, socket.SOCK_STREAM, 0, "", ("127.0.0.1", port))]
+
+    monkeypatch.setattr("socket.getaddrinfo", _loopback)
+    monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", _should_not_run)
+    transport = SafeOutboundAsyncTransport()
+    with pytest.raises(FactoryRuntimeAdapterError) as exc:
+        await transport.handle_async_request(
+            httpx.Request("GET", "http://evil.example.com/pets")
+        )
+    assert exc.value.code == FACTORY_RUNTIME_BASE_URL_FORBIDDEN
+    assert connected["called"] is False
 
 
 def test_no_subprocess_imports_in_runtime_modules() -> None:
