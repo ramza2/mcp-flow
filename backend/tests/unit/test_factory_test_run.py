@@ -34,7 +34,7 @@ from app.services.factory_worker import FactoryWorkerService
 from app.services.role import RoleService
 from app.services.user import UserService
 from sqlalchemy import func, select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 MINIMAL_JSON = json.dumps(
     {
@@ -372,6 +372,49 @@ async def test_test_run_recovery_lists_expired_and_stale(
     assert a.result.id in expired
     assert b.result.id in stale
     assert b.result.id not in expired
+
+
+@pytest.mark.asyncio
+async def test_claim_commits_lease_before_run_claimed(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Claim TX must commit before validation so recovery can see the lease."""
+
+    svc, store, user_id, package_id = await _package_ready(db_session)
+    outcome = await svc.create_test_run(
+        actor_user_id=user_id,
+        package_id=package_id,
+        idempotency_key=f"tr-lease-{uuid.uuid4().hex}",
+    )
+    test_run_id = outcome.result.id
+
+    worker = FactoryTestWorkerService(db_session, storage=store, worker_id="lease-1")
+    claim = await worker.claim(test_run_id=test_run_id, worker_id="lease-1")
+    assert claim.claimed is True
+    assert claim.lease_token is not None
+    await db_session.commit()
+
+    # Separate session observes durable RUNNING lease (claim TX already closed).
+    async with db_session_factory() as other:
+        held = await FactoryTestWorkerService(
+            other, storage=store, worker_id="lease-2"
+        ).claim(test_run_id=test_run_id, worker_id="lease-2")
+        assert held.claimed is False
+        assert held.reason == "LEASE_HELD"
+        row = await other.get(ToolFactoryTestRun, test_run_id)
+        assert row is not None
+        assert row.status == JobStatus.RUNNING.value
+        assert row.lease_token == claim.lease_token
+        assert row.worker_id == "lease-1"
+
+    done = await worker.run_claimed(
+        test_run=claim.test_run,  # type: ignore[arg-type]
+        lease_token=claim.lease_token,
+    )
+    await db_session.commit()
+    assert done.status == JobStatus.SUCCEEDED.value
+    assert done.claimed is True
 
 
 @pytest.mark.asyncio

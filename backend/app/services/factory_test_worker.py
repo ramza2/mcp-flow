@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.canonical_hash import compute_canonical_json_hash
 from app.core.config import get_settings
 from app.domain.enums import JobStatus
+from app.execution.claim import _as_utc
 from app.factory import PHASE_SANDBOX_TEST
 from app.factory.errors import (
     FACTORY_PACKAGE_OBJECT_STORE_FAILED,
@@ -115,7 +116,10 @@ class FactoryTestWorkerService:
         if row.status == JobStatus.QUEUED.value:
             pass
         elif row.status == JobStatus.RUNNING.value:
-            if row.lease_expires_at is not None and row.lease_expires_at > now:
+            if (
+                row.lease_expires_at is not None
+                and _as_utc(row.lease_expires_at) > _as_utc(now)
+            ):
                 return FactoryTestClaimOutcome(
                     claimed=False,
                     reason="LEASE_HELD",
@@ -170,6 +174,8 @@ class FactoryTestWorkerService:
                 claimed=False,
                 reason=claim.reason,
             )
+        # Durable lease before Object Storage / validation work (matches Job path).
+        await self._session.commit()
         return await self.run_claimed(
             test_run=claim.test_run,
             lease_token=claim.lease_token,

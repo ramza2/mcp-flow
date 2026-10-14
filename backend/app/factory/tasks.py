@@ -214,9 +214,37 @@ async def _sandbox_test_once(
                 lease_seconds=settings.factory_lease_seconds,
                 worker_id=worker_id,
             )
-            outcome = await service.process_test_run(
+            claim = await service.claim(
                 test_run_id=test_run_id,
                 worker_id=worker_id,
+            )
+            await session.commit()
+            if (
+                not claim.claimed
+                or claim.test_run is None
+                or claim.lease_token is None
+            ):
+                logger.info(
+                    "factory sandbox test skip test_run_id=%s reason=%s",
+                    test_run_id,
+                    claim.reason,
+                )
+                return
+            lease_token = claim.lease_token
+
+        async with session_scope() as session:
+            service = FactoryTestWorkerService(
+                session,
+                storage=storage,
+                lease_seconds=settings.factory_lease_seconds,
+                worker_id=worker_id,
+            )
+            test_run = await FactoryRepository(session).get_test_run(test_run_id)
+            if test_run is None:
+                return
+            outcome = await service.run_claimed(
+                test_run=test_run,
+                lease_token=lease_token,
             )
             await session.commit()
             logger.info(
