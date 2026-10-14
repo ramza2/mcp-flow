@@ -15,6 +15,7 @@ from app.models.factory import (
     ToolFactoryCandidate,
     ToolFactoryGeneratedPackage,
     ToolFactoryJob,
+    ToolFactoryPublish,
     ToolFactoryReview,
     ToolFactoryTestRun,
 )
@@ -726,10 +727,79 @@ class FactoryRepository:
     async def get_review(self, review_id: uuid.UUID) -> ToolFactoryReview | None:
         return await self._session.get(ToolFactoryReview, review_id)
 
+    async def get_review_for_update(
+        self, review_id: uuid.UUID
+    ) -> ToolFactoryReview | None:
+        stmt = (
+            select(ToolFactoryReview)
+            .where(ToolFactoryReview.id == review_id)
+            .with_for_update()
+        )
+        return (await self._session.execute(stmt)).scalar_one_or_none()
+
     async def get_review_for_test_run(
         self, test_run_id: uuid.UUID
     ) -> ToolFactoryReview | None:
         stmt = select(ToolFactoryReview).where(
             ToolFactoryReview.test_run_id == test_run_id
+        )
+        return (await self._session.execute(stmt)).scalar_one_or_none()
+
+    async def create_publish(
+        self,
+        *,
+        publish_id: uuid.UUID,
+        review_id: uuid.UUID,
+        test_run_id: uuid.UUID,
+        generated_package_id: uuid.UUID,
+        build_id: uuid.UUID,
+        job_id: uuid.UUID,
+        analysis_artifact_id: uuid.UUID,
+        package_content_sha256: str,
+        generator_version: str,
+        package_schema_version: str,
+        test_evidence_hash: str,
+        review_evidence_hash: str,
+        mcp_server_id: uuid.UUID,
+        mcp_tool_ids: list[str],
+        tool_count: int,
+        publish_evidence: dict[str, Any],
+        publish_evidence_hash: str,
+        requested_by: uuid.UUID,
+    ) -> ToolFactoryPublish:
+        row = ToolFactoryPublish(
+            id=publish_id,
+            review_id=review_id,
+            test_run_id=test_run_id,
+            generated_package_id=generated_package_id,
+            build_id=build_id,
+            job_id=job_id,
+            analysis_artifact_id=analysis_artifact_id,
+            package_content_sha256=package_content_sha256,
+            generator_version=generator_version,
+            package_schema_version=package_schema_version,
+            test_evidence_hash=test_evidence_hash,
+            review_evidence_hash=review_evidence_hash,
+            mcp_server_id=mcp_server_id,
+            mcp_tool_ids=mcp_tool_ids,
+            tool_count=tool_count,
+            publish_evidence=publish_evidence,
+            publish_evidence_hash=publish_evidence_hash,
+            requested_by=requested_by,
+            lock_version=1,
+        )
+        self._session.add(row)
+        await self._session.flush()
+        await self._session.refresh(row)
+        return row
+
+    async def get_publish(self, publish_id: uuid.UUID) -> ToolFactoryPublish | None:
+        return await self._session.get(ToolFactoryPublish, publish_id)
+
+    async def get_publish_for_review(
+        self, review_id: uuid.UUID
+    ) -> ToolFactoryPublish | None:
+        stmt = select(ToolFactoryPublish).where(
+            ToolFactoryPublish.review_id == review_id
         )
         return (await self._session.execute(stmt)).scalar_one_or_none()

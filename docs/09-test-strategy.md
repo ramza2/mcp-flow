@@ -1557,9 +1557,21 @@ boundary (no network, no filesystem, no migration/API):
 - `backend/tests/integration/test_factory_migration.py` — Alembic through
   `20261014_0034`; `tool_factory_reviews` unique/indexes
 
-Executable MCP codegen / Docker / Python exec / Publish / DRAFT MCP Server /
-frontend wiring remain out of scope. Declarative Security/Contract TestRun +
-Review foundations are in scope for Issues #91/#93.
+- `backend/tests/unit/test_factory_publish.py` — APPROVE Publish happy path
+  (DRAFT server / INACTIVE tools / tool_count / operation identity); REJECT
+  blocked with zero MCP side effects; review/TestRun/package tamper fail-closed;
+  same-key replay + conflict; one Publish per Review
+- `backend/tests/api/test_factory.py` — Publish create/detail/by-review;
+  Idempotency-Key replay; safe projections
+- `backend/tests/integration/test_factory_persistence.py` — concurrent
+  duplicate Publish race on PostgreSQL → one server/tools set
+- `backend/tests/integration/test_factory_migration.py` — Alembic through
+  `20261014_0035`; `tool_factory_publishes` unique/indexes
+
+Executable MCP codegen / Docker / Python exec / Activate / Connection Test /
+Discovery / frontend wiring remain out of scope. Declarative Security/Contract
+TestRun + Review + Publish/Import DRAFT foundations are in scope for
+Issues #91/#93/#95.
 
 ---
 

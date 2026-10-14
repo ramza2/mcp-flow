@@ -1410,7 +1410,7 @@ GET  /factory/builds/{build_id}
   contract (`factory-contract-policy-v1`) after Object Storage size/hash/lineage
   revalidation; declarative only — no package exec/import/subprocess/deps/
   Docker/network/MCP startup
-- Does **not** Publish/Import or create `MCPTool` / `MCPServer`
+- Does **not** create `MCPTool` / `MCPServer` (Publish/Import is Review-scoped)
 
 ### Reviews (foundation)
 
@@ -1427,7 +1427,26 @@ GET  /factory/builds/{build_id}
 - Responses expose decision, lineage hashes, `test_evidence_hash`,
   `review_evidence_hash`, reviewer/timestamps — never Object Storage keys,
   raw package bytes, or full `review_evidence` secrets
-- Does **not** Publish/Import or create `MCPTool` / `MCPServer`
+
+### Publishes (foundation)
+
+- `POST /factory/reviews/{review_id}/publish` — Publish/Import APPROVE Review
+  into DRAFT MCP assets + required `Idempotency-Key`
+  (`FACTORY_PUBLISH_IMPORT_V1`); unique one Publish per `review_id`; same TX
+  with publish row + MCP Server/Tools + idempotency record
+- `GET /factory/publishes/{publish_id}` — Publish detail
+- `GET /factory/reviews/{review_id}/publish` — Publish for a Review
+- Auth: `mcp.server.manage` create; `mcp.server.read` detail; ACTIVE user
+- Before accept: revalidate Review `decision=APPROVE` + sealed Review evidence,
+  TestRun PASS sealed evidence, Review↔TestRun↔Package lineage, Object Storage
+  size/hash, package schema/kind/generator/tool_count; fail closed
+- REJECT Review → `FACTORY_PUBLISH_REJECTED_REVIEW` (zero MCP side effects)
+- Creates exactly one `MCPServer` (`DRAFT`, `endpoint_url` unset / connection
+  deferred) and `tool_count` `MCPTool` rows (`INACTIVE`) with ToolVersion
+  declarative descriptors (`operation_key`/`method`/`path`/schemas)
+- Responses expose lineage hashes, `mcp_server_id`, `mcp_tool_ids`,
+  `publish_evidence_hash` — never Object Storage keys or raw evidence blobs
+- Does **not** Activate / Connection Test / Discovery / package execution
 
 ### Aspirational (not implemented by this slice)
 
@@ -1439,7 +1458,7 @@ POST /factory/projects/{project_id}/sources
 POST /factory/projects/{project_id}/analyze
 POST /factory/projects/{project_id}/builds   # project-scoped create remains aspirational
 POST /factory/builds/{build_id}/tests       # superseded by artifact-scoped tests above
-POST /factory/builds/{build_id}/publish
+POST /factory/builds/{build_id}/publish     # superseded by review-scoped publish above
 POST /factory/builds/{build_id}/rollback
 ```
 

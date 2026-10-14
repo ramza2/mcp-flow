@@ -282,3 +282,28 @@ class FactoryReviewResponse(BaseModel):
     reviewed_by: uuid.UUID
     reviewed_at: datetime
     created_at: datetime
+
+
+class FactoryPublishResponse(BaseModel):
+    """Safe Factory Publish/Import projection (no OS keys/secrets/evidence blob)."""
+
+    model_config = ConfigDict(extra="forbid", from_attributes=True)
+
+    id: uuid.UUID
+    review_id: uuid.UUID
+    test_run_id: uuid.UUID
+    generated_package_id: uuid.UUID
+    build_id: uuid.UUID
+    job_id: uuid.UUID
+    analysis_artifact_id: uuid.UUID
+    package_content_sha256: str
+    generator_version: str
+    package_schema_version: str
+    test_evidence_hash: str
+    review_evidence_hash: str
+    mcp_server_id: uuid.UUID
+    mcp_tool_ids: list[uuid.UUID]
+    tool_count: int
+    publish_evidence_hash: str
+    requested_by: uuid.UUID
+    created_at: datetime

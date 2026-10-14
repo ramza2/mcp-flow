@@ -21,6 +21,7 @@ from app.schemas.factory import (
     FactoryJobDetailResponse,
     FactoryJobListResponse,
     FactoryJobResponse,
+    FactoryPublishResponse,
     FactoryReviewCreateRequest,
     FactoryReviewResponse,
     FactoryTestRunListResponse,
@@ -358,3 +359,51 @@ async def get_factory_review(
     principal: CurrentPrincipalDep,
 ) -> FactoryReviewResponse:
     return await _service(session).get_review(principal.user_id, review_id)
+
+
+@router.post(
+    "/reviews/{review_id}/publish",
+    response_model=FactoryPublishResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def publish_factory_review(
+    review_id: uuid.UUID,
+    response: Response,
+    session: DbSessionDep,
+    principal: CurrentPrincipalDep,
+    idempotency_key: Annotated[str, Header(alias="Idempotency-Key")],
+) -> FactoryPublishResponse:
+    outcome = await _service(session).publish_review(
+        actor_user_id=principal.user_id,
+        review_id=review_id,
+        idempotency_key=idempotency_key,
+    )
+    response.status_code = outcome.http_status
+    return outcome.result
+
+
+@router.get(
+    "/reviews/{review_id}/publish",
+    response_model=FactoryPublishResponse,
+)
+async def get_factory_publish_for_review(
+    review_id: uuid.UUID,
+    session: DbSessionDep,
+    principal: CurrentPrincipalDep,
+) -> FactoryPublishResponse:
+    return await _service(session).get_publish_for_review(
+        principal.user_id,
+        review_id,
+    )
+
+
+@router.get(
+    "/publishes/{publish_id}",
+    response_model=FactoryPublishResponse,
+)
+async def get_factory_publish(
+    publish_id: uuid.UUID,
+    session: DbSessionDep,
+    principal: CurrentPrincipalDep,
+) -> FactoryPublishResponse:
+    return await _service(session).get_publish(principal.user_id, publish_id)

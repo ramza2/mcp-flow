@@ -63,6 +63,7 @@ async def test_factory_schema_constraints(
             "tool_factory_test_results",
             "tool_factory_test_runs",
             "tool_factory_reviews",
+            "tool_factory_publishes",
         ):
             exists = (
                 await session.execute(
@@ -146,6 +147,9 @@ async def test_factory_schema_constraints(
             "uq_tool_factory_test_runs_package_policies",
             "ix_tool_factory_reviews_generated_package_id",
             "uq_tool_factory_reviews_test_run_id",
+            "ix_tool_factory_publishes_generated_package_id",
+            "uq_tool_factory_publishes_review_id",
+            "uq_tool_factory_publishes_mcp_server_id",
         ):
             assert required in indexes
 

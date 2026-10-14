@@ -19,20 +19,33 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.canonical_hash import compute_canonical_json_hash
 from app.core.config import get_settings
 from app.core.errors import AppError
-from app.domain.enums import JobStatus, UserStatus
+from app.domain.enums import (
+    JobStatus,
+    MCPAuthType,
+    MCPProtocolEra,
+    MCPServerStatus,
+    MCPToolStatus,
+    MCPTransportType,
+    ToolVersionValidationStatus,
+    UserStatus,
+)
 from app.factory import (
     ARTIFACT_CONTENT_TYPE_JSON,
     ARTIFACT_TYPE_OPENAPI_ANALYSIS,
     FACTORY_BUILD_GENERATOR_VERSION,
     FACTORY_CONTRACT_POLICY_VERSION,
     FACTORY_PACKAGE_GENERATOR_VERSION,
+    FACTORY_PUBLISH_EVIDENCE_KIND,
+    FACTORY_PUBLISH_EVIDENCE_SCHEMA_VERSION,
     FACTORY_REVIEW_EVIDENCE_KIND,
     FACTORY_REVIEW_EVIDENCE_SCHEMA_VERSION,
     FACTORY_SECURITY_POLICY_VERSION,
     JOB_TYPE_OPENAPI_ANALYZE,
     OPENAPI_ANALYZER_VERSION,
+    PACKAGE_KIND,
     PACKAGE_SCHEMA_VERSION,
     PHASE_ANALYZE,
+    PHASE_PUBLISH,
     PHASE_REVIEW,
     PHASE_SANDBOX_TEST,
 )
@@ -41,7 +54,13 @@ from app.factory.errors import (
     FACTORY_PACKAGE_HASH_MISMATCH,
     FACTORY_PACKAGE_LINEAGE_MISMATCH,
     FACTORY_PACKAGE_OBJECT_STORE_FAILED,
+    FACTORY_PACKAGE_SCHEMA_INVALID,
     FACTORY_PACKAGE_SNAPSHOT_INVALID,
+    FACTORY_PACKAGE_TOOL_COUNT_MISMATCH,
+    FACTORY_PUBLISH_ALREADY_EXISTS,
+    FACTORY_PUBLISH_EVIDENCE_MISMATCH,
+    FACTORY_PUBLISH_NOT_ELIGIBLE,
+    FACTORY_PUBLISH_REJECTED_REVIEW,
     FACTORY_REVIEW_ALREADY_EXISTS,
     FACTORY_REVIEW_EVIDENCE_MISMATCH,
     FACTORY_REVIEW_NOT_ELIGIBLE,
@@ -70,6 +89,8 @@ from app.models.factory import (
 )
 from app.repositories.factory import FactoryRepository
 from app.repositories.idempotency import IdempotencyRepository
+from app.repositories.mcp_server import MCPServerRepository
+from app.repositories.mcp_tool import MCPToolRepository
 from app.repositories.outbox import OutboxRepository
 from app.repositories.user import UserRepository
 from app.schemas.factory import (
@@ -85,6 +106,7 @@ from app.schemas.factory import (
     FactoryJobDetailResponse,
     FactoryJobListResponse,
     FactoryJobResponse,
+    FactoryPublishResponse,
     FactoryReviewResponse,
     FactoryTestRunListResponse,
     FactoryTestRunResponse,
@@ -108,9 +130,13 @@ _REVIEW_OPERATION_SCOPE = "FACTORY_REVIEW_CREATE_V1"
 _REVIEW_RESOURCE_TYPE = "TOOL_FACTORY_REVIEW"
 _REVIEW_UNIQUE_NAME = "uq_tool_factory_reviews_test_run_id"
 _REVIEW_DECISIONS = frozenset({"APPROVE", "REJECT"})
+_PUBLISH_OPERATION_SCOPE = "FACTORY_PUBLISH_IMPORT_V1"
+_PUBLISH_RESOURCE_TYPE = "TOOL_FACTORY_PUBLISH"
+_PUBLISH_UNIQUE_NAME = "uq_tool_factory_publishes_review_id"
 # Must match factory_test_worker sealed TestRun evidence contract.
 _SANDBOX_TEST_EVIDENCE_KIND = "FACTORY_SANDBOX_TEST_EVIDENCE"
 _SANDBOX_TEST_EVIDENCE_SCHEMA_VERSION = 1
+_PACKAGE_PAYLOAD_SCHEMA_VERSION = 1
 _IDEMPOTENCY_KEY_MAX_LEN = 128
 _IDEMPOTENCY_PK_NAME = "pk_api_idempotency_records"
 
@@ -150,6 +176,13 @@ class FactoryTestRunCreateOutcome:
 @dataclass(frozen=True, slots=True)
 class FactoryReviewCreateOutcome:
     result: FactoryReviewResponse
+    http_status: int
+    replayed: bool
+
+
+@dataclass(frozen=True, slots=True)
+class FactoryPublishCreateOutcome:
+    result: FactoryPublishResponse
     http_status: int
     replayed: bool
 
@@ -405,6 +438,39 @@ def _is_review_unique_violation(exc: IntegrityError) -> bool:
         and "tool_factory_reviews" in lower
         and "test_run_id" in lower
     )
+
+
+def _is_publish_unique_violation(exc: IntegrityError) -> bool:
+    name = _constraint_name(exc)
+    if name == _PUBLISH_UNIQUE_NAME:
+        return True
+    orig = getattr(exc, "orig", None)
+    msg = str(orig if orig is not None else exc)
+    if _PUBLISH_UNIQUE_NAME in msg:
+        return True
+    lower = msg.lower()
+    return (
+        "unique constraint failed" in lower
+        and "tool_factory_publishes" in lower
+        and "review_id" in lower
+    )
+
+
+def _publish_request_hash(*, review_id: uuid.UUID) -> str:
+    return compute_canonical_json_hash({"review_id": str(review_id)})
+
+
+def _declarative_tool_remote_name(tool: dict[str, Any]) -> str:
+    """Stable MCP Tool remote_name from package operation identity."""
+
+    key = str(tool.get("operation_key") or "").strip()
+    if not key:
+        raise AppError(
+            code=FACTORY_PACKAGE_SCHEMA_INVALID,
+            message="Package tool missing operation_key.",
+            status_code=status.HTTP_409_CONFLICT,
+        )
+    return key[:255]
 
 
 def _normalize_review_comment(comment: str | None) -> str | None:
@@ -2279,8 +2345,8 @@ class FactoryService:
         package: ToolFactoryGeneratedPackage,
         *,
         expected_content_sha256: str,
-    ) -> None:
-        """Fail-closed Object Storage size/hash revalidation for Review."""
+    ) -> dict[str, Any]:
+        """Fail-closed Object Storage size/hash revalidation; returns payload."""
 
         storage = self._storage_client()
         try:
@@ -2311,6 +2377,12 @@ class FactoryService:
                 message="Generated Package object payload is corrupt.",
                 status_code=status.HTTP_409_CONFLICT,
             ) from exc
+        if not isinstance(payload, dict):
+            raise AppError(
+                code=FACTORY_PACKAGE_SNAPSHOT_INVALID,
+                message="Generated Package object payload must be an object.",
+                status_code=status.HTTP_409_CONFLICT,
+            )
         actual = compute_canonical_json_hash(payload)
         if actual != package.package_content_sha256:
             raise AppError(
@@ -2324,6 +2396,102 @@ class FactoryService:
                 message="Generated Package hash does not match TestRun snapshot.",
                 status_code=status.HTTP_409_CONFLICT,
             )
+        return payload
+
+    def _assert_package_payload_contract(
+        self,
+        payload: dict[str, Any],
+        *,
+        package: ToolFactoryGeneratedPackage,
+        expected_generator_version: str,
+        expected_package_schema_version: str,
+    ) -> list[dict[str, Any]]:
+        """Fail-closed schema/kind/generator/tool_count + declarative tools."""
+
+        if payload.get("kind") != PACKAGE_KIND:
+            raise AppError(
+                code=FACTORY_PACKAGE_SCHEMA_INVALID,
+                message="Generated Package kind가 올바르지 않습니다.",
+                status_code=status.HTTP_409_CONFLICT,
+            )
+        if payload.get("schema_version") != _PACKAGE_PAYLOAD_SCHEMA_VERSION:
+            raise AppError(
+                code=FACTORY_PACKAGE_SCHEMA_INVALID,
+                message="Generated Package schema_version이 올바르지 않습니다.",
+                status_code=status.HTTP_409_CONFLICT,
+            )
+        if payload.get("generator_version") != expected_generator_version:
+            raise AppError(
+                code=FACTORY_PACKAGE_SCHEMA_INVALID,
+                message="Generated Package generator_version이 projection과 불일치합니다.",
+                status_code=status.HTTP_409_CONFLICT,
+            )
+        if payload.get("package_schema_version") != expected_package_schema_version:
+            raise AppError(
+                code=FACTORY_PACKAGE_SCHEMA_INVALID,
+                message="Generated Package package_schema_version이 projection과 불일치합니다.",
+                status_code=status.HTTP_409_CONFLICT,
+            )
+        tools = payload.get("tools")
+        if not isinstance(tools, list) or not tools:
+            raise AppError(
+                code=FACTORY_PACKAGE_SCHEMA_INVALID,
+                message="Generated Package tools가 비어 있거나 유효하지 않습니다.",
+                status_code=status.HTTP_409_CONFLICT,
+            )
+        tool_count = payload.get("tool_count")
+        if tool_count != len(tools) or tool_count != int(package.tool_count):
+            raise AppError(
+                code=FACTORY_PACKAGE_TOOL_COUNT_MISMATCH,
+                message="Generated Package tool_count가 tools/DB와 불일치합니다.",
+                status_code=status.HTTP_409_CONFLICT,
+            )
+        normalized: list[dict[str, Any]] = []
+        for entry in tools:
+            if not isinstance(entry, dict):
+                raise AppError(
+                    code=FACTORY_PACKAGE_SCHEMA_INVALID,
+                    message="Generated Package tool entry must be an object.",
+                    status_code=status.HTTP_409_CONFLICT,
+                )
+            for field in (
+                "candidate_id",
+                "operation_key",
+                "method",
+                "path",
+            ):
+                if not entry.get(field):
+                    raise AppError(
+                        code=FACTORY_PACKAGE_SCHEMA_INVALID,
+                        message=f"Generated Package tool missing '{field}'.",
+                        status_code=status.HTTP_409_CONFLICT,
+                    )
+            # Reject executable/secret-bearing fields if present.
+            for forbidden in (
+                "command",
+                "commands",
+                "shell",
+                "subprocess",
+                "dependencies",
+                "install",
+                "credentials",
+                "secrets",
+                "auth_headers",
+                "source",
+                "executable",
+                "object_key",
+                "bucket",
+            ):
+                if forbidden in entry:
+                    raise AppError(
+                        code=FACTORY_PACKAGE_SCHEMA_INVALID,
+                        message=(
+                            f"Generated Package tool must not include '{forbidden}'."
+                        ),
+                        status_code=status.HTTP_409_CONFLICT,
+                    )
+            normalized.append(entry)
+        return normalized
 
     def _assert_sealed_test_run_evidence(self, test_run: Any) -> None:
         """Fail-closed: sealed evidence must match TestRun projection columns."""
@@ -2682,3 +2850,561 @@ class FactoryService:
                 status_code=status.HTTP_404_NOT_FOUND,
             )
         return self._review_to_response(row)
+
+    def _publish_to_response(self, row: Any) -> FactoryPublishResponse:
+        tool_ids = [
+            uuid.UUID(str(item)) for item in (row.mcp_tool_ids or [])
+        ]
+        return FactoryPublishResponse(
+            id=row.id,
+            review_id=row.review_id,
+            test_run_id=row.test_run_id,
+            generated_package_id=row.generated_package_id,
+            build_id=row.build_id,
+            job_id=row.job_id,
+            analysis_artifact_id=row.analysis_artifact_id,
+            package_content_sha256=row.package_content_sha256,
+            generator_version=row.generator_version,
+            package_schema_version=row.package_schema_version,
+            test_evidence_hash=row.test_evidence_hash,
+            review_evidence_hash=row.review_evidence_hash,
+            mcp_server_id=row.mcp_server_id,
+            mcp_tool_ids=tool_ids,
+            tool_count=row.tool_count,
+            publish_evidence_hash=row.publish_evidence_hash,
+            requested_by=row.requested_by,
+            created_at=row.created_at,
+        )
+
+    async def _replay_or_conflict_publish(
+        self,
+        record: Any,
+        request_hash: str,
+    ) -> FactoryPublishCreateOutcome:
+        if record.request_hash != request_hash:
+            raise AppError(
+                code="IDEMPOTENCY_KEY_REUSED",
+                message="Idempotency-Key가 다른 요청에 재사용되었습니다.",
+                status_code=status.HTTP_409_CONFLICT,
+            )
+        if record.status != "COMPLETED":
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message="Idempotency record가 COMPLETED가 아닙니다.",
+                status_code=status.HTTP_409_CONFLICT,
+            )
+        if (
+            record.resource_type != _PUBLISH_RESOURCE_TYPE
+            or record.resource_id is None
+        ):
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message="Idempotency resource metadata가 손상되었습니다.",
+                status_code=status.HTTP_409_CONFLICT,
+            )
+        row = await self._repo.get_publish(record.resource_id)
+        if row is None:
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message="Idempotency가 가리키는 Factory Publish가 없습니다.",
+                status_code=status.HTTP_409_CONFLICT,
+            )
+        if (
+            record.response_status != status.HTTP_201_CREATED
+            or record.response_body is None
+        ):
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message="Idempotency response snapshot이 손상되었습니다.",
+                status_code=status.HTTP_409_CONFLICT,
+            )
+        try:
+            cached = FactoryPublishResponse.model_validate(record.response_body)
+        except ValidationError as exc:
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message="Idempotency response snapshot이 유효하지 않습니다.",
+                status_code=status.HTTP_409_CONFLICT,
+            ) from exc
+        if cached.id != record.resource_id:
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message="Idempotency response snapshot이 손상되었습니다.",
+                status_code=status.HTTP_409_CONFLICT,
+            )
+        return FactoryPublishCreateOutcome(
+            result=self._publish_to_response(row),
+            http_status=status.HTTP_201_CREATED,
+            replayed=True,
+        )
+
+    def _assert_sealed_review_evidence(self, review: Any) -> None:
+        """Fail-closed: Review evidence hash + sealed fields vs projection."""
+
+        if not isinstance(review.review_evidence, dict):
+            raise AppError(
+                code=FACTORY_PUBLISH_EVIDENCE_MISMATCH,
+                message="Review evidence가 손상되었습니다.",
+                status_code=status.HTTP_409_CONFLICT,
+            )
+        if not review.review_evidence_hash or len(review.review_evidence_hash) != 64:
+            raise AppError(
+                code=FACTORY_PUBLISH_NOT_ELIGIBLE,
+                message="Review evidence_hash가 없어 Publish할 수 없습니다.",
+                status_code=status.HTTP_409_CONFLICT,
+            )
+        recomputed = compute_canonical_json_hash(review.review_evidence)
+        if recomputed != review.review_evidence_hash:
+            raise AppError(
+                code=FACTORY_PUBLISH_EVIDENCE_MISMATCH,
+                message="Review evidence_hash가 evidence와 일치하지 않습니다.",
+                status_code=status.HTTP_409_CONFLICT,
+            )
+        evidence = review.review_evidence
+        if evidence.get("kind") != FACTORY_REVIEW_EVIDENCE_KIND:
+            raise AppError(
+                code=FACTORY_PUBLISH_EVIDENCE_MISMATCH,
+                message="Review evidence kind가 올바르지 않습니다.",
+                status_code=status.HTTP_409_CONFLICT,
+            )
+        if evidence.get("schema_version") != FACTORY_REVIEW_EVIDENCE_SCHEMA_VERSION:
+            raise AppError(
+                code=FACTORY_PUBLISH_EVIDENCE_MISMATCH,
+                message="Review evidence schema_version이 올바르지 않습니다.",
+                status_code=status.HTTP_409_CONFLICT,
+            )
+        if evidence.get("phase") != PHASE_REVIEW:
+            raise AppError(
+                code=FACTORY_PUBLISH_EVIDENCE_MISMATCH,
+                message="Review evidence phase가 올바르지 않습니다.",
+                status_code=status.HTTP_409_CONFLICT,
+            )
+        if evidence.get("decision") != "APPROVE":
+            raise AppError(
+                code=FACTORY_PUBLISH_EVIDENCE_MISMATCH,
+                message="Sealed Review evidence.decision이 APPROVE가 아닙니다.",
+                status_code=status.HTTP_409_CONFLICT,
+            )
+        if evidence.get("review_id") != str(review.id):
+            raise AppError(
+                code=FACTORY_PUBLISH_EVIDENCE_MISMATCH,
+                message="Sealed Review evidence review_id가 projection과 불일치합니다.",
+                status_code=status.HTTP_409_CONFLICT,
+            )
+        if (
+            evidence.get("test_run_id") != str(review.test_run_id)
+            or evidence.get("generated_package_id") != str(review.generated_package_id)
+            or evidence.get("build_id") != str(review.build_id)
+            or evidence.get("job_id") != str(review.job_id)
+            or evidence.get("analysis_artifact_id") != str(review.analysis_artifact_id)
+            or evidence.get("package_content_sha256") != review.package_content_sha256
+            or evidence.get("generator_version") != review.generator_version
+            or evidence.get("package_schema_version") != review.package_schema_version
+            or evidence.get("test_evidence_hash") != review.test_evidence_hash
+        ):
+            raise AppError(
+                code=FACTORY_PUBLISH_EVIDENCE_MISMATCH,
+                message="Sealed Review evidence lineage가 projection과 불일치합니다.",
+                status_code=status.HTTP_409_CONFLICT,
+            )
+
+    async def _import_draft_mcp_assets(
+        self,
+        *,
+        actor_user_id: uuid.UUID,
+        review: Any,
+        package_tools: list[dict[str, Any]],
+        publish_id: uuid.UUID,
+    ) -> tuple[uuid.UUID, list[uuid.UUID]]:
+        """Create DRAFT MCP Server + INACTIVE Tools from declarative contracts.
+
+        Does not fabricate endpoints, run Connection Test/Discovery/Activate,
+        or execute package code. Connection fill is a later operator step.
+        """
+
+        servers = MCPServerRepository(self._session)
+        tools_repo = MCPToolRepository(self._session)
+        server_code = f"fac-pub-{review.id.hex}"
+        server_name = f"Factory Import {review.id.hex[:8]}"
+        transport_config = {
+            "factory_publish": True,
+            "connection_deferred": True,
+            "source": "TOOL_FACTORY_PUBLISH",
+            "publish_id": str(publish_id),
+            "review_id": str(review.id),
+            "generated_package_id": str(review.generated_package_id),
+            "package_content_sha256": review.package_content_sha256,
+            "note": (
+                "DRAFT import metadata only. endpoint_url is intentionally unset; "
+                "Connection Test / Discovery / Activate are out of this slice."
+            ),
+        }
+        server = await servers.create(
+            code=server_code,
+            name=server_name,
+            description=(
+                "Tool Factory Publish/Import DRAFT MCP Server "
+                f"(review={review.id}). Connection deferred."
+            ),
+            transport_type=str(MCPTransportType.STREAMABLE_HTTP),
+            endpoint_url=None,
+            stdio_manifest_id=None,
+            transport_config=transport_config,
+            auth_type=str(MCPAuthType.NONE),
+            auth_secret_id=None,
+            status=str(MCPServerStatus.DRAFT),
+            protocol_era=str(MCPProtocolEra.CURRENT),
+            created_by=actor_user_id,
+        )
+
+        tool_ids: list[uuid.UUID] = []
+        for tool in package_tools:
+            remote_name = _declarative_tool_remote_name(tool)
+            display = tool.get("summary") or tool.get("operation_id") or remote_name
+            description = tool.get("description")
+            tags = tool.get("tags") if isinstance(tool.get("tags"), list) else []
+            raw_descriptor = {
+                "candidate_id": tool.get("candidate_id"),
+                "operation_key": tool.get("operation_key"),
+                "operation_id": tool.get("operation_id"),
+                "method": tool.get("method"),
+                "path": tool.get("path"),
+                "summary": tool.get("summary"),
+                "description": tool.get("description"),
+                "tags": tags,
+                "deprecated": bool(tool.get("deprecated", False)),
+                "parameters": tool.get("parameters")
+                if isinstance(tool.get("parameters"), list)
+                else [],
+                "request_schema": tool.get("request_schema"),
+                "response_schema": tool.get("response_schema"),
+            }
+            content_hash = compute_canonical_json_hash(raw_descriptor)
+            mcp_tool = await tools_repo.create_tool(
+                mcp_server_id=server.id,
+                remote_name=remote_name,
+                display_name=str(display)[:255] if display else remote_name,
+                description_override=(
+                    str(description) if description is not None else None
+                ),
+                tags=[str(t) for t in tags],
+                status=str(MCPToolStatus.INACTIVE),
+                created_by=actor_user_id,
+            )
+            version = await tools_repo.create_version(
+                mcp_tool_id=mcp_tool.id,
+                version_no=1,
+                content_hash=content_hash,
+                validation_status=str(ToolVersionValidationStatus.WARNING),
+                remote_description=(
+                    str(description) if description is not None else None
+                ),
+                input_schema=tool.get("request_schema"),
+                output_schema=tool.get("response_schema"),
+                annotations={
+                    "factory_import": True,
+                    "method": tool.get("method"),
+                    "path": tool.get("path"),
+                    "candidate_id": tool.get("candidate_id"),
+                    "operation_key": tool.get("operation_key"),
+                    "deprecated": bool(tool.get("deprecated", False)),
+                },
+                raw_descriptor=raw_descriptor,
+                schema_dialect="factory-declarative-v1",
+                validation_errors=[
+                    {
+                        "code": "FACTORY_IMPORT_UNVALIDATED",
+                        "message": (
+                            "Imported from Factory package; MCP schema "
+                            "validation / activation is a later step."
+                        ),
+                    }
+                ],
+                created_by=actor_user_id,
+            )
+            mcp_tool.current_version_id = version.id
+            await self._session.flush()
+            tool_ids.append(mcp_tool.id)
+
+        return server.id, tool_ids
+
+    async def publish_review(
+        self,
+        *,
+        actor_user_id: uuid.UUID,
+        review_id: uuid.UUID,
+        idempotency_key: str,
+    ) -> FactoryPublishCreateOutcome:
+        """Publish/Import an APPROVE Review into DRAFT MCP assets (exactly once)."""
+
+        await self._assert_manage(actor_user_id)
+        key = _normalize_idempotency_key(idempotency_key)
+        req_hash = _publish_request_hash(review_id=review_id)
+        principal_key = str(actor_user_id)
+
+        existing = await self._idempotency.get(
+            principal_key=principal_key,
+            operation_scope=_PUBLISH_OPERATION_SCOPE,
+            idempotency_key=key,
+        )
+        if existing is not None:
+            return await self._replay_or_conflict_publish(existing, req_hash)
+
+        review = await self._repo.get_review_for_update(review_id)
+        if review is None:
+            raise AppError(
+                code="NOT_FOUND",
+                message="Factory Review를 찾을 수 없습니다.",
+                status_code=status.HTTP_404_NOT_FOUND,
+            )
+
+        already = await self._repo.get_publish_for_review(review.id)
+        if already is not None:
+            raise AppError(
+                code=FACTORY_PUBLISH_ALREADY_EXISTS,
+                message="이 Review에 대한 Publish가 이미 존재합니다.",
+                status_code=status.HTTP_409_CONFLICT,
+            )
+
+        if review.decision == "REJECT":
+            raise AppError(
+                code=FACTORY_PUBLISH_REJECTED_REVIEW,
+                message="REJECT Review는 Publish/Import할 수 없습니다.",
+                status_code=status.HTTP_409_CONFLICT,
+            )
+        if review.decision != "APPROVE":
+            raise AppError(
+                code=FACTORY_PUBLISH_NOT_ELIGIBLE,
+                message="Publish는 APPROVE Review에서만 허용됩니다.",
+                status_code=status.HTTP_409_CONFLICT,
+            )
+
+        self._assert_sealed_review_evidence(review)
+
+        test_run = await self._repo.get_test_run(review.test_run_id)
+        if test_run is None:
+            raise AppError(
+                code="NOT_FOUND",
+                message="Factory TestRun을 찾을 수 없습니다.",
+                status_code=status.HTTP_404_NOT_FOUND,
+            )
+        if test_run.status != JobStatus.SUCCEEDED.value or test_run.result != "PASS":
+            raise AppError(
+                code=FACTORY_PUBLISH_NOT_ELIGIBLE,
+                message="Publish는 SUCCEEDED/PASS TestRun에서만 허용됩니다.",
+                status_code=status.HTTP_409_CONFLICT,
+            )
+        if not test_run.evidence_hash or len(test_run.evidence_hash) != 64:
+            raise AppError(
+                code=FACTORY_PUBLISH_NOT_ELIGIBLE,
+                message="TestRun evidence_hash가 없어 Publish할 수 없습니다.",
+                status_code=status.HTTP_409_CONFLICT,
+            )
+        if not isinstance(test_run.evidence, dict):
+            raise AppError(
+                code=FACTORY_PUBLISH_EVIDENCE_MISMATCH,
+                message="TestRun evidence가 손상되었습니다.",
+                status_code=status.HTTP_409_CONFLICT,
+            )
+        if compute_canonical_json_hash(test_run.evidence) != test_run.evidence_hash:
+            raise AppError(
+                code=FACTORY_PUBLISH_EVIDENCE_MISMATCH,
+                message="TestRun evidence_hash가 evidence와 일치하지 않습니다.",
+                status_code=status.HTTP_409_CONFLICT,
+            )
+        try:
+            self._assert_sealed_test_run_evidence(test_run)
+        except AppError as exc:
+            if exc.code == FACTORY_REVIEW_EVIDENCE_MISMATCH:
+                raise AppError(
+                    code=FACTORY_PUBLISH_EVIDENCE_MISMATCH,
+                    message=exc.message,
+                    status_code=status.HTTP_409_CONFLICT,
+                ) from exc
+            raise
+
+        if (
+            test_run.id != review.test_run_id
+            or test_run.generated_package_id != review.generated_package_id
+            or test_run.build_id != review.build_id
+            or test_run.job_id != review.job_id
+            or test_run.analysis_artifact_id != review.analysis_artifact_id
+            or test_run.package_content_sha256 != review.package_content_sha256
+            or test_run.generator_version != review.generator_version
+            or test_run.package_schema_version != review.package_schema_version
+            or test_run.evidence_hash != review.test_evidence_hash
+        ):
+            raise AppError(
+                code=FACTORY_PUBLISH_EVIDENCE_MISMATCH,
+                message="Review↔TestRun lineage가 일치하지 않습니다.",
+                status_code=status.HTTP_409_CONFLICT,
+            )
+
+        package = await self._repo.get_generated_package(review.generated_package_id)
+        if package is None:
+            raise AppError(
+                code="NOT_FOUND",
+                message="Generated Package를 찾을 수 없습니다.",
+                status_code=status.HTTP_404_NOT_FOUND,
+            )
+        if (
+            package.build_id != review.build_id
+            or package.job_id != review.job_id
+            or package.analysis_artifact_id != review.analysis_artifact_id
+            or package.package_content_sha256 != review.package_content_sha256
+            or package.generator_version != review.generator_version
+            or package.package_schema_version != review.package_schema_version
+            or package.source_sha256 != review.source_sha256
+            or package.analyzer_version != review.analyzer_version
+            or package.build_input_hash != review.build_input_hash
+        ):
+            raise AppError(
+                code=FACTORY_PACKAGE_LINEAGE_MISMATCH,
+                message="Review lineage가 Generated Package evidence와 일치하지 않습니다.",
+                status_code=status.HTTP_409_CONFLICT,
+            )
+
+        payload = await self._assert_package_bytes_match(
+            package,
+            expected_content_sha256=review.package_content_sha256,
+        )
+        package_tools = self._assert_package_payload_contract(
+            payload,
+            package=package,
+            expected_generator_version=review.generator_version,
+            expected_package_schema_version=review.package_schema_version,
+        )
+
+        publish_id = uuid.uuid4()
+        now = _utc_now()
+        try:
+            server_id, tool_ids = await self._import_draft_mcp_assets(
+                actor_user_id=actor_user_id,
+                review=review,
+                package_tools=package_tools,
+                publish_id=publish_id,
+            )
+            tool_id_strs = [str(tid) for tid in tool_ids]
+            evidence = {
+                "schema_version": FACTORY_PUBLISH_EVIDENCE_SCHEMA_VERSION,
+                "kind": FACTORY_PUBLISH_EVIDENCE_KIND,
+                "phase": PHASE_PUBLISH,
+                "publish_id": str(publish_id),
+                "review_id": str(review.id),
+                "test_run_id": str(review.test_run_id),
+                "generated_package_id": str(review.generated_package_id),
+                "build_id": str(review.build_id),
+                "job_id": str(review.job_id),
+                "analysis_artifact_id": str(review.analysis_artifact_id),
+                "package_content_sha256": review.package_content_sha256,
+                "generator_version": review.generator_version,
+                "package_schema_version": review.package_schema_version,
+                "test_evidence_hash": review.test_evidence_hash,
+                "review_evidence_hash": review.review_evidence_hash,
+                "mcp_server_id": str(server_id),
+                "mcp_tool_ids": tool_id_strs,
+                "tool_count": len(tool_ids),
+                "requested_by": str(actor_user_id),
+                "created_at": now.isoformat(),
+                "connection_deferred": True,
+            }
+            evidence_hash = compute_canonical_json_hash(evidence)
+            row = await self._repo.create_publish(
+                publish_id=publish_id,
+                review_id=review.id,
+                test_run_id=review.test_run_id,
+                generated_package_id=review.generated_package_id,
+                build_id=review.build_id,
+                job_id=review.job_id,
+                analysis_artifact_id=review.analysis_artifact_id,
+                package_content_sha256=review.package_content_sha256,
+                generator_version=review.generator_version,
+                package_schema_version=review.package_schema_version,
+                test_evidence_hash=review.test_evidence_hash,
+                review_evidence_hash=review.review_evidence_hash,
+                mcp_server_id=server_id,
+                mcp_tool_ids=tool_id_strs,
+                tool_count=len(tool_ids),
+                publish_evidence=evidence,
+                publish_evidence_hash=evidence_hash,
+                requested_by=actor_user_id,
+            )
+            response = self._publish_to_response(row)
+            await self._idempotency.create_completed(
+                principal_key=principal_key,
+                operation_scope=_PUBLISH_OPERATION_SCOPE,
+                idempotency_key=key,
+                request_hash=req_hash,
+                response_status=status.HTTP_201_CREATED,
+                response_body=response.model_dump(mode="json"),
+                resource_type=_PUBLISH_RESOURCE_TYPE,
+                resource_id=row.id,
+                completed_at=now,
+            )
+            await self._session.commit()
+        except IntegrityError as exc:
+            await self._session.rollback()
+            if _is_idempotency_pk_violation(exc) or _is_publish_unique_violation(exc):
+                raced = await self._idempotency.get(
+                    principal_key=principal_key,
+                    operation_scope=_PUBLISH_OPERATION_SCOPE,
+                    idempotency_key=key,
+                )
+                if raced is not None:
+                    return await self._replay_or_conflict_publish(raced, req_hash)
+                existing_publish = await self._repo.get_publish_for_review(review_id)
+                if existing_publish is not None:
+                    raise AppError(
+                        code=FACTORY_PUBLISH_ALREADY_EXISTS,
+                        message="이 Review에 대한 Publish가 이미 존재합니다.",
+                        status_code=status.HTTP_409_CONFLICT,
+                    ) from exc
+                raise AppError(
+                    code="RESOURCE_CONFLICT",
+                    message="Factory Publish 생성 중 충돌이 발생했습니다.",
+                    status_code=status.HTTP_409_CONFLICT,
+                ) from exc
+            raise
+
+        return FactoryPublishCreateOutcome(
+            result=response,
+            http_status=status.HTTP_201_CREATED,
+            replayed=False,
+        )
+
+    async def get_publish(
+        self,
+        actor_user_id: uuid.UUID,
+        publish_id: uuid.UUID,
+    ) -> FactoryPublishResponse:
+        await self._assert_read(actor_user_id)
+        row = await self._repo.get_publish(publish_id)
+        if row is None:
+            raise AppError(
+                code="NOT_FOUND",
+                message="Factory Publish를 찾을 수 없습니다.",
+                status_code=status.HTTP_404_NOT_FOUND,
+            )
+        return self._publish_to_response(row)
+
+    async def get_publish_for_review(
+        self,
+        actor_user_id: uuid.UUID,
+        review_id: uuid.UUID,
+    ) -> FactoryPublishResponse:
+        await self._assert_read(actor_user_id)
+        review = await self._repo.get_review(review_id)
+        if review is None:
+            raise AppError(
+                code="NOT_FOUND",
+                message="Factory Review를 찾을 수 없습니다.",
+                status_code=status.HTTP_404_NOT_FOUND,
+            )
+        row = await self._repo.get_publish_for_review(review.id)
+        if row is None:
+            raise AppError(
+                code="NOT_FOUND",
+                message="이 Review에 대한 Factory Publish가 없습니다.",
+                status_code=status.HTTP_404_NOT_FOUND,
+            )
+        return self._publish_to_response(row)

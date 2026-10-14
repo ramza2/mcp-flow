@@ -814,3 +814,89 @@ async def test_factory_review_approve_list_detail(
     by_run = await factory_client.get(f"{API}/test-runs/{test_run_id}/review")
     assert by_run.status_code == 200
     assert by_run.json()["id"] == body["id"]
+
+
+@pytest.mark.asyncio
+async def test_factory_publish_approve_detail(
+    factory_client: AsyncClient,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from app.services.factory_test_worker import FactoryTestWorkerService
+
+    created = await factory_client.post(
+        f"{API}/jobs",
+        files={"source": ("pets.json", MULTI_OP_JSON, "application/json")},
+        headers={"Idempotency-Key": f"k-pub-{uuid.uuid4().hex}"},
+    )
+    assert created.status_code == 201
+    job_id = created.json()["id"]
+    await _process_job(db_session_factory, uuid.UUID(job_id))
+
+    cands = await factory_client.get(f"{API}/jobs/{job_id}/candidates")
+    cand_ids = [item["id"] for item in cands.json()["items"]]
+    build_resp = await factory_client.post(
+        f"{API}/jobs/{job_id}/builds",
+        json={"candidate_ids": cand_ids},
+        headers={"Idempotency-Key": f"build-pub-{uuid.uuid4().hex}"},
+    )
+    assert build_resp.status_code == 201
+    pkg = await factory_client.post(
+        f"{API}/builds/{build_resp.json()['id']}/generate",
+        headers={"Idempotency-Key": f"gen-pub-{uuid.uuid4().hex}"},
+    )
+    assert pkg.status_code == 201
+    package_id = pkg.json()["id"]
+    tool_count = pkg.json()["tool_count"]
+
+    tr = await factory_client.post(
+        f"{API}/artifacts/{package_id}/tests",
+        headers={"Idempotency-Key": f"tr-pub-{uuid.uuid4().hex}"},
+    )
+    assert tr.status_code == 201
+    test_run_id = tr.json()["id"]
+    storage = get_object_storage()
+    async with db_session_factory() as session:
+        worker = FactoryTestWorkerService(
+            session, storage=storage, worker_id="api-pub"
+        )
+        outcome = await worker.process_test_run(test_run_id=uuid.UUID(test_run_id))
+        await session.commit()
+        assert outcome.status == "SUCCEEDED"
+
+    review = await factory_client.post(
+        f"{API}/test-runs/{test_run_id}/review",
+        json={"decision": "APPROVE", "comment": "ship"},
+        headers={"Idempotency-Key": f"rv-pub-{uuid.uuid4().hex}"},
+    )
+    assert review.status_code == 201, review.text
+    review_id = review.json()["id"]
+
+    key = f"publish-{uuid.uuid4().hex}"
+    first = await factory_client.post(
+        f"{API}/reviews/{review_id}/publish",
+        headers={"Idempotency-Key": key},
+    )
+    assert first.status_code == 201, first.text
+    body = first.json()
+    assert body["review_id"] == review_id
+    assert body["tool_count"] == tool_count
+    assert len(body["mcp_tool_ids"]) == tool_count
+    assert body["mcp_server_id"]
+    assert body["publish_evidence_hash"]
+    assert "object_key" not in first.text
+    assert "publish_evidence" not in body or body.get("publish_evidence") is None
+
+    replay = await factory_client.post(
+        f"{API}/reviews/{review_id}/publish",
+        headers={"Idempotency-Key": key},
+    )
+    assert replay.status_code == 201
+    assert replay.json()["id"] == body["id"]
+
+    detail = await factory_client.get(f"{API}/publishes/{body['id']}")
+    assert detail.status_code == 200
+    assert detail.json()["id"] == body["id"]
+
+    by_review = await factory_client.get(f"{API}/reviews/{review_id}/publish")
+    assert by_review.status_code == 200
+    assert by_review.json()["id"] == body["id"]
