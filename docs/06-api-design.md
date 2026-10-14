@@ -1468,8 +1468,9 @@ POST  /mcp/servers/{server_id}/activate
 - Deferred / missing endpoint → Connection Test `RESOURCE_CONFLICT`
 - Connection Test writes `MCPServerCheck` evidence only (no Discovery, no Tool
   mutation, no auto-Activate)
-- Factory Activate requires configured non-deferred endpoint + latest
-  Connection Test `SUCCEEDED` (Discovery not required here)
+- Factory Activate requires configured non-deferred endpoint + verified
+  Connection Test fingerprint matching current connection config + latest
+  Check `SUCCEEDED` (Discovery not required here; historical Checks retained)
 - Non-Factory MCP Server routes keep prior semantics
 
 ### Aspirational (not implemented by this slice)

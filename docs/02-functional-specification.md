@@ -1286,8 +1286,10 @@ POST  /api/v1/mcp/servers/{server_id}/activate     # Factory: after latest Check
 - Deferred / missing endpoint → Connection Test `RESOURCE_CONFLICT` (no Check)
 - Connection Test persists `MCPServerCheck` only; no Discovery rows, no Tool
   mutation, no automatic Activate; failures leave Server `DRAFT`
-- Factory-imported Activate requires non-deferred usable endpoint + latest
-  relevant Connection Test `SUCCEEDED` (Discovery not required in this slice)
+- Factory-imported Activate requires non-deferred usable endpoint + Connection
+  Test success evidence bound to the current connection-config fingerprint
+  (`transport_config.connection_test_verified_fingerprint`) + latest Check
+  `SUCCEEDED` (Discovery not required in this slice)
 - Non-Factory MCP Server activate/update/test behavior is unchanged
 
 **Not implemented yet:**

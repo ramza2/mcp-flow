@@ -309,6 +309,26 @@ class MCPDiscoveryService:
             server.last_healthy_at = datetime.now(UTC)
             server.negotiated_protocol_version = protocol_version
             server.discovery_mode = str(discovery_mode)
+            # Bind Factory success evidence to the tested connection config.
+            from app.services.mcp_server import (
+                connection_config_fingerprint,
+                is_factory_imported,
+                transport_config_with_verified_fingerprint,
+            )
+
+            if is_factory_imported(server):
+                tested_fp = connection_config_fingerprint(
+                    transport_type=config.transport_type,
+                    endpoint_url=config.endpoint_url,
+                    auth_type=config.auth_type,
+                    auth_secret_id=config.auth_secret_id,
+                    connect_timeout_ms=config.connect_timeout_ms,
+                    call_timeout_ms=config.call_timeout_ms,
+                )
+                server.transport_config = transport_config_with_verified_fingerprint(
+                    server.transport_config,
+                    fingerprint=tested_fp,
+                )
             await self._session.commit()
             await self._session.refresh(check)
             return _check_to_response(check, discovery_mode=str(discovery_mode))

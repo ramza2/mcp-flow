@@ -22,7 +22,9 @@ from app.schemas.mcp_server import MCPServerCreate, MCPServerUpdate
 from app.services.mcp_discovery import MCPDiscoveryService
 from app.services.mcp_server import (
     MCPServerService,
+    connection_config_fingerprint_for_server,
     connection_deferred_effective,
+    get_verified_connection_fingerprint,
     is_connection_deferred,
     is_factory_imported,
 )
@@ -309,24 +311,27 @@ async def test_factory_activate_without_successful_check_rejected(
 
 
 @pytest.mark.asyncio
-async def test_factory_activate_with_latest_succeeded_check_allowed(
+async def test_factory_activate_endpoint_a_success_allowed(
     db_session: AsyncSession,
 ) -> None:
     await _seed_user(db_session)
     server_id = await _create_factory_deferred(db_session)
     svc = MCPServerService(db_session)
     before = await svc.get(server_id)
-    await svc.update(
+    updated = await svc.update(
         server_id,
-        MCPServerUpdate(endpoint_url="https://mcp.test/factory"),
+        MCPServerUpdate(endpoint_url="https://mcp.test/a"),
         expected_lock_version=int(before.lock_version),
     )
     await MCPDiscoveryService(db_session, _healthy_http()).connection_test(server_id)
+    after_test = await svc.get(server_id)
+    assert after_test.transport_config.get(
+        "connection_test_verified_fingerprint"
+    ) == connection_config_fingerprint_for_server(updated)
 
     activated = await svc.activate(server_id)
     assert activated.status == MCPServerStatus.ACTIVE.value
 
-    # Discovery still not required / not created by activate.
     discoveries = (
         await db_session.execute(select(func.count()).select_from(MCPServerDiscovery))
     ).scalar_one()
@@ -334,17 +339,128 @@ async def test_factory_activate_with_latest_succeeded_check_allowed(
 
 
 @pytest.mark.asyncio
-async def test_factory_activate_uses_latest_check_not_historical_success(
+async def test_factory_activate_blocked_after_endpoint_change_without_retest(
     db_session: AsyncSession,
 ) -> None:
     await _seed_user(db_session)
     server_id = await _create_factory_deferred(db_session)
     svc = MCPServerService(db_session)
-    before = await svc.get(server_id)
+    s = await svc.get(server_id)
+    s = await svc.update(
+        server_id,
+        MCPServerUpdate(endpoint_url="https://mcp.test/a"),
+        expected_lock_version=int(s.lock_version),
+    )
+    await MCPDiscoveryService(db_session, _healthy_http()).connection_test(server_id)
+    s = await svc.get(server_id)
     await svc.update(
         server_id,
-        MCPServerUpdate(endpoint_url="https://mcp.test/factory"),
-        expected_lock_version=int(before.lock_version),
+        MCPServerUpdate(endpoint_url="https://mcp.test/b"),
+        expected_lock_version=int(s.lock_version),
+    )
+
+    with pytest.raises(AppError) as act:
+        await svc.activate(server_id)
+    assert act.value.code == "RESOURCE_CONFLICT"
+    assert "current connection" in act.value.message.lower()
+
+    checks = (
+        await db_session.execute(select(func.count()).select_from(MCPServerCheck))
+    ).scalar_one()
+    assert int(checks) >= 1  # historical Check retained
+
+
+@pytest.mark.asyncio
+async def test_factory_activate_allowed_after_retest_on_endpoint_b(
+    db_session: AsyncSession,
+) -> None:
+    await _seed_user(db_session)
+    server_id = await _create_factory_deferred(db_session)
+    svc = MCPServerService(db_session)
+    s = await svc.get(server_id)
+    s = await svc.update(
+        server_id,
+        MCPServerUpdate(endpoint_url="https://mcp.test/a"),
+        expected_lock_version=int(s.lock_version),
+    )
+    await MCPDiscoveryService(db_session, _healthy_http()).connection_test(server_id)
+    s = await svc.get(server_id)
+    s = await svc.update(
+        server_id,
+        MCPServerUpdate(endpoint_url="https://mcp.test/b"),
+        expected_lock_version=int(s.lock_version),
+    )
+    with pytest.raises(AppError):
+        await svc.activate(server_id)
+    await MCPDiscoveryService(db_session, _healthy_http()).connection_test(server_id)
+    activated = await svc.activate(server_id)
+    assert activated.status == MCPServerStatus.ACTIVE.value
+
+
+@pytest.mark.asyncio
+async def test_factory_activate_blocked_after_auth_change(
+    db_session: AsyncSession,
+) -> None:
+    await _seed_user(db_session)
+    server_id = await _create_factory_deferred(db_session)
+    svc = MCPServerService(db_session)
+    s = await svc.get(server_id)
+    s = await svc.update(
+        server_id,
+        MCPServerUpdate(endpoint_url="https://mcp.test/a"),
+        expected_lock_version=int(s.lock_version),
+    )
+    await MCPDiscoveryService(db_session, _healthy_http()).connection_test(server_id)
+    s = await svc.get(server_id)
+    secret_id = uuid.uuid4()
+    await svc.update(
+        server_id,
+        MCPServerUpdate(auth_type="BEARER", auth_secret_id=secret_id),
+        expected_lock_version=int(s.lock_version),
+    )
+    with pytest.raises(AppError) as act:
+        await svc.activate(server_id)
+    assert act.value.code == "RESOURCE_CONFLICT"
+    assert "current connection" in act.value.message.lower()
+
+
+@pytest.mark.asyncio
+async def test_factory_activate_name_description_change_keeps_valid_test(
+    db_session: AsyncSession,
+) -> None:
+    await _seed_user(db_session)
+    server_id = await _create_factory_deferred(db_session)
+    svc = MCPServerService(db_session)
+    s = await svc.get(server_id)
+    s = await svc.update(
+        server_id,
+        MCPServerUpdate(endpoint_url="https://mcp.test/a"),
+        expected_lock_version=int(s.lock_version),
+    )
+    await MCPDiscoveryService(db_session, _healthy_http()).connection_test(server_id)
+    s = await svc.get(server_id)
+    await svc.update(
+        server_id,
+        MCPServerUpdate(name="Renamed Factory Server", description="meta only"),
+        expected_lock_version=int(s.lock_version),
+    )
+    activated = await svc.activate(server_id)
+    assert activated.status == MCPServerStatus.ACTIVE.value
+    assert activated.name == "Renamed Factory Server"
+
+
+@pytest.mark.asyncio
+async def test_factory_activate_blocked_when_latest_check_failed(
+    db_session: AsyncSession,
+) -> None:
+    await _seed_user(db_session)
+    server_id = await _create_factory_deferred(db_session)
+    svc = MCPServerService(db_session)
+    s = await svc.get(server_id)
+    await svc.update(
+        server_id,
+        MCPServerUpdate(endpoint_url="https://mcp.test/a"),
+        expected_lock_version=int(s.lock_version),
     )
     await MCPDiscoveryService(db_session, _healthy_http()).connection_test(server_id)
     await MCPDiscoveryService(db_session, _failing_http()).connection_test(server_id)
@@ -352,6 +468,11 @@ async def test_factory_activate_uses_latest_check_not_historical_success(
     with pytest.raises(AppError) as act:
         await svc.activate(server_id)
     assert act.value.code == "RESOURCE_CONFLICT"
+    # Fingerprint still matches; latest FAILED blocks Activate.
+    server = await svc.get(server_id)
+    assert get_verified_connection_fingerprint(server) == (
+        connection_config_fingerprint_for_server(server)
+    )
 
 
 @pytest.mark.asyncio
