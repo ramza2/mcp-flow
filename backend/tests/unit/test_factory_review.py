@@ -312,10 +312,15 @@ async def test_review_rejects_package_missing_tamper_lineage(
         "FACTORY_PACKAGE_SIZE_MISMATCH",
     }
 
+    # Tamper Generated Package lineage (TestRun sealed evidence still consistent).
     svc3, _store3, user_id3, test_run_id3 = await _pass_test_run(db_session)
     tr3 = await db_session.get(ToolFactoryTestRun, test_run_id3)
     assert tr3 is not None
-    tr3.package_content_sha256 = "c" * 64
+    package3 = await db_session.get(
+        ToolFactoryGeneratedPackage, tr3.generated_package_id
+    )
+    assert package3 is not None
+    package3.package_content_sha256 = "c" * 64
     await db_session.commit()
     with pytest.raises(AppError) as lin:
         await svc3.create_review(
@@ -326,6 +331,106 @@ async def test_review_rejects_package_missing_tamper_lineage(
             idempotency_key=f"rv-lin-{uuid.uuid4().hex}",
         )
     assert lin.value.code == FACTORY_PACKAGE_LINEAGE_MISMATCH
+
+
+@pytest.mark.asyncio
+async def test_review_rejects_sealed_evidence_projection_drift(
+    db_session: AsyncSession,
+) -> None:
+    """Projection columns must match hash-sealed evidence content (fail closed)."""
+
+    # security_result projection only.
+    svc, _store, user_id, test_run_id = await _pass_test_run(db_session)
+    row = await db_session.get(ToolFactoryTestRun, test_run_id)
+    assert row is not None and isinstance(row.security_result, dict)
+    row.security_result = {**row.security_result, "passed": False, "extra": "tamper"}
+    await db_session.commit()
+    with pytest.raises(AppError) as sec:
+        await svc.create_review(
+            actor_user_id=user_id,
+            test_run_id=test_run_id,
+            decision="APPROVE",
+            comment=None,
+            idempotency_key=f"rv-sec-{uuid.uuid4().hex}",
+        )
+    assert sec.value.code == FACTORY_REVIEW_EVIDENCE_MISMATCH
+
+    # contract_result projection only.
+    svc2, _s2, user_id2, test_run_id2 = await _pass_test_run(db_session)
+    row2 = await db_session.get(ToolFactoryTestRun, test_run_id2)
+    assert row2 is not None and isinstance(row2.contract_result, dict)
+    row2.contract_result = {**row2.contract_result, "passed": False}
+    await db_session.commit()
+    with pytest.raises(AppError) as con:
+        await svc2.create_review(
+            actor_user_id=user_id2,
+            test_run_id=test_run_id2,
+            decision="APPROVE",
+            comment=None,
+            idempotency_key=f"rv-con-{uuid.uuid4().hex}",
+        )
+    assert con.value.code == FACTORY_REVIEW_EVIDENCE_MISMATCH
+
+    # status/result projection forced PASS while sealed evidence remains FAIL.
+    svc3, _s3, user_id3, test_run_id3 = await _pass_test_run(db_session)
+    row3 = await db_session.get(ToolFactoryTestRun, test_run_id3)
+    assert row3 is not None and isinstance(row3.evidence, dict)
+    fail_evidence = {
+        **row3.evidence,
+        "result": "FAIL",
+        "error_code": "FORCED_FAIL",
+        "error_message": "projection lie",
+    }
+    fail_evidence.pop("security", None)
+    fail_evidence.pop("contract", None)
+    row3.evidence = fail_evidence
+    row3.evidence_hash = compute_canonical_json_hash(fail_evidence)
+    row3.status = JobStatus.SUCCEEDED.value
+    row3.result = "PASS"
+    await db_session.commit()
+    with pytest.raises(AppError) as fail_ev:
+        await svc3.create_review(
+            actor_user_id=user_id3,
+            test_run_id=test_run_id3,
+            decision="APPROVE",
+            comment=None,
+            idempotency_key=f"rv-fail-{uuid.uuid4().hex}",
+        )
+    assert fail_ev.value.code == FACTORY_REVIEW_EVIDENCE_MISMATCH
+
+    # sealed evidence lineage/policy drifts from projection (hash still seals).
+    svc4, _s4, user_id4, test_run_id4 = await _pass_test_run(db_session)
+    row4 = await db_session.get(ToolFactoryTestRun, test_run_id4)
+    assert row4 is not None and isinstance(row4.evidence, dict)
+    drifted = {
+        **row4.evidence,
+        "generated_package_id": str(uuid.uuid4()),
+        "security_policy_version": "tampered-policy",
+    }
+    row4.evidence = drifted
+    row4.evidence_hash = compute_canonical_json_hash(drifted)
+    await db_session.commit()
+    with pytest.raises(AppError) as lineage_ev:
+        await svc4.create_review(
+            actor_user_id=user_id4,
+            test_run_id=test_run_id4,
+            decision="REJECT",
+            comment="no",
+            idempotency_key=f"rv-drift-{uuid.uuid4().hex}",
+        )
+    assert lineage_ev.value.code == FACTORY_REVIEW_EVIDENCE_MISMATCH
+
+    # Happy path still works after the above rejections.
+    svc5, _s5, user_id5, test_run_id5 = await _pass_test_run(db_session)
+    ok = await svc5.create_review(
+        actor_user_id=user_id5,
+        test_run_id=test_run_id5,
+        decision="APPROVE",
+        comment="ok",
+        idempotency_key=f"rv-ok-{uuid.uuid4().hex}",
+    )
+    assert ok.result.decision == "APPROVE"
+    assert len(ok.result.review_evidence_hash) == 64
 
 
 @pytest.mark.asyncio

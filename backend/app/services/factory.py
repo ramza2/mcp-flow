@@ -34,6 +34,7 @@ from app.factory import (
     PACKAGE_SCHEMA_VERSION,
     PHASE_ANALYZE,
     PHASE_REVIEW,
+    PHASE_SANDBOX_TEST,
 )
 from app.factory.contracts import FactoryOpenAPIAnalysis
 from app.factory.errors import (
@@ -107,6 +108,9 @@ _REVIEW_OPERATION_SCOPE = "FACTORY_REVIEW_CREATE_V1"
 _REVIEW_RESOURCE_TYPE = "TOOL_FACTORY_REVIEW"
 _REVIEW_UNIQUE_NAME = "uq_tool_factory_reviews_test_run_id"
 _REVIEW_DECISIONS = frozenset({"APPROVE", "REJECT"})
+# Must match factory_test_worker sealed TestRun evidence contract.
+_SANDBOX_TEST_EVIDENCE_KIND = "FACTORY_SANDBOX_TEST_EVIDENCE"
+_SANDBOX_TEST_EVIDENCE_SCHEMA_VERSION = 1
 _IDEMPOTENCY_KEY_MAX_LEN = 128
 _IDEMPOTENCY_PK_NAME = "pk_api_idempotency_records"
 
@@ -2321,6 +2325,128 @@ class FactoryService:
                 status_code=status.HTTP_409_CONFLICT,
             )
 
+    def _assert_sealed_test_run_evidence(self, test_run: Any) -> None:
+        """Fail-closed: sealed evidence must match TestRun projection columns."""
+
+        evidence = test_run.evidence
+        if not isinstance(evidence, dict):
+            raise AppError(
+                code=FACTORY_REVIEW_EVIDENCE_MISMATCH,
+                message="TestRun evidence가 손상되었습니다.",
+                status_code=status.HTTP_409_CONFLICT,
+            )
+        if evidence.get("kind") != _SANDBOX_TEST_EVIDENCE_KIND:
+            raise AppError(
+                code=FACTORY_REVIEW_EVIDENCE_MISMATCH,
+                message="TestRun evidence kind가 올바르지 않습니다.",
+                status_code=status.HTTP_409_CONFLICT,
+            )
+        if evidence.get("schema_version") != _SANDBOX_TEST_EVIDENCE_SCHEMA_VERSION:
+            raise AppError(
+                code=FACTORY_REVIEW_EVIDENCE_MISMATCH,
+                message="TestRun evidence schema_version이 올바르지 않습니다.",
+                status_code=status.HTTP_409_CONFLICT,
+            )
+        if evidence.get("phase") != PHASE_SANDBOX_TEST:
+            raise AppError(
+                code=FACTORY_REVIEW_EVIDENCE_MISMATCH,
+                message="TestRun evidence phase가 올바르지 않습니다.",
+                status_code=status.HTTP_409_CONFLICT,
+            )
+        if evidence.get("result") != "PASS":
+            raise AppError(
+                code=FACTORY_REVIEW_EVIDENCE_MISMATCH,
+                message="Sealed TestRun evidence.result가 PASS가 아닙니다.",
+                status_code=status.HTTP_409_CONFLICT,
+            )
+        if evidence.get("test_run_id") != str(test_run.id):
+            raise AppError(
+                code=FACTORY_REVIEW_EVIDENCE_MISMATCH,
+                message="Sealed evidence test_run_id가 projection과 불일치합니다.",
+                status_code=status.HTTP_409_CONFLICT,
+            )
+        if (
+            evidence.get("generated_package_id") != str(test_run.generated_package_id)
+            or evidence.get("build_id") != str(test_run.build_id)
+            or evidence.get("job_id") != str(test_run.job_id)
+            or evidence.get("analysis_artifact_id")
+            != str(test_run.analysis_artifact_id)
+            or evidence.get("package_content_sha256") != test_run.package_content_sha256
+            or evidence.get("generator_version") != test_run.generator_version
+            or evidence.get("security_policy_version")
+            != test_run.security_policy_version
+            or evidence.get("contract_policy_version")
+            != test_run.contract_policy_version
+        ):
+            raise AppError(
+                code=FACTORY_REVIEW_EVIDENCE_MISMATCH,
+                message="Sealed evidence lineage/policy가 projection과 불일치합니다.",
+                status_code=status.HTTP_409_CONFLICT,
+            )
+
+        sealed_security = evidence.get("security")
+        sealed_contract = evidence.get("contract")
+        security = test_run.security_result
+        contract = test_run.contract_result
+        if not isinstance(sealed_security, dict) or not isinstance(security, dict):
+            raise AppError(
+                code=FACTORY_REVIEW_EVIDENCE_MISMATCH,
+                message="security evidence/projection이 유효하지 않습니다.",
+                status_code=status.HTTP_409_CONFLICT,
+            )
+        if not isinstance(sealed_contract, dict) or not isinstance(contract, dict):
+            raise AppError(
+                code=FACTORY_REVIEW_EVIDENCE_MISMATCH,
+                message="contract evidence/projection이 유효하지 않습니다.",
+                status_code=status.HTTP_409_CONFLICT,
+            )
+        if compute_canonical_json_hash(sealed_security) != compute_canonical_json_hash(
+            security
+        ):
+            raise AppError(
+                code=FACTORY_REVIEW_EVIDENCE_MISMATCH,
+                message="sealed security evidence가 security_result projection과 불일치합니다.",
+                status_code=status.HTTP_409_CONFLICT,
+            )
+        if compute_canonical_json_hash(sealed_contract) != compute_canonical_json_hash(
+            contract
+        ):
+            raise AppError(
+                code=FACTORY_REVIEW_EVIDENCE_MISMATCH,
+                message="sealed contract evidence가 contract_result projection과 불일치합니다.",
+                status_code=status.HTTP_409_CONFLICT,
+            )
+        if sealed_security.get("passed") is not True or security.get("passed") is not True:
+            raise AppError(
+                code=FACTORY_REVIEW_EVIDENCE_MISMATCH,
+                message="security_result.passed가 true가 아닙니다.",
+                status_code=status.HTTP_409_CONFLICT,
+            )
+        if sealed_contract.get("passed") is not True or contract.get("passed") is not True:
+            raise AppError(
+                code=FACTORY_REVIEW_EVIDENCE_MISMATCH,
+                message="contract_result.passed가 true가 아닙니다.",
+                status_code=status.HTTP_409_CONFLICT,
+            )
+        if (
+            sealed_security.get("policy_version") != test_run.security_policy_version
+            or security.get("policy_version") != test_run.security_policy_version
+        ):
+            raise AppError(
+                code=FACTORY_REVIEW_EVIDENCE_MISMATCH,
+                message="security policy_version이 projection과 불일치합니다.",
+                status_code=status.HTTP_409_CONFLICT,
+            )
+        if (
+            sealed_contract.get("policy_version") != test_run.contract_policy_version
+            or contract.get("policy_version") != test_run.contract_policy_version
+        ):
+            raise AppError(
+                code=FACTORY_REVIEW_EVIDENCE_MISMATCH,
+                message="contract policy_version이 projection과 불일치합니다.",
+                status_code=status.HTTP_409_CONFLICT,
+            )
+
     async def create_review(
         self,
         *,
@@ -2397,20 +2523,7 @@ class FactoryService:
                 message="TestRun evidence_hash가 evidence와 일치하지 않습니다.",
                 status_code=status.HTTP_409_CONFLICT,
             )
-        security = test_run.security_result
-        contract = test_run.contract_result
-        if not isinstance(security, dict) or security.get("passed") is not True:
-            raise AppError(
-                code=FACTORY_REVIEW_NOT_ELIGIBLE,
-                message="security_result.passed가 true가 아닙니다.",
-                status_code=status.HTTP_409_CONFLICT,
-            )
-        if not isinstance(contract, dict) or contract.get("passed") is not True:
-            raise AppError(
-                code=FACTORY_REVIEW_NOT_ELIGIBLE,
-                message="contract_result.passed가 true가 아닙니다.",
-                status_code=status.HTTP_409_CONFLICT,
-            )
+        self._assert_sealed_test_run_evidence(test_run)
 
         package = await self._repo.get_generated_package(test_run.generated_package_id)
         if package is None:
@@ -2433,18 +2546,6 @@ class FactoryService:
             raise AppError(
                 code=FACTORY_PACKAGE_LINEAGE_MISMATCH,
                 message="TestRun lineage가 Generated Package evidence와 일치하지 않습니다.",
-                status_code=status.HTTP_409_CONFLICT,
-            )
-        if security.get("policy_version") not in (
-            None,
-            test_run.security_policy_version,
-        ) or contract.get("policy_version") not in (
-            None,
-            test_run.contract_policy_version,
-        ):
-            raise AppError(
-                code=FACTORY_REVIEW_EVIDENCE_MISMATCH,
-                message="TestRun policy versions가 security/contract evidence와 불일치합니다.",
                 status_code=status.HTTP_409_CONFLICT,
             )
 
