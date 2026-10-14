@@ -9,6 +9,7 @@ import pytest
 from app.core.errors import AppError
 from app.domain.enums import MCPServerStatus, MCPToolStatus, UserStatus
 from app.mcp.errors import MCPClientError
+from app.models.factory import ToolFactoryPublish
 from app.models.mcp import MCPServerCheck, MCPServerDiscovery, MCPTool
 from app.repositories.mcp_tool import MCPToolRepository
 from app.repositories.role import PermissionRepository
@@ -93,9 +94,92 @@ async def _connection_test_and_clean_discovery(
 ) -> None:
     """Issue #99: Factory Activate also requires CLEAN Discovery evidence."""
 
-    http = _healthy_http()
+    # Helpers that attach durable FactoryPublish membership (Issue #99).
+    from tests.unit import test_factory_discovery_reconcile as fdr
+
+    existing_publish = (
+        await session.execute(
+            select(ToolFactoryPublish).where(
+                ToolFactoryPublish.mcp_server_id == server_id
+            )
+        )
+    ).scalar_one_or_none()
+
+    tools_repo = MCPToolRepository(session)
+    tools, _ = await tools_repo.list_tools(
+        mcp_server_id=server_id, page=1, page_size=10_000
+    )
+    if existing_publish is None:
+        user_id = await fdr._seed_user(session)
+        review = await fdr._approved_review_row(session, user_id=user_id)
+        if not tools:
+            schema = {"type": "object", "properties": {}}
+            tool = await tools_repo.create_tool(
+                mcp_server_id=server_id,
+                remote_name="GET /ping",
+                display_name="GET /ping",
+                tags=[],
+                status=str(MCPToolStatus.INACTIVE),
+            )
+            version = await tools_repo.create_version(
+                mcp_tool_id=tool.id,
+                version_no=1,
+                content_hash=uuid.uuid4().hex,
+                validation_status="WARNING",
+                input_schema=schema,
+                output_schema=None,
+                annotations={
+                    "factory_import": True,
+                    "operation_key": "GET /ping",
+                    "method": "GET",
+                    "path": "/ping",
+                },
+                raw_descriptor={
+                    "method": "GET",
+                    "path": "/ping",
+                    "operation_key": "GET /ping",
+                },
+                schema_dialect="factory-declarative-v1",
+            )
+            tool.current_version_id = version.id
+            await session.commit()
+            tools = [tool]
+        await fdr._attach_factory_publish(
+            session,
+            user_id=user_id,
+            server_id=server_id,
+            tool_ids=[tool.id for tool in tools],
+            review=review,
+        )
+        tools, _ = await tools_repo.list_tools(
+            mcp_server_id=server_id, page=1, page_size=10_000
+        )
+
+    remotes = []
+    for tool in tools:
+        assert tool.current_version_id is not None
+        version = await tools_repo.get_version(tool.current_version_id)
+        assert version is not None
+        remotes.append(
+            fdr._desc(
+                tool.remote_name,
+                input_schema=version.input_schema
+                if isinstance(version.input_schema, dict)
+                else {"type": "object"},
+                output_schema=version.output_schema
+                if isinstance(version.output_schema, dict)
+                else None,
+            )
+        )
+
+    http = MagicMock()
+    http.discover_capabilities = AsyncMock(return_value={})
+    http.list_tools = AsyncMock(return_value=remotes)
     await MCPDiscoveryService(session, http).connection_test(server_id)
-    await MCPDiscoveryService(session, http).discover(server_id, apply_changes=False)
+    result = await MCPDiscoveryService(session, http).discover(
+        server_id, apply_changes=False
+    )
+    assert result.success is True
 
 
 def _failing_http() -> MagicMock:

@@ -2,20 +2,31 @@
 
 from __future__ import annotations
 
+import json
 import uuid
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from app.core.canonical_hash import compute_canonical_json_hash
 from app.core.errors import AppError
-from app.domain.enums import MCPServerStatus, MCPToolStatus, UserStatus
+from app.domain.enums import JobStatus, MCPServerStatus, MCPToolStatus, UserStatus
+from app.factory import (
+    FACTORY_PUBLISH_EVIDENCE_KIND,
+    FACTORY_PUBLISH_EVIDENCE_SCHEMA_VERSION,
+    PHASE_PUBLISH,
+)
 from app.factory.discovery_reconcile import (
     build_factory_reconcile_plan,
     factory_contract_fingerprint,
     has_immutable_factory_lineage,
     index_remote_tools_strict,
 )
+from app.infrastructure.object_storage import InMemoryObjectStorage
 from app.mcp.normalize import RemoteToolDescriptor
+from app.models.factory import ToolFactoryReview
 from app.models.mcp import MCPServerDiscovery, MCPTool, MCPToolVersion
+from app.repositories.factory import FactoryRepository
 from app.repositories.mcp_tool import MCPToolRepository
 from app.repositories.role import PermissionRepository
 from app.schemas.auth import (
@@ -25,6 +36,9 @@ from app.schemas.auth import (
     UserRoleReplaceRequest,
 )
 from app.schemas.mcp_server import MCPServerUpdate
+from app.services.factory import FactoryService
+from app.services.factory_test_worker import FactoryTestWorkerService
+from app.services.factory_worker import FactoryWorkerService
 from app.services.mcp_discovery import MCPDiscoveryService
 from app.services.mcp_server import (
     MCPServerService,
@@ -35,6 +49,22 @@ from app.services.role import RoleService
 from app.services.user import UserService
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+
+_MINIMAL_OPENAPI = json.dumps(
+    {
+        "openapi": "3.0.3",
+        "info": {"title": "Demo", "version": "1.0.0"},
+        "paths": {
+            "/ping": {
+                "get": {
+                    "operationId": "ping",
+                    "responses": {"200": {"description": "ok"}},
+                }
+            }
+        },
+    },
+    separators=(",", ":"),
+).encode("utf-8")
 
 
 async def _seed_user(session: AsyncSession) -> uuid.UUID:
@@ -50,10 +80,11 @@ async def _seed_user(session: AsyncSession) -> uuid.UUID:
         RoleCreate(code=f"fdr-r-{uuid.uuid4().hex[:8]}", name="FDR")
     )
     manage = await PermissionRepository(session).get_by_code("mcp.server.manage")
-    assert manage is not None
+    read = await PermissionRepository(session).get_by_code("mcp.server.read")
+    assert manage is not None and read is not None
     await RoleService(session).replace_permissions(
         role.id,
-        RolePermissionReplaceRequest(permission_ids=[manage.id]),
+        RolePermissionReplaceRequest(permission_ids=[manage.id, read.id]),
         expected_lock_version=1,
     )
     await UserService(session).replace_roles(
@@ -65,14 +96,140 @@ async def _seed_user(session: AsyncSession) -> uuid.UUID:
     return user.id
 
 
+async def _approved_review_row(
+    session: AsyncSession, *, user_id: uuid.UUID
+) -> ToolFactoryReview:
+    """Create an APPROVE Review to supply durable Publish lineage FKs."""
+
+    store = InMemoryObjectStorage()
+    svc = FactoryService(session, storage=store)
+    job = await svc.create_openapi_analyze_job(
+        actor_user_id=user_id,
+        source_bytes=_MINIMAL_OPENAPI,
+        filename="pets.json",
+        idempotency_key=f"job-{uuid.uuid4().hex}",
+    )
+    await FactoryWorkerService(session, storage=store, worker_id="u-a").process_job(
+        job_id=job.result.id
+    )
+    await session.commit()
+    cands = await svc.list_candidates_for_job(user_id, job.result.id)
+    build = await svc.create_build(
+        actor_user_id=user_id,
+        job_id=job.result.id,
+        candidate_ids=[item.id for item in cands.items],
+        idempotency_key=f"build-{uuid.uuid4().hex}",
+    )
+    pkg = await svc.generate_package(
+        actor_user_id=user_id,
+        build_id=build.result.id,
+        idempotency_key=f"pkg-{uuid.uuid4().hex}",
+    )
+    tr = await svc.create_test_run(
+        actor_user_id=user_id,
+        package_id=pkg.result.id,
+        idempotency_key=f"tr-{uuid.uuid4().hex}",
+    )
+    done = await FactoryTestWorkerService(
+        session, storage=store, worker_id="u-t"
+    ).process_test_run(test_run_id=tr.result.id)
+    await session.commit()
+    assert done.status == JobStatus.SUCCEEDED.value
+    review = await svc.create_review(
+        actor_user_id=user_id,
+        test_run_id=tr.result.id,
+        decision="APPROVE",
+        comment="ok",
+        idempotency_key=f"rv-{uuid.uuid4().hex}",
+    )
+    row = await session.get(ToolFactoryReview, review.result.id)
+    assert row is not None
+    return row
+
+
+async def _attach_factory_publish(
+    session: AsyncSession,
+    *,
+    user_id: uuid.UUID,
+    server_id: uuid.UUID,
+    tool_ids: list[uuid.UUID],
+    review: ToolFactoryReview,
+) -> uuid.UUID:
+    """Persist FactoryPublish + bind Server transport_config lineage keys."""
+
+    publish_id = uuid.uuid4()
+    tool_id_strs = [str(tid) for tid in tool_ids]
+    now = datetime.now(UTC)
+    evidence = {
+        "schema_version": FACTORY_PUBLISH_EVIDENCE_SCHEMA_VERSION,
+        "kind": FACTORY_PUBLISH_EVIDENCE_KIND,
+        "phase": PHASE_PUBLISH,
+        "publish_id": str(publish_id),
+        "review_id": str(review.id),
+        "test_run_id": str(review.test_run_id),
+        "generated_package_id": str(review.generated_package_id),
+        "build_id": str(review.build_id),
+        "job_id": str(review.job_id),
+        "analysis_artifact_id": str(review.analysis_artifact_id),
+        "package_content_sha256": review.package_content_sha256,
+        "generator_version": review.generator_version,
+        "package_schema_version": review.package_schema_version,
+        "test_evidence_hash": review.test_evidence_hash,
+        "review_evidence_hash": review.review_evidence_hash,
+        "mcp_server_id": str(server_id),
+        "mcp_tool_ids": tool_id_strs,
+        "tool_count": len(tool_ids),
+        "requested_by": str(user_id),
+        "created_at": now.isoformat(),
+        "connection_deferred": True,
+    }
+    await FactoryRepository(session).create_publish(
+        publish_id=publish_id,
+        review_id=review.id,
+        test_run_id=review.test_run_id,
+        generated_package_id=review.generated_package_id,
+        build_id=review.build_id,
+        job_id=review.job_id,
+        analysis_artifact_id=review.analysis_artifact_id,
+        package_content_sha256=review.package_content_sha256,
+        generator_version=review.generator_version,
+        package_schema_version=review.package_schema_version,
+        test_evidence_hash=review.test_evidence_hash,
+        review_evidence_hash=review.review_evidence_hash,
+        mcp_server_id=server_id,
+        mcp_tool_ids=tool_id_strs,
+        tool_count=len(tool_ids),
+        publish_evidence=evidence,
+        publish_evidence_hash=compute_canonical_json_hash(evidence),
+        requested_by=user_id,
+    )
+    server = await MCPServerService(session).get(server_id)
+    cfg = dict(server.transport_config or {})
+    cfg.update(
+        {
+            "factory_publish": True,
+            "source": "TOOL_FACTORY_PUBLISH",
+            "publish_id": str(publish_id),
+            "review_id": str(review.id),
+            "generated_package_id": str(review.generated_package_id),
+            "package_content_sha256": review.package_content_sha256,
+        }
+    )
+    server.transport_config = cfg
+    await session.commit()
+    return publish_id
+
+
 async def _factory_server_ready(
     session: AsyncSession,
     *,
     tools: list[dict] | None = None,
 ) -> uuid.UUID:
-    """Create Factory deferred server, set endpoint, Connection Test success."""
+    """Create Factory deferred server + durable Publish, Connection Test success."""
 
-    await _seed_user(session)
+    user_id = await _seed_user(session)
+    review = await _approved_review_row(session, user_id=user_id)
+    publish_id = uuid.uuid4()
     svc = MCPServerService(session)
     server = await svc.create_factory_deferred_draft_uncommitted(
         name="Factory Discovery",
@@ -81,7 +238,10 @@ async def _factory_server_ready(
             "connection_deferred": True,
             "factory_publish": True,
             "source": "TOOL_FACTORY_PUBLISH",
-            "publish_id": str(uuid.uuid4()),
+            "publish_id": str(publish_id),
+            "review_id": str(review.id),
+            "generated_package_id": str(review.generated_package_id),
+            "package_content_sha256": review.package_content_sha256,
         },
         code=f"fac-disc-{uuid.uuid4().hex[:12]}",
     )
@@ -96,6 +256,7 @@ async def _factory_server_ready(
     http.list_tools = AsyncMock(return_value=[])
     await MCPDiscoveryService(session, http).connection_test(s.id)
 
+    tool_ids: list[uuid.UUID] = []
     if tools:
         repo = MCPToolRepository(session)
         for item in tools:
@@ -119,11 +280,31 @@ async def _factory_server_ready(
                     "method": "GET",
                     "path": "/pets",
                 },
-                raw_descriptor={"factory": True},
+                raw_descriptor={
+                    "method": "GET",
+                    "path": "/pets",
+                    "operation_key": item["remote_name"],
+                },
                 schema_dialect="factory-declarative-v1",
             )
             tool.current_version_id = version.id
+            tool_ids.append(tool.id)
         await session.commit()
+
+    if not tool_ids:
+        raise AssertionError(
+            "_factory_server_ready requires at least one imported Tool for "
+            "FactoryPublish.mcp_tool_ids."
+        )
+    await _attach_factory_publish(
+        session,
+        user_id=user_id,
+        server_id=s.id,
+        tool_ids=tool_ids,
+        review=review,
+    )
+    # Re-bind verified Connection Test fingerprint after transport_config rewrite.
+    await MCPDiscoveryService(session, http).connection_test(s.id)
     return s.id
 
 
@@ -573,7 +754,7 @@ async def test_unrelated_local_tool_not_absorbed_into_expected(
     assert result.factory_diff is not None
     assert result.factory_diff.status == "AMBIGUOUS"
     assert result.error_code == "FACTORY_DISCOVERY_AMBIGUOUS"
-    assert "lineage" in (result.error_message or "").lower()
+    assert "mcp_tool_ids" in (result.error_message or "")
     assert (
         await db_session.execute(select(func.count()).select_from(MCPTool))
     ).scalar_one() == tools_before
@@ -607,6 +788,132 @@ async def test_unrelated_local_tool_not_absorbed_into_expected(
     assert (
         await db_session.execute(select(func.count()).select_from(MCPToolVersion))
     ).scalar_one() == versions_before
+
+
+@pytest.mark.asyncio
+async def test_factory_looking_tool_outside_publish_ids_fail_closed(
+    db_session: AsyncSession,
+) -> None:
+    """Perfect Factory-looking metadata is insufficient without Publish membership."""
+
+    schema = {"type": "object", "properties": {"q": {"type": "string"}}}
+    server_id = await _factory_server_ready(
+        db_session,
+        tools=[{"remote_name": "GET /pets", "input_schema": schema}],
+    )
+    repo = MCPToolRepository(db_session)
+    fake = await repo.create_tool(
+        mcp_server_id=server_id,
+        remote_name="GET /forged",
+        display_name="GET /forged",
+        tags=[],
+        status=str(MCPToolStatus.INACTIVE),
+    )
+    version = await repo.create_version(
+        mcp_tool_id=fake.id,
+        version_no=1,
+        content_hash=uuid.uuid4().hex,
+        validation_status="WARNING",
+        input_schema=schema,
+        output_schema=None,
+        annotations={
+            "factory_import": True,
+            "operation_key": "GET /forged",
+            "method": "GET",
+            "path": "/forged",
+            "candidate_id": str(uuid.uuid4()),
+        },
+        raw_descriptor={
+            "method": "GET",
+            "path": "/forged",
+            "operation_key": "GET /forged",
+            "candidate_id": str(uuid.uuid4()),
+        },
+        schema_dialect="factory-declarative-v1",
+    )
+    fake.current_version_id = version.id
+    await db_session.commit()
+
+    tools_before = (
+        await db_session.execute(select(func.count()).select_from(MCPTool))
+    ).scalar_one()
+    versions_before = (
+        await db_session.execute(select(func.count()).select_from(MCPToolVersion))
+    ).scalar_one()
+    result = await MCPDiscoveryService(
+        db_session, _http_with_tools([_desc("GET /pets", input_schema=schema)])
+    ).discover(server_id, apply_changes=False)
+    assert result.success is False
+    assert result.factory_diff is not None
+    assert result.factory_diff.status == "AMBIGUOUS"
+    assert "mcp_tool_ids" in (result.error_message or "")
+    assert "GET /forged" in (result.error_message or "")
+    assert (
+        await db_session.execute(select(func.count()).select_from(MCPTool))
+    ).scalar_one() == tools_before
+    assert (
+        await db_session.execute(select(func.count()).select_from(MCPToolVersion))
+    ).scalar_one() == versions_before
+
+
+@pytest.mark.asyncio
+async def test_transport_config_publish_lineage_mismatch_fail_closed(
+    db_session: AsyncSession,
+) -> None:
+    schema = {"type": "object", "properties": {"q": {"type": "string"}}}
+    server_id = await _factory_server_ready(
+        db_session,
+        tools=[{"remote_name": "GET /pets", "input_schema": schema}],
+    )
+    server = await MCPServerService(db_session).get(server_id)
+    cfg = dict(server.transport_config or {})
+    cfg["review_id"] = str(uuid.uuid4())
+    server.transport_config = cfg
+    await db_session.commit()
+
+    tools_before = (
+        await db_session.execute(select(func.count()).select_from(MCPTool))
+    ).scalar_one()
+    versions_before = (
+        await db_session.execute(select(func.count()).select_from(MCPToolVersion))
+    ).scalar_one()
+    result = await MCPDiscoveryService(
+        db_session, _http_with_tools([_desc("GET /pets", input_schema=schema)])
+    ).discover(server_id, apply_changes=False)
+    assert result.success is False
+    assert result.factory_diff is not None
+    assert result.factory_diff.status == "AMBIGUOUS"
+    assert "review_id" in (result.error_message or "")
+    assert (
+        await db_session.execute(select(func.count()).select_from(MCPTool))
+    ).scalar_one() == tools_before
+    assert (
+        await db_session.execute(select(func.count()).select_from(MCPToolVersion))
+    ).scalar_one() == versions_before
+    assert get_verified_discovery_fingerprint(
+        await MCPServerService(db_session).get(server_id)
+    ) is None
+
+
+@pytest.mark.asyncio
+async def test_normal_factory_publish_expected_set_loads(
+    db_session: AsyncSession,
+) -> None:
+    schema = {"type": "object", "properties": {"q": {"type": "string"}}}
+    server_id = await _factory_server_ready(
+        db_session,
+        tools=[{"remote_name": "GET /pets", "input_schema": schema}],
+    )
+    result = await MCPDiscoveryService(
+        db_session, _http_with_tools([_desc("GET /pets", input_schema=schema)])
+    ).discover(server_id, apply_changes=False)
+    assert result.success is True
+    assert result.factory_diff is not None
+    assert result.factory_diff.status == "CLEAN"
+    assert result.factory_diff.matched == 1
+    assert get_verified_discovery_fingerprint(
+        await MCPServerService(db_session).get(server_id)
+    ) is not None
 
 
 @pytest.mark.asyncio

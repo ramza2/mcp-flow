@@ -44,11 +44,12 @@ def has_immutable_factory_lineage(
     raw_descriptor: Any = None,
     schema_dialect: str | None = None,
 ) -> bool:
-    """True only for reviewed/imported Factory ToolVersion provenance.
+    """True for Factory-imported ToolVersion provenance markers.
 
-    Requires ``factory_import=true`` plus Publish/Review/package identity from
-    annotations, raw_descriptor, or the Factory declarative schema dialect.
-    Unrelated local Tools must not pass this check.
+    Necessary but not sufficient for expected-set membership: Discovery also
+    requires the Tool id to appear in the Server's durable FactoryPublish
+    ``mcp_tool_ids``. Requires ``factory_import=true`` plus declarative dialect
+    or package identity fields from annotations/raw_descriptor.
     """
 
     if not isinstance(annotations, dict):

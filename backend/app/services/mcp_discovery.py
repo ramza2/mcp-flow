@@ -659,10 +659,83 @@ class MCPDiscoveryService:
         await self._session.refresh(discovery)
         return _discovery_to_response(discovery)
 
+    async def _resolve_factory_publish_for_server(
+        self, server: MCPServer
+    ) -> tuple[Any | None, str | None]:
+        """Load durable FactoryPublish and cross-check Server transport_config."""
+
+        from app.repositories.factory import FactoryRepository
+
+        cfg = server.transport_config if isinstance(server.transport_config, dict) else {}
+        publish_id_raw = cfg.get("publish_id")
+        review_id_raw = cfg.get("review_id")
+        package_id_raw = cfg.get("generated_package_id")
+        package_sha = cfg.get("package_content_sha256")
+        if not publish_id_raw or not review_id_raw or not package_id_raw:
+            return None, (
+                "Factory Server transport_config missing publish_id / review_id / "
+                "generated_package_id required for Discovery reconciliation."
+            )
+        try:
+            publish_id = uuid.UUID(str(publish_id_raw))
+            review_id = uuid.UUID(str(review_id_raw))
+            package_id = uuid.UUID(str(package_id_raw))
+        except (TypeError, ValueError):
+            return None, (
+                "Factory Server transport_config lineage IDs must be valid UUIDs."
+            )
+
+        publish = await FactoryRepository(self._session).get_publish(publish_id)
+        if publish is None:
+            return None, f"FactoryPublish not found for publish_id={publish_id}."
+        if publish.mcp_server_id != server.id:
+            return None, (
+                "FactoryPublish.mcp_server_id does not match the MCP Server under "
+                "Discovery."
+            )
+        if publish.id != publish_id:
+            return None, (
+                "FactoryPublish.id does not match transport_config.publish_id."
+            )
+        if publish.review_id != review_id:
+            return None, (
+                "FactoryPublish.review_id does not match transport_config.review_id."
+            )
+        if publish.generated_package_id != package_id:
+            return None, (
+                "FactoryPublish.generated_package_id does not match "
+                "transport_config.generated_package_id."
+            )
+        if package_sha is not None and str(package_sha).strip() != "":
+            if str(package_sha) != publish.package_content_sha256:
+                return None, (
+                    "FactoryPublish.package_content_sha256 does not match "
+                    "transport_config.package_content_sha256."
+                )
+        return publish, None
+
     async def _load_expected_factory_contracts(
         self, server_id: uuid.UUID
     ) -> tuple[dict[str, MCPTool], dict[str, dict[str, Any]], str | None]:
-        """Load Factory lineage tools only; fail closed on pollution/duplicates."""
+        """Load expected Tools from FactoryPublish membership + ToolVersion provenance."""
+
+        server = await self._require_server(server_id)
+        publish, publish_err = await self._resolve_factory_publish_for_server(server)
+        if publish_err is not None or publish is None:
+            return {}, {}, publish_err or "FactoryPublish resolution failed."
+
+        authoritative_ids: set[uuid.UUID] = set()
+        for item in publish.mcp_tool_ids or []:
+            try:
+                authoritative_ids.add(uuid.UUID(str(item)))
+            except (TypeError, ValueError):
+                return (
+                    {},
+                    {},
+                    "FactoryPublish.mcp_tool_ids contains an invalid Tool UUID.",
+                )
+        if not authoritative_ids:
+            return {}, {}, "FactoryPublish.mcp_tool_ids is empty."
 
         existing_tools, _ = await self._tools.list_tools(
             mcp_server_id=server_id,
@@ -670,6 +743,7 @@ class MCPDiscoveryService:
             page_size=10_000,
         )
         seen_names: set[str] = set()
+        live_by_id: dict[uuid.UUID, MCPTool] = {}
         for tool in existing_tools:
             if tool.remote_name in seen_names:
                 return (
@@ -678,11 +752,45 @@ class MCPDiscoveryService:
                     f"Duplicate imported tool identity: {tool.remote_name!r}.",
                 )
             seen_names.add(tool.remote_name)
+            live_by_id[tool.id] = tool
+
+        pollution = sorted(
+            tool.remote_name
+            for tool in existing_tools
+            if tool.id not in authoritative_ids
+        )
+        if pollution:
+            names = ", ".join(repr(n) for n in pollution)
+            return (
+                {},
+                {},
+                (
+                    "Factory Discovery expected set polluted by live Tools not in "
+                    f"FactoryPublish.mcp_tool_ids: {names}. "
+                    "Resolve unrelated local Tools before reconciliation."
+                ),
+            )
+
+        missing_published = sorted(
+            str(tool_id)
+            for tool_id in authoritative_ids
+            if tool_id not in live_by_id
+        )
+        if missing_published:
+            return (
+                {},
+                {},
+                (
+                    "FactoryPublish.mcp_tool_ids reference Tools missing from the "
+                    f"MCP Server: {', '.join(missing_published)}."
+                ),
+            )
 
         existing_by_name: dict[str, MCPTool] = {}
         expected: dict[str, dict[str, Any]] = {}
-        unrelated: list[str] = []
-        for tool in existing_tools:
+        invalid_provenance: list[str] = []
+        for tool_id in sorted(authoritative_ids, key=str):
+            tool = live_by_id[tool_id]
             input_schema = None
             output_schema = None
             annotations = None
@@ -701,7 +809,7 @@ class MCPDiscoveryService:
                 raw_descriptor=raw_descriptor,
                 schema_dialect=schema_dialect,
             ):
-                unrelated.append(tool.remote_name)
+                invalid_provenance.append(tool.remote_name)
                 continue
             existing_by_name[tool.remote_name] = tool
             expected[tool.remote_name] = {
@@ -709,15 +817,14 @@ class MCPDiscoveryService:
                 "output_schema": output_schema,
             }
 
-        if unrelated:
-            names = ", ".join(repr(n) for n in sorted(unrelated))
+        if invalid_provenance:
+            names = ", ".join(repr(n) for n in sorted(invalid_provenance))
             return (
                 {},
                 {},
                 (
-                    "Factory Discovery expected set polluted by Tools without "
-                    f"immutable Factory lineage: {names}. "
-                    "Resolve unrelated local Tools before reconciliation."
+                    "FactoryPublish member Tools lack immutable Factory ToolVersion "
+                    f"provenance: {names}."
                 ),
             )
         return existing_by_name, expected, None
