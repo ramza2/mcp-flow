@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import uuid
+from typing import Any
 
 from fastapi import status
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -38,6 +39,17 @@ def _protocol_era_for_transport(transport: MCPTransportType) -> MCPProtocolEra:
     return MCPProtocolEra.CURRENT
 
 
+def is_connection_deferred(server: MCPServer) -> bool:
+    """True when transport_config marks a Factory deferred-DRAFT import."""
+
+    cfg = server.transport_config
+    return isinstance(cfg, dict) and cfg.get("connection_deferred") is True
+
+
+def has_usable_endpoint(server: MCPServer) -> bool:
+    return bool(server.endpoint_url and str(server.endpoint_url).strip())
+
+
 class MCPServerService:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
@@ -61,6 +73,7 @@ class MCPServerService:
         stdio_manifest_id: str | None,
         auth_type: MCPAuthType,
         auth_secret_id: uuid.UUID | None,
+        allow_deferred_http: bool = False,
     ) -> str | None:
         """Validate transport/auth fields. Returns normalized endpoint_url when applicable."""
 
@@ -74,7 +87,11 @@ class MCPServerService:
                     message="stdio_manifest_id is not allowed for HTTP transports.",
                     status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 )
-            normalized = validate_mcp_endpoint_url(endpoint_url or "")
+            if allow_deferred_http and not (endpoint_url and str(endpoint_url).strip()):
+                # Factory Publish deferred-DRAFT only: no fabricated endpoint.
+                normalized = None
+            else:
+                normalized = validate_mcp_endpoint_url(endpoint_url or "")
         elif transport_type == MCPTransportType.STDIO:
             if endpoint_url:
                 raise AppError(
@@ -125,6 +142,7 @@ class MCPServerService:
             stdio_manifest_id=data.stdio_manifest_id,
             auth_type=data.auth_type,
             auth_secret_id=data.auth_secret_id,
+            allow_deferred_http=False,
         )
         era = _protocol_era_for_transport(data.transport_type)
         code = _generate_server_code(data.name)
@@ -148,6 +166,72 @@ class MCPServerService:
             connect_timeout_ms=data.connect_timeout_ms,
             call_timeout_ms=data.call_timeout_ms,
             max_concurrency=data.max_concurrency,
+            created_by=created_by,
+        )
+
+    async def create_factory_deferred_draft_uncommitted(
+        self,
+        *,
+        name: str,
+        description: str | None,
+        transport_config: dict[str, Any],
+        created_by: uuid.UUID | None = None,
+        code: str | None = None,
+    ) -> MCPServer:
+        """Canonical Factory Publish path: DRAFT HTTP server without endpoint.
+
+        Regular create still requires endpoint_url. This path is only for
+        connection_deferred=true DRAFT imports; Activate / Connection Test remain
+        blocked until an endpoint is set later.
+        """
+
+        if not isinstance(transport_config, dict):
+            raise AppError(
+                code="VALIDATION_ERROR",
+                message="transport_config must be an object for deferred DRAFT.",
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            )
+        if transport_config.get("connection_deferred") is not True:
+            raise AppError(
+                code="VALIDATION_ERROR",
+                message=(
+                    "connection_deferred=true is required for Factory "
+                    "deferred DRAFT creation."
+                ),
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            )
+        # Refuse fabricated endpoints on the deferred path.
+        self._validate_transport_auth(
+            transport_type=MCPTransportType.STREAMABLE_HTTP,
+            endpoint_url=None,
+            stdio_manifest_id=None,
+            auth_type=MCPAuthType.NONE,
+            auth_secret_id=None,
+            allow_deferred_http=True,
+        )
+        era = _protocol_era_for_transport(MCPTransportType.STREAMABLE_HTTP)
+        server_code = (code or "").strip() or _generate_server_code(name)
+        if await self._servers.get_by_code(server_code) is not None:
+            if code:
+                raise AppError(
+                    code="RESOURCE_CONFLICT",
+                    message="MCP server code already exists.",
+                    status_code=status.HTTP_409_CONFLICT,
+                )
+            server_code = _generate_server_code(name)
+
+        return await self._servers.create(
+            code=server_code,
+            name=name,
+            description=description,
+            transport_type=str(MCPTransportType.STREAMABLE_HTTP),
+            endpoint_url=None,
+            stdio_manifest_id=None,
+            transport_config=dict(transport_config),
+            auth_type=str(MCPAuthType.NONE),
+            auth_secret_id=None,
+            status=MCPServerStatus.DRAFT,
+            protocol_era=str(era),
             created_by=created_by,
         )
 
@@ -257,6 +341,16 @@ class MCPServerService:
                 message=(
                     f"Cannot activate server in status {server.status}; "
                     "expected DRAFT or INACTIVE."
+                ),
+                status_code=status.HTTP_409_CONFLICT,
+            )
+        if is_connection_deferred(server) and not has_usable_endpoint(server):
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message=(
+                    "Cannot activate connection_deferred DRAFT MCP Server "
+                    "without endpoint_url. Set a real endpoint, then Connection "
+                    "Test, before Activate."
                 ),
                 status_code=status.HTTP_409_CONFLICT,
             )

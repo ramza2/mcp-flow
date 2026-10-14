@@ -21,11 +21,7 @@ from app.core.config import get_settings
 from app.core.errors import AppError
 from app.domain.enums import (
     JobStatus,
-    MCPAuthType,
-    MCPProtocolEra,
-    MCPServerStatus,
     MCPToolStatus,
-    MCPTransportType,
     ToolVersionValidationStatus,
     UserStatus,
 )
@@ -66,6 +62,7 @@ from app.factory.errors import (
     FACTORY_REVIEW_NOT_ELIGIBLE,
     FACTORY_SOURCE_OBJECT_STORE_FAILED,
 )
+from app.factory.import_input_schema import build_mcp_callable_input_schema
 from app.factory.openapi_analyzer import MAX_OPERATIONS, MAX_SOURCE_BYTES
 from app.factory.package_generator import (
     PackageGenerationError,
@@ -89,7 +86,6 @@ from app.models.factory import (
 )
 from app.repositories.factory import FactoryRepository
 from app.repositories.idempotency import IdempotencyRepository
-from app.repositories.mcp_server import MCPServerRepository
 from app.repositories.mcp_tool import MCPToolRepository
 from app.repositories.outbox import OutboxRepository
 from app.repositories.user import UserRepository
@@ -112,6 +108,7 @@ from app.schemas.factory import (
     FactoryTestRunResponse,
 )
 from app.services.authorization import AuthorizationResolver
+from app.services.mcp_server import MCPServerService
 
 _MCP_SERVER_READ = "mcp.server.read"
 _MCP_SERVER_MANAGE = "mcp.server.manage"
@@ -3018,11 +3015,11 @@ class FactoryService:
     ) -> tuple[uuid.UUID, list[uuid.UUID]]:
         """Create DRAFT MCP Server + INACTIVE Tools from declarative contracts.
 
-        Does not fabricate endpoints, run Connection Test/Discovery/Activate,
-        or execute package code. Connection fill is a later operator step.
+        Uses MCPServerService canonical deferred-DRAFT path (no repository
+        invariant bypass, no fabricated endpoints). Connection Test / Discovery /
+        Activate remain blocked until an endpoint is set later.
         """
 
-        servers = MCPServerRepository(self._session)
         tools_repo = MCPToolRepository(self._session)
         server_code = f"fac-pub-{review.id.hex}"
         server_name = f"Factory Import {review.id.hex[:8]}"
@@ -3039,22 +3036,17 @@ class FactoryService:
                 "Connection Test / Discovery / Activate are out of this slice."
             ),
         }
-        server = await servers.create(
-            code=server_code,
+        server = await MCPServerService(
+            self._session
+        ).create_factory_deferred_draft_uncommitted(
             name=server_name,
             description=(
                 "Tool Factory Publish/Import DRAFT MCP Server "
                 f"(review={review.id}). Connection deferred."
             ),
-            transport_type=str(MCPTransportType.STREAMABLE_HTTP),
-            endpoint_url=None,
-            stdio_manifest_id=None,
             transport_config=transport_config,
-            auth_type=str(MCPAuthType.NONE),
-            auth_secret_id=None,
-            status=str(MCPServerStatus.DRAFT),
-            protocol_era=str(MCPProtocolEra.CURRENT),
             created_by=actor_user_id,
+            code=server_code,
         )
 
         tool_ids: list[uuid.UUID] = []
@@ -3063,6 +3055,9 @@ class FactoryService:
             display = tool.get("summary") or tool.get("operation_id") or remote_name
             description = tool.get("description")
             tags = tool.get("tags") if isinstance(tool.get("tags"), list) else []
+            parameters = (
+                tool.get("parameters") if isinstance(tool.get("parameters"), list) else []
+            )
             raw_descriptor = {
                 "candidate_id": tool.get("candidate_id"),
                 "operation_key": tool.get("operation_key"),
@@ -3073,12 +3068,14 @@ class FactoryService:
                 "description": tool.get("description"),
                 "tags": tags,
                 "deprecated": bool(tool.get("deprecated", False)),
-                "parameters": tool.get("parameters")
-                if isinstance(tool.get("parameters"), list)
-                else [],
+                "parameters": parameters,
                 "request_schema": tool.get("request_schema"),
                 "response_schema": tool.get("response_schema"),
             }
+            input_schema = build_mcp_callable_input_schema(
+                parameters=parameters,
+                request_schema=tool.get("request_schema"),
+            )
             content_hash = compute_canonical_json_hash(raw_descriptor)
             mcp_tool = await tools_repo.create_tool(
                 mcp_server_id=server.id,
@@ -3099,7 +3096,7 @@ class FactoryService:
                 remote_description=(
                     str(description) if description is not None else None
                 ),
-                input_schema=tool.get("request_schema"),
+                input_schema=input_schema,
                 output_schema=tool.get("response_schema"),
                 annotations={
                     "factory_import": True,

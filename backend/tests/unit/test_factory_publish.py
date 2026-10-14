@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import json
 import uuid
+from unittest.mock import MagicMock
 
 import pytest
+from app.agent.parameter_builder import _validate_input_schema
 from app.core.errors import AppError
 from app.domain.enums import JobStatus, MCPServerStatus, MCPToolStatus, UserStatus
 from app.factory.errors import (
@@ -23,7 +25,13 @@ from app.models.factory import (
     ToolFactoryReview,
     ToolFactoryTestRun,
 )
-from app.models.mcp import MCPServer, MCPTool, MCPToolVersion
+from app.models.mcp import (
+    MCPServer,
+    MCPServerCheck,
+    MCPServerDiscovery,
+    MCPTool,
+    MCPToolVersion,
+)
 from app.repositories.role import PermissionRepository
 from app.schemas.auth import (
     RoleCreate,
@@ -34,6 +42,8 @@ from app.schemas.auth import (
 from app.services.factory import FactoryService
 from app.services.factory_test_worker import FactoryTestWorkerService
 from app.services.factory_worker import FactoryWorkerService
+from app.services.mcp_discovery import MCPDiscoveryService
+from app.services.mcp_server import MCPServerService
 from app.services.role import RoleService
 from app.services.user import UserService
 from sqlalchemy import func, select
@@ -47,6 +57,54 @@ MINIMAL_JSON = json.dumps(
             "/ping": {
                 "get": {
                     "operationId": "ping",
+                    "responses": {"200": {"description": "ok"}},
+                }
+            }
+        },
+    },
+    separators=(",", ":"),
+).encode("utf-8")
+
+RICH_JSON = json.dumps(
+    {
+        "openapi": "3.0.3",
+        "info": {"title": "Pets", "version": "1.0.0"},
+        "paths": {
+            "/pets/{petId}": {
+                "put": {
+                    "operationId": "updatePet",
+                    "parameters": [
+                        {
+                            "name": "petId",
+                            "in": "path",
+                            "required": True,
+                            "schema": {"type": "integer", "format": "int64"},
+                        },
+                        {
+                            "name": "verbose",
+                            "in": "query",
+                            "required": False,
+                            "schema": {"type": "boolean"},
+                        },
+                        {
+                            "name": "q",
+                            "in": "query",
+                            "required": True,
+                            "schema": {"type": "string"},
+                        },
+                    ],
+                    "requestBody": {
+                        "required": True,
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "properties": {"name": {"type": "string"}},
+                                    "required": ["name"],
+                                }
+                            }
+                        },
+                    },
                     "responses": {"200": {"description": "ok"}},
                 }
             }
@@ -89,13 +147,14 @@ async def _approved_review(
     session: AsyncSession,
     *,
     decision: str = "APPROVE",
+    source_bytes: bytes = MINIMAL_JSON,
 ) -> tuple[FactoryService, InMemoryObjectStorage, uuid.UUID, uuid.UUID]:
     user_id = await _seed_user(session)
     store = InMemoryObjectStorage()
     svc = FactoryService(session, storage=store)
     job = await svc.create_openapi_analyze_job(
         actor_user_id=user_id,
-        source_bytes=MINIMAL_JSON,
+        source_bytes=source_bytes,
         filename="pets.json",
         idempotency_key=f"job-{uuid.uuid4().hex}",
     )
@@ -137,7 +196,9 @@ async def _approved_review(
 
 @pytest.mark.asyncio
 async def test_publish_approve_happy_path(db_session: AsyncSession) -> None:
-    svc, _store, user_id, review_id = await _approved_review(db_session)
+    svc, _store, user_id, review_id = await _approved_review(
+        db_session, source_bytes=RICH_JSON
+    )
     key = f"pub-{uuid.uuid4().hex}"
     published = await svc.publish_review(
         actor_user_id=user_id,
@@ -157,6 +218,13 @@ async def test_publish_approve_happy_path(db_session: AsyncSession) -> None:
     assert server.endpoint_url is None
     assert isinstance(server.transport_config, dict)
     assert server.transport_config.get("connection_deferred") is True
+
+    with pytest.raises(AppError) as act:
+        await MCPServerService(db_session).activate(server.id)
+    assert act.value.code == "RESOURCE_CONFLICT"
+    with pytest.raises(AppError) as conn:
+        await MCPDiscoveryService(db_session, MagicMock()).connection_test(server.id)
+    assert conn.value.code == "RESOURCE_CONFLICT"
 
     tools = list(
         (
@@ -179,6 +247,18 @@ async def test_publish_approve_happy_path(db_session: AsyncSession) -> None:
         assert version.raw_descriptor.get("path")
         assert "command" not in version.raw_descriptor
         assert "secrets" not in version.raw_descriptor
+        assert isinstance(version.input_schema, dict)
+        props, required = _validate_input_schema(version.input_schema)
+        assert "petId" in props
+        assert "q" in props
+        assert "verbose" in props
+        assert "body" in props
+        assert "petId" in required
+        assert "q" in required
+        assert "body" in required
+        assert "verbose" not in required
+        assert isinstance(version.raw_descriptor.get("parameters"), list)
+        assert version.raw_descriptor.get("request_schema") is not None
 
     package = await db_session.get(
         ToolFactoryGeneratedPackage, published.result.generated_package_id
@@ -199,11 +279,19 @@ async def test_publish_approve_happy_path(db_session: AsyncSession) -> None:
     by_review = await svc.get_publish_for_review(user_id, review_id)
     assert by_review.id == published.result.id
 
-    # No activation / discovery side effects.
-    discoveries = (
+    # No activation / discovery / connection-check side effects.
+    servers = (
         await db_session.execute(select(func.count()).select_from(MCPServer))
     ).scalar_one()
-    assert int(discoveries) == 1
+    assert int(servers) == 1
+    discoveries = (
+        await db_session.execute(select(func.count()).select_from(MCPServerDiscovery))
+    ).scalar_one()
+    checks = (
+        await db_session.execute(select(func.count()).select_from(MCPServerCheck))
+    ).scalar_one()
+    assert int(discoveries) == 0
+    assert int(checks) == 0
 
 
 @pytest.mark.asyncio
