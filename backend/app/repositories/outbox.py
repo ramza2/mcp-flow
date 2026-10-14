@@ -123,6 +123,30 @@ class OutboxRepository:
         await self._session.flush()
         return row
 
+    async def create_factory_test_run_dispatch(
+        self,
+        *,
+        test_run_id: uuid.UUID,
+        created_at: datetime,
+    ) -> OutboxEvent:
+        row = OutboxEvent(
+            id=uuid.uuid4(),
+            event_type="FACTORY_TEST_RUN_DISPATCH",
+            aggregate_type="TOOL_FACTORY_TEST_RUN",
+            aggregate_id=test_run_id,
+            dedupe_key=f"factory_test_run:{test_run_id}:sandbox_test",
+            payload={"test_run_id": str(test_run_id)},
+            created_at=created_at,
+            last_attempt_at=None,
+            published_at=None,
+            publish_attempt_count=0,
+            last_error_code=None,
+            lock_version=1,
+        )
+        self._session.add(row)
+        await self._session.flush()
+        return row
+
     async def claim_unpublished_batch(self, *, limit: int) -> list[OutboxEvent]:
         stmt = (
             select(OutboxEvent)

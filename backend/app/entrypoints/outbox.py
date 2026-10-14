@@ -33,6 +33,9 @@ class OutboxIterationResult:
     factory_recovery_selected: int
     factory_recovery_published: int
     factory_recovery_failed: int
+    factory_test_recovery_selected: int
+    factory_test_recovery_published: int
+    factory_test_recovery_failed: int
 
 
 async def run_iteration(*, settings: Settings | None = None) -> OutboxIterationResult:
@@ -115,6 +118,38 @@ async def run_iteration(*, settings: Settings | None = None) -> OutboxIterationR
                 exc_info=True,
             )
 
+    factory_test_recovery_selected = 0
+    factory_test_recovery_published = 0
+    factory_test_recovery_failed = 0
+    async with session_scope() as session:
+        factory_recovery = FactoryRecoveryService(session)
+        expired_test_runs = await factory_recovery.list_expired_running_test_run_ids(
+            limit=cfg.outbox_batch_size
+        )
+        stale_test_runs = await factory_recovery.list_stale_queued_test_run_ids(
+            limit=cfg.outbox_batch_size,
+            min_age_seconds=cfg.factory_queued_republish_age_seconds,
+        )
+        seen_tests: set[uuid.UUID] = set()
+        test_run_ids: list[uuid.UUID] = []
+        for test_run_id in (*expired_test_runs, *stale_test_runs):
+            if test_run_id in seen_tests:
+                continue
+            seen_tests.add(test_run_id)
+            test_run_ids.append(test_run_id)
+        factory_test_recovery_selected = len(test_run_ids)
+    for test_run_id in test_run_ids:
+        try:
+            publisher.publish_factory_test_run_recovery(test_run_id=test_run_id)
+            factory_test_recovery_published += 1
+        except Exception:
+            factory_test_recovery_failed += 1
+            logger.warning(
+                "factory test-run recovery publish failed test_run_id=%s",
+                test_run_id,
+                exc_info=True,
+            )
+
     return OutboxIterationResult(
         staged=staged,
         selected=result.selected,
@@ -128,6 +163,9 @@ async def run_iteration(*, settings: Settings | None = None) -> OutboxIterationR
         factory_recovery_selected=factory_recovery_selected,
         factory_recovery_published=factory_recovery_published,
         factory_recovery_failed=factory_recovery_failed,
+        factory_test_recovery_selected=factory_test_recovery_selected,
+        factory_test_recovery_published=factory_test_recovery_published,
+        factory_test_recovery_failed=factory_test_recovery_failed,
     )
 
 
@@ -152,8 +190,10 @@ async def _run() -> None:
             # failed recovery publish is rediscovered on the next poll.
             # Expired PENDING ApprovalRequests are terminalized by expire_due_batch
             # in the same iteration (no separate scheduler).
-            # Factory: unpublished FACTORY_JOB_DISPATCH is relayed; expired RUNNING /
-            # stale QUEUED Jobs are republished via publish_factory_recovery.
+            # Factory: unpublished FACTORY_JOB_DISPATCH / FACTORY_TEST_RUN_DISPATCH
+            # is relayed; expired RUNNING / stale QUEUED Jobs and TestRuns are
+            # republished via publish_factory_recovery /
+            # publish_factory_test_run_recovery.
             result = await run_iteration(settings=settings)
             if (
                 result.staged
@@ -161,13 +201,17 @@ async def _run() -> None:
                 or result.recovery_selected
                 or result.approval_expiry_selected
                 or result.factory_recovery_selected
+                or result.factory_test_recovery_selected
             ):
                 logger.info(
                     "outbox iteration staged=%s selected=%s published=%s failed=%s"
                     " recovery_selected=%s recovery_published=%s recovery_failed=%s"
                     " approval_expiry_selected=%s approval_expiry_expired=%s"
                     " factory_recovery_selected=%s factory_recovery_published=%s"
-                    " factory_recovery_failed=%s",
+                    " factory_recovery_failed=%s"
+                    " factory_test_recovery_selected=%s"
+                    " factory_test_recovery_published=%s"
+                    " factory_test_recovery_failed=%s",
                     result.staged,
                     result.selected,
                     result.published,
@@ -180,6 +224,9 @@ async def _run() -> None:
                     result.factory_recovery_selected,
                     result.factory_recovery_published,
                     result.factory_recovery_failed,
+                    result.factory_test_recovery_selected,
+                    result.factory_test_recovery_published,
+                    result.factory_test_recovery_failed,
                 )
             try:
                 await asyncio.wait_for(

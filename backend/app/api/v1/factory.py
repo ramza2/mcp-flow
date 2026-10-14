@@ -1,4 +1,4 @@
-"""Tool Factory Job + Candidate Tool + Build + Generated Package API (docs/06)."""
+"""Tool Factory Job + Candidate + Build + Package + TestRun API (docs/06)."""
 
 from __future__ import annotations
 
@@ -21,6 +21,8 @@ from app.schemas.factory import (
     FactoryJobDetailResponse,
     FactoryJobListResponse,
     FactoryJobResponse,
+    FactoryTestRunListResponse,
+    FactoryTestRunResponse,
 )
 from app.services.factory import FactoryService
 
@@ -249,3 +251,57 @@ async def get_factory_generated_package(
         principal.user_id,
         artifact_id,
     )
+
+
+@router.post(
+    "/artifacts/{package_id}/tests",
+    response_model=FactoryTestRunResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_factory_test_run(
+    package_id: uuid.UUID,
+    response: Response,
+    session: DbSessionDep,
+    principal: CurrentPrincipalDep,
+    idempotency_key: Annotated[str, Header(alias="Idempotency-Key")],
+) -> FactoryTestRunResponse:
+    outcome = await _service(session).create_test_run(
+        actor_user_id=principal.user_id,
+        package_id=package_id,
+        idempotency_key=idempotency_key,
+    )
+    response.status_code = outcome.http_status
+    return outcome.result
+
+
+@router.get(
+    "/artifacts/{package_id}/tests",
+    response_model=FactoryTestRunListResponse,
+)
+async def list_factory_package_test_runs(
+    package_id: uuid.UUID,
+    session: DbSessionDep,
+    principal: CurrentPrincipalDep,
+    page: Annotated[int, Query(ge=1)] = 1,
+    page_size: Annotated[int, Query(ge=1, le=100)] = 20,
+    sort: Annotated[str, Query()] = "-created_at",
+) -> FactoryTestRunListResponse:
+    return await _service(session).list_test_runs_for_package(
+        principal.user_id,
+        package_id,
+        page=page,
+        page_size=page_size,
+        sort=sort,
+    )
+
+
+@router.get(
+    "/test-runs/{test_run_id}",
+    response_model=FactoryTestRunResponse,
+)
+async def get_factory_test_run(
+    test_run_id: uuid.UUID,
+    session: DbSessionDep,
+    principal: CurrentPrincipalDep,
+) -> FactoryTestRunResponse:
+    return await _service(session).get_test_run(principal.user_id, test_run_id)

@@ -12,6 +12,7 @@ from app.infrastructure.celery_app import celery_app
 logger = logging.getLogger(__name__)
 
 FACTORY_ANALYZE_TASK = "mcpflow.factory.analyze_openapi"
+FACTORY_SANDBOX_TEST_TASK = "mcpflow.factory.run_sandbox_test"
 FACTORY_QUEUE = "factory"
 
 

@@ -61,6 +61,7 @@ async def test_factory_schema_constraints(
             "tool_factory_builds",
             "tool_factory_generated_packages",
             "tool_factory_test_results",
+            "tool_factory_test_runs",
         ):
             exists = (
                 await session.execute(
@@ -139,8 +140,43 @@ async def test_factory_schema_constraints(
             "ix_tool_factory_artifacts_job_id",
             "ix_tool_factory_test_results_job_id",
             "uq_tool_factory_artifacts_job_artifact_type",
+            "ix_tool_factory_test_runs_generated_package_id",
+            "ix_tool_factory_test_runs_status_lease_expires_at",
+            "uq_tool_factory_test_runs_package_policies",
         ):
             assert required in indexes
+
+        test_run_checks = (
+            await session.execute(
+                text(
+                    """
+                    SELECT conname, pg_get_constraintdef(oid)
+                    FROM pg_constraint
+                    WHERE conrelid = 'tool_factory_test_runs'::regclass
+                      AND contype = 'c'
+                    """
+                )
+            )
+        ).all()
+        test_run_check_map = {row[0]: row[1] for row in test_run_checks}
+        status_def = _check_constraint_definition(
+            test_run_check_map, "ck_tool_factory_test_runs_status"
+        )
+        for value in (
+            "PENDING",
+            "QUEUED",
+            "RUNNING",
+            "SUCCEEDED",
+            "FAILED",
+            "CANCELLED",
+            "TIMED_OUT",
+        ):
+            assert value in status_def
+        result_def = _check_constraint_definition(
+            test_run_check_map, "ck_tool_factory_test_runs_result"
+        )
+        assert "PASS" in result_def
+        assert "FAIL" in result_def
 
 
 async def _seed_user_job(

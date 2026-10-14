@@ -468,6 +468,151 @@ class ToolFactoryGeneratedPackage(Base):
     )
 
 
+class ToolFactoryTestRun(Base):
+    """Durable sandbox Security/Contract TestRun for a Generated Package.
+
+    Factory-local async evidence. Not an MCPTool / MCPServer. Never executes
+    package code; validates declarative integrity/contracts only.
+    """
+
+    __tablename__ = "tool_factory_test_runs"
+    __table_args__ = (
+        UniqueConstraint(
+            "generated_package_id",
+            "security_policy_version",
+            "contract_policy_version",
+            name="uq_tool_factory_test_runs_package_policies",
+        ),
+        CheckConstraint(
+            "status IN ("
+            "'PENDING', 'QUEUED', 'RUNNING', 'SUCCEEDED', 'FAILED', "
+            "'CANCELLED', 'TIMED_OUT')",
+            name="ck_tool_factory_test_runs_status",
+        ),
+        CheckConstraint(
+            "result IS NULL OR result IN ('PASS', 'FAIL')",
+            name="ck_tool_factory_test_runs_result",
+        ),
+        CheckConstraint(
+            "length(package_content_sha256) = 64",
+            name="ck_tool_factory_test_runs_package_sha_len",
+        ),
+        CheckConstraint(
+            "length(source_sha256) = 64",
+            name="ck_tool_factory_test_runs_source_sha_len",
+        ),
+        CheckConstraint(
+            "length(build_input_hash) = 64",
+            name="ck_tool_factory_test_runs_build_input_hash_len",
+        ),
+        CheckConstraint(
+            "evidence_hash IS NULL OR length(evidence_hash) = 64",
+            name="ck_tool_factory_test_runs_evidence_hash_len",
+        ),
+        CheckConstraint(
+            "length(trim(generator_version)) > 0",
+            name="ck_tool_factory_test_runs_generator_version_ne",
+        ),
+        CheckConstraint(
+            "length(trim(security_policy_version)) > 0",
+            name="ck_tool_factory_test_runs_security_policy_ne",
+        ),
+        CheckConstraint(
+            "length(trim(contract_policy_version)) > 0",
+            name="ck_tool_factory_test_runs_contract_policy_ne",
+        ),
+        CheckConstraint(
+            "lock_version >= 1",
+            name="ck_tool_factory_test_runs_lock_version",
+        ),
+        Index("ix_tool_factory_test_runs_generated_package_id", "generated_package_id"),
+        Index(
+            "ix_tool_factory_test_runs_status_lease_expires_at",
+            "status",
+            "lease_expires_at",
+        ),
+        Index(
+            "ix_tool_factory_test_runs_requested_by_created_at",
+            "requested_by",
+            "created_at",
+        ),
+        Index("ix_tool_factory_test_runs_created_at", "created_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    generated_package_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("tool_factory_generated_packages.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    build_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("tool_factory_builds.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    job_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("tool_factory_jobs.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    analysis_artifact_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("tool_factory_artifacts.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    package_content_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    generator_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    package_schema_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    source_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    analyzer_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    build_input_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    security_policy_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    contract_policy_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    result: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    security_result: Mapped[dict[str, Any] | None] = mapped_column(
+        JSONB(none_as_null=True), nullable=True
+    )
+    contract_result: Mapped[dict[str, Any] | None] = mapped_column(
+        JSONB(none_as_null=True), nullable=True
+    )
+    evidence: Mapped[dict[str, Any] | None] = mapped_column(
+        JSONB(none_as_null=True), nullable=True
+    )
+    evidence_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    error_code: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    requested_by: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    queued_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    worker_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    lease_token: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), nullable=True
+    )
+    lease_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    lock_version: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=1, server_default="1"
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+
 class ToolFactoryTestResult(Base):
     """Forward-compatible evidence table — unused by OpenAPI analysis in this slice."""
 

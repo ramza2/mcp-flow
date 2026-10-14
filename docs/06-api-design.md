@@ -1393,6 +1393,25 @@ GET  /factory/builds/{build_id}
 - Does **not** exec/import Python, install deps, build Docker images, start MCP,
   or create `MCPTool` / `MCPServer`
 
+### Sandbox Security/Contract TestRuns (foundation)
+
+- `POST /factory/artifacts/{package_id}/tests` — enqueue durable sandbox
+  TestRun for a Generated Package + required `Idempotency-Key`
+  (`FACTORY_TEST_RUN_CREATE_V1`); same TX creates `QUEUED` TestRun +
+  `FACTORY_TEST_RUN_DISPATCH` Outbox; unique
+  `(generated_package_id, security_policy_version, contract_policy_version)`
+- `GET /factory/artifacts/{package_id}/tests` — paged TestRuns for a package
+- `GET /factory/test-runs/{test_run_id}` — TestRun detail with safe projections
+  (`status`, optional `result`, `security_result`, `contract_result`,
+  `evidence_hash`, safe error fields); never exposes Object Storage keys,
+  raw package bytes, or internal lease/worker fencing fields as credentials
+- Auth: `mcp.server.manage` create; `mcp.server.read` list/detail; ACTIVE user
+- factory-worker runs versioned security (`factory-security-policy-v1`) then
+  contract (`factory-contract-policy-v1`) after Object Storage size/hash/lineage
+  revalidation; declarative only — no package exec/import/subprocess/deps/
+  Docker/network/MCP startup
+- Does **not** Publish/Import or create `MCPTool` / `MCPServer`
+
 ### Aspirational (not implemented by this slice)
 
 ```text
@@ -1402,12 +1421,12 @@ GET  /factory/projects/{project_id}
 POST /factory/projects/{project_id}/sources
 POST /factory/projects/{project_id}/analyze
 POST /factory/projects/{project_id}/builds   # project-scoped create remains aspirational
-POST /factory/builds/{build_id}/tests
+POST /factory/builds/{build_id}/tests       # superseded by artifact-scoped tests above
 POST /factory/builds/{build_id}/publish
 POST /factory/builds/{build_id}/rollback
 ```
 
-Python source를 API/일반 Worker process에서 직접 import/exec하지 않는다.
+Python/package source를 API process에서 직접 import/exec하지 않는다.
 Generic product-wide `/jobs` API is also not implemented here.
 
 ---

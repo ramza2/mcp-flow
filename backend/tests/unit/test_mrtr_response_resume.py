@@ -484,6 +484,9 @@ async def test_outbox_relay_publishes_mrtr_resume(
         def publish_factory_job(self, **_k: Any) -> None:
             raise AssertionError("factory dispatch unexpected")
 
+        def publish_factory_test_run(self, **_k: Any) -> None:
+            raise AssertionError("factory test-run unexpected")
+
     async with db_session_factory() as session:
         await MrtrResponseService(session).submit_response(
             execution_id=execution_id,

@@ -44,6 +44,7 @@ class RecordingOutboxPublisher:
     def __init__(self, *, fail: bool = False) -> None:
         self.fail = fail
         self.factory_calls: list[tuple[uuid.UUID, uuid.UUID]] = []
+        self.factory_test_calls: list[tuple[uuid.UUID, uuid.UUID]] = []
         self.recovery_calls: list[uuid.UUID] = []
 
     def publish_execution(self, **_kwargs: Any) -> None:
@@ -64,6 +65,16 @@ class RecordingOutboxPublisher:
         if self.fail:
             raise ConnectionError("broker unavailable")
         self.factory_calls.append((job_id, outbox_event_id))
+
+    def publish_factory_test_run(
+        self,
+        *,
+        test_run_id: uuid.UUID,
+        outbox_event_id: uuid.UUID,
+    ) -> None:
+        if self.fail:
+            raise ConnectionError("broker unavailable")
+        self.factory_test_calls.append((test_run_id, outbox_event_id))
 
     def publish_factory_recovery(self, *, job_id: uuid.UUID) -> None:
         if self.fail:

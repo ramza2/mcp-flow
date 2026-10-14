@@ -160,6 +160,37 @@ class CeleryExecutionQueuePublisher:
                 retry_policy=celery_app.conf.task_publish_retry_policy,
             )
 
+    def publish_factory_test_run(
+        self,
+        *,
+        test_run_id: uuid.UUID,
+        outbox_event_id: uuid.UUID,
+    ) -> None:
+        """Publish ID-only Factory sandbox TestRun delivery; DB claim is SoT."""
+
+        settings = get_settings()
+        transport_options = {
+            "socket_connect_timeout": settings.celery_publish_connect_timeout,
+            "socket_timeout": settings.celery_publish_socket_timeout,
+            "max_retries": settings.celery_publish_max_retries,
+        }
+        with celery_app.connection_for_write(
+            connect_timeout=settings.celery_publish_connect_timeout,
+            transport_options=transport_options,
+        ) as connection:
+            celery_app.send_task(
+                "mcpflow.factory.run_sandbox_test",
+                kwargs={
+                    "test_run_id": str(test_run_id),
+                    "outbox_event_id": str(outbox_event_id),
+                },
+                queue="factory",
+                task_id=str(outbox_event_id),
+                connection=connection,
+                retry=True,
+                retry_policy=celery_app.conf.task_publish_retry_policy,
+            )
+
     def publish_factory_recovery(self, *, job_id: uuid.UUID) -> None:
         """Republish Factory analyze for stale QUEUED / expired RUNNING Jobs.
 
@@ -180,6 +211,32 @@ class CeleryExecutionQueuePublisher:
             celery_app.send_task(
                 "mcpflow.factory.analyze_openapi",
                 kwargs={"job_id": str(job_id)},
+                queue="factory",
+                connection=connection,
+                retry=True,
+                retry_policy=celery_app.conf.task_publish_retry_policy,
+            )
+
+    def publish_factory_test_run_recovery(self, *, test_run_id: uuid.UUID) -> None:
+        """Republish sandbox TestRun for stale QUEUED / expired RUNNING rows.
+
+        TestRun status remains durable in PostgreSQL; failed publish is safe —
+        the next outbox poll rediscovers the same eligible TestRun.
+        """
+
+        settings = get_settings()
+        transport_options = {
+            "socket_connect_timeout": settings.celery_publish_connect_timeout,
+            "socket_timeout": settings.celery_publish_socket_timeout,
+            "max_retries": settings.celery_publish_max_retries,
+        }
+        with celery_app.connection_for_write(
+            connect_timeout=settings.celery_publish_connect_timeout,
+            transport_options=transport_options,
+        ) as connection:
+            celery_app.send_task(
+                "mcpflow.factory.run_sandbox_test",
+                kwargs={"test_run_id": str(test_run_id)},
                 queue="factory",
                 connection=connection,
                 retry=True,

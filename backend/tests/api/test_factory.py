@@ -656,3 +656,83 @@ async def test_generate_package_list_detail(
     assert detail.status_code == 200
     assert detail.json()["package_content_sha256"] == body["package_content_sha256"]
     assert len(detail.json()["tools"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_sandbox_test_run_create_list_detail(
+    factory_client: AsyncClient,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from app.services.factory_test_worker import FactoryTestWorkerService
+
+    created = await factory_client.post(
+        f"{API}/jobs",
+        files={"source": ("pets.json", MULTI_OP_JSON, "application/json")},
+        headers={"Idempotency-Key": f"k-tr-{uuid.uuid4().hex}"},
+    )
+    assert created.status_code == 201
+    job_id = created.json()["id"]
+    await _process_job(db_session_factory, uuid.UUID(job_id))
+
+    cands = await factory_client.get(f"{API}/jobs/{job_id}/candidates")
+    cand_ids = [item["id"] for item in cands.json()["items"]]
+    build_resp = await factory_client.post(
+        f"{API}/jobs/{job_id}/builds",
+        json={"candidate_ids": cand_ids},
+        headers={"Idempotency-Key": f"build-tr-{uuid.uuid4().hex}"},
+    )
+    assert build_resp.status_code == 201
+    build_id = build_resp.json()["id"]
+
+    pkg = await factory_client.post(
+        f"{API}/builds/{build_id}/generate",
+        headers={"Idempotency-Key": f"gen-tr-{uuid.uuid4().hex}"},
+    )
+    assert pkg.status_code == 201
+    package_id = pkg.json()["id"]
+
+    key = f"test-{uuid.uuid4().hex}"
+    first = await factory_client.post(
+        f"{API}/artifacts/{package_id}/tests",
+        headers={"Idempotency-Key": key},
+    )
+    assert first.status_code == 201, first.text
+    body = first.json()
+    assert body["status"] == "QUEUED"
+    assert body["generated_package_id"] == package_id
+    assert body["security_policy_version"] == "factory-security-policy-v1"
+    assert body["contract_policy_version"] == "factory-contract-policy-v1"
+    assert body["result"] is None
+    assert "object_key" not in first.text
+    assert "object_bucket" not in first.text
+    assert "evidence" not in body or body.get("evidence") is None
+
+    replay = await factory_client.post(
+        f"{API}/artifacts/{package_id}/tests",
+        headers={"Idempotency-Key": key},
+    )
+    assert replay.status_code == 201
+    assert replay.json()["id"] == body["id"]
+
+    storage = get_object_storage()
+    async with db_session_factory() as session:
+        worker = FactoryTestWorkerService(
+            session, storage=storage, worker_id="api-test"
+        )
+        outcome = await worker.process_test_run(test_run_id=uuid.UUID(body["id"]))
+        await session.commit()
+        assert outcome.status == "SUCCEEDED"
+
+    detail = await factory_client.get(f"{API}/test-runs/{body['id']}")
+    assert detail.status_code == 200
+    assert detail.json()["status"] == "SUCCEEDED"
+    assert detail.json()["result"] == "PASS"
+    assert detail.json()["evidence_hash"]
+    assert detail.json()["security_result"]["passed"] is True
+    assert detail.json()["contract_result"]["passed"] is True
+    assert "object_key" not in detail.text
+
+    listed = await factory_client.get(f"{API}/artifacts/{package_id}/tests")
+    assert listed.status_code == 200
+    assert listed.json()["total"] == 1
+    assert listed.json()["items"][0]["id"] == body["id"]

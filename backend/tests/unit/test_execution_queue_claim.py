@@ -67,6 +67,16 @@ class FakePublisher:
         if self.fail:
             raise ConnectionError("broker unavailable")
 
+    def publish_factory_test_run(
+        self,
+        *,
+        test_run_id: uuid.UUID,
+        outbox_event_id: uuid.UUID,
+    ) -> None:
+        self.calls.append((test_run_id, outbox_event_id))
+        if self.fail:
+            raise ConnectionError("broker unavailable")
+
 
 async def _created_execution(session: AsyncSession) -> tuple[uuid.UUID, str]:
     seeded = await _seed_ready(session)

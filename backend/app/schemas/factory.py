@@ -204,3 +204,43 @@ class FactoryGeneratedPackageResponse(BaseModel):
 class FactoryGeneratedPackageListResponse(Page):
     items: list[FactoryGeneratedPackageResponse]
     build_id: uuid.UUID
+
+
+FactoryTestRunResult = Literal["PASS", "FAIL"]
+
+
+class FactoryTestRunResponse(BaseModel):
+    """Safe sandbox TestRun projection (no Object Storage keys/secrets)."""
+
+    model_config = ConfigDict(extra="forbid", from_attributes=True)
+
+    id: uuid.UUID
+    generated_package_id: uuid.UUID
+    build_id: uuid.UUID
+    job_id: uuid.UUID
+    analysis_artifact_id: uuid.UUID
+    package_content_sha256: str
+    generator_version: str
+    package_schema_version: str
+    source_sha256: str
+    analyzer_version: str
+    build_input_hash: str
+    security_policy_version: str
+    contract_policy_version: str
+    status: JobStatus
+    result: FactoryTestRunResult | None = None
+    security_result: dict[str, Any] | None = None
+    contract_result: dict[str, Any] | None = None
+    evidence_hash: str | None = None
+    error_code: str | None = None
+    error_message: str | None = None
+    requested_by: uuid.UUID
+    created_at: datetime
+    queued_at: datetime | None = None
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+
+
+class FactoryTestRunListResponse(Page):
+    items: list[FactoryTestRunResponse]
+    generated_package_id: uuid.UUID

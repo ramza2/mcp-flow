@@ -1190,14 +1190,41 @@ GET  /api/v1/factory/artifacts/{artifact_id}
   `FACTORY_PACKAGE_GENERATE_V1`; resource_type `TOOL_FACTORY_GENERATED_PACKAGE`
 - Safe responses never expose Object Storage keys/credentials or raw OpenAPI
 
+### Tool Factory sandbox Security/Contract Test foundation (implemented slice)
+
+Durable async TestRun for an existing Generated Package. Validates Object
+Storage integrity + declarative package security/contract only. Does **not**
+execute package code, start MCP, Publish/Import, or create MCPTool/MCPServer.
+
+```text
+POST /api/v1/factory/artifacts/{package_id}/tests
+GET  /api/v1/factory/artifacts/{package_id}/tests
+GET  /api/v1/factory/test-runs/{test_run_id}
+```
+
+- Auth: `mcp.server.manage` (create), `mcp.server.read` (list/detail); ACTIVE user
+- Flow: `POST` → durable `QUEUED` TestRun + `FACTORY_TEST_RUN_DISPATCH` Outbox
+  (same TX) → factory-worker → Object Storage reload → size/hash/lineage →
+  versioned security (`factory-security-policy-v1`) → versioned contract
+  (`factory-contract-policy-v1`) → terminal structured evidence
+- Unique `(generated_package_id, security_policy_version, contract_policy_version)`;
+  Idempotency scope `FACTORY_TEST_RUN_CREATE_V1`; resource_type
+  `TOOL_FACTORY_TEST_RUN`
+- Worker revalidates Object Storage size/hash and embedded package lineage
+  against DB evidence; missing/corrupt/hash/lineage mismatch → durable `FAILED`
+  with safe `error_code` / `error_message` + `evidence_hash`
+- Valid declarative package → `result=PASS` / `status=SUCCEEDED`
+- API responses expose safe projections only (no Object Storage keys, no raw
+  evidence blob secrets, no package exec)
+
 **Not implemented yet:**
 
 - allowlisted URL source fetch
 - generic `/jobs` API
-- sandbox build/test / executable MCP code / Docker image
-- Python source analysis / dependency install / subprocess
-- Security/Contract Test / Publish / DRAFT MCP Server creation
-- Connection Test / Discovery / activation
+- executable MCP code / Docker image / Python import/exec / dependency install
+- subprocess / host process / Docker-in-Docker / external network from package
+- real MCP server startup / Discovery / Tool test call
+- Publish / Import / DRAFT MCP Server creation / activation
 - version/archive/restore
 - frontend real API wiring
 - aspirational `/factory/projects` routes and build tests/publish/rollback
@@ -1205,12 +1232,15 @@ GET  /api/v1/factory/artifacts/{artifact_id}
 ## FNC-FAC-002. 생성
 
 선택 operation을 Tool로 생성하고 credential은 Secret reference placeholder로만 표현한다.
-(현재 slice는 Build snapshot + declarative Generated Package artifact foundation만
-수행하며 sandbox/executable codegen은 후속.)
+(현재 slice는 Build snapshot + declarative Generated Package artifact + sandbox
+Security/Contract Test foundation까지 수행하며 executable codegen/Publish는 후속.)
 
 ## FNC-FAC-003. Sandbox Build/Test
 
-Core API/Worker에서 source를 직접 `exec/import`하지 않는다. 별도 `factory-worker`의 제한된 환경에서 build/test한다.
+Core API process에서 package code를 `exec/import`하거나 subprocess/dependency
+install/Docker을 수행하지 않는다. Security/Contract는 `factory-worker`의
+declarative validation path로 실행한다 (현재 slice는 executable MCP sandbox가
+아니라 integrity/contract evidence만 생성한다).
 
 ## FNC-FAC-004. 검증/배포 승인
 
