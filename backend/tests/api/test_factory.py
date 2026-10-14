@@ -714,8 +714,11 @@ async def test_sandbox_test_run_create_list_detail(
     assert replay.status_code == 201
     assert replay.json()["id"] == body["id"]
 
+    storage = get_object_storage()
     async with db_session_factory() as session:
-        worker = FactoryTestWorkerService(session, worker_id="api-test")
+        worker = FactoryTestWorkerService(
+            session, storage=storage, worker_id="api-test"
+        )
         outcome = await worker.process_test_run(test_run_id=uuid.UUID(body["id"]))
         await session.commit()
         assert outcome.status == "SUCCEEDED"

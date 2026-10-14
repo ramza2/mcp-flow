@@ -7,14 +7,12 @@ import json
 import uuid
 
 import pytest
-from app.core.canonical_hash import (
-    compute_canonical_json_hash,
-    encode_canonical_json_bytes,
-)
+from app.core.canonical_hash import compute_canonical_json_hash
 from app.factory.package_generator import (
     FACTORY_PACKAGE_GENERATOR_VERSION,
     PACKAGE_KIND,
     PACKAGE_SCHEMA_VERSION,
+    encode_canonical_json_bytes,
 )
 from app.factory.sandbox_contract import (
     FACTORY_CONTRACT_POLICY_VERSION,

@@ -7,7 +7,6 @@ import uuid
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from app.core.canonical_hash import encode_canonical_json_bytes
 from app.core.errors import AppError
 from app.domain.enums import JobStatus, UserStatus
 from app.factory import (
@@ -15,6 +14,7 @@ from app.factory import (
     FACTORY_SECURITY_POLICY_VERSION,
 )
 from app.factory.errors import FACTORY_SOURCE_OBJECT_MISSING
+from app.factory.package_generator import encode_canonical_json_bytes
 from app.infrastructure.object_storage import InMemoryObjectStorage
 from app.models.factory import ToolFactoryGeneratedPackage, ToolFactoryTestRun
 from app.models.mcp import MCPServer, MCPTool
