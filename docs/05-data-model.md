@@ -2037,8 +2037,11 @@ Factory-imported `mcp_servers.transport_config` retains lineage
 (`factory_publish`, `source=TOOL_FACTORY_PUBLISH`, publish/review ids) and
 `connection_deferred`. After a valid endpoint is persisted via
 `MCPServerService.update`, `connection_deferred` is set `false` (lineage keys
-kept). Connection Test evidence remains `mcp_server_checks` only. Factory
-Activate requires latest check `SUCCEEDED`; Discovery remains a later slice.
+kept). Connection Test evidence remains `mcp_server_checks` only; success also
+stores `connection_test_verified_fingerprint` on `transport_config`. Factory
+Activate requires that fingerprint to match the current connection-relevant
+config (transport/endpoint/auth/timeouts) and the latest check `SUCCEEDED`;
+historical checks are retained. Discovery remains a later slice.
 
 Do not duplicate product-wide `JobStatus` with Factory-local analysis issue
 severities. Product-wide `object_blobs` catalog is still deferred; Factory
