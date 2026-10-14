@@ -36,10 +36,19 @@ from app.models.mcp import MCPServer, MCPServerCheck, MCPServerDiscovery, MCPToo
 from app.repositories.mcp_discovery import MCPDiscoveryRepository
 from app.repositories.mcp_server import MCPServerRepository
 from app.repositories.mcp_tool import MCPToolRepository
+from app.factory.discovery_reconcile import (
+    FactoryReconcilePlan,
+    build_factory_reconcile_plan,
+    extract_factory_lineage_annotations,
+    factory_diff_as_generic_counts,
+    index_remote_tools_strict,
+)
 from app.schemas.mcp_server import (
     ConnectionTestResponse,
     DiscoveryDiffSummary,
     DiscoveryResponse,
+    FactoryDiscoveryClassification,
+    FactoryDiscoveryDiffSummary,
 )
 
 
@@ -90,6 +99,40 @@ def _reject_unsupported_transport(config: ServerConfig) -> None:
         )
 
 
+def _factory_diff_to_response(
+    raw: dict[str, Any],
+) -> FactoryDiscoveryDiffSummary | None:
+    factory_raw = raw.get("factory_reconciliation")
+    if not isinstance(factory_raw, dict):
+        return None
+    classifications_raw = factory_raw.get("classifications")
+    classifications: list[FactoryDiscoveryClassification] = []
+    if isinstance(classifications_raw, list):
+        for item in classifications_raw:
+            if not isinstance(item, dict):
+                continue
+            try:
+                classifications.append(FactoryDiscoveryClassification.model_validate(item))
+            except Exception:
+                continue
+    status = factory_raw.get("status") or "MISMATCHED"
+    if status not in {"CLEAN", "MISMATCHED", "AMBIGUOUS"}:
+        status = "MISMATCHED"
+    return FactoryDiscoveryDiffSummary(
+        status=status,  # type: ignore[arg-type]
+        matched=int(factory_raw.get("matched", 0) or 0),
+        missing_expected=int(factory_raw.get("missing_expected", 0) or 0),
+        unexpected_remote=int(factory_raw.get("unexpected_remote", 0) or 0),
+        contract_changed=int(factory_raw.get("contract_changed", 0) or 0),
+        classifications=classifications,
+        error_message=(
+            str(factory_raw["error_message"])
+            if factory_raw.get("error_message") is not None
+            else None
+        ),
+    )
+
+
 def _discovery_to_response(discovery: MCPServerDiscovery) -> DiscoveryResponse:
     raw = discovery.raw_response if isinstance(discovery.raw_response, dict) else {}
     diff_raw = raw.get("diff") if isinstance(raw.get("diff"), dict) else {}
@@ -113,6 +156,7 @@ def _discovery_to_response(discovery: MCPServerDiscovery) -> DiscoveryResponse:
             missing=int(diff_raw.get("missing", 0) or 0),
             unchanged=int(diff_raw.get("unchanged", 0) or 0),
         ),
+        factory_diff=_factory_diff_to_response(raw),
         started_at=discovery.started_at,
         finished_at=discovery.finished_at,
         capabilities=discovery.capabilities,
@@ -363,9 +407,48 @@ class MCPDiscoveryService:
         mode: str = "FULL",
         apply_changes: bool = False,
     ) -> DiscoveryResponse:
+        from app.services.mcp_server import (
+            connection_config_fingerprint,
+            connection_deferred_effective,
+            get_verified_connection_fingerprint,
+            is_factory_imported,
+        )
+
         server = await self._require_server(server_id)
+        factory_server = is_factory_imported(server)
         config = _server_config(server)
         _reject_unsupported_transport(config)
+
+        if factory_server:
+            if connection_deferred_effective(server):
+                raise AppError(
+                    code="RESOURCE_CONFLICT",
+                    message=(
+                        "Cannot Discovery Factory connection_deferred DRAFT MCP "
+                        "Server without endpoint_url. Set a real endpoint and "
+                        "pass Connection Test first."
+                    ),
+                    status_code=status.HTTP_409_CONFLICT,
+                )
+            current_fp = connection_config_fingerprint(
+                transport_type=config.transport_type,
+                endpoint_url=config.endpoint_url,
+                auth_type=config.auth_type,
+                auth_secret_id=config.auth_secret_id,
+                connect_timeout_ms=config.connect_timeout_ms,
+                call_timeout_ms=config.call_timeout_ms,
+            )
+            verified_fp = get_verified_connection_fingerprint(server)
+            if verified_fp is None or verified_fp != current_fp:
+                raise AppError(
+                    code="RESOURCE_CONFLICT",
+                    message=(
+                        "Cannot Discovery Factory-imported MCP Server without a "
+                        "SUCCEEDED Connection Test for the current connection "
+                        "configuration."
+                    ),
+                    status_code=status.HTTP_409_CONFLICT,
+                )
 
         if await self._credential_auth_blocked(config):
             raise AppError(
@@ -437,9 +520,28 @@ class MCPDiscoveryService:
             }
             server = await self._require_server(config.id)
             server.last_error_at = finished
+            if factory_server:
+                from app.services.mcp_server import (
+                    transport_config_clear_discovery_fingerprint,
+                )
+
+                server.transport_config = transport_config_clear_discovery_fingerprint(
+                    server.transport_config
+                )
             await self._session.commit()
             await self._session.refresh(discovery)
             return _discovery_to_response(discovery)
+
+        if factory_server:
+            return await self._discover_factory(
+                config=config,
+                discovery_id=discovery_id,
+                remote_tools=remote_tools,
+                capabilities=capabilities,
+                discovery_mode=str(discovery_mode),
+                mode=mode,
+                apply_changes=apply_changes,
+            )
 
         # Fingerprint remote descriptors outside DB mutation.
         remote_by_name, remote_meta = _build_remote_meta(remote_tools)
@@ -555,6 +657,329 @@ class MCPDiscoveryService:
         await self._session.commit()
         await self._session.refresh(discovery)
         return _discovery_to_response(discovery)
+
+    async def _load_expected_factory_contracts(
+        self, server_id: uuid.UUID
+    ) -> tuple[dict[str, MCPTool], dict[str, dict[str, Any]], str | None]:
+        """Load imported tools + contracts; fail closed on duplicate remote_name."""
+
+        existing_tools, _ = await self._tools.list_tools(
+            mcp_server_id=server_id,
+            page=1,
+            page_size=10_000,
+        )
+        existing_by_name: dict[str, MCPTool] = {}
+        for tool in existing_tools:
+            if tool.remote_name in existing_by_name:
+                return (
+                    {},
+                    {},
+                    f"Duplicate imported tool identity: {tool.remote_name!r}.",
+                )
+            existing_by_name[tool.remote_name] = tool
+
+        expected: dict[str, dict[str, Any]] = {}
+        for name, tool in existing_by_name.items():
+            input_schema = None
+            output_schema = None
+            if tool.current_version_id is not None:
+                version = await self._tools.get_version(tool.current_version_id)
+                if version is not None:
+                    input_schema = version.input_schema
+                    output_schema = version.output_schema
+            expected[name] = {
+                "input_schema": input_schema,
+                "output_schema": output_schema,
+            }
+        return existing_by_name, expected, None
+
+    async def _discover_factory(
+        self,
+        *,
+        config: ServerConfig,
+        discovery_id: uuid.UUID,
+        remote_tools: list[RemoteToolDescriptor],
+        capabilities: dict[str, Any] | None,
+        discovery_mode: str,
+        mode: str,
+        apply_changes: bool,
+    ) -> DiscoveryResponse:
+        from app.services.mcp_server import (
+            connection_config_fingerprint,
+            transport_config_clear_discovery_fingerprint,
+            transport_config_with_discovery_fingerprint,
+        )
+
+        tested_fp = connection_config_fingerprint(
+            transport_type=config.transport_type,
+            endpoint_url=config.endpoint_url,
+            auth_type=config.auth_type,
+            auth_secret_id=config.auth_secret_id,
+            connect_timeout_ms=config.connect_timeout_ms,
+            call_timeout_ms=config.call_timeout_ms,
+        )
+
+        remote_by_name, remote_dup_err = index_remote_tools_strict(remote_tools)
+        if remote_dup_err is not None:
+            plan = FactoryReconcilePlan(
+                status="AMBIGUOUS",
+                entries=[],
+                error_message=remote_dup_err,
+            )
+            return await self._finalize_factory_discovery(
+                config=config,
+                discovery_id=discovery_id,
+                capabilities=capabilities,
+                discovery_mode=discovery_mode,
+                mode=mode,
+                apply_changes=apply_changes,
+                plan=plan,
+                tested_fp=tested_fp,
+                apply_plan=False,
+                remote_by_name={},
+                remote_meta={},
+                existing_by_name={},
+            )
+
+        remote_meta: dict[str, dict[str, Any]] = {}
+        for name, desc in remote_by_name.items():
+            digest = content_hash(desc)
+            validation_status, validation_errors = validate_tool_schemas(
+                desc.input_schema,
+                desc.output_schema,
+            )
+            remote_meta[name] = {
+                "content_hash": digest,
+                "validation_status": str(validation_status),
+                "validation_errors": validation_errors or None,
+            }
+
+        if apply_changes:
+            locked = await self._servers.lock_for_update(config.id)
+            if locked is None:
+                raise AppError(
+                    code="NOT_FOUND",
+                    message="MCP server not found.",
+                    status_code=status.HTTP_404_NOT_FOUND,
+                )
+            existing_by_name, expected, local_dup_err = (
+                await self._load_expected_factory_contracts(config.id)
+            )
+        else:
+            existing_by_name, expected, local_dup_err = (
+                await self._load_expected_factory_contracts(config.id)
+            )
+
+        if local_dup_err is not None:
+            plan = FactoryReconcilePlan(
+                status="AMBIGUOUS",
+                entries=[],
+                error_message=local_dup_err,
+            )
+            return await self._finalize_factory_discovery(
+                config=config,
+                discovery_id=discovery_id,
+                capabilities=capabilities,
+                discovery_mode=discovery_mode,
+                mode=mode,
+                apply_changes=apply_changes,
+                plan=plan,
+                tested_fp=tested_fp,
+                apply_plan=False,
+                remote_by_name=remote_by_name,
+                remote_meta=remote_meta,
+                existing_by_name=existing_by_name,
+            )
+
+        plan = build_factory_reconcile_plan(
+            expected_by_name=expected,
+            remote_by_name=remote_by_name,
+        )
+
+        apply_plan = bool(apply_changes and plan.is_clean)
+        if apply_changes and not plan.is_clean:
+            # Persist evidence + fail closed with zero Tool mutations.
+            response = await self._finalize_factory_discovery(
+                config=config,
+                discovery_id=discovery_id,
+                capabilities=capabilities,
+                discovery_mode=discovery_mode,
+                mode=mode,
+                apply_changes=apply_changes,
+                plan=plan,
+                tested_fp=tested_fp,
+                apply_plan=False,
+                remote_by_name=remote_by_name,
+                remote_meta=remote_meta,
+                existing_by_name=existing_by_name,
+            )
+            raise AppError(
+                code="FACTORY_DISCOVERY_RECONCILE_FAILED",
+                message=(
+                    plan.error_message
+                    or (
+                        "Factory Discovery reconciliation failed; "
+                        "MISSING_EXPECTED / UNEXPECTED_REMOTE / "
+                        "CONTRACT_CHANGED / ambiguity must be resolved "
+                        "before apply_changes."
+                    )
+                ),
+                status_code=status.HTTP_409_CONFLICT,
+            )
+
+        if apply_plan:
+            await self._apply_factory_matched(
+                server_id=config.id,
+                remote_by_name=remote_by_name,
+                remote_meta=remote_meta,
+                existing_by_name=existing_by_name,
+                matched_names=plan.matched_names(),
+            )
+
+        return await self._finalize_factory_discovery(
+            config=config,
+            discovery_id=discovery_id,
+            capabilities=capabilities,
+            discovery_mode=discovery_mode,
+            mode=mode,
+            apply_changes=apply_changes,
+            plan=plan,
+            tested_fp=tested_fp,
+            apply_plan=apply_plan,
+            remote_by_name=remote_by_name,
+            remote_meta=remote_meta,
+            existing_by_name=existing_by_name,
+        )
+
+    async def _finalize_factory_discovery(
+        self,
+        *,
+        config: ServerConfig,
+        discovery_id: uuid.UUID,
+        capabilities: dict[str, Any] | None,
+        discovery_mode: str,
+        mode: str,
+        apply_changes: bool,
+        plan: FactoryReconcilePlan,
+        tested_fp: str,
+        apply_plan: bool,
+        remote_by_name: dict[str, RemoteToolDescriptor],
+        remote_meta: dict[str, dict[str, Any]],
+        existing_by_name: dict[str, MCPTool],
+    ) -> DiscoveryResponse:
+        from app.services.mcp_server import (
+            transport_config_clear_discovery_fingerprint,
+            transport_config_with_discovery_fingerprint,
+        )
+
+        diff_summary = factory_diff_as_generic_counts(plan)
+        factory_raw = plan.to_raw()
+        factory_raw["connection_fingerprint"] = tested_fp
+        tool_summaries = [
+            {
+                "remote_name": e.remote_name,
+                "change": e.classification,
+                "content_hash": remote_meta.get(e.remote_name, {}).get("content_hash"),
+                "validation_status": remote_meta.get(e.remote_name, {}).get(
+                    "validation_status"
+                ),
+            }
+            for e in sorted(plan.entries, key=lambda x: x.remote_name)
+        ]
+
+        negotiated = CURRENT_MCP_PROTOCOL_VERSION
+        finished = datetime.now(UTC)
+        discovery = await self._discoveries.get_discovery(discovery_id)
+        assert discovery is not None
+        clean = plan.is_clean
+        discovery.success = clean
+        discovery.discovery_mode = discovery_mode
+        discovery.selected_version = negotiated
+        discovery.capabilities = capabilities
+        discovery.finished_at = finished
+        if clean:
+            discovery.error_code = None
+            discovery.error_message = None
+        else:
+            discovery.error_code = (
+                "FACTORY_DISCOVERY_AMBIGUOUS"
+                if plan.status == "AMBIGUOUS"
+                else "FACTORY_DISCOVERY_MISMATCH"
+            )
+            discovery.error_message = plan.error_message or (
+                "Factory Discovery reconciliation reported unresolved mismatches."
+            )
+        discovery.raw_response = {
+            "apply_changes": apply_changes,
+            "mode": mode,
+            "diff": diff_summary,
+            "tool_summaries": tool_summaries,
+            "factory_reconciliation": factory_raw,
+            "factory_apply_executed": apply_plan,
+        }
+
+        server = await self._require_server(config.id)
+        server.discovery_mode = discovery_mode
+        server.capabilities = capabilities
+        server.negotiated_protocol_version = negotiated
+        if clean:
+            server.last_healthy_at = finished
+            server.transport_config = transport_config_with_discovery_fingerprint(
+                server.transport_config,
+                fingerprint=tested_fp,
+            )
+        else:
+            server.last_error_at = finished
+            server.transport_config = transport_config_clear_discovery_fingerprint(
+                server.transport_config
+            )
+        await self._session.commit()
+        await self._session.refresh(discovery)
+        return _discovery_to_response(discovery)
+
+    async def _apply_factory_matched(
+        self,
+        *,
+        server_id: uuid.UUID,
+        remote_by_name: dict[str, RemoteToolDescriptor],
+        remote_meta: dict[str, dict[str, Any]],
+        existing_by_name: dict[str, MCPTool],
+        matched_names: list[str],
+    ) -> None:
+        """Reconcile MATCHED tools only; keep INACTIVE; preserve Factory lineage."""
+
+        del server_id  # identity comes from existing tools
+        for name in matched_names:
+            desc = remote_by_name[name]
+            meta = remote_meta[name]
+            tool = existing_by_name[name]
+            prior_annotations: dict[str, Any] | None = None
+            if tool.current_version_id is not None:
+                prior = await self._tools.get_version(tool.current_version_id)
+                if prior is not None and isinstance(prior.annotations, dict):
+                    prior_annotations = prior.annotations
+            lineage = extract_factory_lineage_annotations(prior_annotations)
+            merged_annotations = {
+                **(desc.annotations or {}),
+                **lineage,
+            }
+            stored_desc = RemoteToolDescriptor(
+                name=desc.name,
+                description=desc.description,
+                input_schema=desc.input_schema,
+                output_schema=desc.output_schema,
+                annotations=merged_annotations,
+                raw=desc.raw,
+            )
+            # content_hash identity stays the remote wire hash (meta); annotations
+            # carry Factory lineage without affecting contract matching.
+            version = await self._ensure_version(tool.id, stored_desc, meta)
+            tool.current_version_id = version.id
+            # Never auto-ACTIVE / DISCOVERED; imported Tools stay INACTIVE.
+            if tool.status != MCPToolStatus.INACTIVE:
+                tool.status = MCPToolStatus.INACTIVE
+            await self._tools.touch_last_seen(tool)
+            await self._session.flush()
 
     async def _apply_tool_diff(
         self,

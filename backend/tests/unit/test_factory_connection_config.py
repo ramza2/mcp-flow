@@ -88,6 +88,16 @@ def _healthy_http() -> MagicMock:
     return http
 
 
+async def _connection_test_and_clean_discovery(
+    session: AsyncSession, server_id: uuid.UUID
+) -> None:
+    """Issue #99: Factory Activate also requires CLEAN Discovery evidence."""
+
+    http = _healthy_http()
+    await MCPDiscoveryService(session, http).connection_test(server_id)
+    await MCPDiscoveryService(session, http).discover(server_id, apply_changes=False)
+
+
 def _failing_http() -> MagicMock:
     http = MagicMock()
     http.discover_capabilities = AsyncMock(
@@ -323,7 +333,7 @@ async def test_factory_activate_endpoint_a_success_allowed(
         MCPServerUpdate(endpoint_url="https://mcp.test/a"),
         expected_lock_version=int(before.lock_version),
     )
-    await MCPDiscoveryService(db_session, _healthy_http()).connection_test(server_id)
+    await _connection_test_and_clean_discovery(db_session, server_id)
     after_test = await svc.get(server_id)
     assert after_test.transport_config.get(
         "connection_test_verified_fingerprint"
@@ -335,7 +345,7 @@ async def test_factory_activate_endpoint_a_success_allowed(
     discoveries = (
         await db_session.execute(select(func.count()).select_from(MCPServerDiscovery))
     ).scalar_one()
-    assert int(discoveries) == 0
+    assert int(discoveries) >= 1
 
 
 @pytest.mark.asyncio
@@ -351,7 +361,7 @@ async def test_factory_activate_blocked_after_endpoint_change_without_retest(
         MCPServerUpdate(endpoint_url="https://mcp.test/a"),
         expected_lock_version=int(s.lock_version),
     )
-    await MCPDiscoveryService(db_session, _healthy_http()).connection_test(server_id)
+    await _connection_test_and_clean_discovery(db_session, server_id)
     s = await svc.get(server_id)
     await svc.update(
         server_id,
@@ -383,7 +393,7 @@ async def test_factory_activate_allowed_after_retest_on_endpoint_b(
         MCPServerUpdate(endpoint_url="https://mcp.test/a"),
         expected_lock_version=int(s.lock_version),
     )
-    await MCPDiscoveryService(db_session, _healthy_http()).connection_test(server_id)
+    await _connection_test_and_clean_discovery(db_session, server_id)
     s = await svc.get(server_id)
     s = await svc.update(
         server_id,
@@ -392,7 +402,7 @@ async def test_factory_activate_allowed_after_retest_on_endpoint_b(
     )
     with pytest.raises(AppError):
         await svc.activate(server_id)
-    await MCPDiscoveryService(db_session, _healthy_http()).connection_test(server_id)
+    await _connection_test_and_clean_discovery(db_session, server_id)
     activated = await svc.activate(server_id)
     assert activated.status == MCPServerStatus.ACTIVE.value
 
@@ -410,7 +420,7 @@ async def test_factory_activate_blocked_after_auth_change(
         MCPServerUpdate(endpoint_url="https://mcp.test/a"),
         expected_lock_version=int(s.lock_version),
     )
-    await MCPDiscoveryService(db_session, _healthy_http()).connection_test(server_id)
+    await _connection_test_and_clean_discovery(db_session, server_id)
     s = await svc.get(server_id)
     secret_id = uuid.uuid4()
     await svc.update(
@@ -437,7 +447,7 @@ async def test_factory_activate_name_description_change_keeps_valid_test(
         MCPServerUpdate(endpoint_url="https://mcp.test/a"),
         expected_lock_version=int(s.lock_version),
     )
-    await MCPDiscoveryService(db_session, _healthy_http()).connection_test(server_id)
+    await _connection_test_and_clean_discovery(db_session, server_id)
     s = await svc.get(server_id)
     await svc.update(
         server_id,
@@ -462,13 +472,13 @@ async def test_factory_activate_blocked_when_latest_check_failed(
         MCPServerUpdate(endpoint_url="https://mcp.test/a"),
         expected_lock_version=int(s.lock_version),
     )
-    await MCPDiscoveryService(db_session, _healthy_http()).connection_test(server_id)
+    await _connection_test_and_clean_discovery(db_session, server_id)
     await MCPDiscoveryService(db_session, _failing_http()).connection_test(server_id)
 
     with pytest.raises(AppError) as act:
         await svc.activate(server_id)
     assert act.value.code == "RESOURCE_CONFLICT"
-    # Fingerprint still matches; latest FAILED blocks Activate.
+    # Connection fingerprint still matches; latest FAILED Check blocks Activate.
     server = await svc.get(server_id)
     assert get_verified_connection_fingerprint(server) == (
         connection_config_fingerprint_for_server(server)

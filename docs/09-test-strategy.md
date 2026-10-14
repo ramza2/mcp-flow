@@ -1571,17 +1571,22 @@ boundary (no network, no filesystem, no migration/API):
 - `backend/tests/unit/test_factory_connection_config.py` — Factory deferred
   DRAFT endpoint PATCH (clears `connection_deferred`, preserves lineage);
   invalid/unsafe endpoint + stale `lock_version` rejected; Connection Test
-  blocked while deferred; success → one `MCPServerCheck`, zero Discovery, Tools
-  stay INACTIVE, Server stays DRAFT; failure → DRAFT + Activate blocked;
-  Factory Activate requires latest SUCCEEDED Check; non-Factory Activate
-  without Check still allowed
+  blocked while deferred; fingerprint drift / latest FAILED Check block
+  Activate; non-Factory Activate without Check still allowed
 - `backend/tests/unit/test_mcp_server_deferred_draft.py` — deferred create /
   Activate / Connection Test gates without endpoint
+- `backend/tests/unit/test_factory_discovery_reconcile.py` — Factory Discovery
+  preview classifications (MATCHED / MISSING / UNEXPECTED / CONTRACT_CHANGED /
+  AMBIGUOUS) with mutation 0; apply CLEAN reconcile keeps Tools INACTIVE;
+  apply mismatch → `FACTORY_DISCOVERY_RECONCILE_FAILED` + partial mutation 0;
+  Activate requires Discovery; config drift needs retest+rediscovery;
+  non-Factory discovery apply unchanged
 
-Executable MCP codegen / Docker / Python exec / Discovery reconciliation /
-frontend wiring remain out of scope. Declarative Security/Contract TestRun +
-Review + Publish/Import DRAFT + connection configuration/Connection Test
-foundations are in scope for Issues #91/#93/#95/#97.
+Executable MCP codegen / Docker / Python exec / Tool auto-ACTIVE / frontend
+wiring remain out of scope. Declarative Security/Contract TestRun + Review +
+Publish/Import DRAFT + connection configuration/Connection Test + Factory
+Discovery reconciliation foundations are in scope for Issues
+#91/#93/#95/#97/#99.
 
 ---
 

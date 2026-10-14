@@ -1275,7 +1275,6 @@ MCP Server through the canonical MCP Server API, then run Connection Test:
 ```text
 PATCH /api/v1/mcp/servers/{server_id}              # endpoint_url (+ optional auth_*)
 POST  /api/v1/mcp/servers/{server_id}/connection-tests
-POST  /api/v1/mcp/servers/{server_id}/activate     # Factory: after latest Check SUCCEEDED
 ```
 
 - Uses existing `MCPServerService` / `MCPDiscoveryService` (no repository bypass)
@@ -1284,13 +1283,35 @@ POST  /api/v1/mcp/servers/{server_id}/activate     # Factory: after latest Check
 - On valid endpoint persist: `transport_config.connection_deferred=false` while
   Factory lineage keys (`factory_publish`, `publish_id`, …) are retained
 - Deferred / missing endpoint → Connection Test `RESOURCE_CONFLICT` (no Check)
-- Connection Test persists `MCPServerCheck` only; no Discovery rows, no Tool
-  mutation, no automatic Activate; failures leave Server `DRAFT`
-- Factory-imported Activate requires non-deferred usable endpoint + Connection
-  Test success evidence bound to the current connection-config fingerprint
-  (`transport_config.connection_test_verified_fingerprint`) + latest Check
-  `SUCCEEDED` (Discovery not required in this slice)
-- Non-Factory MCP Server activate/update/test behavior is unchanged
+- Connection Test persists `MCPServerCheck` only; no Tool mutation / auto-Activate
+- Success stores `connection_test_verified_fingerprint` for the tested config
+
+### Tool Factory Discovery validation + reconciliation (implemented slice)
+
+```text
+POST /api/v1/mcp/servers/{server_id}/discoveries   # apply_changes false|true
+POST /api/v1/mcp/servers/{server_id}/activate
+```
+
+- Requires current verified Connection Test fingerprint before Factory Discovery
+- Preview (`apply_changes=false`): real `list_tools`, persist `MCPServerDiscovery`,
+  classify vs imported Tools (`MATCHED` / `MISSING_EXPECTED` /
+  `UNEXPECTED_REMOTE` / `CONTRACT_CHANGED`); Tool/ToolVersion mutation = 0
+- Matching identity: deterministic one-to-one `MCPTool.remote_name` (no fuzzy/LLM);
+  duplicate remote identity → `AMBIGUOUS` fail closed
+- Contract compare: `remote_name` + `input_schema` + `output_schema` hashes;
+  Factory provenance annotations do not force `CONTRACT_CHANGED`
+- Apply (`apply_changes=true`): only when plan is `CLEAN`; reconcile MATCHED Tools
+  only (canonical ToolVersion evidence, lineage preserved, status stays
+  `INACTIVE`); never create UNEXPECTED tools, delete MISSING, overwrite
+  incompatible contracts, or auto-ACTIVE Tools/Server
+- Any mismatch/ambiguity on apply → `FACTORY_DISCOVERY_RECONCILE_FAILED`,
+  partial mutation 0, historical Discovery retained
+- CLEAN success stores `connection_discovery_verified_fingerprint`; mismatch clears it
+- Factory Activate requires: usable non-deferred endpoint + Connection Test
+  fingerprint match + latest Check `SUCCEEDED` + Discovery fingerprint match
+  for the same connection config (no unresolved mismatches)
+- Non-Factory Discovery/Activate behavior unchanged
 
 **Not implemented yet:**
 
@@ -1298,7 +1319,7 @@ POST  /api/v1/mcp/servers/{server_id}/activate     # Factory: after latest Check
 - generic `/jobs` API
 - executable MCP code / Docker image / Python import/exec / dependency install
 - subprocess / host process / Docker-in-Docker / external network from package
-- Discovery execution / Tool reconciliation / automatic Tool ACTIVE
+- automatic Tool ACTIVE / OpenAPI→running MCP runtime generation
 - version/archive/restore
 - frontend real API wiring
 - aspirational `/factory/projects` routes and build tests/rollback
@@ -1307,8 +1328,8 @@ POST  /api/v1/mcp/servers/{server_id}/activate     # Factory: after latest Check
 
 선택 operation을 Tool로 생성하고 credential은 Secret reference placeholder로만 표현한다.
 (현재 slice는 Build + Generated Package + sandbox Test + Review + Publish/Import
-DRAFT MCP handoff + connection configuration/Connection Test foundation까지
-수행하며 Discovery/executable codegen은 후속.)
+DRAFT MCP handoff + connection configuration/Connection Test + Factory Discovery
+reconciliation foundation까지 수행하며 Tool auto-ACTIVE/executable codegen은 후속.)
 
 ## FNC-FAC-003. Sandbox Build/Test
 
@@ -1321,8 +1342,8 @@ declarative validation path로 실행한다 (현재 slice는 executable MCP sand
 
 PASS TestRun에 대한 Factory Review(`APPROVE`/`REJECT`) foundation과 APPROVE
 Review의 Publish/Import → DRAFT MCP Server/INACTIVE Tools foundation, 그리고
-canonical MCP PATCH + Connection Test + Factory Activate precondition
-hardening이 구현된다. Discovery / Tool ACTIVE reconciliation은 후속 slice이다.
+canonical MCP PATCH + Connection Test + Factory Discovery reconciliation +
+Factory Activate precondition hardening이 구현된다. Tool auto-ACTIVE는 후속이다.
 
 ## FNC-FAC-005. Version/Evidence
 
