@@ -50,6 +50,13 @@ class ExecutionQueuePublisher(Protocol):
         outbox_event_id: uuid.UUID,
     ) -> None: ...
 
+    def publish_factory_test_run(
+        self,
+        *,
+        test_run_id: uuid.UUID,
+        outbox_event_id: uuid.UUID,
+    ) -> None: ...
+
 
 @dataclass(frozen=True, slots=True)
 class PublishBatchResult:
@@ -214,6 +221,39 @@ def validate_factory_job_dispatch_event(row: object) -> uuid.UUID:
             status_code=409,
         )
     return job_id
+
+
+def validate_factory_test_run_dispatch_event(row: object) -> uuid.UUID:
+    """Validate ID-only Factory TestRun dispatch Outbox evidence."""
+
+    payload = getattr(row, "payload", None)
+    if not isinstance(payload, dict) or set(payload) != {"test_run_id"}:
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message="Factory TestRun dispatch Outbox payload is corrupted.",
+            status_code=409,
+        )
+    try:
+        test_run_id = uuid.UUID(str(payload["test_run_id"]))
+    except (TypeError, ValueError) as exc:
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message="Factory TestRun dispatch Outbox payload is corrupted.",
+            status_code=409,
+        ) from exc
+    expected_dedupe = f"factory_test_run:{test_run_id}:sandbox_test"
+    if (
+        getattr(row, "event_type", None) != "FACTORY_TEST_RUN_DISPATCH"
+        or getattr(row, "aggregate_type", None) != "TOOL_FACTORY_TEST_RUN"
+        or test_run_id != getattr(row, "aggregate_id", None)
+        or getattr(row, "dedupe_key", None) != expected_dedupe
+    ):
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message="Factory TestRun dispatch Outbox lineage is corrupted.",
+            status_code=409,
+        )
+    return test_run_id
 
 
 class ExecutionQueueService:
@@ -430,6 +470,12 @@ class OutboxRelayService:
             job_id = validate_factory_job_dispatch_event(row)
             publisher.publish_factory_job(
                 job_id=job_id,
+                outbox_event_id=row.id,
+            )
+        elif event_type == "FACTORY_TEST_RUN_DISPATCH":
+            test_run_id = validate_factory_test_run_dispatch_event(row)
+            publisher.publish_factory_test_run(
+                test_run_id=test_run_id,
                 outbox_event_id=row.id,
             )
         else:

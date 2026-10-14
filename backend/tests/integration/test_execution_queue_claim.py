@@ -62,6 +62,15 @@ class FakePublisher:
         self.calls.append((job_id, outbox_event_id))
         if self.fail:
             raise ConnectionError("redis unavailable")
+    def publish_factory_test_run(
+        self,
+        *,
+        test_run_id: object = None,
+        outbox_event_id: object = None,
+        **_kwargs: object,
+    ) -> None:
+        return None
+
 
 
 async def _create_one(session: AsyncSession) -> tuple[dict[str, object], object, str]:

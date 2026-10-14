@@ -134,6 +134,15 @@ async def test_outbox_published_at_is_captured_after_publish_returns(
 
         def publish_factory_job(self, **_kwargs: object) -> None:
             raise AssertionError("factory unexpected")
+    def publish_factory_test_run(
+        self,
+        *,
+        test_run_id: object = None,
+        outbox_event_id: object = None,
+        **_kwargs: object,
+    ) -> None:
+        return None
+
 
     monkeypatch.setattr(queue_module, "datetime", FakeDateTime)
 

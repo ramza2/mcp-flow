@@ -1532,9 +1532,23 @@ boundary (no network, no filesystem, no migration/API):
 - `backend/tests/integration/test_factory_persistence.py` — concurrent Generate
   with same Idempotency-Key keeps a single Generated Package; no MCPTool /
   MCPServer rows
+- `backend/tests/unit/test_factory_sandbox.py` — versioned security/contract
+  validators; size/hash/forbidden-content/duplicate-operation fail-closed
+- `backend/tests/unit/test_factory_test_run.py` — TestRun create + same-TX
+  `FACTORY_TEST_RUN_DISPATCH`; worker PASS path; missing/corrupt/hash/lineage
+  FAIL evidence; duplicate delivery; idempotency/natural unique; recovery
+  candidate listing; no MCPTool/MCPServer side effects
+- `backend/tests/api/test_factory.py` — artifact-scoped TestRun create/list/
+  detail; Idempotency-Key replay; safe projection (no OS keys/raw evidence)
+- `backend/tests/integration/test_factory_persistence.py` — concurrent TestRun
+  create with same Idempotency-Key; single Outbox dispatch; worker PASS +
+  duplicate delivery; no MCPTool/MCPServer rows
+- `backend/tests/integration/test_factory_migration.py` — Alembic through
+  `20261014_0033`; `tool_factory_test_runs` constraints/indexes
 
-Sandbox executable codegen / Docker / Python exec / Security tests / Publish /
-DRAFT MCP Server / frontend wiring remain out of scope.
+Executable MCP codegen / Docker / Python exec / Publish / DRAFT MCP Server /
+frontend wiring remain out of scope. Declarative Security/Contract TestRun
+foundation is in scope for Issue #91.
 
 ---
 

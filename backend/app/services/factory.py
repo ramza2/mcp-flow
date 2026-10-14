@@ -24,7 +24,9 @@ from app.factory import (
     ARTIFACT_CONTENT_TYPE_JSON,
     ARTIFACT_TYPE_OPENAPI_ANALYSIS,
     FACTORY_BUILD_GENERATOR_VERSION,
+    FACTORY_CONTRACT_POLICY_VERSION,
     FACTORY_PACKAGE_GENERATOR_VERSION,
+    FACTORY_SECURITY_POLICY_VERSION,
     JOB_TYPE_OPENAPI_ANALYZE,
     OPENAPI_ANALYZER_VERSION,
     PACKAGE_SCHEMA_VERSION,
@@ -72,6 +74,8 @@ from app.schemas.factory import (
     FactoryJobDetailResponse,
     FactoryJobListResponse,
     FactoryJobResponse,
+    FactoryTestRunListResponse,
+    FactoryTestRunResponse,
 )
 from app.services.authorization import AuthorizationResolver
 
@@ -85,6 +89,9 @@ _BUILD_RESOURCE_TYPE = "TOOL_FACTORY_BUILD"
 _PACKAGE_OPERATION_SCOPE = "FACTORY_PACKAGE_GENERATE_V1"
 _PACKAGE_RESOURCE_TYPE = "TOOL_FACTORY_GENERATED_PACKAGE"
 _PACKAGE_UNIQUE_NAME = "uq_tool_factory_generated_packages_build_generator"
+_TEST_RUN_OPERATION_SCOPE = "FACTORY_TEST_RUN_CREATE_V1"
+_TEST_RUN_RESOURCE_TYPE = "TOOL_FACTORY_TEST_RUN"
+_TEST_RUN_UNIQUE_NAME = "uq_tool_factory_test_runs_package_policies"
 _IDEMPOTENCY_KEY_MAX_LEN = 128
 _IDEMPOTENCY_PK_NAME = "pk_api_idempotency_records"
 
@@ -110,6 +117,13 @@ class FactoryBuildCreateOutcome:
 @dataclass(frozen=True, slots=True)
 class FactoryPackageGenerateOutcome:
     result: FactoryGeneratedPackageResponse
+    http_status: int
+    replayed: bool
+
+
+@dataclass(frozen=True, slots=True)
+class FactoryTestRunCreateOutcome:
+    result: FactoryTestRunResponse
     http_status: int
     replayed: bool
 
@@ -325,6 +339,30 @@ def _is_package_unique_violation(exc: IntegrityError) -> bool:
     orig = getattr(exc, "orig", None)
     msg = str(orig if orig is not None else exc)
     return _PACKAGE_UNIQUE_NAME in msg
+
+
+def _is_test_run_unique_violation(exc: IntegrityError) -> bool:
+    name = _constraint_name(exc)
+    if name == _TEST_RUN_UNIQUE_NAME:
+        return True
+    orig = getattr(exc, "orig", None)
+    msg = str(orig if orig is not None else exc)
+    return _TEST_RUN_UNIQUE_NAME in msg
+
+
+def _test_run_request_hash(
+    *,
+    package_id: uuid.UUID,
+    security_policy_version: str,
+    contract_policy_version: str,
+) -> str:
+    return compute_canonical_json_hash(
+        {
+            "generated_package_id": str(package_id),
+            "security_policy_version": security_policy_version,
+            "contract_policy_version": contract_policy_version,
+        }
+    )
 
 
 class FactoryService:
@@ -1716,3 +1754,300 @@ class FactoryService:
             )
         tools = await self._load_package_tools(row)
         return self._package_to_response(row, tools=tools)
+
+    def _test_run_to_response(self, row: Any) -> FactoryTestRunResponse:
+        return FactoryTestRunResponse(
+            id=row.id,
+            generated_package_id=row.generated_package_id,
+            build_id=row.build_id,
+            job_id=row.job_id,
+            analysis_artifact_id=row.analysis_artifact_id,
+            package_content_sha256=row.package_content_sha256,
+            generator_version=row.generator_version,
+            package_schema_version=row.package_schema_version,
+            source_sha256=row.source_sha256,
+            analyzer_version=row.analyzer_version,
+            build_input_hash=row.build_input_hash,
+            security_policy_version=row.security_policy_version,
+            contract_policy_version=row.contract_policy_version,
+            status=JobStatus(row.status),
+            result=row.result,
+            security_result=row.security_result,
+            contract_result=row.contract_result,
+            evidence_hash=row.evidence_hash,
+            error_code=row.error_code,
+            error_message=row.error_message,
+            requested_by=row.requested_by,
+            created_at=row.created_at,
+            queued_at=row.queued_at,
+            started_at=row.started_at,
+            finished_at=row.finished_at,
+        )
+
+    async def _replay_or_conflict_test_run(
+        self,
+        record: Any,
+        request_hash: str,
+    ) -> FactoryTestRunCreateOutcome:
+        if record.request_hash != request_hash:
+            raise AppError(
+                code="IDEMPOTENCY_KEY_REUSED",
+                message="Idempotency-Key가 다른 요청에 재사용되었습니다.",
+                status_code=status.HTTP_409_CONFLICT,
+            )
+        if record.status != "COMPLETED":
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message="Idempotency record가 COMPLETED가 아닙니다.",
+                status_code=status.HTTP_409_CONFLICT,
+            )
+        if (
+            record.resource_type != _TEST_RUN_RESOURCE_TYPE
+            or record.resource_id is None
+        ):
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message="Idempotency resource metadata가 손상되었습니다.",
+                status_code=status.HTTP_409_CONFLICT,
+            )
+        row = await self._repo.get_test_run(record.resource_id)
+        if row is None:
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message="Idempotency가 가리키는 Factory TestRun이 없습니다.",
+                status_code=status.HTTP_409_CONFLICT,
+            )
+        if (
+            record.response_status != status.HTTP_201_CREATED
+            or record.response_body is None
+        ):
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message="Idempotency response snapshot이 손상되었습니다.",
+                status_code=status.HTTP_409_CONFLICT,
+            )
+        try:
+            cached = FactoryTestRunResponse.model_validate(record.response_body)
+        except ValidationError as exc:
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message="Idempotency response snapshot이 유효하지 않습니다.",
+                status_code=status.HTTP_409_CONFLICT,
+            ) from exc
+        if cached.id != record.resource_id:
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message="Idempotency response snapshot이 손상되었습니다.",
+                status_code=status.HTTP_409_CONFLICT,
+            )
+        # Live projection (status may have advanced since enqueue).
+        live = self._test_run_to_response(row)
+        return FactoryTestRunCreateOutcome(
+            result=live,
+            http_status=status.HTTP_201_CREATED,
+            replayed=True,
+        )
+
+    async def create_test_run(
+        self,
+        *,
+        actor_user_id: uuid.UUID,
+        package_id: uuid.UUID,
+        idempotency_key: str,
+    ) -> FactoryTestRunCreateOutcome:
+        """Enqueue a durable sandbox Security/Contract TestRun for a package."""
+
+        await self._assert_manage(actor_user_id)
+        key = _normalize_idempotency_key(idempotency_key)
+        security_policy_version = FACTORY_SECURITY_POLICY_VERSION
+        contract_policy_version = FACTORY_CONTRACT_POLICY_VERSION
+        req_hash = _test_run_request_hash(
+            package_id=package_id,
+            security_policy_version=security_policy_version,
+            contract_policy_version=contract_policy_version,
+        )
+        principal_key = str(actor_user_id)
+
+        existing = await self._idempotency.get(
+            principal_key=principal_key,
+            operation_scope=_TEST_RUN_OPERATION_SCOPE,
+            idempotency_key=key,
+        )
+        if existing is not None:
+            return await self._replay_or_conflict_test_run(existing, req_hash)
+
+        package = await self._repo.get_generated_package(package_id)
+        if package is None:
+            raise AppError(
+                code="NOT_FOUND",
+                message="Generated Package를 찾을 수 없습니다.",
+                status_code=status.HTTP_404_NOT_FOUND,
+            )
+
+        already = await self._repo.get_test_run_for_package_policies(
+            generated_package_id=package.id,
+            security_policy_version=security_policy_version,
+            contract_policy_version=contract_policy_version,
+        )
+        if already is not None:
+            response = self._test_run_to_response(already)
+            now = _utc_now()
+            try:
+                await self._idempotency.create_completed(
+                    principal_key=principal_key,
+                    operation_scope=_TEST_RUN_OPERATION_SCOPE,
+                    idempotency_key=key,
+                    request_hash=req_hash,
+                    response_status=status.HTTP_201_CREATED,
+                    response_body=response.model_dump(mode="json"),
+                    resource_type=_TEST_RUN_RESOURCE_TYPE,
+                    resource_id=already.id,
+                    completed_at=now,
+                )
+                await self._session.commit()
+            except IntegrityError as exc:
+                await self._session.rollback()
+                if not _is_idempotency_pk_violation(exc):
+                    raise
+                raced = await self._idempotency.get(
+                    principal_key=principal_key,
+                    operation_scope=_TEST_RUN_OPERATION_SCOPE,
+                    idempotency_key=key,
+                )
+                if raced is None:
+                    raise AppError(
+                        code="RESOURCE_CONFLICT",
+                        message="Factory TestRun 생성 중 충돌이 발생했습니다.",
+                        status_code=status.HTTP_409_CONFLICT,
+                    ) from exc
+                return await self._replay_or_conflict_test_run(raced, req_hash)
+            return FactoryTestRunCreateOutcome(
+                result=response,
+                http_status=status.HTTP_201_CREATED,
+                replayed=True,
+            )
+
+        # Pre-dispatch integrity: package object must still match evidence.
+        try:
+            await self._load_package_tools(package)
+        except AppError:
+            raise
+
+        test_run_id = uuid.uuid4()
+        now = _utc_now()
+        try:
+            row = await self._repo.create_test_run(
+                test_run_id=test_run_id,
+                generated_package_id=package.id,
+                build_id=package.build_id,
+                job_id=package.job_id,
+                analysis_artifact_id=package.analysis_artifact_id,
+                package_content_sha256=package.package_content_sha256,
+                generator_version=package.generator_version,
+                package_schema_version=package.package_schema_version,
+                source_sha256=package.source_sha256,
+                analyzer_version=package.analyzer_version,
+                build_input_hash=package.build_input_hash,
+                security_policy_version=security_policy_version,
+                contract_policy_version=contract_policy_version,
+                status=JobStatus.QUEUED.value,
+                requested_by=actor_user_id,
+                queued_at=now,
+            )
+            await self._outbox.create_factory_test_run_dispatch(
+                test_run_id=row.id,
+                created_at=now,
+            )
+            response = self._test_run_to_response(row)
+            await self._idempotency.create_completed(
+                principal_key=principal_key,
+                operation_scope=_TEST_RUN_OPERATION_SCOPE,
+                idempotency_key=key,
+                request_hash=req_hash,
+                response_status=status.HTTP_201_CREATED,
+                response_body=response.model_dump(mode="json"),
+                resource_type=_TEST_RUN_RESOURCE_TYPE,
+                resource_id=row.id,
+                completed_at=now,
+            )
+            await self._session.commit()
+        except IntegrityError as exc:
+            await self._session.rollback()
+            if _is_idempotency_pk_violation(exc) or _is_test_run_unique_violation(exc):
+                raced = await self._idempotency.get(
+                    principal_key=principal_key,
+                    operation_scope=_TEST_RUN_OPERATION_SCOPE,
+                    idempotency_key=key,
+                )
+                if raced is not None:
+                    return await self._replay_or_conflict_test_run(raced, req_hash)
+                existing_run = await self._repo.get_test_run_for_package_policies(
+                    generated_package_id=package.id,
+                    security_policy_version=security_policy_version,
+                    contract_policy_version=contract_policy_version,
+                )
+                if existing_run is not None:
+                    return FactoryTestRunCreateOutcome(
+                        result=self._test_run_to_response(existing_run),
+                        http_status=status.HTTP_201_CREATED,
+                        replayed=True,
+                    )
+                raise AppError(
+                    code="RESOURCE_CONFLICT",
+                    message="Factory TestRun 생성 중 충돌이 발생했습니다.",
+                    status_code=status.HTTP_409_CONFLICT,
+                ) from exc
+            raise
+
+        return FactoryTestRunCreateOutcome(
+            result=response,
+            http_status=status.HTTP_201_CREATED,
+            replayed=False,
+        )
+
+    async def get_test_run(
+        self,
+        actor_user_id: uuid.UUID,
+        test_run_id: uuid.UUID,
+    ) -> FactoryTestRunResponse:
+        await self._assert_read(actor_user_id)
+        row = await self._repo.get_test_run(test_run_id)
+        if row is None:
+            raise AppError(
+                code="NOT_FOUND",
+                message="Factory TestRun을 찾을 수 없습니다.",
+                status_code=status.HTTP_404_NOT_FOUND,
+            )
+        return self._test_run_to_response(row)
+
+    async def list_test_runs_for_package(
+        self,
+        actor_user_id: uuid.UUID,
+        package_id: uuid.UUID,
+        *,
+        page: int = 1,
+        page_size: int = 20,
+        sort: str = "-created_at",
+    ) -> FactoryTestRunListResponse:
+        await self._assert_read(actor_user_id)
+        package = await self._repo.get_generated_package(package_id)
+        if package is None:
+            raise AppError(
+                code="NOT_FOUND",
+                message="Generated Package를 찾을 수 없습니다.",
+                status_code=status.HTTP_404_NOT_FOUND,
+            )
+        rows, total = await self._repo.list_test_runs_for_package(
+            package.id,
+            page=page,
+            page_size=page_size,
+            sort=sort,
+        )
+        return FactoryTestRunListResponse(
+            items=[self._test_run_to_response(row) for row in rows],
+            page=page,
+            page_size=page_size,
+            total=total,
+            has_next=(page * page_size) < total,
+            generated_package_id=package.id,
+        )

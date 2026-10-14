@@ -723,6 +723,15 @@ async def test_broker_publish_failure_leaves_unpublished_outbox(
 
             def publish_factory_job(self, **_kwargs: Any) -> None:
                 raise AssertionError("factory dispatch unexpected")
+    def publish_factory_test_run(
+        self,
+        *,
+        test_run_id: object = None,
+        outbox_event_id: object = None,
+        **_kwargs: object,
+    ) -> None:
+        return None
+
 
         result = await OutboxRelayService(session).publish_batch(
             publisher=BadPublisher(), limit=10
@@ -762,6 +771,15 @@ async def test_broker_publish_failure_leaves_unpublished_outbox(
 
             def publish_factory_job(self, **_kwargs: Any) -> None:
                 raise AssertionError("factory dispatch unexpected")
+    def publish_factory_test_run(
+        self,
+        *,
+        test_run_id: object = None,
+        outbox_event_id: object = None,
+        **_kwargs: object,
+    ) -> None:
+        return None
+
 
         good = GoodPublisher()
         result2 = await OutboxRelayService(session).publish_batch(

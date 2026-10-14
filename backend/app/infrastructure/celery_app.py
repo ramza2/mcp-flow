@@ -26,6 +26,7 @@ celery_app.conf.update(
         "mcpflow.execution.approval_resume": {"queue": "execution"},
         "mcpflow.execution.mrtr_resume": {"queue": "execution"},
         "mcpflow.factory.analyze_openapi": {"queue": "factory"},
+        "mcpflow.factory.run_sandbox_test": {"queue": "factory"},
     },
     task_serializer="json",
     accept_content=["json"],

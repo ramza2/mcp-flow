@@ -27,6 +27,7 @@ from app.models.factory import (
     ToolFactoryGeneratedPackage,
     ToolFactoryJob,
     ToolFactoryTestResult,
+    ToolFactoryTestRun,
 )
 from app.models.idempotency import ApiIdempotencyRecord
 from app.models.mcp import (
@@ -81,6 +82,7 @@ __all__ = [
     "ToolFactoryGeneratedPackage",
     "ToolFactoryJob",
     "ToolFactoryTestResult",
+    "ToolFactoryTestRun",
     "StepAttempt",
     "ToolCall",
     "Schedule",

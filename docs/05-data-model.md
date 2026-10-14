@@ -1964,12 +1964,13 @@ tool_factory_artifacts
 tool_factory_candidates
 tool_factory_builds
 tool_factory_generated_packages
+tool_factory_test_runs
 tool_factory_test_results
 ```
 
 생성 artifact hash, generator version, sandbox policy, 시험 결과를 보존한다. 운영 활성화는 관리자 승인 후 별도 MCP Server 등록 흐름을 사용한다.
 
-**Implemented durable foundation (migrations `20261008_0028`, `20261013_0029`, `20261013_0030`, `20261013_0031`, `20261013_0032`):**
+**Implemented durable foundation (migrations `20261008_0028`, `20261013_0029`, `20261013_0030`, `20261013_0031`, `20261013_0032`, `20261014_0033`):**
 
 - `tool_factory_jobs` — OpenAPI analysis Jobs; canonical `JobStatus` CHECK;
   **no** raw source/body column; stores `source_sha256`, Object Storage
@@ -2002,11 +2003,22 @@ tool_factory_test_results
   (`object_bucket` / `object_key` / `content_type` / `package_size_bytes`);
   `tool_count >= 1`; **no** FK to `mcp_tools` / `mcp_servers`; package bytes
   are not stored inline in PostgreSQL
-- `tool_factory_test_results` — forward-compatible evidence table (unused by
-  the analysis flow in this slice)
+- `tool_factory_test_runs` — durable sandbox Security/Contract TestRun;
+  unique `(generated_package_id, security_policy_version,
+  contract_policy_version)`; lineage
+  `generated_package_id` / `build_id` / `job_id` / `analysis_artifact_id` /
+  `package_content_sha256` / `generator_version` / `package_schema_version` /
+  `source_sha256` / `analyzer_version` / `build_input_hash`;
+  policies `factory-security-policy-v1` / `factory-contract-policy-v1`;
+  canonical `JobStatus` + optional `result` (`PASS`/`FAIL`); structured
+  `security_result` / `contract_result` / `evidence` + `evidence_hash`;
+  claim fencing (`queued_at`, `worker_id`, `lease_token`, `lease_expires_at`,
+  `lock_version`); **no** FK to `mcp_tools` / `mcp_servers`
+- `tool_factory_test_results` — forward-compatible evidence table (legacy
+  placeholder; sandbox TestRun evidence uses `tool_factory_test_runs`)
 
 Do not duplicate product-wide `JobStatus` with Factory-local analysis issue
-severities. Executable sandbox packages / Publish remain later. Product-wide
+severities. Executable MCP sandbox packages / Publish remain later. Product-wide
 `object_blobs` catalog is still deferred; Factory Jobs/packages store safe
 object reference columns directly.
 

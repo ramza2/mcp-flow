@@ -462,6 +462,15 @@ async def test_pg_outbox_publish_failure_then_recovery_one_analysis(
                 self.fail_once = False
                 raise ConnectionError("broker down")
             self.calls.append(job_id)
+    def publish_factory_test_run(
+        self,
+        *,
+        test_run_id: object = None,
+        outbox_event_id: object = None,
+        **_kwargs: object,
+    ) -> None:
+        return None
+
 
     storage = InMemoryObjectStorage()
     async with integration_session_factory() as session:
@@ -770,6 +779,119 @@ async def test_pg_concurrent_package_generate_same_idempotency_key(
             )
         ).scalar_one()
         assert int(count) == 1
+        tools = (
+            await session.execute(text("SELECT count(*) FROM mcp_tools"))
+        ).scalar_one()
+        servers = (
+            await session.execute(text("SELECT count(*) FROM mcp_servers"))
+        ).scalar_one()
+        assert int(tools) == 0
+        assert int(servers) == 0
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_pg_concurrent_test_run_same_idempotency_key(
+    integration_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Same Idempotency-Key concurrent TestRun create keeps a single row."""
+    from app.services.factory_test_worker import FactoryTestWorkerService
+
+    storage = InMemoryObjectStorage()
+    async with integration_session_factory() as session:
+        user_id = await _seed_manage_user(session)
+        outcome = await FactoryService(
+            session, storage=storage
+        ).create_openapi_analyze_job(
+            actor_user_id=user_id,
+            source_bytes=MINIMAL_JSON,
+            filename="tr.json",
+            idempotency_key=f"job-{uuid.uuid4().hex}",
+        )
+        await session.commit()
+        job_id = outcome.result.id
+
+    async with integration_session_factory() as session:
+        worker = FactoryWorkerService(session, storage=storage, worker_id="pg-tr")
+        result = await worker.process_job(job_id=job_id)
+        await session.commit()
+        assert result.status == JobStatus.SUCCEEDED.value
+        cand_id = (
+            await session.execute(
+                text(
+                    "SELECT id FROM tool_factory_candidates WHERE job_id = :jid LIMIT 1"
+                ),
+                {"jid": str(job_id)},
+            )
+        ).scalar_one()
+        build = await FactoryService(session, storage=storage).create_build(
+            actor_user_id=user_id,
+            job_id=job_id,
+            candidate_ids=[uuid.UUID(str(cand_id))],
+            idempotency_key=f"build-{uuid.uuid4().hex}",
+        )
+        pkg = await FactoryService(session, storage=storage).generate_package(
+            actor_user_id=user_id,
+            build_id=build.result.id,
+            idempotency_key=f"pkg-{uuid.uuid4().hex}",
+        )
+        package_id = pkg.result.id
+
+    key = f"tr-race-{uuid.uuid4().hex}"
+
+    async def _run() -> Any:
+        async with integration_session_factory() as session:
+            try:
+                return await FactoryService(session, storage=storage).create_test_run(
+                    actor_user_id=user_id,
+                    package_id=package_id,
+                    idempotency_key=key,
+                )
+            except AppError as exc:
+                return exc
+
+    results = await asyncio.gather(_run(), _run())
+    outcomes = [r for r in results if not isinstance(r, AppError)]
+    errors = [r for r in results if isinstance(r, AppError)]
+    assert not errors, f"unexpected AppError in test-run race: {errors}"
+    assert len(outcomes) == 2
+    assert sorted(o.replayed for o in outcomes) == [False, True]
+    assert {o.result.id for o in outcomes} == {outcomes[0].result.id}
+
+    async with integration_session_factory() as session:
+        count = (
+            await session.execute(
+                text(
+                    "SELECT count(*) FROM tool_factory_test_runs "
+                    "WHERE generated_package_id = :pid"
+                ),
+                {"pid": str(package_id)},
+            )
+        ).scalar_one()
+        assert int(count) == 1
+        outbox = (
+            await session.execute(
+                text(
+                    "SELECT count(*) FROM outbox_events "
+                    "WHERE event_type = 'FACTORY_TEST_RUN_DISPATCH' "
+                    "AND aggregate_id = :tid"
+                ),
+                {"tid": str(outcomes[0].result.id)},
+            )
+        ).scalar_one()
+        assert int(outbox) == 1
+
+        worker = FactoryTestWorkerService(
+            session, storage=storage, worker_id="pg-tr-run"
+        )
+        done = await worker.process_test_run(test_run_id=outcomes[0].result.id)
+        await session.commit()
+        assert done.status == JobStatus.SUCCEEDED.value
+
+        again = await worker.process_test_run(test_run_id=outcomes[0].result.id)
+        await session.commit()
+        assert again.claimed is False
+
         tools = (
             await session.execute(text("SELECT count(*) FROM mcp_tools"))
         ).scalar_one()
