@@ -26,6 +26,9 @@ _SLUG_RE = re.compile(r"[^a-z0-9]+")
 # transport_config key: sha256 of connection-relevant fields verified by
 # a SUCCEEDED Factory Connection Test (does not delete historical Checks).
 _CONNECTION_TEST_VERIFIED_FP_KEY = "connection_test_verified_fingerprint"
+# transport_config key: same fingerprint bound to a CLEAN Factory Discovery
+# reconciliation (does not delete historical Discovery rows).
+_CONNECTION_DISCOVERY_VERIFIED_FP_KEY = "connection_discovery_verified_fingerprint"
 
 
 def _slugify_name(name: str) -> str:
@@ -142,6 +145,38 @@ def transport_config_with_verified_fingerprint(
 
     cfg = dict(transport_config) if isinstance(transport_config, dict) else {}
     cfg[_CONNECTION_TEST_VERIFIED_FP_KEY] = fingerprint
+    return cfg
+
+
+def get_verified_discovery_fingerprint(server: MCPServer) -> str | None:
+    cfg = server.transport_config
+    if not isinstance(cfg, dict):
+        return None
+    value = cfg.get(_CONNECTION_DISCOVERY_VERIFIED_FP_KEY)
+    if isinstance(value, str) and len(value) == 64:
+        return value
+    return None
+
+
+def transport_config_with_discovery_fingerprint(
+    transport_config: dict[str, Any] | None,
+    *,
+    fingerprint: str,
+) -> dict[str, Any]:
+    """Store verified Factory Discovery fingerprint; preserve lineage keys."""
+
+    cfg = dict(transport_config) if isinstance(transport_config, dict) else {}
+    cfg[_CONNECTION_DISCOVERY_VERIFIED_FP_KEY] = fingerprint
+    return cfg
+
+
+def transport_config_clear_discovery_fingerprint(
+    transport_config: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Clear Discovery binding after failed/mismatched Factory reconciliation."""
+
+    cfg = dict(transport_config) if isinstance(transport_config, dict) else {}
+    cfg.pop(_CONNECTION_DISCOVERY_VERIFIED_FP_KEY, None)
     return cfg
 
 
@@ -464,9 +499,8 @@ class MCPServerService:
                 status_code=status.HTTP_409_CONFLICT,
             )
         if is_factory_imported(server):
-            # Factory lifecycle: require configured endpoint + deferred cleared
-            # + verified Connection Test fingerprint matching current connection
-            # config + latest Check SUCCEEDED. Discovery is a later slice.
+            # Factory lifecycle: endpoint + Connection Test fingerprint +
+            # CLEAN Discovery reconciliation for the same connection config.
             if is_connection_deferred(server) or not has_usable_endpoint(server):
                 raise AppError(
                     code="RESOURCE_CONFLICT",
@@ -497,6 +531,17 @@ class MCPServerService:
                     message=(
                         "Cannot activate Factory-imported MCP Server without a "
                         "latest SUCCEEDED Connection Test."
+                    ),
+                    status_code=status.HTTP_409_CONFLICT,
+                )
+            discovery_fp = get_verified_discovery_fingerprint(server)
+            if discovery_fp is None or discovery_fp != current_fp:
+                raise AppError(
+                    code="RESOURCE_CONFLICT",
+                    message=(
+                        "Cannot activate Factory-imported MCP Server without a "
+                        "successful Factory Discovery reconciliation for the "
+                        "current connection configuration."
                     ),
                     status_code=status.HTTP_409_CONFLICT,
                 )

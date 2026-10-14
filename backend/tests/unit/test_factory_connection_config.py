@@ -9,6 +9,7 @@ import pytest
 from app.core.errors import AppError
 from app.domain.enums import MCPServerStatus, MCPToolStatus, UserStatus
 from app.mcp.errors import MCPClientError
+from app.models.factory import ToolFactoryPublish
 from app.models.mcp import MCPServerCheck, MCPServerDiscovery, MCPTool
 from app.repositories.mcp_tool import MCPToolRepository
 from app.repositories.role import PermissionRepository
@@ -86,6 +87,99 @@ def _healthy_http() -> MagicMock:
     http.discover_capabilities = AsyncMock(return_value={})
     http.list_tools = AsyncMock(return_value=[])
     return http
+
+
+async def _connection_test_and_clean_discovery(
+    session: AsyncSession, server_id: uuid.UUID
+) -> None:
+    """Issue #99: Factory Activate also requires CLEAN Discovery evidence."""
+
+    # Helpers that attach durable FactoryPublish membership (Issue #99).
+    from tests.unit import test_factory_discovery_reconcile as fdr
+
+    existing_publish = (
+        await session.execute(
+            select(ToolFactoryPublish).where(
+                ToolFactoryPublish.mcp_server_id == server_id
+            )
+        )
+    ).scalar_one_or_none()
+
+    tools_repo = MCPToolRepository(session)
+    tools, _ = await tools_repo.list_tools(
+        mcp_server_id=server_id, page=1, page_size=10_000
+    )
+    if existing_publish is None:
+        user_id = await fdr._seed_user(session)
+        review = await fdr._approved_review_row(session, user_id=user_id)
+        if not tools:
+            schema = {"type": "object", "properties": {}}
+            tool = await tools_repo.create_tool(
+                mcp_server_id=server_id,
+                remote_name="GET /ping",
+                display_name="GET /ping",
+                tags=[],
+                status=str(MCPToolStatus.INACTIVE),
+            )
+            version = await tools_repo.create_version(
+                mcp_tool_id=tool.id,
+                version_no=1,
+                content_hash=uuid.uuid4().hex,
+                validation_status="WARNING",
+                input_schema=schema,
+                output_schema=None,
+                annotations={
+                    "factory_import": True,
+                    "operation_key": "GET /ping",
+                    "method": "GET",
+                    "path": "/ping",
+                },
+                raw_descriptor={
+                    "method": "GET",
+                    "path": "/ping",
+                    "operation_key": "GET /ping",
+                },
+                schema_dialect="factory-declarative-v1",
+            )
+            tool.current_version_id = version.id
+            await session.commit()
+            tools = [tool]
+        await fdr._attach_factory_publish(
+            session,
+            user_id=user_id,
+            server_id=server_id,
+            tool_ids=[tool.id for tool in tools],
+            review=review,
+        )
+        tools, _ = await tools_repo.list_tools(
+            mcp_server_id=server_id, page=1, page_size=10_000
+        )
+
+    remotes = []
+    for tool in tools:
+        assert tool.current_version_id is not None
+        version = await tools_repo.get_version(tool.current_version_id)
+        assert version is not None
+        remotes.append(
+            fdr._desc(
+                tool.remote_name,
+                input_schema=version.input_schema
+                if isinstance(version.input_schema, dict)
+                else {"type": "object"},
+                output_schema=version.output_schema
+                if isinstance(version.output_schema, dict)
+                else None,
+            )
+        )
+
+    http = MagicMock()
+    http.discover_capabilities = AsyncMock(return_value={})
+    http.list_tools = AsyncMock(return_value=remotes)
+    await MCPDiscoveryService(session, http).connection_test(server_id)
+    result = await MCPDiscoveryService(session, http).discover(
+        server_id, apply_changes=False
+    )
+    assert result.success is True
 
 
 def _failing_http() -> MagicMock:
@@ -323,7 +417,7 @@ async def test_factory_activate_endpoint_a_success_allowed(
         MCPServerUpdate(endpoint_url="https://mcp.test/a"),
         expected_lock_version=int(before.lock_version),
     )
-    await MCPDiscoveryService(db_session, _healthy_http()).connection_test(server_id)
+    await _connection_test_and_clean_discovery(db_session, server_id)
     after_test = await svc.get(server_id)
     assert after_test.transport_config.get(
         "connection_test_verified_fingerprint"
@@ -335,7 +429,7 @@ async def test_factory_activate_endpoint_a_success_allowed(
     discoveries = (
         await db_session.execute(select(func.count()).select_from(MCPServerDiscovery))
     ).scalar_one()
-    assert int(discoveries) == 0
+    assert int(discoveries) >= 1
 
 
 @pytest.mark.asyncio
@@ -351,7 +445,7 @@ async def test_factory_activate_blocked_after_endpoint_change_without_retest(
         MCPServerUpdate(endpoint_url="https://mcp.test/a"),
         expected_lock_version=int(s.lock_version),
     )
-    await MCPDiscoveryService(db_session, _healthy_http()).connection_test(server_id)
+    await _connection_test_and_clean_discovery(db_session, server_id)
     s = await svc.get(server_id)
     await svc.update(
         server_id,
@@ -383,7 +477,7 @@ async def test_factory_activate_allowed_after_retest_on_endpoint_b(
         MCPServerUpdate(endpoint_url="https://mcp.test/a"),
         expected_lock_version=int(s.lock_version),
     )
-    await MCPDiscoveryService(db_session, _healthy_http()).connection_test(server_id)
+    await _connection_test_and_clean_discovery(db_session, server_id)
     s = await svc.get(server_id)
     s = await svc.update(
         server_id,
@@ -392,7 +486,7 @@ async def test_factory_activate_allowed_after_retest_on_endpoint_b(
     )
     with pytest.raises(AppError):
         await svc.activate(server_id)
-    await MCPDiscoveryService(db_session, _healthy_http()).connection_test(server_id)
+    await _connection_test_and_clean_discovery(db_session, server_id)
     activated = await svc.activate(server_id)
     assert activated.status == MCPServerStatus.ACTIVE.value
 
@@ -410,7 +504,7 @@ async def test_factory_activate_blocked_after_auth_change(
         MCPServerUpdate(endpoint_url="https://mcp.test/a"),
         expected_lock_version=int(s.lock_version),
     )
-    await MCPDiscoveryService(db_session, _healthy_http()).connection_test(server_id)
+    await _connection_test_and_clean_discovery(db_session, server_id)
     s = await svc.get(server_id)
     secret_id = uuid.uuid4()
     await svc.update(
@@ -437,7 +531,7 @@ async def test_factory_activate_name_description_change_keeps_valid_test(
         MCPServerUpdate(endpoint_url="https://mcp.test/a"),
         expected_lock_version=int(s.lock_version),
     )
-    await MCPDiscoveryService(db_session, _healthy_http()).connection_test(server_id)
+    await _connection_test_and_clean_discovery(db_session, server_id)
     s = await svc.get(server_id)
     await svc.update(
         server_id,
@@ -462,13 +556,13 @@ async def test_factory_activate_blocked_when_latest_check_failed(
         MCPServerUpdate(endpoint_url="https://mcp.test/a"),
         expected_lock_version=int(s.lock_version),
     )
-    await MCPDiscoveryService(db_session, _healthy_http()).connection_test(server_id)
+    await _connection_test_and_clean_discovery(db_session, server_id)
     await MCPDiscoveryService(db_session, _failing_http()).connection_test(server_id)
 
     with pytest.raises(AppError) as act:
         await svc.activate(server_id)
     assert act.value.code == "RESOURCE_CONFLICT"
-    # Fingerprint still matches; latest FAILED blocks Activate.
+    # Connection fingerprint still matches; latest FAILED Check blocks Activate.
     server = await svc.get(server_id)
     assert get_verified_connection_fingerprint(server) == (
         connection_config_fingerprint_for_server(server)

@@ -1449,7 +1449,7 @@ GET  /factory/builds/{build_id}
 - Publish itself does **not** Activate / Connection Test / Discovery / package
   execution
 
-### Factory connection configuration + Connection Test (reuses MCP Server API)
+### Factory connection configuration + Connection Test + Discovery (reuses MCP Server API)
 
 Factory-imported DRAFT servers continue on the canonical MCP Server routes
 (no Factory-only transport model):
@@ -1457,6 +1457,7 @@ Factory-imported DRAFT servers continue on the canonical MCP Server routes
 ```text
 PATCH /mcp/servers/{server_id}
 POST  /mcp/servers/{server_id}/connection-tests
+POST  /mcp/servers/{server_id}/discoveries
 POST  /mcp/servers/{server_id}/activate
 ```
 
@@ -1466,11 +1467,17 @@ POST  /mcp/servers/{server_id}/activate
 - Valid endpoint persist clears effective `connection_deferred` in
   `transport_config` while preserving Factory lineage metadata
 - Deferred / missing endpoint → Connection Test `RESOURCE_CONFLICT`
-- Connection Test writes `MCPServerCheck` evidence only (no Discovery, no Tool
-  mutation, no auto-Activate)
-- Factory Activate requires configured non-deferred endpoint + verified
-  Connection Test fingerprint matching current connection config + latest
-  Check `SUCCEEDED` (Discovery not required here; historical Checks retained)
+- Connection Test writes `MCPServerCheck` +
+  `connection_test_verified_fingerprint`
+- Factory Discovery requires that Connection Test fingerprint for the current
+  config; response may include `factory_diff`
+  (`MATCHED` / `MISSING_EXPECTED` / `UNEXPECTED_REMOTE` / `CONTRACT_CHANGED`)
+- Preview: no Tool mutation; Apply: fail closed unless plan `CLEAN`; CLEAN
+  apply reconciles MATCHED only (Tools stay `INACTIVE`); mismatch apply →
+  `FACTORY_DISCOVERY_RECONCILE_FAILED` with zero partial mutation
+- CLEAN Discovery stores `connection_discovery_verified_fingerprint`
+- Factory Activate requires Connection Test + Discovery fingerprints matching
+  current connection config + latest Check `SUCCEEDED`
 - Non-Factory MCP Server routes keep prior semantics
 
 ### Aspirational (not implemented by this slice)

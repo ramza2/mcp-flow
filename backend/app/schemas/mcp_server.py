@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -127,6 +127,34 @@ class DiscoveryDiffSummary(BaseModel):
     unchanged: int = 0
 
 
+class FactoryDiscoveryClassification(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    remote_name: str
+    classification: Literal[
+        "MATCHED",
+        "MISSING_EXPECTED",
+        "UNEXPECTED_REMOTE",
+        "CONTRACT_CHANGED",
+    ]
+    expected_contract_hash: str | None = None
+    remote_contract_hash: str | None = None
+
+
+class FactoryDiscoveryDiffSummary(BaseModel):
+    """Factory-imported server reconciliation projection (Issue #99)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["CLEAN", "MISMATCHED", "AMBIGUOUS"] = "CLEAN"
+    matched: int = 0
+    missing_expected: int = 0
+    unexpected_remote: int = 0
+    contract_changed: int = 0
+    classifications: list[FactoryDiscoveryClassification] = Field(default_factory=list)
+    error_message: str | None = None
+
+
 class DiscoveryResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -140,6 +168,7 @@ class DiscoveryResponse(BaseModel):
     error_message: str | None = None
     apply_changes: bool = False
     diff: DiscoveryDiffSummary = Field(default_factory=DiscoveryDiffSummary)
+    factory_diff: FactoryDiscoveryDiffSummary | None = None
     started_at: datetime
     finished_at: datetime | None = None
     capabilities: dict[str, Any] | None = None
