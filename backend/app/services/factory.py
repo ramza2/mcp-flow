@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 import uuid
 from dataclasses import dataclass
@@ -20,23 +21,40 @@ from app.core.config import get_settings
 from app.core.errors import AppError
 from app.domain.enums import JobStatus, UserStatus
 from app.factory import (
+    ARTIFACT_CONTENT_TYPE_JSON,
     ARTIFACT_TYPE_OPENAPI_ANALYSIS,
     FACTORY_BUILD_GENERATOR_VERSION,
+    FACTORY_PACKAGE_GENERATOR_VERSION,
     JOB_TYPE_OPENAPI_ANALYZE,
     OPENAPI_ANALYZER_VERSION,
+    PACKAGE_SCHEMA_VERSION,
     PHASE_ANALYZE,
 )
 from app.factory.contracts import FactoryOpenAPIAnalysis
 from app.factory.errors import (
+    FACTORY_PACKAGE_HASH_MISMATCH,
+    FACTORY_PACKAGE_LINEAGE_MISMATCH,
+    FACTORY_PACKAGE_OBJECT_STORE_FAILED,
+    FACTORY_PACKAGE_SNAPSHOT_INVALID,
     FACTORY_SOURCE_OBJECT_STORE_FAILED,
 )
 from app.factory.openapi_analyzer import MAX_OPERATIONS, MAX_SOURCE_BYTES
+from app.factory.package_generator import (
+    PackageGenerationError,
+    build_generated_package,
+)
 from app.infrastructure.object_storage import (
     ObjectStorageClient,
     ObjectStorageError,
     get_object_storage,
 )
-from app.models.factory import ToolFactoryArtifact, ToolFactoryCandidate, ToolFactoryJob
+from app.models.factory import (
+    ToolFactoryArtifact,
+    ToolFactoryBuild,
+    ToolFactoryCandidate,
+    ToolFactoryGeneratedPackage,
+    ToolFactoryJob,
+)
 from app.repositories.factory import FactoryRepository
 from app.repositories.idempotency import IdempotencyRepository
 from app.repositories.outbox import OutboxRepository
@@ -48,6 +66,9 @@ from app.schemas.factory import (
     FactoryCandidateListResponse,
     FactoryCandidateMaterializeResponse,
     FactoryCandidateResponse,
+    FactoryGeneratedPackageListResponse,
+    FactoryGeneratedPackageResponse,
+    FactoryGeneratedPackageTool,
     FactoryJobDetailResponse,
     FactoryJobListResponse,
     FactoryJobResponse,
@@ -61,6 +82,9 @@ _OPERATION_SCOPE = "FACTORY_OPENAPI_ANALYZE_V1"
 _RESOURCE_TYPE = "TOOL_FACTORY_JOB"
 _BUILD_OPERATION_SCOPE = "FACTORY_BUILD_CREATE_V1"
 _BUILD_RESOURCE_TYPE = "TOOL_FACTORY_BUILD"
+_PACKAGE_OPERATION_SCOPE = "FACTORY_PACKAGE_GENERATE_V1"
+_PACKAGE_RESOURCE_TYPE = "TOOL_FACTORY_GENERATED_PACKAGE"
+_PACKAGE_UNIQUE_NAME = "uq_tool_factory_generated_packages_build_generator"
 _IDEMPOTENCY_KEY_MAX_LEN = 128
 _IDEMPOTENCY_PK_NAME = "pk_api_idempotency_records"
 
@@ -79,6 +103,13 @@ class FactoryJobCreateOutcome:
 @dataclass(frozen=True, slots=True)
 class FactoryBuildCreateOutcome:
     result: FactoryBuildResponse
+    http_status: int
+    replayed: bool
+
+
+@dataclass(frozen=True, slots=True)
+class FactoryPackageGenerateOutcome:
+    result: FactoryGeneratedPackageResponse
     http_status: int
     replayed: bool
 
@@ -267,6 +298,33 @@ def build_source_object_key(*, job_id: uuid.UUID) -> str:
     """Server-generated non-guessable Object Storage key (no credentials/secrets)."""
 
     return f"factory/openapi/{job_id.hex}/{uuid.uuid4().hex}"
+
+
+def build_package_object_key(*, build_id: uuid.UUID, generator_version: str) -> str:
+    """Deterministic Object Storage key for a Build + package generator version."""
+
+    return (
+        f"factory/packages/{build_id.hex}/"
+        f"{generator_version}/package.json"
+    )
+
+
+def _package_request_hash(*, build_id: uuid.UUID, generator_version: str) -> str:
+    return compute_canonical_json_hash(
+        {
+            "build_id": str(build_id),
+            "generator_version": generator_version,
+        }
+    )
+
+
+def _is_package_unique_violation(exc: IntegrityError) -> bool:
+    name = _constraint_name(exc)
+    if name == _PACKAGE_UNIQUE_NAME:
+        return True
+    orig = getattr(exc, "orig", None)
+    msg = str(orig if orig is not None else exc)
+    return _PACKAGE_UNIQUE_NAME in msg
 
 
 class FactoryService:
@@ -1122,3 +1180,539 @@ class FactoryService:
             has_next=(page * page_size) < total,
             job_id=job.id,
         )
+
+    def _revalidate_build_hashes(self, build: ToolFactoryBuild) -> list[Any]:
+        """Fail-closed integrity check immediately before package generation."""
+
+        snapshot = build.candidates_snapshot
+        if not isinstance(snapshot, list) or not snapshot:
+            raise AppError(
+                code=FACTORY_PACKAGE_SNAPSHOT_INVALID,
+                message="Build candidates_snapshot is missing or empty.",
+                status_code=status.HTTP_409_CONFLICT,
+            )
+        recomputed_snapshot_hash = compute_canonical_json_hash(snapshot)
+        if recomputed_snapshot_hash != build.candidates_snapshot_hash:
+            raise AppError(
+                code=FACTORY_PACKAGE_HASH_MISMATCH,
+                message=(
+                    "Build candidates_snapshot_hash does not match the "
+                    "persisted snapshot."
+                ),
+                status_code=status.HTTP_409_CONFLICT,
+            )
+        raw_ids = build.candidate_ids if isinstance(build.candidate_ids, list) else []
+        candidate_ids = [str(cid) for cid in raw_ids]
+        if not candidate_ids:
+            raise AppError(
+                code=FACTORY_PACKAGE_SNAPSHOT_INVALID,
+                message="Build candidate_ids lineage is missing.",
+                status_code=status.HTTP_409_CONFLICT,
+            )
+        recomputed_input_hash = compute_canonical_json_hash(
+            _build_input_hash_payload(
+                job_id=build.job_id,
+                analysis_artifact_id=build.analysis_artifact_id,
+                source_sha256=build.source_sha256,
+                analyzer_version=build.analyzer_version,
+                generator_version=build.generator_version,
+                candidate_ids=candidate_ids,
+                candidates_snapshot_hash=build.candidates_snapshot_hash,
+            )
+        )
+        if recomputed_input_hash != build.build_input_hash:
+            raise AppError(
+                code=FACTORY_PACKAGE_HASH_MISMATCH,
+                message=(
+                    "Build build_input_hash does not match recomputed "
+                    "Build input evidence."
+                ),
+                status_code=status.HTTP_409_CONFLICT,
+            )
+        if (
+            not build.source_sha256
+            or len(build.source_sha256) != 64
+            or not build.analyzer_version
+        ):
+            raise AppError(
+                code=FACTORY_PACKAGE_LINEAGE_MISMATCH,
+                message="Build source lineage is missing or corrupt.",
+                status_code=status.HTTP_409_CONFLICT,
+            )
+        return snapshot
+
+    def _package_to_response(
+        self,
+        row: ToolFactoryGeneratedPackage,
+        *,
+        tools: list[Any] | None = None,
+    ) -> FactoryGeneratedPackageResponse:
+        projected: list[FactoryGeneratedPackageTool] = []
+        if tools is not None:
+            projected = [
+                FactoryGeneratedPackageTool.model_validate(tool) for tool in tools
+            ]
+        return FactoryGeneratedPackageResponse(
+            id=row.id,
+            artifact_type="GENERATED_PACKAGE",
+            build_id=row.build_id,
+            job_id=row.job_id,
+            analysis_artifact_id=row.analysis_artifact_id,
+            source_sha256=row.source_sha256,
+            analyzer_version=row.analyzer_version,
+            build_input_hash=row.build_input_hash,
+            build_generator_version=row.build_generator_version,
+            generator_version=row.generator_version,
+            package_schema_version=row.package_schema_version,
+            package_content_sha256=row.package_content_sha256,
+            package_size_bytes=row.package_size_bytes,
+            tool_count=row.tool_count,
+            tools=projected,
+            requested_by=row.requested_by,
+            created_at=row.created_at,
+        )
+
+    async def _load_package_tools(
+        self,
+        row: ToolFactoryGeneratedPackage,
+    ) -> list[Any]:
+        storage = self._storage_client()
+        try:
+            raw = await storage.get_bytes(
+                bucket=row.object_bucket,
+                object_key=row.object_key,
+            )
+        except ObjectStorageError as exc:
+            raise AppError(
+                code=exc.code or FACTORY_PACKAGE_OBJECT_STORE_FAILED,
+                message=exc.message,
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            ) from exc
+        if len(raw) != int(row.package_size_bytes):
+            raise AppError(
+                code=FACTORY_PACKAGE_HASH_MISMATCH,
+                message=(
+                    "Generated Package object size does not match "
+                    "persisted package_size_bytes."
+                ),
+                status_code=status.HTTP_409_CONFLICT,
+            )
+        try:
+            payload = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise AppError(
+                code=FACTORY_PACKAGE_SNAPSHOT_INVALID,
+                message="Generated Package object payload is corrupt.",
+                status_code=status.HTTP_409_CONFLICT,
+            ) from exc
+        if compute_canonical_json_hash(payload) != row.package_content_sha256:
+            raise AppError(
+                code=FACTORY_PACKAGE_HASH_MISMATCH,
+                message="Generated Package object hash does not match evidence.",
+                status_code=status.HTTP_409_CONFLICT,
+            )
+        tools = payload.get("tools") if isinstance(payload, dict) else None
+        if not isinstance(tools, list):
+            raise AppError(
+                code=FACTORY_PACKAGE_SNAPSHOT_INVALID,
+                message="Generated Package tools payload is invalid.",
+                status_code=status.HTTP_409_CONFLICT,
+            )
+        return tools
+
+    async def _cleanup_package_object_if_unowned(
+        self,
+        *,
+        storage: ObjectStorageClient,
+        bucket: str,
+        object_key: str,
+        build_id: uuid.UUID,
+        generator_version: str,
+    ) -> None:
+        """Delete Object Storage bytes only when no durable package owns the key.
+
+        Deterministic package keys are shared across attempts for the same
+        Build + generator version. A race loser must not delete the winner's
+        object after UNIQUE/idempotency conflict.
+        """
+        owner = await self._repo.get_generated_package_for_build(
+            build_id,
+            generator_version=generator_version,
+        )
+        if (
+            owner is not None
+            and owner.object_bucket == bucket
+            and owner.object_key == object_key
+        ):
+            return
+        await storage.delete_object(bucket=bucket, object_key=object_key)
+
+    async def _replay_or_conflict_package(
+        self,
+        record: Any,
+        request_hash: str,
+    ) -> FactoryPackageGenerateOutcome:
+        if record.request_hash != request_hash:
+            raise AppError(
+                code="IDEMPOTENCY_KEY_REUSED",
+                message="Idempotency-Key가 다른 요청에 재사용되었습니다.",
+                status_code=status.HTTP_409_CONFLICT,
+            )
+        if record.status != "COMPLETED":
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message="Idempotency record가 COMPLETED가 아닙니다.",
+                status_code=status.HTTP_409_CONFLICT,
+            )
+        if (
+            record.resource_type != _PACKAGE_RESOURCE_TYPE
+            or record.resource_id is None
+        ):
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message="Idempotency resource metadata가 손상되었습니다.",
+                status_code=status.HTTP_409_CONFLICT,
+            )
+        row = await self._repo.get_generated_package(record.resource_id)
+        if row is None:
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message="Idempotency가 가리키는 Generated Package가 없습니다.",
+                status_code=status.HTTP_409_CONFLICT,
+            )
+        if (
+            record.response_status != status.HTTP_201_CREATED
+            or record.response_body is None
+        ):
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message="Idempotency response snapshot이 손상되었습니다.",
+                status_code=status.HTTP_409_CONFLICT,
+            )
+        try:
+            cached = FactoryGeneratedPackageResponse.model_validate(
+                record.response_body
+            )
+        except ValidationError as exc:
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message="Idempotency response snapshot이 유효하지 않습니다.",
+                status_code=status.HTTP_409_CONFLICT,
+            ) from exc
+        if cached.id != record.resource_id:
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message="Idempotency response snapshot이 손상되었습니다.",
+                status_code=status.HTTP_409_CONFLICT,
+            )
+        # Revalidate Object Storage existence/hash/size on every replay.
+        tools = await self._load_package_tools(row)
+        live = self._package_to_response(row, tools=tools)
+        if live.package_content_sha256 != cached.package_content_sha256:
+            raise AppError(
+                code=FACTORY_PACKAGE_HASH_MISMATCH,
+                message=(
+                    "Idempotency snapshot package hash does not match "
+                    "durable Generated Package evidence."
+                ),
+                status_code=status.HTTP_409_CONFLICT,
+            )
+        return FactoryPackageGenerateOutcome(
+            result=live,
+            http_status=status.HTTP_201_CREATED,
+            replayed=True,
+        )
+
+    async def generate_package(
+        self,
+        *,
+        actor_user_id: uuid.UUID,
+        build_id: uuid.UUID,
+        idempotency_key: str,
+    ) -> FactoryPackageGenerateOutcome:
+        """Generate a durable declarative package artifact from a Build snapshot."""
+
+        await self._assert_manage(actor_user_id)
+        key = _normalize_idempotency_key(idempotency_key)
+        generator_version = FACTORY_PACKAGE_GENERATOR_VERSION
+        req_hash = _package_request_hash(
+            build_id=build_id,
+            generator_version=generator_version,
+        )
+        principal_key = str(actor_user_id)
+
+        existing = await self._idempotency.get(
+            principal_key=principal_key,
+            operation_scope=_PACKAGE_OPERATION_SCOPE,
+            idempotency_key=key,
+        )
+        if existing is not None:
+            return await self._replay_or_conflict_package(existing, req_hash)
+
+        # Serialize generation per Build so UNIQUE(build_id, generator_version)
+        # and Idempotency-Key races cannot interleave mid-write.
+        build = await self._repo.get_build_for_update(build_id)
+        if build is None:
+            raise AppError(
+                code="NOT_FOUND",
+                message="Factory Build를 찾을 수 없습니다.",
+                status_code=status.HTTP_404_NOT_FOUND,
+            )
+
+        # Re-check idempotency after lock (winner may have committed).
+        existing = await self._idempotency.get(
+            principal_key=principal_key,
+            operation_scope=_PACKAGE_OPERATION_SCOPE,
+            idempotency_key=key,
+        )
+        if existing is not None:
+            # Release Build FOR UPDATE before replaying from a fresh read.
+            await self._session.rollback()
+            raced = await self._idempotency.get(
+                principal_key=principal_key,
+                operation_scope=_PACKAGE_OPERATION_SCOPE,
+                idempotency_key=key,
+            )
+            if raced is None:
+                raise AppError(
+                    code="RESOURCE_CONFLICT",
+                    message="Generated Package 생성 중 충돌이 발생했습니다.",
+                    status_code=status.HTTP_409_CONFLICT,
+                )
+            return await self._replay_or_conflict_package(raced, req_hash)
+
+        # Natural identity: one package per Build + generator version.
+        already = await self._repo.get_generated_package_for_build(
+            build.id,
+            generator_version=generator_version,
+        )
+        if already is not None:
+            tools = await self._load_package_tools(already)
+            response = self._package_to_response(already, tools=tools)
+            now = _utc_now()
+            try:
+                await self._idempotency.create_completed(
+                    principal_key=principal_key,
+                    operation_scope=_PACKAGE_OPERATION_SCOPE,
+                    idempotency_key=key,
+                    request_hash=req_hash,
+                    response_status=status.HTTP_201_CREATED,
+                    response_body=response.model_dump(mode="json"),
+                    resource_type=_PACKAGE_RESOURCE_TYPE,
+                    resource_id=already.id,
+                    completed_at=now,
+                )
+                await self._session.commit()
+            except IntegrityError as exc:
+                await self._session.rollback()
+                if not _is_idempotency_pk_violation(exc):
+                    raise
+                raced = await self._idempotency.get(
+                    principal_key=principal_key,
+                    operation_scope=_PACKAGE_OPERATION_SCOPE,
+                    idempotency_key=key,
+                )
+                if raced is None:
+                    raise AppError(
+                        code="RESOURCE_CONFLICT",
+                        message="Generated Package 생성 중 충돌이 발생했습니다.",
+                        status_code=status.HTTP_409_CONFLICT,
+                    ) from exc
+                return await self._replay_or_conflict_package(raced, req_hash)
+            return FactoryPackageGenerateOutcome(
+                result=response,
+                http_status=status.HTTP_201_CREATED,
+                replayed=True,
+            )
+
+        snapshot = self._revalidate_build_hashes(build)
+        try:
+            package, raw, content_sha256 = build_generated_package(
+                build_id=str(build.id),
+                build_input_hash=build.build_input_hash,
+                build_generator_version=build.generator_version,
+                job_id=str(build.job_id),
+                analysis_artifact_id=str(build.analysis_artifact_id),
+                source_sha256=build.source_sha256,
+                analyzer_version=build.analyzer_version,
+                candidates_snapshot=snapshot,
+                generator_version=generator_version,
+                package_schema_version=PACKAGE_SCHEMA_VERSION,
+            )
+        except PackageGenerationError as exc:
+            raise AppError(
+                code=exc.code,
+                message=exc.message,
+                status_code=status.HTTP_409_CONFLICT,
+            ) from exc
+
+        settings = get_settings()
+        bucket = settings.object_storage_bucket
+        # Capture scalars before persistence so rollback cannot expire them.
+        locked_build_id = build.id
+        locked_job_id = build.job_id
+        locked_analysis_artifact_id = build.analysis_artifact_id
+        locked_source_sha256 = build.source_sha256
+        locked_analyzer_version = build.analyzer_version
+        locked_build_generator_version = build.generator_version
+        locked_build_input_hash = build.build_input_hash
+        object_key = build_package_object_key(
+            build_id=locked_build_id,
+            generator_version=generator_version,
+        )
+        storage = self._storage_client()
+        try:
+            await storage.ensure_bucket(bucket)
+            await storage.put_bytes(
+                bucket=bucket,
+                object_key=object_key,
+                data=raw,
+                content_type=ARTIFACT_CONTENT_TYPE_JSON,
+            )
+        except ObjectStorageError as exc:
+            raise AppError(
+                code=exc.code or FACTORY_PACKAGE_OBJECT_STORE_FAILED,
+                message=exc.message,
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            ) from exc
+
+        package_id = uuid.uuid4()
+        now = _utc_now()
+        try:
+            row = await self._repo.create_generated_package(
+                package_id=package_id,
+                build_id=locked_build_id,
+                job_id=locked_job_id,
+                analysis_artifact_id=locked_analysis_artifact_id,
+                source_sha256=locked_source_sha256,
+                analyzer_version=locked_analyzer_version,
+                build_input_hash=locked_build_input_hash,
+                build_generator_version=locked_build_generator_version,
+                generator_version=generator_version,
+                package_schema_version=PACKAGE_SCHEMA_VERSION,
+                package_content_sha256=content_sha256,
+                package_size_bytes=len(raw),
+                tool_count=int(package["tool_count"]),
+                object_bucket=bucket,
+                object_key=object_key,
+                content_type=ARTIFACT_CONTENT_TYPE_JSON,
+                requested_by=actor_user_id,
+            )
+            response = self._package_to_response(row, tools=package["tools"])
+            await self._idempotency.create_completed(
+                principal_key=principal_key,
+                operation_scope=_PACKAGE_OPERATION_SCOPE,
+                idempotency_key=key,
+                request_hash=req_hash,
+                response_status=status.HTTP_201_CREATED,
+                response_body=response.model_dump(mode="json"),
+                resource_type=_PACKAGE_RESOURCE_TYPE,
+                resource_id=row.id,
+                completed_at=now,
+            )
+            await self._session.commit()
+        except IntegrityError as exc:
+            await self._session.rollback()
+            # Compensating delete only when no durable owner keeps this key.
+            await self._cleanup_package_object_if_unowned(
+                storage=storage,
+                bucket=bucket,
+                object_key=object_key,
+                build_id=locked_build_id,
+                generator_version=generator_version,
+            )
+            if _is_idempotency_pk_violation(exc) or _is_package_unique_violation(exc):
+                raced = await self._idempotency.get(
+                    principal_key=principal_key,
+                    operation_scope=_PACKAGE_OPERATION_SCOPE,
+                    idempotency_key=key,
+                )
+                if raced is not None:
+                    return await self._replay_or_conflict_package(raced, req_hash)
+                existing_pkg = await self._repo.get_generated_package_for_build(
+                    locked_build_id,
+                    generator_version=generator_version,
+                )
+                if existing_pkg is not None:
+                    tools = await self._load_package_tools(existing_pkg)
+                    return FactoryPackageGenerateOutcome(
+                        result=self._package_to_response(
+                            existing_pkg, tools=tools
+                        ),
+                        http_status=status.HTTP_201_CREATED,
+                        replayed=True,
+                    )
+                raise AppError(
+                    code="RESOURCE_CONFLICT",
+                    message="Generated Package 생성 중 충돌이 발생했습니다.",
+                    status_code=status.HTTP_409_CONFLICT,
+                ) from exc
+            raise
+        except Exception:
+            await self._session.rollback()
+            await self._cleanup_package_object_if_unowned(
+                storage=storage,
+                bucket=bucket,
+                object_key=object_key,
+                build_id=locked_build_id,
+                generator_version=generator_version,
+            )
+            raise
+
+        return FactoryPackageGenerateOutcome(
+            result=response,
+            http_status=status.HTTP_201_CREATED,
+            replayed=False,
+        )
+
+    async def list_generated_packages_for_build(
+        self,
+        actor_user_id: uuid.UUID,
+        build_id: uuid.UUID,
+        *,
+        page: int = 1,
+        page_size: int = 20,
+        sort: str = "-created_at",
+    ) -> FactoryGeneratedPackageListResponse:
+        await self._assert_read(actor_user_id)
+        build = await self._repo.get_build(build_id)
+        if build is None:
+            raise AppError(
+                code="NOT_FOUND",
+                message="Factory Build를 찾을 수 없습니다.",
+                status_code=status.HTTP_404_NOT_FOUND,
+            )
+        rows, total = await self._repo.list_generated_packages_for_build(
+            build.id,
+            page=page,
+            page_size=page_size,
+            sort=sort,
+        )
+        items: list[FactoryGeneratedPackageResponse] = []
+        for row in rows:
+            tools = await self._load_package_tools(row)
+            items.append(self._package_to_response(row, tools=tools))
+        return FactoryGeneratedPackageListResponse(
+            items=items,
+            page=page,
+            page_size=page_size,
+            total=total,
+            has_next=(page * page_size) < total,
+            build_id=build.id,
+        )
+
+    async def get_generated_package(
+        self,
+        actor_user_id: uuid.UUID,
+        package_id: uuid.UUID,
+    ) -> FactoryGeneratedPackageResponse:
+        await self._assert_read(actor_user_id)
+        row = await self._repo.get_generated_package(package_id)
+        if row is None:
+            raise AppError(
+                code="NOT_FOUND",
+                message="Generated Package를 찾을 수 없습니다.",
+                status_code=status.HTTP_404_NOT_FOUND,
+            )
+        tools = await self._load_package_tools(row)
+        return self._package_to_response(row, tools=tools)

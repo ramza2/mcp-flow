@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
+from typing import Any
 
 import pytest
 from app.core.canonical_hash import compute_canonical_json_hash
@@ -13,12 +14,14 @@ from app.domain.enums import JobStatus, UserStatus
 from app.factory import (
     ARTIFACT_TYPE_OPENAPI_ANALYSIS,
     FACTORY_BUILD_GENERATOR_VERSION,
+    FACTORY_PACKAGE_GENERATOR_VERSION,
     JOB_TYPE_OPENAPI_ANALYZE,
     OPENAPI_ANALYZER_VERSION,
 )
 from app.factory.errors import (
     FACTORY_ANALYSIS_LIMIT_EXCEEDED,
     FACTORY_CANDIDATE_PERSIST_FAILED,
+    FACTORY_PACKAGE_HASH_MISMATCH,
     FACTORY_SOURCE_OBJECT_CORRUPT,
     FACTORY_SOURCE_OBJECT_MISSING,
     FACTORY_SOURCE_PARSE_ERROR,
@@ -33,6 +36,7 @@ from app.models.factory import (
     ToolFactoryArtifact,
     ToolFactoryBuild,
     ToolFactoryCandidate,
+    ToolFactoryGeneratedPackage,
     ToolFactoryJob,
 )
 from app.models.idempotency import ApiIdempotencyRecord
@@ -1087,3 +1091,280 @@ async def test_build_idempotency_replay_and_conflict(
             idempotency_key=key,
         )
     assert conflict.value.code == "IDEMPOTENCY_KEY_REUSED"
+
+
+@pytest.mark.asyncio
+async def test_generate_package_deterministic_and_idempotent(
+    db_session: AsyncSession,
+) -> None:
+    svc, store, user_id, job_id, cand_ids = await _succeeded_job_with_candidates(
+        db_session
+    )
+    build = await svc.create_build(
+        actor_user_id=user_id,
+        job_id=job_id,
+        candidate_ids=cand_ids,
+        idempotency_key=f"build-{uuid.uuid4().hex}",
+    )
+    key = f"pkg-{uuid.uuid4().hex}"
+    first = await svc.generate_package(
+        actor_user_id=user_id,
+        build_id=build.result.id,
+        idempotency_key=key,
+    )
+    second = await svc.generate_package(
+        actor_user_id=user_id,
+        build_id=build.result.id,
+        idempotency_key=key,
+    )
+    assert first.http_status == 201
+    assert first.replayed is False
+    assert second.replayed is True
+    assert second.result.id == first.result.id
+    assert first.result.package_content_sha256 == second.result.package_content_sha256
+    assert first.result.generator_version == FACTORY_PACKAGE_GENERATOR_VERSION
+    assert first.result.tool_count == len(cand_ids)
+    assert first.result.build_input_hash == build.result.build_input_hash
+    assert sorted(t.operation_key for t in first.result.tools) == sorted(
+        t.operation_key for t in first.result.tools
+    )
+
+    # Same Build + generator via a different key returns the same package identity.
+    again = await svc.generate_package(
+        actor_user_id=user_id,
+        build_id=build.result.id,
+        idempotency_key=f"pkg-other-{uuid.uuid4().hex}",
+    )
+    assert again.result.id == first.result.id
+    assert again.result.package_content_sha256 == first.result.package_content_sha256
+
+    tools = (
+        await db_session.execute(select(func.count()).select_from(MCPTool))
+    ).scalar_one()
+    servers = (
+        await db_session.execute(select(func.count()).select_from(MCPServer))
+    ).scalar_one()
+    assert int(tools) == 0
+    assert int(servers) == 0
+
+    listed = await svc.list_generated_packages_for_build(user_id, build.result.id)
+    assert listed.total == 1
+    detail = await svc.get_generated_package(user_id, first.result.id)
+    assert detail.package_content_sha256 == first.result.package_content_sha256
+    assert len(detail.tools) == first.result.tool_count
+
+
+@pytest.mark.asyncio
+async def test_generate_package_fail_closed_on_snapshot_tamper(
+    db_session: AsyncSession,
+) -> None:
+    svc, _store, user_id, job_id, cand_ids = await _succeeded_job_with_candidates(
+        db_session
+    )
+    build = await svc.create_build(
+        actor_user_id=user_id,
+        job_id=job_id,
+        candidate_ids=[cand_ids[0]],
+        idempotency_key=f"build-{uuid.uuid4().hex}",
+    )
+    row = await db_session.get(ToolFactoryBuild, build.result.id)
+    assert row is not None
+    # Tamper snapshot without updating hash.
+    snap = list(row.candidates_snapshot)
+    snap[0] = {**snap[0], "summary": "tampered-after-persist"}
+    row.candidates_snapshot = snap
+    await db_session.commit()
+
+    with pytest.raises(AppError) as exc:
+        await svc.generate_package(
+            actor_user_id=user_id,
+            build_id=build.result.id,
+            idempotency_key=f"pkg-{uuid.uuid4().hex}",
+        )
+    assert exc.value.status_code == 409
+    assert exc.value.code == FACTORY_PACKAGE_HASH_MISMATCH
+
+
+@pytest.mark.asyncio
+async def test_generate_package_fail_closed_on_build_input_hash_tamper(
+    db_session: AsyncSession,
+) -> None:
+    svc, _store, user_id, job_id, cand_ids = await _succeeded_job_with_candidates(
+        db_session
+    )
+    build = await svc.create_build(
+        actor_user_id=user_id,
+        job_id=job_id,
+        candidate_ids=[cand_ids[0]],
+        idempotency_key=f"build-{uuid.uuid4().hex}",
+    )
+    row = await db_session.get(ToolFactoryBuild, build.result.id)
+    assert row is not None
+    row.build_input_hash = "f" * 64
+    await db_session.commit()
+
+    with pytest.raises(AppError) as exc:
+        await svc.generate_package(
+            actor_user_id=user_id,
+            build_id=build.result.id,
+            idempotency_key=f"pkg-{uuid.uuid4().hex}",
+        )
+    assert exc.value.status_code == 409
+    assert exc.value.code == FACTORY_PACKAGE_HASH_MISMATCH
+
+
+@pytest.mark.asyncio
+async def test_generate_package_orphan_object_cleaned_on_persist_failure(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.core.config import get_settings
+    from app.factory import FACTORY_PACKAGE_GENERATOR_VERSION as PKG_GEN
+    from app.services.factory import build_package_object_key
+
+    svc, store, user_id, job_id, cand_ids = await _succeeded_job_with_candidates(
+        db_session
+    )
+    build = await svc.create_build(
+        actor_user_id=user_id,
+        job_id=job_id,
+        candidate_ids=[cand_ids[0]],
+        idempotency_key=f"build-{uuid.uuid4().hex}",
+    )
+    bucket = get_settings().object_storage_bucket
+    object_key = build_package_object_key(
+        build_id=build.result.id,
+        generator_version=PKG_GEN,
+    )
+
+    async def _boom(self: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("simulated package persist failure")
+
+    monkeypatch.setattr(
+        FactoryRepository, "create_generated_package", _boom
+    )
+    with pytest.raises(RuntimeError, match="simulated package persist failure"):
+        await svc.generate_package(
+            actor_user_id=user_id,
+            build_id=build.result.id,
+            idempotency_key=f"pkg-{uuid.uuid4().hex}",
+        )
+    assert store.has_object(bucket=bucket, object_key=object_key) is False
+    count = (
+        await db_session.execute(
+            select(func.count()).where(
+                ToolFactoryGeneratedPackage.build_id == build.result.id
+            )
+        )
+    ).scalar_one()
+    assert int(count) == 0
+
+
+@pytest.mark.asyncio
+async def test_generate_package_cleanup_preserves_winner_object(
+    db_session: AsyncSession,
+) -> None:
+    from app.core.config import get_settings
+    from app.factory import FACTORY_PACKAGE_GENERATOR_VERSION as PKG_GEN
+    from app.services.factory import build_package_object_key
+
+    svc, store, user_id, job_id, cand_ids = await _succeeded_job_with_candidates(
+        db_session
+    )
+    build = await svc.create_build(
+        actor_user_id=user_id,
+        job_id=job_id,
+        candidate_ids=[cand_ids[0]],
+        idempotency_key=f"build-{uuid.uuid4().hex}",
+    )
+    first = await svc.generate_package(
+        actor_user_id=user_id,
+        build_id=build.result.id,
+        idempotency_key=f"pkg-{uuid.uuid4().hex}",
+    )
+    bucket = get_settings().object_storage_bucket
+    object_key = build_package_object_key(
+        build_id=build.result.id,
+        generator_version=PKG_GEN,
+    )
+    assert store.has_object(bucket=bucket, object_key=object_key) is True
+
+    # Loser-style cleanup must not delete the durable owner's object.
+    await svc._cleanup_package_object_if_unowned(
+        storage=store,
+        bucket=bucket,
+        object_key=object_key,
+        build_id=build.result.id,
+        generator_version=PKG_GEN,
+    )
+    assert store.has_object(bucket=bucket, object_key=object_key) is True
+    detail = await svc.get_generated_package(user_id, first.result.id)
+    assert detail.package_content_sha256 == first.result.package_content_sha256
+
+
+@pytest.mark.asyncio
+async def test_generate_package_replay_revalidates_object_storage(
+    db_session: AsyncSession,
+) -> None:
+    from app.core.config import get_settings
+    from app.factory import FACTORY_PACKAGE_GENERATOR_VERSION as PKG_GEN
+    from app.factory.errors import FACTORY_SOURCE_OBJECT_MISSING
+    from app.services.factory import build_package_object_key
+
+    svc, store, user_id, job_id, cand_ids = await _succeeded_job_with_candidates(
+        db_session
+    )
+    build = await svc.create_build(
+        actor_user_id=user_id,
+        job_id=job_id,
+        candidate_ids=[cand_ids[0]],
+        idempotency_key=f"build-{uuid.uuid4().hex}",
+    )
+    key = f"pkg-replay-{uuid.uuid4().hex}"
+    first = await svc.generate_package(
+        actor_user_id=user_id,
+        build_id=build.result.id,
+        idempotency_key=key,
+    )
+    assert first.replayed is False
+
+    # Healthy replay reloads tools from Object Storage (not cache-only).
+    replay = await svc.generate_package(
+        actor_user_id=user_id,
+        build_id=build.result.id,
+        idempotency_key=key,
+    )
+    assert replay.replayed is True
+    assert replay.result.id == first.result.id
+    assert len(replay.result.tools) == first.result.tool_count
+
+    bucket = get_settings().object_storage_bucket
+    object_key = build_package_object_key(
+        build_id=build.result.id,
+        generator_version=PKG_GEN,
+    )
+    await store.delete_object(bucket=bucket, object_key=object_key)
+    with pytest.raises(AppError) as missing:
+        await svc.generate_package(
+            actor_user_id=user_id,
+            build_id=build.result.id,
+            idempotency_key=key,
+        )
+    assert missing.value.status_code == 503
+    assert missing.value.code == FACTORY_SOURCE_OBJECT_MISSING
+
+    # Size mismatch also fails closed on replay.
+    await store.put_bytes(
+        bucket=bucket,
+        object_key=object_key,
+        data=b'{"truncated":true}',
+        content_type="application/json",
+    )
+    with pytest.raises(AppError) as size_exc:
+        await svc.generate_package(
+            actor_user_id=user_id,
+            build_id=build.result.id,
+            idempotency_key=key,
+        )
+    assert size_exc.value.status_code == 409
+    assert size_exc.value.code == FACTORY_PACKAGE_HASH_MISMATCH

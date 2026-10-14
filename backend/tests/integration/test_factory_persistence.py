@@ -688,3 +688,93 @@ async def test_pg_concurrent_build_create_same_idempotency_key(
             )
         ).scalar_one()
         assert int(count) == 1
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_pg_concurrent_package_generate_same_idempotency_key(
+    integration_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Same Idempotency-Key concurrent generate keeps a single package.
+
+    Generation takes a Build row lock (FOR UPDATE), so a create_completed
+    barrier would deadlock; gather without an artificial barrier instead.
+    """
+    storage = InMemoryObjectStorage()
+    async with integration_session_factory() as session:
+        user_id = await _seed_manage_user(session)
+        outcome = await FactoryService(
+            session, storage=storage
+        ).create_openapi_analyze_job(
+            actor_user_id=user_id,
+            source_bytes=MINIMAL_JSON,
+            filename="pkg.json",
+            idempotency_key=f"job-{uuid.uuid4().hex}",
+        )
+        await session.commit()
+        job_id = outcome.result.id
+
+    async with integration_session_factory() as session:
+        worker = FactoryWorkerService(session, storage=storage, worker_id="pg-pkg")
+        result = await worker.process_job(job_id=job_id)
+        await session.commit()
+        assert result.status == JobStatus.SUCCEEDED.value
+        cand_id = (
+            await session.execute(
+                text(
+                    "SELECT id FROM tool_factory_candidates WHERE job_id = :jid LIMIT 1"
+                ),
+                {"jid": str(job_id)},
+            )
+        ).scalar_one()
+        build = await FactoryService(session, storage=storage).create_build(
+            actor_user_id=user_id,
+            job_id=job_id,
+            candidate_ids=[uuid.UUID(str(cand_id))],
+            idempotency_key=f"build-{uuid.uuid4().hex}",
+        )
+        build_id = build.result.id
+
+    key = f"pkg-race-{uuid.uuid4().hex}"
+
+    async def _run() -> Any:
+        async with integration_session_factory() as session:
+            try:
+                return await FactoryService(session, storage=storage).generate_package(
+                    actor_user_id=user_id,
+                    build_id=build_id,
+                    idempotency_key=key,
+                )
+            except AppError as exc:
+                return exc
+
+    results = await asyncio.gather(_run(), _run())
+    outcomes = [r for r in results if not isinstance(r, AppError)]
+    errors = [r for r in results if isinstance(r, AppError)]
+    assert not errors, f"unexpected AppError in package race: {errors}"
+    assert len(outcomes) == 2
+    assert sorted(o.replayed for o in outcomes) == [False, True]
+    assert {o.result.id for o in outcomes} == {outcomes[0].result.id}
+    assert {
+        o.result.package_content_sha256 for o in outcomes
+    } == {outcomes[0].result.package_content_sha256}
+
+    async with integration_session_factory() as session:
+        count = (
+            await session.execute(
+                text(
+                    "SELECT count(*) FROM tool_factory_generated_packages "
+                    "WHERE build_id = :bid"
+                ),
+                {"bid": str(build_id)},
+            )
+        ).scalar_one()
+        assert int(count) == 1
+        tools = (
+            await session.execute(text("SELECT count(*) FROM mcp_tools"))
+        ).scalar_one()
+        servers = (
+            await session.execute(text("SELECT count(*) FROM mcp_servers"))
+        ).scalar_one()
+        assert int(tools) == 0
+        assert int(servers) == 0

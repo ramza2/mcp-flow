@@ -1166,11 +1166,35 @@ GET  /api/v1/factory/builds/{build_id}
 - REQ-FAC-009: durable async Job + `factory-worker`
 - REQ-FAC-012: source/analyzer/analysis-artifact hashes only
 
+### Tool Factory Generated Package foundation (implemented slice)
+
+Deterministic **declarative** Generated Package artifact from an existing Build's
+immutable `candidates_snapshot`. No OpenAPI re-parse, no code execution, no
+MCPTool/MCPServer creation.
+
+```text
+POST /api/v1/factory/builds/{build_id}/generate
+GET  /api/v1/factory/builds/{build_id}/artifacts
+GET  /api/v1/factory/artifacts/{artifact_id}
+```
+
+- Auth: `mcp.server.manage` (generate), `mcp.server.read` (list/detail); ACTIVE user
+- Immediately before generation, revalidate
+  `candidates_snapshot_hash` + `build_input_hash`; tamper/missing/corrupt lineage
+  fails closed (`FACTORY_PACKAGE_HASH_MISMATCH` / related)
+- Package schema `factory-generated-package-v1`; generator
+  `factory-package-generator-v1`; tools ordered by `(operation_key, candidate_id)`
+- `package_content_sha256` via `compute_canonical_json_hash`; package bytes in
+  Object Storage; PostgreSQL stores metadata/evidence only
+- Unique `(build_id, generator_version)`; Idempotency scope
+  `FACTORY_PACKAGE_GENERATE_V1`; resource_type `TOOL_FACTORY_GENERATED_PACKAGE`
+- Safe responses never expose Object Storage keys/credentials or raw OpenAPI
+
 **Not implemented yet:**
 
 - allowlisted URL source fetch
 - generic `/jobs` API
-- sandbox build/test / generated MCP code/package / Docker image
+- sandbox build/test / executable MCP code / Docker image
 - Python source analysis / dependency install / subprocess
 - Security/Contract Test / Publish / DRAFT MCP Server creation
 - Connection Test / Discovery / activation
@@ -1181,7 +1205,8 @@ GET  /api/v1/factory/builds/{build_id}
 ## FNC-FAC-002. 생성
 
 선택 operation을 Tool로 생성하고 credential은 Secret reference placeholder로만 표현한다.
-(현재 slice의 Build foundation은 Candidate snapshot 고정만 수행하며 code generation은 후속.)
+(현재 slice는 Build snapshot + declarative Generated Package artifact foundation만
+수행하며 sandbox/executable codegen은 후속.)
 
 ## FNC-FAC-003. Sandbox Build/Test
 

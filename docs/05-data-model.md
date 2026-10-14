@@ -1963,12 +1963,13 @@ tool_factory_jobs
 tool_factory_artifacts
 tool_factory_candidates
 tool_factory_builds
+tool_factory_generated_packages
 tool_factory_test_results
 ```
 
 생성 artifact hash, generator version, sandbox policy, 시험 결과를 보존한다. 운영 활성화는 관리자 승인 후 별도 MCP Server 등록 흐름을 사용한다.
 
-**Implemented durable foundation (migrations `20261008_0028`, `20261013_0029`, `20261013_0030`, `20261013_0031`):**
+**Implemented durable foundation (migrations `20261008_0028`, `20261013_0029`, `20261013_0030`, `20261013_0031`, `20261013_0032`):**
 
 - `tool_factory_jobs` — OpenAPI analysis Jobs; canonical `JobStatus` CHECK;
   **no** raw source/body column; stores `source_sha256`, Object Storage
@@ -1991,13 +1992,23 @@ tool_factory_test_results
   `candidates_snapshot_hash` + `build_input_hash` (canonical JSON SHA-256);
   `candidate_count >= 1`; **no** new product-wide Build status enum;
   **no** FK to `mcp_tools` / `mcp_servers`
+- `tool_factory_generated_packages` — declarative Generated Package evidence;
+  unique `(build_id, generator_version)`; lineage
+  `build_id` / `job_id` / `analysis_artifact_id` / `source_sha256` /
+  `analyzer_version` / `build_input_hash` / `build_generator_version`;
+  `generator_version` (`factory-package-generator-v1`) +
+  `package_schema_version` (`factory-generated-package-v1`);
+  `package_content_sha256` + Object Storage refs
+  (`object_bucket` / `object_key` / `content_type` / `package_size_bytes`);
+  `tool_count >= 1`; **no** FK to `mcp_tools` / `mcp_servers`; package bytes
+  are not stored inline in PostgreSQL
 - `tool_factory_test_results` — forward-compatible evidence table (unused by
   the analysis flow in this slice)
 
 Do not duplicate product-wide `JobStatus` with Factory-local analysis issue
-severities. Generated packages / Publish remain later. Product-wide
-`object_blobs` catalog is still deferred; Factory Jobs store safe object
-reference columns directly.
+severities. Executable sandbox packages / Publish remain later. Product-wide
+`object_blobs` catalog is still deferred; Factory Jobs/packages store safe
+object reference columns directly.
 
 ---
 

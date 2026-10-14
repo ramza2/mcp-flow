@@ -152,3 +152,55 @@ class FactoryBuildResponse(BaseModel):
 class FactoryBuildListResponse(Page):
     items: list[FactoryBuildResponse]
     job_id: uuid.UUID
+
+
+class FactoryGeneratedPackageTool(BaseModel):
+    """Safe declarative Tool contract projected from a Generated Package."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    candidate_id: uuid.UUID
+    job_id: uuid.UUID
+    analysis_artifact_id: uuid.UUID
+    source_sha256: str
+    analyzer_version: str
+    operation_key: str
+    method: str
+    path: str
+    operation_id: str | None = None
+    summary: str | None = None
+    description: str | None = None
+    tags: list[str] = Field(default_factory=list)
+    deprecated: bool = False
+    parameters: list[FactoryParameterCandidate] = Field(default_factory=list)
+    request_schema: dict[str, Any] | None = None
+    response_schema: dict[str, Any] | None = None
+
+
+class FactoryGeneratedPackageResponse(BaseModel):
+    """Safe Generated Package projection (no Object Storage keys/credentials)."""
+
+    model_config = ConfigDict(extra="forbid", from_attributes=True)
+
+    id: uuid.UUID
+    artifact_type: Literal["GENERATED_PACKAGE"] = "GENERATED_PACKAGE"
+    build_id: uuid.UUID
+    job_id: uuid.UUID
+    analysis_artifact_id: uuid.UUID
+    source_sha256: str
+    analyzer_version: str
+    build_input_hash: str
+    build_generator_version: str
+    generator_version: str
+    package_schema_version: str
+    package_content_sha256: str
+    package_size_bytes: int
+    tool_count: int
+    tools: list[FactoryGeneratedPackageTool] = Field(default_factory=list)
+    requested_by: uuid.UUID
+    created_at: datetime
+
+
+class FactoryGeneratedPackageListResponse(Page):
+    items: list[FactoryGeneratedPackageResponse]
+    build_id: uuid.UUID

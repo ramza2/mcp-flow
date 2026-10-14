@@ -1377,7 +1377,21 @@ GET  /factory/builds/{build_id}
 - `GET /factory/builds/{build_id}` — Build detail with immutable snapshot
 - Auth: `mcp.server.manage` create; `mcp.server.read` list/detail; ACTIVE user
 - Responses never include raw OpenAPI source, Object Storage keys, or secrets
-- Does **not** generate code/packages, start sandboxes, or create MCP entities
+- Does **not** generate executable code, start sandboxes, or create MCP entities
+
+### Generated Packages (foundation)
+
+- `POST /factory/builds/{build_id}/generate` — create declarative Generated
+  Package from Build `candidates_snapshot` + required `Idempotency-Key`
+  (`FACTORY_PACKAGE_GENERATE_V1`); revalidates snapshot/build_input hashes
+  fail-closed; unique `(build_id, generator_version)`; stores package bytes in
+  Object Storage and metadata/hashes in PostgreSQL
+- `GET /factory/builds/{build_id}/artifacts` — paged Generated Packages for a Build
+- `GET /factory/artifacts/{artifact_id}` — Generated Package detail with tools
+- Auth: `mcp.server.manage` generate; `mcp.server.read` list/detail; ACTIVE user
+- Responses never include Object Storage keys/credentials, raw OpenAPI, or secrets
+- Does **not** exec/import Python, install deps, build Docker images, start MCP,
+  or create `MCPTool` / `MCPServer`
 
 ### Aspirational (not implemented by this slice)
 
