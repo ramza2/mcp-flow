@@ -1288,6 +1288,15 @@ class FactoryService:
                 message=exc.message,
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             ) from exc
+        if len(raw) != int(row.package_size_bytes):
+            raise AppError(
+                code=FACTORY_PACKAGE_HASH_MISMATCH,
+                message=(
+                    "Generated Package object size does not match "
+                    "persisted package_size_bytes."
+                ),
+                status_code=status.HTTP_409_CONFLICT,
+            )
         try:
             payload = json.loads(raw.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -1310,6 +1319,33 @@ class FactoryService:
                 status_code=status.HTTP_409_CONFLICT,
             )
         return tools
+
+    async def _cleanup_package_object_if_unowned(
+        self,
+        *,
+        storage: ObjectStorageClient,
+        bucket: str,
+        object_key: str,
+        build_id: uuid.UUID,
+        generator_version: str,
+    ) -> None:
+        """Delete Object Storage bytes only when no durable package owns the key.
+
+        Deterministic package keys are shared across attempts for the same
+        Build + generator version. A race loser must not delete the winner's
+        object after UNIQUE/idempotency conflict.
+        """
+        owner = await self._repo.get_generated_package_for_build(
+            build_id,
+            generator_version=generator_version,
+        )
+        if (
+            owner is not None
+            and owner.object_bucket == bucket
+            and owner.object_key == object_key
+        ):
+            return
+        await storage.delete_object(bucket=bucket, object_key=object_key)
 
     async def _replay_or_conflict_package(
         self,
@@ -1354,7 +1390,7 @@ class FactoryService:
                 status_code=status.HTTP_409_CONFLICT,
             )
         try:
-            result = FactoryGeneratedPackageResponse.model_validate(
+            cached = FactoryGeneratedPackageResponse.model_validate(
                 record.response_body
             )
         except ValidationError as exc:
@@ -1363,14 +1399,26 @@ class FactoryService:
                 message="Idempotency response snapshot이 유효하지 않습니다.",
                 status_code=status.HTTP_409_CONFLICT,
             ) from exc
-        if result.id != record.resource_id:
+        if cached.id != record.resource_id:
             raise AppError(
                 code="RESOURCE_CONFLICT",
                 message="Idempotency response snapshot이 손상되었습니다.",
                 status_code=status.HTTP_409_CONFLICT,
             )
+        # Revalidate Object Storage existence/hash/size on every replay.
+        tools = await self._load_package_tools(row)
+        live = self._package_to_response(row, tools=tools)
+        if live.package_content_sha256 != cached.package_content_sha256:
+            raise AppError(
+                code=FACTORY_PACKAGE_HASH_MISMATCH,
+                message=(
+                    "Idempotency snapshot package hash does not match "
+                    "durable Generated Package evidence."
+                ),
+                status_code=status.HTTP_409_CONFLICT,
+            )
         return FactoryPackageGenerateOutcome(
-            result=result,
+            result=live,
             http_status=status.HTTP_201_CREATED,
             replayed=True,
         )
@@ -1500,8 +1548,16 @@ class FactoryService:
 
         settings = get_settings()
         bucket = settings.object_storage_bucket
+        # Capture scalars before persistence so rollback cannot expire them.
+        locked_build_id = build.id
+        locked_job_id = build.job_id
+        locked_analysis_artifact_id = build.analysis_artifact_id
+        locked_source_sha256 = build.source_sha256
+        locked_analyzer_version = build.analyzer_version
+        locked_build_generator_version = build.generator_version
+        locked_build_input_hash = build.build_input_hash
         object_key = build_package_object_key(
-            build_id=build.id,
+            build_id=locked_build_id,
             generator_version=generator_version,
         )
         storage = self._storage_client()
@@ -1525,13 +1581,13 @@ class FactoryService:
         try:
             row = await self._repo.create_generated_package(
                 package_id=package_id,
-                build_id=build.id,
-                job_id=build.job_id,
-                analysis_artifact_id=build.analysis_artifact_id,
-                source_sha256=build.source_sha256,
-                analyzer_version=build.analyzer_version,
-                build_input_hash=build.build_input_hash,
-                build_generator_version=build.generator_version,
+                build_id=locked_build_id,
+                job_id=locked_job_id,
+                analysis_artifact_id=locked_analysis_artifact_id,
+                source_sha256=locked_source_sha256,
+                analyzer_version=locked_analyzer_version,
+                build_input_hash=locked_build_input_hash,
+                build_generator_version=locked_build_generator_version,
                 generator_version=generator_version,
                 package_schema_version=PACKAGE_SCHEMA_VERSION,
                 package_content_sha256=content_sha256,
@@ -1557,6 +1613,14 @@ class FactoryService:
             await self._session.commit()
         except IntegrityError as exc:
             await self._session.rollback()
+            # Compensating delete only when no durable owner keeps this key.
+            await self._cleanup_package_object_if_unowned(
+                storage=storage,
+                bucket=bucket,
+                object_key=object_key,
+                build_id=locked_build_id,
+                generator_version=generator_version,
+            )
             if _is_idempotency_pk_violation(exc) or _is_package_unique_violation(exc):
                 raced = await self._idempotency.get(
                     principal_key=principal_key,
@@ -1566,7 +1630,7 @@ class FactoryService:
                 if raced is not None:
                     return await self._replay_or_conflict_package(raced, req_hash)
                 existing_pkg = await self._repo.get_generated_package_for_build(
-                    build.id,
+                    locked_build_id,
                     generator_version=generator_version,
                 )
                 if existing_pkg is not None:
@@ -1586,6 +1650,13 @@ class FactoryService:
             raise
         except Exception:
             await self._session.rollback()
+            await self._cleanup_package_object_if_unowned(
+                storage=storage,
+                bucket=bucket,
+                object_key=object_key,
+                build_id=locked_build_id,
+                generator_version=generator_version,
+            )
             raise
 
         return FactoryPackageGenerateOutcome(
