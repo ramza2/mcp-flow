@@ -28,24 +28,33 @@ class FactoryImportSchemaError(AppError):
         )
 
 
+def _normalize_property_name(name: str) -> str:
+    """Same normalize basis as Parameter Builder (lookup-only)."""
+
+    return name.strip().casefold()
+
+
 def build_mcp_callable_input_schema(
     *,
     parameters: list[Any] | None,
     request_schema: Any | None,
+    request_body_required: bool = False,
 ) -> dict[str, Any]:
     """Build MCP ToolVersion.input_schema from declarative package fields.
 
     Rules:
-    - Each parameter becomes a top-level property keyed by ``name``
+    - Each parameter becomes a top-level property keyed by exact ``name``
     - ``required=true`` parameters are listed in ``required``
     - Parameter ``schema`` is preserved (default ``{type: string}`` when absent)
     - ``request_schema`` is exposed as property ``body`` (no deep merge)
-    - Property name collisions fail closed
+    - ``body`` is listed in ``required`` only when ``request_body_required`` is true
+    - Normalized property-name collisions (strip + casefold) fail closed
     """
 
     properties: dict[str, Any] = {}
     required: list[str] = []
-    seen_names: set[str] = set()
+    # normalized name -> exact property name already claimed
+    seen_normalized: dict[str, str] = {}
 
     ordered_params = _ordered_parameters(parameters or [])
     for param in ordered_params:
@@ -54,15 +63,22 @@ def build_mcp_callable_input_schema(
             raise FactoryImportSchemaError(
                 "Package parameter name must be a non-empty string."
             )
-        if name in seen_names:
+        normalized = _normalize_property_name(name)
+        if not normalized:
             raise FactoryImportSchemaError(
-                f"Package parameter name collision: {name!r}."
+                "Package parameter name must be a non-empty string."
             )
-        if name == _BODY_PROPERTY:
+        if normalized in seen_normalized:
+            prior = seen_normalized[normalized]
+            raise FactoryImportSchemaError(
+                "Package parameter name collision after normalize "
+                f"(strip/casefold): {name!r} conflicts with {prior!r}."
+            )
+        if normalized == _normalize_property_name(_BODY_PROPERTY):
             raise FactoryImportSchemaError(
                 "Package parameter name 'body' conflicts with request body mapping."
             )
-        seen_names.add(name)
+        seen_normalized[normalized] = name
         schema = param.get("schema")
         if schema is None:
             prop_schema: dict[str, Any] = {"type": "string"}
@@ -86,14 +102,16 @@ def build_mcp_callable_input_schema(
             raise FactoryImportSchemaError(
                 "Package request_schema must be an object when present."
             )
-        if _BODY_PROPERTY in seen_names or _BODY_PROPERTY in properties:
+        body_norm = _normalize_property_name(_BODY_PROPERTY)
+        if body_norm in seen_normalized or _BODY_PROPERTY in properties:
             raise FactoryImportSchemaError(
                 "Cannot map request_schema: property 'body' already exists."
             )
         properties[_BODY_PROPERTY] = dict(request_schema)
-        # requestBody presence maps to a callable body argument; treat as required
-        # when a schema is provided (OpenAPI required flag is not snapshotted).
-        required.append(_BODY_PROPERTY)
+        seen_normalized[body_norm] = _BODY_PROPERTY
+        # Do not invent stronger requiredness than the reviewed contract.
+        if request_body_required is True:
+            required.append(_BODY_PROPERTY)
 
     schema: dict[str, Any] = {
         "type": "object",

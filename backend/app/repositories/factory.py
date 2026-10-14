@@ -256,7 +256,8 @@ class FactoryRepository:
         deprecated: bool,
         parameters: list[Any],
         request_schema: dict[str, Any] | None,
-        response_schema: dict[str, Any] | None,
+        request_body_required: bool = False,
+        response_schema: dict[str, Any] | None = None,
         candidate_id: uuid.UUID | None = None,
     ) -> ToolFactoryCandidate:
         candidate = ToolFactoryCandidate(
@@ -275,6 +276,7 @@ class FactoryRepository:
             deprecated=deprecated,
             parameters=parameters,
             request_schema=request_schema,
+            request_body_required=bool(request_body_required),
             response_schema=response_schema,
         )
         self._session.add(candidate)

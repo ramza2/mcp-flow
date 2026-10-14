@@ -259,6 +259,7 @@ async def test_publish_approve_happy_path(db_session: AsyncSession) -> None:
         assert "verbose" not in required
         assert isinstance(version.raw_descriptor.get("parameters"), list)
         assert version.raw_descriptor.get("request_schema") is not None
+        assert version.raw_descriptor.get("request_body_required") is True
 
     package = await db_session.get(
         ToolFactoryGeneratedPackage, published.result.generated_package_id
@@ -478,3 +479,183 @@ async def test_publish_one_terminal_row_no_activation(
     assert server.status == MCPServerStatus.DRAFT.value
     assert server.discovery_mode is None
     assert server.last_healthy_at is None
+
+
+OPTIONAL_BODY_JSON = json.dumps(
+    {
+        "openapi": "3.0.3",
+        "info": {"title": "OptionalBody", "version": "1.0.0"},
+        "paths": {
+            "/items": {
+                "post": {
+                    "operationId": "createItem",
+                    "requestBody": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "properties": {"name": {"type": "string"}},
+                                }
+                            }
+                        }
+                    },
+                    "responses": {"200": {"description": "ok"}},
+                }
+            }
+        },
+    },
+    separators=(",", ":"),
+).encode("utf-8")
+
+NO_BODY_JSON = json.dumps(
+    {
+        "openapi": "3.0.3",
+        "info": {"title": "NoBody", "version": "1.0.0"},
+        "paths": {
+            "/ping": {
+                "get": {
+                    "operationId": "ping",
+                    "parameters": [
+                        {
+                            "name": "q",
+                            "in": "query",
+                            "required": True,
+                            "schema": {"type": "string"},
+                        }
+                    ],
+                    "responses": {"200": {"description": "ok"}},
+                }
+            }
+        },
+    },
+    separators=(",", ":"),
+).encode("utf-8")
+
+COLLISION_JSON = json.dumps(
+    {
+        "openapi": "3.0.3",
+        "info": {"title": "Collision", "version": "1.0.0"},
+        "paths": {
+            "/things/{ID}": {
+                "get": {
+                    "operationId": "getThing",
+                    "parameters": [
+                        {
+                            "name": "ID",
+                            "in": "path",
+                            "required": True,
+                            "schema": {"type": "string"},
+                        },
+                        {
+                            "name": "id",
+                            "in": "query",
+                            "required": False,
+                            "schema": {"type": "string"},
+                        },
+                    ],
+                    "responses": {"200": {"description": "ok"}},
+                }
+            }
+        },
+    },
+    separators=(",", ":"),
+).encode("utf-8")
+
+
+@pytest.mark.asyncio
+async def test_publish_optional_request_body_not_required(
+    db_session: AsyncSession,
+) -> None:
+    svc, _store, user_id, review_id = await _approved_review(
+        db_session, source_bytes=OPTIONAL_BODY_JSON
+    )
+    published = await svc.publish_review(
+        actor_user_id=user_id,
+        review_id=review_id,
+        idempotency_key=f"pub-opt-{uuid.uuid4().hex}",
+    )
+    tools = list(
+        (
+            await db_session.execute(
+                select(MCPTool).where(
+                    MCPTool.mcp_server_id == published.result.mcp_server_id
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert len(tools) == 1
+    version = await db_session.get(MCPToolVersion, tools[0].current_version_id)
+    assert version is not None
+    assert "body" in version.input_schema["properties"]
+    assert "body" not in version.input_schema.get("required", [])
+    assert version.raw_descriptor.get("request_body_required") is False
+    props, required = _validate_input_schema(version.input_schema)
+    assert "body" in props
+    assert "body" not in required
+
+
+@pytest.mark.asyncio
+async def test_publish_absent_request_body_omits_body(
+    db_session: AsyncSession,
+) -> None:
+    svc, _store, user_id, review_id = await _approved_review(
+        db_session, source_bytes=NO_BODY_JSON
+    )
+    published = await svc.publish_review(
+        actor_user_id=user_id,
+        review_id=review_id,
+        idempotency_key=f"pub-nobody-{uuid.uuid4().hex}",
+    )
+    tools = list(
+        (
+            await db_session.execute(
+                select(MCPTool).where(
+                    MCPTool.mcp_server_id == published.result.mcp_server_id
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert len(tools) == 1
+    version = await db_session.get(MCPToolVersion, tools[0].current_version_id)
+    assert version is not None
+    assert "body" not in version.input_schema["properties"]
+    assert "q" in version.input_schema["properties"]
+    assert "q" in version.input_schema.get("required", [])
+
+
+@pytest.mark.asyncio
+async def test_publish_normalized_param_collision_zero_side_effects(
+    db_session: AsyncSession,
+) -> None:
+    svc, _store, user_id, review_id = await _approved_review(
+        db_session, source_bytes=COLLISION_JSON
+    )
+    servers_before = (
+        await db_session.execute(select(func.count()).select_from(MCPServer))
+    ).scalar_one()
+    tools_before = (
+        await db_session.execute(select(func.count()).select_from(MCPTool))
+    ).scalar_one()
+    with pytest.raises(AppError) as exc:
+        await svc.publish_review(
+            actor_user_id=user_id,
+            review_id=review_id,
+            idempotency_key=f"pub-col-{uuid.uuid4().hex}",
+        )
+    assert exc.value.code == "FACTORY_PACKAGE_SCHEMA_INVALID"
+    servers_after = (
+        await db_session.execute(select(func.count()).select_from(MCPServer))
+    ).scalar_one()
+    tools_after = (
+        await db_session.execute(select(func.count()).select_from(MCPTool))
+    ).scalar_one()
+    publishes = (
+        await db_session.execute(select(func.count()).select_from(ToolFactoryPublish))
+    ).scalar_one()
+    assert int(servers_before) == int(servers_after) == 0
+    assert int(tools_before) == int(tools_after) == 0
+    assert int(publishes) == 0

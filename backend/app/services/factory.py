@@ -225,6 +225,7 @@ def _candidate_contract_snapshot(candidate: ToolFactoryCandidate) -> dict[str, A
         "deprecated": bool(candidate.deprecated),
         "parameters": parameters,
         "request_schema": candidate.request_schema,
+        "request_body_required": bool(candidate.request_body_required),
         "response_schema": candidate.response_schema,
     }
 
@@ -870,6 +871,7 @@ class FactoryService:
             deprecated=bool(row.deprecated),
             parameters=parameters,
             request_schema=row.request_schema,
+            request_body_required=bool(row.request_body_required),
             response_schema=row.response_schema,
             created_at=row.created_at,
         )
@@ -927,6 +929,9 @@ class FactoryService:
                                 p.model_dump(mode="json") for p in operation.parameters
                             ],
                             request_schema=operation.request_schema,
+                            request_body_required=bool(
+                                operation.request_body_required
+                            ),
                             response_schema=operation.response_schema,
                         )
                     created += 1
@@ -3020,6 +3025,50 @@ class FactoryService:
         Activate remain blocked until an endpoint is set later.
         """
 
+        # Fail closed on schema mapping before any MCPServer/MCPTool side effects.
+        prepared: list[dict[str, Any]] = []
+        for tool in package_tools:
+            remote_name = _declarative_tool_remote_name(tool)
+            display = tool.get("summary") or tool.get("operation_id") or remote_name
+            description = tool.get("description")
+            tags = tool.get("tags") if isinstance(tool.get("tags"), list) else []
+            parameters = (
+                tool.get("parameters") if isinstance(tool.get("parameters"), list) else []
+            )
+            request_body_required = bool(tool.get("request_body_required", False))
+            raw_descriptor = {
+                "candidate_id": tool.get("candidate_id"),
+                "operation_key": tool.get("operation_key"),
+                "operation_id": tool.get("operation_id"),
+                "method": tool.get("method"),
+                "path": tool.get("path"),
+                "summary": tool.get("summary"),
+                "description": tool.get("description"),
+                "tags": tags,
+                "deprecated": bool(tool.get("deprecated", False)),
+                "parameters": parameters,
+                "request_schema": tool.get("request_schema"),
+                "request_body_required": request_body_required,
+                "response_schema": tool.get("response_schema"),
+            }
+            input_schema = build_mcp_callable_input_schema(
+                parameters=parameters,
+                request_schema=tool.get("request_schema"),
+                request_body_required=request_body_required,
+            )
+            prepared.append(
+                {
+                    "tool": tool,
+                    "remote_name": remote_name,
+                    "display": display,
+                    "description": description,
+                    "tags": tags,
+                    "raw_descriptor": raw_descriptor,
+                    "input_schema": input_schema,
+                    "content_hash": compute_canonical_json_hash(raw_descriptor),
+                }
+            )
+
         tools_repo = MCPToolRepository(self._session)
         server_code = f"fac-pub-{review.id.hex}"
         server_name = f"Factory Import {review.id.hex[:8]}"
@@ -3050,33 +3099,12 @@ class FactoryService:
         )
 
         tool_ids: list[uuid.UUID] = []
-        for tool in package_tools:
-            remote_name = _declarative_tool_remote_name(tool)
-            display = tool.get("summary") or tool.get("operation_id") or remote_name
-            description = tool.get("description")
-            tags = tool.get("tags") if isinstance(tool.get("tags"), list) else []
-            parameters = (
-                tool.get("parameters") if isinstance(tool.get("parameters"), list) else []
-            )
-            raw_descriptor = {
-                "candidate_id": tool.get("candidate_id"),
-                "operation_key": tool.get("operation_key"),
-                "operation_id": tool.get("operation_id"),
-                "method": tool.get("method"),
-                "path": tool.get("path"),
-                "summary": tool.get("summary"),
-                "description": tool.get("description"),
-                "tags": tags,
-                "deprecated": bool(tool.get("deprecated", False)),
-                "parameters": parameters,
-                "request_schema": tool.get("request_schema"),
-                "response_schema": tool.get("response_schema"),
-            }
-            input_schema = build_mcp_callable_input_schema(
-                parameters=parameters,
-                request_schema=tool.get("request_schema"),
-            )
-            content_hash = compute_canonical_json_hash(raw_descriptor)
+        for item in prepared:
+            tool = item["tool"]
+            remote_name = item["remote_name"]
+            display = item["display"]
+            description = item["description"]
+            tags = item["tags"]
             mcp_tool = await tools_repo.create_tool(
                 mcp_server_id=server.id,
                 remote_name=remote_name,
@@ -3091,12 +3119,12 @@ class FactoryService:
             version = await tools_repo.create_version(
                 mcp_tool_id=mcp_tool.id,
                 version_no=1,
-                content_hash=content_hash,
+                content_hash=item["content_hash"],
                 validation_status=str(ToolVersionValidationStatus.WARNING),
                 remote_description=(
                     str(description) if description is not None else None
                 ),
-                input_schema=input_schema,
+                input_schema=item["input_schema"],
                 output_schema=tool.get("response_schema"),
                 annotations={
                     "factory_import": True,
@@ -3106,7 +3134,7 @@ class FactoryService:
                     "operation_key": tool.get("operation_key"),
                     "deprecated": bool(tool.get("deprecated", False)),
                 },
-                raw_descriptor=raw_descriptor,
+                raw_descriptor=item["raw_descriptor"],
                 schema_dialect="factory-declarative-v1",
                 validation_errors=[
                     {

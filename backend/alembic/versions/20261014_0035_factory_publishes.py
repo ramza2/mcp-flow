@@ -23,6 +23,18 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
+    # Preserve OpenAPI requestBody.required on Candidate Tools (Publish maps
+    # this into MCP input_schema.required for the body property).
+    op.add_column(
+        "tool_factory_candidates",
+        sa.Column(
+            "request_body_required",
+            sa.Boolean(),
+            nullable=False,
+            server_default=sa.text("false"),
+        ),
+    )
+
     op.create_table(
         "tool_factory_publishes",
         sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True, nullable=False),
@@ -191,3 +203,4 @@ def downgrade() -> None:
         table_name="tool_factory_publishes",
     )
     op.drop_table("tool_factory_publishes")
+    op.drop_column("tool_factory_candidates", "request_body_required")

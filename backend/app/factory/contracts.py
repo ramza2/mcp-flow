@@ -52,6 +52,7 @@ class FactoryOperationCandidate(BaseModel):
     deprecated: bool = False
     parameters: list[FactoryParameterCandidate] = Field(default_factory=list)
     request_schema: dict[str, Any] | None = None
+    request_body_required: bool = False
     response_schema: dict[str, Any] | None = None
 
 
