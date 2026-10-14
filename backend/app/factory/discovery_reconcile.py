@@ -28,6 +28,53 @@ _FACTORY_ANNOTATION_KEYS = (
     "operation_key",
     "deprecated",
 )
+_FACTORY_SCHEMA_DIALECT = "factory-declarative-v1"
+_PACKAGE_LINEAGE_IDENTITY_KEYS = (
+    "operation_key",
+    "candidate_id",
+    "publish_id",
+    "review_id",
+    "generated_package_id",
+)
+
+
+def has_immutable_factory_lineage(
+    *,
+    annotations: Any,
+    raw_descriptor: Any = None,
+    schema_dialect: str | None = None,
+) -> bool:
+    """True only for reviewed/imported Factory ToolVersion provenance.
+
+    Requires ``factory_import=true`` plus Publish/Review/package identity from
+    annotations, raw_descriptor, or the Factory declarative schema dialect.
+    Unrelated local Tools must not pass this check.
+    """
+
+    if not isinstance(annotations, dict):
+        return False
+    if annotations.get("factory_import") is not True:
+        return False
+    if schema_dialect == _FACTORY_SCHEMA_DIALECT:
+        return True
+    for key in _PACKAGE_LINEAGE_IDENTITY_KEYS:
+        value = annotations.get(key)
+        if value is not None and value != "":
+            return True
+    method = annotations.get("method")
+    path = annotations.get("path")
+    if method not in (None, "") and path not in (None, ""):
+        return True
+    if isinstance(raw_descriptor, dict):
+        for key in _PACKAGE_LINEAGE_IDENTITY_KEYS:
+            value = raw_descriptor.get(key)
+            if value is not None and value != "":
+                return True
+        raw_method = raw_descriptor.get("method")
+        raw_path = raw_descriptor.get("path")
+        if raw_method not in (None, "") and raw_path not in (None, ""):
+            return True
+    return False
 
 
 def factory_contract_fingerprint(

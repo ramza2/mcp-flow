@@ -11,6 +11,7 @@ from app.domain.enums import MCPServerStatus, MCPToolStatus, UserStatus
 from app.factory.discovery_reconcile import (
     build_factory_reconcile_plan,
     factory_contract_fingerprint,
+    has_immutable_factory_lineage,
     index_remote_tools_strict,
 )
 from app.mcp.normalize import RemoteToolDescriptor
@@ -160,6 +161,32 @@ def test_index_remote_tools_strict_duplicate() -> None:
     assert "Duplicate" in err
 
 
+def test_has_immutable_factory_lineage() -> None:
+    assert (
+        has_immutable_factory_lineage(
+            annotations={"factory_import": True, "operation_key": "GET /pets"},
+            schema_dialect="factory-declarative-v1",
+        )
+        is True
+    )
+    assert (
+        has_immutable_factory_lineage(
+            annotations={"factory_import": True},
+            raw_descriptor={"method": "GET", "path": "/pets"},
+        )
+        is True
+    )
+    assert (
+        has_immutable_factory_lineage(
+            annotations={"factory_import": True},
+            raw_descriptor={"name": "unrelated"},
+        )
+        is False
+    )
+    assert has_immutable_factory_lineage(annotations={"factory_import": False}) is False
+    assert has_immutable_factory_lineage(annotations=None) is False
+
+
 def test_contract_fingerprint_ignores_annotations_and_description() -> None:
     a = factory_contract_fingerprint(
         remote_name="t",
@@ -268,7 +295,13 @@ async def test_preview_missing_unexpected_contract_no_mutation(
         await db_session.execute(select(func.count()).select_from(MCPToolVersion))
     ).scalar_one()
     remote = [
-        _desc("GET /pets", input_schema={"type": "object", "properties": {"x": {"type": "number"}}}),
+        _desc(
+            "GET /pets",
+            input_schema={
+                "type": "object",
+                "properties": {"x": {"type": "number"}},
+            },
+        ),
         _desc("POST /other"),
     ]
     result = await MCPDiscoveryService(
@@ -283,7 +316,8 @@ async def test_preview_missing_unexpected_contract_no_mutation(
     assert (
         await db_session.execute(select(func.count()).select_from(MCPToolVersion))
     ).scalar_one() == versions_before
-    assert get_verified_discovery_fingerprint(await MCPServerService(db_session).get(server_id)) is None
+    server = await MCPServerService(db_session).get(server_id)
+    assert get_verified_discovery_fingerprint(server) is None
 
 
 @pytest.mark.asyncio
@@ -492,3 +526,136 @@ async def test_non_factory_discovery_apply_unchanged(db_session: AsyncSession) -
     ).scalar_one()
     assert tool.remote_name == "echo"
     assert tool.status == "DISCOVERED"
+
+
+@pytest.mark.asyncio
+async def test_unrelated_local_tool_not_absorbed_into_expected(
+    db_session: AsyncSession,
+) -> None:
+    schema = {"type": "object", "properties": {"q": {"type": "string"}}}
+    server_id = await _factory_server_ready(
+        db_session,
+        tools=[{"remote_name": "GET /pets", "input_schema": schema}],
+    )
+    repo = MCPToolRepository(db_session)
+    unrelated = await repo.create_tool(
+        mcp_server_id=server_id,
+        remote_name="local.unrelated",
+        display_name="local.unrelated",
+        tags=[],
+        status=str(MCPToolStatus.INACTIVE),
+    )
+    version = await repo.create_version(
+        mcp_tool_id=unrelated.id,
+        version_no=1,
+        content_hash=uuid.uuid4().hex,
+        validation_status="WARNING",
+        input_schema={"type": "object"},
+        output_schema=None,
+        annotations={"note": "not factory"},
+        raw_descriptor={"name": "local.unrelated"},
+        schema_dialect="json-schema",
+    )
+    unrelated.current_version_id = version.id
+    await db_session.commit()
+
+    tools_before = (
+        await db_session.execute(select(func.count()).select_from(MCPTool))
+    ).scalar_one()
+    versions_before = (
+        await db_session.execute(select(func.count()).select_from(MCPToolVersion))
+    ).scalar_one()
+
+    result = await MCPDiscoveryService(
+        db_session, _http_with_tools([_desc("GET /pets", input_schema=schema)])
+    ).discover(server_id, apply_changes=False)
+    assert result.success is False
+    assert result.factory_diff is not None
+    assert result.factory_diff.status == "AMBIGUOUS"
+    assert result.error_code == "FACTORY_DISCOVERY_AMBIGUOUS"
+    assert "lineage" in (result.error_message or "").lower()
+    assert (
+        await db_session.execute(select(func.count()).select_from(MCPTool))
+    ).scalar_one() == tools_before
+    assert (
+        await db_session.execute(select(func.count()).select_from(MCPToolVersion))
+    ).scalar_one() == versions_before
+    names = {
+        t.remote_name
+        for t in (
+            await db_session.execute(
+                select(MCPTool).where(MCPTool.mcp_server_id == server_id)
+            )
+        )
+        .scalars()
+        .all()
+    }
+    assert names == {"GET /pets", "local.unrelated"}
+    assert get_verified_discovery_fingerprint(
+        await MCPServerService(db_session).get(server_id)
+    ) is None
+
+    apply_result = await MCPDiscoveryService(
+        db_session, _http_with_tools([_desc("GET /pets", input_schema=schema)])
+    ).discover(server_id, apply_changes=True)
+    assert apply_result.success is False
+    assert apply_result.factory_diff is not None
+    assert apply_result.factory_diff.status == "AMBIGUOUS"
+    assert (
+        await db_session.execute(select(func.count()).select_from(MCPTool))
+    ).scalar_one() == tools_before
+    assert (
+        await db_session.execute(select(func.count()).select_from(MCPToolVersion))
+    ).scalar_one() == versions_before
+
+
+@pytest.mark.asyncio
+async def test_apply_connection_drift_zero_mutation(
+    db_session: AsyncSession,
+) -> None:
+    schema = {"type": "object", "properties": {"q": {"type": "string"}}}
+    server_id = await _factory_server_ready(
+        db_session,
+        tools=[{"remote_name": "GET /pets", "input_schema": schema}],
+    )
+    svc = MCPServerService(db_session)
+    tools_before = (
+        await db_session.execute(select(func.count()).select_from(MCPTool))
+    ).scalar_one()
+    versions_before = (
+        await db_session.execute(select(func.count()).select_from(MCPToolVersion))
+    ).scalar_one()
+
+    async def _list_tools_drift(*_a: object, **_k: object) -> list[RemoteToolDescriptor]:
+        server = await svc.get(server_id)
+        await svc.update(
+            server_id,
+            MCPServerUpdate(endpoint_url="https://mcp.test/factory-disc-drift-b"),
+            expected_lock_version=int(server.lock_version),
+        )
+        return [_desc("GET /pets", input_schema=schema)]
+
+    http = MagicMock()
+    http.discover_capabilities = AsyncMock(return_value={})
+    http.list_tools = AsyncMock(side_effect=_list_tools_drift)
+
+    with pytest.raises(AppError) as exc:
+        await MCPDiscoveryService(db_session, http).discover(
+            server_id, apply_changes=True
+        )
+    assert exc.value.code == "FACTORY_DISCOVERY_CONNECTION_DRIFT"
+    assert (
+        await db_session.execute(select(func.count()).select_from(MCPTool))
+    ).scalar_one() == tools_before
+    assert (
+        await db_session.execute(select(func.count()).select_from(MCPToolVersion))
+    ).scalar_one() == versions_before
+    server = await svc.get(server_id)
+    assert get_verified_discovery_fingerprint(server) is None
+    with pytest.raises(AppError) as act:
+        await svc.activate(server_id)
+    assert act.value.code == "RESOURCE_CONFLICT"
+    discoveries = (
+        await db_session.execute(select(func.count()).select_from(MCPServerDiscovery))
+    ).scalar_one()
+    assert int(discoveries) >= 1

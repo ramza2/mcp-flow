@@ -23,6 +23,14 @@ from app.domain.enums import (
     MCPToolStatus,
     MCPTransportType,
 )
+from app.factory.discovery_reconcile import (
+    FactoryReconcilePlan,
+    build_factory_reconcile_plan,
+    extract_factory_lineage_annotations,
+    factory_diff_as_generic_counts,
+    has_immutable_factory_lineage,
+    index_remote_tools_strict,
+)
 from app.mcp.client import MCPHttpClient
 from app.mcp.errors import DiscoverUnsupportedError, MCPClientError
 from app.mcp.normalize import (
@@ -36,13 +44,6 @@ from app.models.mcp import MCPServer, MCPServerCheck, MCPServerDiscovery, MCPToo
 from app.repositories.mcp_discovery import MCPDiscoveryRepository
 from app.repositories.mcp_server import MCPServerRepository
 from app.repositories.mcp_tool import MCPToolRepository
-from app.factory.discovery_reconcile import (
-    FactoryReconcilePlan,
-    build_factory_reconcile_plan,
-    extract_factory_lineage_annotations,
-    factory_diff_as_generic_counts,
-    index_remote_tools_strict,
-)
 from app.schemas.mcp_server import (
     ConnectionTestResponse,
     DiscoveryDiffSummary,
@@ -661,36 +662,64 @@ class MCPDiscoveryService:
     async def _load_expected_factory_contracts(
         self, server_id: uuid.UUID
     ) -> tuple[dict[str, MCPTool], dict[str, dict[str, Any]], str | None]:
-        """Load imported tools + contracts; fail closed on duplicate remote_name."""
+        """Load Factory lineage tools only; fail closed on pollution/duplicates."""
 
         existing_tools, _ = await self._tools.list_tools(
             mcp_server_id=server_id,
             page=1,
             page_size=10_000,
         )
-        existing_by_name: dict[str, MCPTool] = {}
+        seen_names: set[str] = set()
         for tool in existing_tools:
-            if tool.remote_name in existing_by_name:
+            if tool.remote_name in seen_names:
                 return (
                     {},
                     {},
                     f"Duplicate imported tool identity: {tool.remote_name!r}.",
                 )
-            existing_by_name[tool.remote_name] = tool
+            seen_names.add(tool.remote_name)
 
+        existing_by_name: dict[str, MCPTool] = {}
         expected: dict[str, dict[str, Any]] = {}
-        for name, tool in existing_by_name.items():
+        unrelated: list[str] = []
+        for tool in existing_tools:
             input_schema = None
             output_schema = None
+            annotations = None
+            raw_descriptor = None
+            schema_dialect = None
             if tool.current_version_id is not None:
                 version = await self._tools.get_version(tool.current_version_id)
                 if version is not None:
                     input_schema = version.input_schema
                     output_schema = version.output_schema
-            expected[name] = {
+                    annotations = version.annotations
+                    raw_descriptor = version.raw_descriptor
+                    schema_dialect = version.schema_dialect
+            if not has_immutable_factory_lineage(
+                annotations=annotations,
+                raw_descriptor=raw_descriptor,
+                schema_dialect=schema_dialect,
+            ):
+                unrelated.append(tool.remote_name)
+                continue
+            existing_by_name[tool.remote_name] = tool
+            expected[tool.remote_name] = {
                 "input_schema": input_schema,
                 "output_schema": output_schema,
             }
+
+        if unrelated:
+            names = ", ".join(repr(n) for n in sorted(unrelated))
+            return (
+                {},
+                {},
+                (
+                    "Factory Discovery expected set polluted by Tools without "
+                    f"immutable Factory lineage: {names}. "
+                    "Resolve unrelated local Tools before reconciliation."
+                ),
+            )
         return existing_by_name, expected, None
 
     async def _discover_factory(
@@ -704,11 +733,7 @@ class MCPDiscoveryService:
         mode: str,
         apply_changes: bool,
     ) -> DiscoveryResponse:
-        from app.services.mcp_server import (
-            connection_config_fingerprint,
-            transport_config_clear_discovery_fingerprint,
-            transport_config_with_discovery_fingerprint,
-        )
+        from app.services.mcp_server import connection_config_fingerprint
 
         tested_fp = connection_config_fingerprint(
             transport_type=config.transport_type,
@@ -762,6 +787,35 @@ class MCPDiscoveryService:
                     message="MCP server not found.",
                     status_code=status.HTTP_404_NOT_FOUND,
                 )
+            drift_err = self._factory_apply_fingerprint_drift_error(
+                locked=locked,
+                tested_fp=tested_fp,
+            )
+            if drift_err is not None:
+                plan = FactoryReconcilePlan(
+                    status="MISMATCHED",
+                    entries=[],
+                    error_message=drift_err,
+                )
+                await self._finalize_factory_discovery(
+                    config=config,
+                    discovery_id=discovery_id,
+                    capabilities=capabilities,
+                    discovery_mode=discovery_mode,
+                    mode=mode,
+                    apply_changes=apply_changes,
+                    plan=plan,
+                    tested_fp=tested_fp,
+                    apply_plan=False,
+                    remote_by_name=remote_by_name,
+                    remote_meta=remote_meta,
+                    existing_by_name={},
+                )
+                raise AppError(
+                    code="FACTORY_DISCOVERY_CONNECTION_DRIFT",
+                    message=drift_err,
+                    status_code=status.HTTP_409_CONFLICT,
+                )
             existing_by_name, expected, local_dup_err = (
                 await self._load_expected_factory_contracts(config.id)
             )
@@ -799,7 +853,7 @@ class MCPDiscoveryService:
         apply_plan = bool(apply_changes and plan.is_clean)
         if apply_changes and not plan.is_clean:
             # Persist evidence + fail closed with zero Tool mutations.
-            response = await self._finalize_factory_discovery(
+            await self._finalize_factory_discovery(
                 config=config,
                 discovery_id=discovery_id,
                 capabilities=capabilities,
@@ -828,6 +882,43 @@ class MCPDiscoveryService:
             )
 
         if apply_plan:
+            # Re-check under the same row lock immediately before writes.
+            locked = await self._servers.lock_for_update(config.id)
+            if locked is None:
+                raise AppError(
+                    code="NOT_FOUND",
+                    message="MCP server not found.",
+                    status_code=status.HTTP_404_NOT_FOUND,
+                )
+            drift_err = self._factory_apply_fingerprint_drift_error(
+                locked=locked,
+                tested_fp=tested_fp,
+            )
+            if drift_err is not None:
+                plan = FactoryReconcilePlan(
+                    status="MISMATCHED",
+                    entries=[],
+                    error_message=drift_err,
+                )
+                await self._finalize_factory_discovery(
+                    config=config,
+                    discovery_id=discovery_id,
+                    capabilities=capabilities,
+                    discovery_mode=discovery_mode,
+                    mode=mode,
+                    apply_changes=apply_changes,
+                    plan=plan,
+                    tested_fp=tested_fp,
+                    apply_plan=False,
+                    remote_by_name=remote_by_name,
+                    remote_meta=remote_meta,
+                    existing_by_name=existing_by_name,
+                )
+                raise AppError(
+                    code="FACTORY_DISCOVERY_CONNECTION_DRIFT",
+                    message=drift_err,
+                    status_code=status.HTTP_409_CONFLICT,
+                )
             await self._apply_factory_matched(
                 server_id=config.id,
                 remote_by_name=remote_by_name,
@@ -849,6 +940,32 @@ class MCPDiscoveryService:
             remote_by_name=remote_by_name,
             remote_meta=remote_meta,
             existing_by_name=existing_by_name,
+        )
+
+    @staticmethod
+    def _factory_apply_fingerprint_drift_error(
+        *,
+        locked: MCPServer,
+        tested_fp: str,
+    ) -> str | None:
+        """Require locked current FP == tested snapshot == verified Connection Test."""
+
+        from app.services.mcp_server import (
+            connection_config_fingerprint_for_server,
+            get_verified_connection_fingerprint,
+        )
+
+        current_fp = connection_config_fingerprint_for_server(locked)
+        verified_fp = get_verified_connection_fingerprint(locked)
+        if (
+            verified_fp is not None
+            and current_fp == tested_fp
+            and current_fp == verified_fp
+        ):
+            return None
+        return (
+            "Connection configuration changed during Factory Discovery apply; "
+            "stale snapshot discarded without Tool/ToolVersion mutation."
         )
 
     async def _finalize_factory_discovery(
