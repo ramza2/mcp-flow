@@ -674,6 +674,35 @@ async def test_deploy_sh_includes_scheduler() -> None:
 
 
 @pytest.mark.asyncio
+async def test_compose_factory_mock_upstream_bypasses_db_entrypoint() -> None:
+    """factory-mock-upstream must not run shared /entrypoint.sh (no DB)."""
+
+    from pathlib import Path
+
+    import yaml
+
+    repo_root = Path(__file__).resolve().parents[3]
+    compose = yaml.safe_load((repo_root / "compose.yaml").read_text(encoding="utf-8"))
+    mock = compose["services"]["factory-mock-upstream"]
+
+    assert mock.get("entrypoint") == []
+    assert mock.get("command") == [
+        "python",
+        "-m",
+        "app.entrypoints.factory_mock_upstream",
+    ]
+    assert "environment" not in mock
+    assert "secrets" not in mock
+    networks = mock.get("networks") or []
+    assert "factory" in networks
+    assert "data" not in networks
+    health = mock.get("healthcheck") or {}
+    assert any(
+        "8091" in str(part) for part in (health.get("test") or [])
+    ), health
+
+
+@pytest.mark.asyncio
 async def test_schedule_source_policy_and_lineage_accept(
     db_session: AsyncSession,
 ) -> None:
