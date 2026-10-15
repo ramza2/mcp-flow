@@ -320,7 +320,7 @@ deploy_core() {
   preflight
 
   log "Building application images"
-  compose build api worker factory-worker outbox scheduler migration frontend
+  compose build api worker factory-worker factory-runtime factory-mock-upstream outbox scheduler migration frontend
 
   log "Starting stateful dependencies"
   compose up -d postgres redis object-storage
@@ -331,8 +331,9 @@ deploy_core() {
   wait_migration
 
   log "Starting MCPFlow runtime"
-  compose up -d api worker factory-worker outbox scheduler frontend
-  wait_services "runtime services" api worker factory-worker outbox scheduler frontend postgres redis object-storage
+  # factory-mock-upstream before factory-runtime (compose depends_on healthy).
+  compose up -d api worker factory-worker factory-mock-upstream factory-runtime outbox scheduler frontend
+  wait_services "runtime services" api worker factory-worker factory-mock-upstream factory-runtime outbox scheduler frontend postgres redis object-storage
   smoke_test
 
   log "Deployment complete"
