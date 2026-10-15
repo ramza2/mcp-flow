@@ -539,6 +539,63 @@ async def test_runtime_binding_base_url_change_invalidates_factory_lifecycle(
 
 
 @pytest.mark.asyncio
+async def test_ready_fails_closed_on_reviewed_authorization_header(
+    db_session: AsyncSession,
+) -> None:
+    """Credential header channels must fail at READY — zero outbound HTTP."""
+
+    from app.repositories.mcp_tool import MCPToolRepository
+
+    _svc, store, user_id, publish_id = await _publish_pets(db_session)
+    pub = await _svc.get_publish(user_id, publish_id)
+    tools = (
+        await db_session.execute(
+            select(MCPTool).where(MCPTool.mcp_server_id == pub.mcp_server_id)
+        )
+    ).scalars().all()
+    assert len(tools) == 1
+    tool = tools[0]
+    assert tool.current_version_id is not None
+    version = await MCPToolRepository(db_session).get_version(tool.current_version_id)
+    assert version is not None
+    # Tamper reviewed ToolVersion schema to inject reserved credential header.
+    version.input_schema = {
+        "type": "object",
+        "properties": {
+            "Authorization": {
+                "type": "string",
+                "x-mcpflow-param-in": "header",
+            }
+        },
+        "additionalProperties": False,
+    }
+    await db_session.commit()
+
+    runtime = FactoryRuntimeService(db_session, storage=store)
+    created = await runtime.create_binding(
+        actor_user_id=user_id, publish_id=publish_id
+    )
+    updated = await runtime.update_binding(
+        actor_user_id=user_id,
+        binding_id=created.id,
+        data=FactoryRuntimeBindingUpdate(
+            base_url="http://factory-mock-upstream:8091",
+            lock_version=created.lock_version,
+        ),
+    )
+    with pytest.raises(AppError) as ready:
+        await runtime.mark_ready(
+            actor_user_id=user_id,
+            binding_id=updated.id,
+            lock_version=updated.lock_version,
+        )
+    assert ready.value.code == "FACTORY_RUNTIME_CREDENTIAL_PARAM_FORBIDDEN"
+    refreshed = await runtime.get_binding(user_id, created.id)
+    assert refreshed.status == FactoryRuntimeBindingStatus.DRAFT
+    assert refreshed.mcp_endpoint_url is None
+
+
+@pytest.mark.asyncio
 async def test_runtime_binding_disable_invalidates_factory_lifecycle(
     db_session: AsyncSession,
 ) -> None:

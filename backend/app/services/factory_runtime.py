@@ -22,6 +22,7 @@ from app.factory.errors import (
     FACTORY_RUNTIME_ALREADY_EXISTS,
     FACTORY_RUNTIME_BASE_URL_FORBIDDEN,
     FACTORY_RUNTIME_CONFIG_INVALID,
+    FACTORY_RUNTIME_CREDENTIAL_PARAM_FORBIDDEN,
     FACTORY_RUNTIME_LINEAGE_MISMATCH,
     FACTORY_RUNTIME_NOT_READY,
     FACTORY_RUNTIME_PUBLISH_INVALID,
@@ -29,6 +30,7 @@ from app.factory.errors import (
 from app.factory.import_input_schema import build_mcp_callable_input_schema
 from app.factory.runtime_http_adapter import (
     DeclarativeToolContract,
+    FactoryRuntimeAdapterError,
     package_tool_to_contract,
 )
 from app.factory.runtime_limits import (
@@ -554,12 +556,26 @@ class FactoryRuntimeService:
                         pkg_tool.get("request_body_required", False)
                     ),
                 )
-            contracts[tool.remote_name] = package_tool_to_contract(
-                pkg_tool,
-                input_schema=input_schema,
-                output_schema=version.output_schema,
-                remote_name=tool.remote_name,
-            )
+            try:
+                contracts[tool.remote_name] = package_tool_to_contract(
+                    pkg_tool,
+                    input_schema=input_schema,
+                    output_schema=version.output_schema,
+                    remote_name=tool.remote_name,
+                )
+            except FactoryRuntimeAdapterError as exc:
+                # Credential / cookie channels must fail at READY/load — never
+                # reach outbound HTTP.
+                status_code = (
+                    status.HTTP_422_UNPROCESSABLE_ENTITY
+                    if exc.code == FACTORY_RUNTIME_CREDENTIAL_PARAM_FORBIDDEN
+                    else status.HTTP_409_CONFLICT
+                )
+                raise AppError(
+                    code=exc.code,
+                    message=exc.message,
+                    status_code=status_code,
+                ) from exc
         if len(contracts) != len(publish.mcp_tool_ids):
             raise AppError(
                 code=FACTORY_RUNTIME_LINEAGE_MISMATCH,

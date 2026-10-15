@@ -11,8 +11,10 @@ from app.core.url_validation import validate_outbound_base_url
 from app.factory.runtime_http_adapter import (
     DeclarativeToolContract,
     FactoryRuntimeAdapterError,
+    assert_safe_runtime_param_mapping,
     execute_declarative_http,
     map_arguments_to_http,
+    package_tool_to_contract,
     validate_tool_arguments,
 )
 from app.factory.runtime_limits import FOLLOW_REDIRECTS
@@ -328,6 +330,177 @@ def test_build_mcp_endpoint_url() -> None:
 
 def test_redirects_disabled_constant() -> None:
     assert FOLLOW_REDIRECTS is False
+
+
+@pytest.mark.parametrize(
+    "header_name",
+    ["Authorization", "authorization", "AUTHORIZATION", "Proxy-Authorization", "Cookie"],
+)
+def test_reserved_credential_header_fail_closed_before_http(header_name: str) -> None:
+    http_calls = {"n": 0}
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        http_calls["n"] += 1
+        return httpx.Response(200, json={"ok": True})
+
+    with pytest.raises(FactoryRuntimeAdapterError) as exc:
+        package_tool_to_contract(
+            {
+                "operation_key": "GET /secure",
+                "method": "GET",
+                "path": "/secure",
+                "parameters": [
+                    {
+                        "name": header_name,
+                        "location": "header",
+                        "required": True,
+                        "schema": {"type": "string"},
+                    }
+                ],
+            },
+            input_schema={
+                "type": "object",
+                "properties": {
+                    header_name: {
+                        "type": "string",
+                        "x-mcpflow-param-in": "header",
+                    }
+                },
+                "required": [header_name],
+                "additionalProperties": False,
+            },
+        )
+    assert exc.value.code == "FACTORY_RUNTIME_CREDENTIAL_PARAM_FORBIDDEN"
+
+    # Mapping / execute must also refuse — zero outbound HTTP.
+    bad = DeclarativeToolContract(
+        remote_name="GET /secure",
+        method="GET",
+        path_template="/secure",
+        input_schema={
+            "type": "object",
+            "properties": {
+                header_name: {"type": "string", "x-mcpflow-param-in": "header"}
+            },
+            "additionalProperties": False,
+        },
+        output_schema=None,
+        description=None,
+        request_body_required=False,
+    )
+    with pytest.raises(FactoryRuntimeAdapterError):
+        map_arguments_to_http(contract=bad, arguments={header_name: "secret"})
+    assert http_calls["n"] == 0
+
+
+def test_openapi_cookie_parameter_fail_closed() -> None:
+    with pytest.raises(FactoryRuntimeAdapterError) as exc:
+        assert_safe_runtime_param_mapping(
+            parameters=[
+                {
+                    "name": "session",
+                    "location": "cookie",
+                    "required": False,
+                    "schema": {"type": "string"},
+                }
+            ],
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "session": {
+                        "type": "string",
+                        "x-mcpflow-param-in": "cookie",
+                    }
+                },
+            },
+        )
+    assert exc.value.code == "FACTORY_RUNTIME_CREDENTIAL_PARAM_FORBIDDEN"
+
+    with pytest.raises(FactoryRuntimeAdapterError) as exc2:
+        package_tool_to_contract(
+            {
+                "operation_key": "GET /pets",
+                "method": "GET",
+                "path": "/pets",
+                "parameters": [
+                    {
+                        "name": "session",
+                        "location": "cookie",
+                        "required": False,
+                        "schema": {"type": "string"},
+                    }
+                ],
+            },
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "session": {
+                        "type": "string",
+                        "x-mcpflow-param-in": "cookie",
+                    }
+                },
+            },
+        )
+    assert exc2.value.code == "FACTORY_RUNTIME_CREDENTIAL_PARAM_FORBIDDEN"
+
+
+@pytest.mark.asyncio
+async def test_normal_request_id_header_maps_and_calls() -> None:
+    contract = package_tool_to_contract(
+        {
+            "operation_key": "GET /pets",
+            "method": "GET",
+            "path": "/pets",
+            "parameters": [
+                {
+                    "name": "X-Request-ID",
+                    "location": "header",
+                    "required": False,
+                    "schema": {"type": "string"},
+                }
+            ],
+        },
+        input_schema={
+            "type": "object",
+            "properties": {
+                "X-Request-ID": {
+                    "type": "string",
+                    "x-mcpflow-param-in": "header",
+                }
+            },
+            "additionalProperties": False,
+        },
+    )
+    path, query, headers, cookies, body = map_arguments_to_http(
+        contract=contract,
+        arguments={"X-Request-ID": "req-1"},
+    )
+    assert path == "/pets"
+    assert headers == {"X-Request-ID": "req-1"}
+    assert cookies == {}
+    assert query == {} and body is None
+
+    seen: dict = {}
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        seen["header"] = request.headers.get("X-Request-ID")
+        return httpx.Response(200, json={"pets": []})
+
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(_handler), follow_redirects=False
+    )
+    result = await execute_declarative_http(
+        base_url="https://api.example.com",
+        contract=contract,
+        arguments={"X-Request-ID": "req-1"},
+        auth_headers=None,
+        connect_timeout_ms=1000,
+        call_timeout_ms=1000,
+        max_response_bytes=10_000,
+        http_client=client,
+    )
+    assert result.ok is True
+    assert seen["header"] == "req-1"
 
 
 @pytest.mark.asyncio

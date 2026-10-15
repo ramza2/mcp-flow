@@ -18,6 +18,7 @@ import httpx
 import jsonschema
 
 from app.factory.errors import (
+    FACTORY_RUNTIME_CREDENTIAL_PARAM_FORBIDDEN,
     FACTORY_RUNTIME_HTTP_FAILED,
     FACTORY_RUNTIME_INPUT_INVALID,
     FACTORY_RUNTIME_RESPONSE_TOO_LARGE,
@@ -33,7 +34,19 @@ logger = logging.getLogger(__name__)
 
 _PATH_PARAM_RE = re.compile(r"\{([^{}]+)\}")
 _PARAM_IN = "x-mcpflow-param-in"
+# Cookie params are rejected at contract load for #101 foundation (no safe
+# non-auth cookie policy yet). Mapping still recognizes the token only to
+# fail closed explicitly rather than silent-drop.
 _ALLOWED_LOCATIONS = frozenset({"path", "query", "header", "cookie"})
+# Caller-controlled credential transport names (case-insensitive).
+# Outbound auth must use RuntimeBinding.auth_* + SecretResolver only.
+_RESERVED_CREDENTIAL_HEADER_NAMES = frozenset(
+    {
+        "authorization",
+        "proxy-authorization",
+        "cookie",
+    }
+)
 
 
 class FactoryRuntimeAdapterError(Exception):
@@ -89,12 +102,88 @@ def validate_tool_arguments(
         ) from exc
 
 
+def _is_reserved_credential_header_name(name: str) -> bool:
+    return name.strip().lower() in _RESERVED_CREDENTIAL_HEADER_NAMES
+
+
+def assert_safe_runtime_param_mapping(
+    *,
+    parameters: list[Any] | None,
+    input_schema: dict[str, Any] | None,
+) -> None:
+    """Fail closed before READY/outbound when reviewed params can carry credentials.
+
+    - OpenAPI ``in: cookie`` / ``x-mcpflow-param-in: cookie`` rejected
+    - Header names Authorization / Proxy-Authorization / Cookie rejected
+      (case-insensitive)
+    - Non-sensitive headers (e.g. X-Request-ID) remain allowed
+    """
+
+    for param in parameters or []:
+        if not isinstance(param, dict):
+            continue
+        location = str(param.get("location") or "").strip().lower()
+        name = str(param.get("name") or "")
+        if location == "cookie":
+            raise FactoryRuntimeAdapterError(
+                FACTORY_RUNTIME_CREDENTIAL_PARAM_FORBIDDEN,
+                (
+                    "Reviewed OpenAPI cookie parameters are not supported by the "
+                    "Factory runtime foundation; outbound credentials must use "
+                    "RuntimeBinding auth SecretResolver only."
+                ),
+            )
+        if location == "header" and _is_reserved_credential_header_name(name):
+            raise FactoryRuntimeAdapterError(
+                FACTORY_RUNTIME_CREDENTIAL_PARAM_FORBIDDEN,
+                (
+                    f"Reviewed header parameter {name!r} is a reserved credential "
+                    "transport name; outbound auth must use RuntimeBinding "
+                    "auth_type/auth_secret_id + SecretResolver only."
+                ),
+            )
+
+    if not isinstance(input_schema, dict):
+        return
+    props = input_schema.get("properties")
+    if not isinstance(props, dict):
+        return
+    for prop_name, meta in props.items():
+        if not isinstance(meta, dict):
+            continue
+        location = str(meta.get(_PARAM_IN) or "").strip().lower()
+        if location == "cookie":
+            raise FactoryRuntimeAdapterError(
+                FACTORY_RUNTIME_CREDENTIAL_PARAM_FORBIDDEN,
+                (
+                    f"Reviewed input property {prop_name!r} maps to cookie; "
+                    "Factory runtime foundation rejects cookie parameters."
+                ),
+            )
+        if location == "header" and _is_reserved_credential_header_name(str(prop_name)):
+            raise FactoryRuntimeAdapterError(
+                FACTORY_RUNTIME_CREDENTIAL_PARAM_FORBIDDEN,
+                (
+                    f"Reviewed header property {prop_name!r} is a reserved "
+                    "credential transport name; outbound auth must use "
+                    "RuntimeBinding auth SecretResolver only."
+                ),
+            )
+
+
 def map_arguments_to_http(
     *,
     contract: DeclarativeToolContract,
     arguments: dict[str, Any],
 ) -> tuple[str, dict[str, str], dict[str, str], dict[str, str], Any | None]:
     """Return (path, query, headers, cookies, json_body) from reviewed mapping."""
+
+    # Defense in depth: contracts with credential channels must already have
+    # failed at READY/load; never map them if they appear here.
+    assert_safe_runtime_param_mapping(
+        parameters=None,
+        input_schema=contract.input_schema,
+    )
 
     props = contract.input_schema.get("properties")
     if props is not None and not isinstance(props, dict):
@@ -125,6 +214,16 @@ def map_arguments_to_http(
                 FACTORY_RUNTIME_INPUT_INVALID,
                 f"Argument {key!r} has no reviewed x-mcpflow-param-in location.",
             )
+        if location == "cookie":
+            raise FactoryRuntimeAdapterError(
+                FACTORY_RUNTIME_CREDENTIAL_PARAM_FORBIDDEN,
+                "Cookie parameter mapping is forbidden on Factory runtime foundation.",
+            )
+        if location == "header" and _is_reserved_credential_header_name(key):
+            raise FactoryRuntimeAdapterError(
+                FACTORY_RUNTIME_CREDENTIAL_PARAM_FORBIDDEN,
+                f"Header {key!r} is a reserved credential transport name.",
+            )
         rendered = _stringify_param(value)
         if location == "path":
             path_params[key] = rendered
@@ -133,7 +232,11 @@ def map_arguments_to_http(
         elif location == "header":
             headers[key] = rendered
         else:
-            cookies[key] = rendered
+            # Unreachable for cookie (rejected above); keep fail-closed.
+            raise FactoryRuntimeAdapterError(
+                FACTORY_RUNTIME_CREDENTIAL_PARAM_FORBIDDEN,
+                f"Unsupported parameter location {location!r}.",
+            )
 
     if contract.request_body_required and not body_seen:
         raise FactoryRuntimeAdapterError(
@@ -385,16 +488,20 @@ def package_tool_to_contract(
             FACTORY_RUNTIME_INPUT_INVALID,
             "Reviewed package path must be an absolute path template.",
         )
+    parameters = (
+        tool.get("parameters") if isinstance(tool.get("parameters"), list) else []
+    )
     # Prefer imported/reviewed input_schema; fall back to rebuild from package.
     schema = input_schema
     if not isinstance(schema, dict) or "type" not in schema:
         schema = build_mcp_callable_input_schema(
-            parameters=tool.get("parameters")
-            if isinstance(tool.get("parameters"), list)
-            else [],
+            parameters=parameters,
             request_schema=tool.get("request_schema"),
             request_body_required=bool(tool.get("request_body_required", False)),
         )
+    # Fail closed before READY / outbound HTTP — never treat Tool args as
+    # credential injection channels.
+    assert_safe_runtime_param_mapping(parameters=parameters, input_schema=schema)
     return DeclarativeToolContract(
         remote_name=name[:255],
         method=method,
