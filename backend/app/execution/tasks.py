@@ -294,7 +294,7 @@ async def _recover_once(*, execution_id: uuid.UUID, worker_id: str) -> None:
     max_retries=None,
 )
 def recover_execution_task(self: object, *, execution_id: str) -> None:
-    """Recover an expired RUNNING Execution; duplicate delivery is a DB no-op."""
+    """Recover expired RUNNING or CANCEL_REQUESTED; duplicate delivery is a DB no-op."""
     try:
         execution_uuid = uuid.UUID(execution_id)
     except (TypeError, ValueError):

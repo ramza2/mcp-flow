@@ -531,6 +531,12 @@ Dataset은 평가 전 FROZEN하고 실행 중 정답을 변경하지 않는다.
 
 추가 (FNC-EXE-011 expired RUNNING lease recovery vertical slice):
 
+- expired CANCEL_REQUESTED lease recovery (Issue #113): discovery includes
+  CANCEL_REQUESTED + expired lease for AGENT_REQUEST/WORKFLOW_VERSION/
+  SCHEDULE_OCCURRENCE; evidence A→CANCELLED, B STARTED ToolCall→UNKNOWN_OUTCOME+
+  FAILED (no retry even READ_ONLY), C terminal ToolCall preserved; multi-step
+  sequential/parallel MCP 0; duplicate/stale fencing; Schedule REPLACE unblocks
+  via existing waiting reconciliation; WAITING_*/non-expired not selected
 - recovery risk decision uses pinned `Execution.policy_snapshot.tool_policy`
   (READ_ONLY/IDEMPOTENT_WRITE=safe retry; NON_IDEMPOTENT_WRITE/DESTRUCTIVE/UNKNOWN=unsafe);
   mutable MCPToolPolicy drift must not reclassify past ambiguous calls
@@ -931,9 +937,10 @@ FNC-EXE-010 / REQ-EXE-009 cancellation (PR #55):
 - PG parallel `input_required` cancel (not DAG_WAIT_UNSUPPORTED); PG parallel UNKNOWN_OUTCOME under cancel → Execution FAILED
 - PG FOR_EACH cancel before next iteration materialization (no iter-2 children / no extra MCP)
 - Inactive session on public cancel API → `401 AUTH_SESSION_INVALID` (session layer); service ACTIVE check remains 403
-- Recovery limitation: `CANCEL_REQUESTED` is never an ordinary SAFE_RETRY candidate. The owning live worker must settle an already in-flight ToolCall. Crash/expired-lease cancellation reconciliation is a separate recovery hardening slice — not claimed here. Schedule REPLACE must fail closed if prior cancellation cannot yet be safely settled.
+- `CANCEL_REQUESTED` is never an ordinary SAFE_RETRY / RUNNING recovery candidate. Live owning worker settles in-flight ToolCalls; expired-lease cancellation recovery terminalizes from durable evidence only (MCP 0, no new Attempt).
+- Cancel-recovery acceptance: READY/no Attempt → CANCELLED; STARTED Attempt/no ToolCall → CANCELLED; STARTED ToolCall → UNKNOWN_OUTCOME + Execution FAILED (incl. READ_ONLY, no retry); terminal SUCCEEDED ToolCall preserved; existing UNKNOWN_OUTCOME → FAILED; sequential/parallel multi-step no downstream/sibling MCP; WORKFLOW_VERSION / SCHEDULE_OCCURRENCE sources; duplicate recovery NO_OP loser; stale worker fencing; non-expired / WAITING_* not selected; Schedule REPLACE unblocks after prior terminalization via existing waiting reconciliation.
 - Internal cancel helper does not commit (caller-owned TX for Schedule REPLACE)
-- No remote MCP cancel protocol; Schedule REPLACE not implemented here
+- No remote MCP cancel protocol
 
 ### 완료판정
 

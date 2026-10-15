@@ -942,8 +942,10 @@ A TOOL → C CONDITION → PASS TOOL (when C.condition_result==true)
 
 - one Celery/Execution task; not one task per Step
 - duplicate orchestrator delivery seeing RUNNING TOOL under lease → `WAVE_IN_PROGRESS` NOOP
-- Multi-Step expired-lease / parallel-wave recovery remains fail-closed: never
-  re-invoke terminal Attempt/ToolCall; complex parallel recovery unsupported
+- Multi-Step expired RUNNING / parallel-wave recovery remains fail-closed: never
+  re-invoke terminal Attempt/ToolCall; complex parallel RUNNING recovery unsupported.
+  Expired CANCEL_REQUESTED multi-step recovery is cancellation-only terminalization
+  (MCP 0) and does not resume orchestration waves.
 - runtime Binding resolve unchanged for TOOL args; STEP_OUTPUT still requires
   SUCCEEDED source + exact Plan↔Step lineage; CONDITION `result_inline` is a
   valid STEP_OUTPUT source
@@ -1780,7 +1782,7 @@ MCP progress는 `execution.step.progress` event로 normalize한다. progress 비
 5. 취소 후 신규 Step / Attempt / SAFE_RETRY / downstream MCP를 시작하지 않는다.
 6. 이미 전송된 호출이 valid `input_required`를 반환해도 WAITING_INPUT/OPEN MCPInputRequest를 열지 않는다 — ToolCall 라운드 SUCCEEDED + Attempt/Step CANCELLED.
 7. `UNKNOWN_OUTCOME` / mandatory fatal은 취소보다 우선하여 Execution `FAILED`를 유지한다 (CANCELLED로 숨기지 않음).
-8. Recovery는 `CANCEL_REQUESTED`를 ordinary retry candidate로 선택하지 않는다. crash/expired-lease cancellation reconciliation은 후속 hardening.
+8. Recovery는 `CANCEL_REQUESTED`를 ordinary RUNNING retry candidate로 선택하지 않는다. expired `CANCEL_REQUESTED` lease는 cancellation-only recovery가 durable evidence로 terminalize한다(MCP 0 / 새 Attempt 금지 / STARTED ToolCall → UNKNOWN_OUTCOME + Execution FAILED).
 9. `apply_cancellation_locked`는 caller TX ownership을 가정하며 commit하지 않는다 (Schedule REPLACE 조합용).
 10. 이 원시는 Schedule `overlap_policy=REPLACE`의 선행 조건이며 REPLACE 자체는 후속 PR.
 
