@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import AppError
@@ -155,61 +155,88 @@ class ExecutionRecoveryService:
                 status_code=400,
             )
         ts = now or datetime.now(UTC)
-        agent_stmt = (
-            select(Execution.id)
-            .where(
-                Execution.status == ExecutionStatus.RUNNING.value,
-                Execution.source_type == ExecutionSourceType.AGENT_REQUEST.value,
-                Execution.lease_expires_at.is_not(None),
-                Execution.lease_expires_at <= ts,
-            )
-            .order_by(Execution.lease_expires_at.asc())
-            .limit(limit)
+        agent_rows = list(
+            (
+                await self._session.execute(
+                    select(Execution.id, Execution.lease_expires_at)
+                    .where(
+                        Execution.status == ExecutionStatus.RUNNING.value,
+                        Execution.source_type
+                        == ExecutionSourceType.AGENT_REQUEST.value,
+                        Execution.lease_expires_at.is_not(None),
+                        Execution.lease_expires_at <= ts,
+                    )
+                    .order_by(
+                        Execution.lease_expires_at.asc(),
+                        Execution.id.asc(),
+                    )
+                    .limit(limit)
+                )
+            ).all()
         )
-        agent_ids = list((await self._session.execute(agent_stmt)).scalars().all())
 
-        # Workflow/Schedule: fetch a bounded expired RUNNING set, then filter out
-        # LOOP Plans so unsupported executions are not republished every poll.
-        wf_stmt = (
-            select(Execution)
-            .where(
-                Execution.status == ExecutionStatus.RUNNING.value,
-                Execution.source_type.in_(tuple(_WORKFLOW_RUNNING_RECOVERY_SOURCES)),
-                Execution.lease_expires_at.is_not(None),
-                Execution.lease_expires_at <= ts,
-            )
-            .order_by(Execution.lease_expires_at.asc())
-            .limit(max(limit * 4, limit))
-        )
-        wf_rows = list((await self._session.execute(wf_stmt)).scalars().all())
+        # Workflow/Schedule: keyset-paginate past LOOP/unsupported Plans so a
+        # dense unsupported prefix cannot starve later eligible rows. Never use
+        # a fixed overfetch window that stops after limit*N filtered rows.
         from app.execution.workflow_dag_recovery import (
             plan_supports_workflow_running_recovery,
         )
 
-        wf_ids: list[uuid.UUID] = []
-        for row in wf_rows:
-            if plan_supports_workflow_running_recovery(row.plan_snapshot):
-                wf_ids.append(row.id)
-            if len(wf_ids) >= limit:
-                break
-
-        # Merge by lease expiry order using already-fetched rows where possible.
-        merged: list[tuple[datetime, uuid.UUID]] = []
-        if agent_ids:
-            agent_meta = (
-                await self._session.execute(
-                    select(Execution.id, Execution.lease_expires_at).where(
-                        Execution.id.in_(agent_ids)
+        page_size = limit
+        wf_eligible: list[tuple[datetime, uuid.UUID]] = []
+        cursor_expires: datetime | None = None
+        cursor_id: uuid.UUID | None = None
+        while len(wf_eligible) < limit:
+            conditions = [
+                Execution.status == ExecutionStatus.RUNNING.value,
+                Execution.source_type.in_(tuple(_WORKFLOW_RUNNING_RECOVERY_SOURCES)),
+                Execution.lease_expires_at.is_not(None),
+                Execution.lease_expires_at <= ts,
+            ]
+            if cursor_expires is not None and cursor_id is not None:
+                conditions.append(
+                    or_(
+                        Execution.lease_expires_at > cursor_expires,
+                        and_(
+                            Execution.lease_expires_at == cursor_expires,
+                            Execution.id > cursor_id,
+                        ),
                     )
                 )
-            ).all()
-            for exec_id, expires in agent_meta:
-                if expires is not None:
-                    merged.append((_as_utc(expires), exec_id))
-        for row in wf_rows:
-            if row.id in wf_ids and row.lease_expires_at is not None:
-                merged.append((_as_utc(row.lease_expires_at), row.id))
-        merged.sort(key=lambda item: item[0])
+            page = list(
+                (
+                    await self._session.execute(
+                        select(Execution)
+                        .where(*conditions)
+                        .order_by(
+                            Execution.lease_expires_at.asc(),
+                            Execution.id.asc(),
+                        )
+                        .limit(page_size)
+                    )
+                ).scalars().all()
+            )
+            if not page:
+                break
+            for row in page:
+                if row.lease_expires_at is None:
+                    continue
+                if plan_supports_workflow_running_recovery(row.plan_snapshot):
+                    wf_eligible.append((_as_utc(row.lease_expires_at), row.id))
+                    if len(wf_eligible) >= limit:
+                        break
+            last = page[-1]
+            if last.lease_expires_at is None:
+                break
+            cursor_expires = last.lease_expires_at
+            cursor_id = last.id
+
+        merged: list[tuple[datetime, uuid.UUID]] = []
+        for exec_id, expires in agent_rows:
+            if expires is not None:
+                merged.append((_as_utc(expires), exec_id))
+        merged.extend(wf_eligible)
+        merged.sort(key=lambda item: (item[0], item[1]))
         seen: set[uuid.UUID] = set()
         ordered: list[uuid.UUID] = []
         for _expires, exec_id in merged:

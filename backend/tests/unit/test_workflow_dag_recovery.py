@@ -558,6 +558,167 @@ async def test_agent_request_recovery_still_works(db_session: AsyncSession) -> N
     assert rec.lease_token != old_token
 
 
+async def _plant_expired_unsupported_workflow(
+    session: AsyncSession,
+    *,
+    template: Any,
+    plan_snapshot: dict[str, Any],
+    lease_expires_at: datetime,
+) -> uuid.UUID:
+    """Lightweight expired RUNNING Workflow row with unsupported Plan."""
+    from app.schemas.execution_plan import EXECUTION_PLAN_SCHEMA_VERSION, compute_plan_hash
+
+    row = await ExecutionRepository(session).create_execution(
+        source_type=ExecutionSourceType.WORKFLOW_VERSION.value,
+        trigger_type="USER",
+        requester_id=template.requester_id,
+        agent_request_id=None,
+        agent_version_id=None,
+        plan_validation_run_id=None,
+        status=ExecutionStatus.RUNNING.value,
+        plan_schema_version=EXECUTION_PLAN_SCHEMA_VERSION,
+        plan_snapshot=plan_snapshot,
+        plan_hash=compute_plan_hash(plan_snapshot)
+        if plan_supports_workflow_running_recovery(plan_snapshot)
+        else "a" * 64,
+        input_snapshot={},
+        policy_snapshot=dict(template.policy_snapshot),
+        trace_id=None,
+        requested_at=lease_expires_at,
+        workflow_version_id=template.workflow_version_id,
+    )
+    row.worker_id = "unsupported-old"
+    row.lease_token = uuid.uuid4()
+    row.lease_expires_at = lease_expires_at
+    row.started_at = lease_expires_at
+    await session.flush()
+    return row.id
+
+
+@pytest.mark.asyncio
+async def test_discovery_starvation_free_past_unsupported_prefix(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A: unsupported prefix larger than old limit*4 overfetch still yields eligible."""
+    _install_no_side_effects(monkeypatch)
+    limit = 5
+    # Old buggy window was limit*4; plant more unsupported than that.
+    unsupported_count = limit * 4 + 5
+
+    eligible_id, _ctx, now, _w, _tok = await _seed_workflow_execution(
+        db_session, plan_builder=lambda wid, tv: _tool_plan(wid, tv)
+    )
+    template = await ExecutionRepository(db_session).get(eligible_id)
+    assert template is not None
+
+    base = now - timedelta(seconds=unsupported_count + 10)
+    loop_plan = _loop_plan(uuid.uuid4(), _ctx["tool_version_id"])
+    for i in range(unsupported_count):
+        # Alternate LOOP and malformed so both unsupported shapes are skipped.
+        if i % 2 == 0:
+            snap = loop_plan
+        else:
+            snap = {"not": "a-valid-plan", "i": i}
+        await _plant_expired_unsupported_workflow(
+            db_session,
+            template=template,
+            plan_snapshot=snap,
+            lease_expires_at=base + timedelta(seconds=i),
+        )
+    # Eligible expires after every unsupported row (would sit past old window).
+    eligible = await ExecutionRepository(db_session).get(eligible_id)
+    assert eligible is not None
+    eligible.lease_expires_at = base + timedelta(seconds=unsupported_count + 1)
+    await db_session.commit()
+
+    ids = await ExecutionRecoveryService(
+        db_session, lease_seconds=60
+    ).list_expired_running_ids(limit=limit, now=now)
+    assert eligible_id in ids
+    assert len(ids) <= limit
+
+
+@pytest.mark.asyncio
+async def test_discovery_merge_agent_and_workflow_global_order_limit(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """B: AgentRequest + Workflow merge preserves lease expiry order and limit."""
+    _install_no_side_effects(monkeypatch)
+    from tests.unit.test_execution_recovery import _claim_ready
+
+    now = datetime.now(UTC)
+    # Workflow expires earliest.
+    wf_id, _ctx, claim_now, _w, _tok = await _seed_workflow_execution(
+        db_session, plan_builder=lambda wid, tv: _tool_plan(wid, tv)
+    )
+    wf = await ExecutionRepository(db_session).get(wf_id)
+    assert wf is not None
+    wf.lease_expires_at = now - timedelta(seconds=30)
+    await db_session.commit()
+
+    agent_a, _oa, _ta, _ = await _claim_ready(db_session)
+    agent_b, _ob, _tb, _ = await _claim_ready(db_session)
+    a_row = await ExecutionRepository(db_session).get(agent_a)
+    b_row = await ExecutionRepository(db_session).get(agent_b)
+    assert a_row is not None and b_row is not None
+    a_row.lease_expires_at = now - timedelta(seconds=20)
+    b_row.lease_expires_at = now - timedelta(seconds=10)
+    await db_session.commit()
+    del claim_now
+
+    ids = await ExecutionRecoveryService(
+        db_session, lease_seconds=60
+    ).list_expired_running_ids(limit=2, now=now)
+    assert ids == [wf_id, agent_a]
+
+    ids_all = await ExecutionRecoveryService(
+        db_session, lease_seconds=60
+    ).list_expired_running_ids(limit=10, now=now)
+    assert ids_all[:3] == [wf_id, agent_a, agent_b]
+
+
+@pytest.mark.asyncio
+async def test_discovery_loop_plan_never_returned(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """C: LOOP Plan expired RUNNING Workflow is never a candidate."""
+    _install_no_side_effects(monkeypatch)
+    loop_ctx = await _seed_ready_workflow(db_session)
+    loop_wf = await _create_workflow(db_session)
+    loop_plan = _loop_plan(loop_wf.id, loop_ctx["tool_version_id"])
+    loop_ver = await _create_draft_version(db_session, loop_wf.id, plan=loop_plan)
+    await _publish_and_activate(db_session, loop_wf.id, loop_ver.id)
+    loop_user = await _seed_authorized_workflow_user(
+        db_session, workflow_id=loop_wf.id, tool_ids=[loop_ctx["tool_id"]]
+    )
+    await db_session.commit()
+    loop_out = await _create(
+        db_session,
+        {
+            "workflow_id": loop_wf.id,
+            "version_id": loop_ver.id,
+            "requester_id": loop_user,
+        },
+        idempotency_key=_idem_key(),
+        inputs={"items": [{"id": 1}]},
+    )
+    await db_session.commit()
+    await ExecutionQueueService(db_session).stage_created_batch(limit=10)
+    await db_session.commit()
+    now = datetime.now(UTC)
+    claim = await ExecutionClaimService(db_session, lease_seconds=60).claim(
+        execution_id=loop_out.result.id, worker_id="loop-only", now=now
+    )
+    await db_session.commit()
+    assert claim.claimed
+    await _expire_lease(db_session, execution_id=loop_out.result.id, claim_now=now)
+
+    ids = await ExecutionRecoveryService(
+        db_session, lease_seconds=60
+    ).list_expired_running_ids(limit=50, now=now)
+    assert loop_out.result.id not in ids
+
+
 # ---------------------------------------------------------------------------
 # Sequential DAG
 # ---------------------------------------------------------------------------
