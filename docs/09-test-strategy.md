@@ -403,7 +403,8 @@ Dataset은 평가 전 FROZEN하고 실행 중 정답을 변경하지 않는다.
 - fatal / FAIL_EXECUTION sibling wave: sibling evidence persisted; no downstream;
   lease cleared only after wave settlement; PENDING→SKIPPED
 - stop precedence FATAL > FAIL_EXECUTION TIMED_OUT > FAIL_EXECUTION FAILED
-- multi-Step Approval/MRTR → fail closed (`DAG_WAIT_UNSUPPORTED`); single-TOOL waits green
+- multi-Step ToolPolicy approval → WAITING_APPROVAL (deterministic wave suspension);
+  multi-Step MRTR → fail closed (`DAG_WAIT_UNSUPPORTED`); single-TOOL waits green
 - JOIN reconcile race → one terminal JOIN; zero Attempt/ToolCall
 - duplicate orchestration / READY race → Attempt/ToolCall/MCP ≤ 1 per Step
 - PostgreSQL concurrent root promotion slots never exceed max_parallelism
@@ -480,7 +481,7 @@ Dataset은 평가 전 FROZEN하고 실행 중 정답을 변경하지 않는다.
 - two eligible APPROVALs serialize by Plan order (≤1 PENDING request / Execution)
 - reject/expiry mandatory-fatal (ignore CONTINUE / MARK_PARTIAL); multi-Step
   PENDING→SKIPPED, unused READY TOOL→CANCELLED; downstream MCP 0
-- multi-Step ToolPolicy approval remains `DAG_WAIT_UNSUPPORTED`
+- multi-Step ToolPolicy approval → WAITING_APPROVAL + Workflow/Schedule resume
 - context: deterministic build; upstream evidence Plan order; raw result not
   persisted (hash only); unknown schema fail closed; TOOL context unchanged
 - resume: fresh lease + READY; policy/context/upstream drift → FAILED; duplicate
@@ -888,7 +889,8 @@ DRAFT → PUBLISHED → DEPRECATED
 - `workflow_execution_policy.v1` exact top-level + full TOOL projection (incl. LOOP
   body); corruption → RESOURCE_CONFLICT; AgentRequest snapshot unchanged
 - ToolPolicy confirmation → `WORKFLOW_CONFIRMATION_UNSUPPORTED`
-- ToolPolicy approval → `DAG_WAIT_UNSUPPORTED` (authorable APPROVAL supported)
+- ToolPolicy approval → WAITING_APPROVAL + same-Execution resume
+  (`WORKFLOW_VERSION` / `SCHEDULE_OCCURRENCE`); authorable APPROVAL unchanged
 - Idempotency `WORKFLOW_VERSION_EXECUTION_CREATE_V1` race / key reuse
 - Queue staging + claim accept WORKFLOW_VERSION (not Schedule/Factory by default)
 - Attempt / B2 source-aware auth; actual Phase-A / B2 grant/policy drift (MCP 0)

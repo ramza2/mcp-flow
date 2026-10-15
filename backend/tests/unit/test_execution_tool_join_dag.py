@@ -1178,20 +1178,22 @@ async def test_multistep_mrtr_fail_closed_no_open_wait(
 
 
 @pytest.mark.asyncio
-async def test_multistep_approval_fail_closed_before_mcp(
+async def test_multistep_approval_enters_waiting_before_mcp(
     db_session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Issue #111: parallel-ready wave suspends on first approval TOOL (no MCP)."""
     _install_no_side_effects(monkeypatch)
     async with db_session_factory() as session:
         seeded = await _seed_executable(session)
         approval = await ApprovalPolicyRepository(session).create(
             code=f"ap-dag-{uuid.uuid4().hex[:8]}",
-            name="DAG Wait Unsupported Gate",
+            name="DAG ToolPolicy Approval Gate",
             decision_mode="ANY",
             required_approvals=1,
             default_expiry_seconds=3600,
-            approver_scope={"roles": ["ops"]},
+            approver_scope={"role_codes": ["ops"]},
+            allow_self_approval=True,
         )
         await session.flush()
         policy = await MCPToolPolicyRepository(session).get_by_tool_id(seeded["tool_id"])
@@ -1211,12 +1213,21 @@ async def test_multistep_approval_fail_closed_before_mcp(
         db_session_factory, plan=plan, seeded=seeded, client=client
     )
     assert len(client.calls) == 0
-    assert outcome.reason in {"DAG_WAIT_UNSUPPORTED", "EXECUTION_FAILED"}
+    assert outcome.reason == "WAITING_APPROVAL"
     async with db_session_factory() as session:
         execution = await ExecutionRepository(session).get(execution_id)
         assert execution is not None
-        assert execution.status == ExecutionStatus.FAILED.value
-        assert execution.status != ExecutionStatus.WAITING_APPROVAL.value
+        assert execution.status == ExecutionStatus.WAITING_APPROVAL.value
+        steps = await ExecutionRepository(session).list_steps(execution_id)
+        waiting = [s for s in steps if s.status == StepStatus.WAITING_APPROVAL.value]
+        assert len(waiting) == 1
+        assert waiting[0].step_key == "a"
+        from app.repositories.approval_request import ApprovalRequestRepository
+
+        pending = await ApprovalRequestRepository(session).find_pending_for_execution(
+            execution_id=execution_id
+        )
+        assert pending is not None
 
 
 @pytest.mark.asyncio

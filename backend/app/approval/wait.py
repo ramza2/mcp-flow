@@ -58,15 +58,20 @@ class ApprovalWaitService:
         *,
         execution: Execution,
         step: ExecutionStep,
-        tool_config: ToolStepConfigV1,
+        tool_config: ToolStepConfigV1 | None = None,
         tool_policy: MCPToolPolicy,
         approval_policy: ApprovalPolicy,
+        resolved_input: dict[str, Any] | None = None,
         now: datetime | None = None,
     ) -> ApprovalWaitOutcome:
         """Create or reuse PENDING ApprovalRequest and enter WAITING_APPROVAL.
 
         Caller must hold FOR UPDATE locks on ``execution`` and ``step`` and have
         already validated runtime preflight + confirmation evidence.
+
+        ``resolved_input`` should be the secret-safe runtime resolution (and is
+        required for Workflow dynamic bindings). When omitted, LITERAL/SECRET_REF
+        bindings are materialized from ``tool_config``.
         """
         ts = now or datetime.now(UTC)
         if ts.tzinfo is None:
@@ -127,7 +132,19 @@ class ApprovalWaitService:
                 status_code=409,
             )
 
-        resolved_input = materialize_secret_safe_resolved_input(tool_config.bindings)
+        if resolved_input is None:
+            if tool_config is None:
+                raise AppError(
+                    code="EXECUTION_PRECONDITION_FAILED",
+                    message=(
+                        "ToolPolicy approval wait requires resolved_input or "
+                        "tool_config bindings."
+                    ),
+                    status_code=409,
+                )
+            resolved_input = materialize_secret_safe_resolved_input(
+                tool_config.bindings
+            )
         context_snapshot = build_approval_context_snapshot(
             execution=execution,
             step=step,

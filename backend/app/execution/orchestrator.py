@@ -10,8 +10,10 @@ Nested LOOP / body APPROVAL fail closed before MCP.
 
 Authorable APPROVAL is an Execution-level Plan checkpoint: entering wait
 clears the lease and may freeze unrelated READY sibling branches until
-``EXECUTION_APPROVAL_RESUME``. Multi-Step ToolPolicy approval and MRTR
-remain ``DAG_WAIT_UNSUPPORTED``.
+``EXECUTION_APPROVAL_RESUME``. Multi-Step ToolPolicy approval wait is also
+Execution-level: when a READY TOOL requires approval, the wave selects that
+TOOL deterministically (Plan/wave order) and does not start additional new
+remote TOOL calls. Multi-Step MRTR remains ``DAG_WAIT_UNSUPPORTED``.
 """
 
 from __future__ import annotations
@@ -487,6 +489,19 @@ class ExecutionOrchestrator:
 
             single_tool = prepared.single_tool
             wave_ids = list(prepared.ready_step_ids)
+            # ToolPolicy approval is Execution-level suspension. If any READY
+            # TOOL in this wave has pinned requires_approval, run only the first
+            # such TOOL (Plan/wave order) and allow approval wait while still
+            # forbidding multi-Step MRTR. Do not start sibling remote calls.
+            allow_approval_wait = single_tool
+            if not single_tool and wave_ids:
+                approval_wave = await self._select_approval_suspension_wave(
+                    execution_id=execution_id,
+                    wave_step_ids=wave_ids,
+                )
+                if approval_wave is not None:
+                    wave_ids = list(approval_wave)
+                    allow_approval_wait = True
             outcomes = await asyncio.gather(
                 *[
                     self._runner.run_claimed_tool_step(
@@ -496,6 +511,7 @@ class ExecutionOrchestrator:
                         lease_token=lease_token,
                         defer_execution_terminalization=not single_tool,
                         forbid_execution_wait=not single_tool,
+                        forbid_new_approval_wait=not allow_approval_wait,
                     )
                     for sid in wave_ids
                 ]
@@ -503,8 +519,9 @@ class ExecutionOrchestrator:
             if outcomes:
                 last_outcome = outcomes[-1]
 
-            # Single-TOOL wait/retry dispositions — preserve #46 entry behavior.
-            if single_tool and len(outcomes) == 1:
+            # Wait/retry dispositions — lease may already be cleared on approval.
+            # Multi-step ToolPolicy wait also returns here (do not settle under lease).
+            if len(outcomes) == 1:
                 outcome = outcomes[0]
                 disposition = self._effective_disposition(outcome)
                 if disposition == DISPOSITION_RETRY or outcome.reason == _REASON_SAFE_RETRY_READY:
@@ -514,7 +531,7 @@ class ExecutionOrchestrator:
                     _REASON_WAITING_INPUT,
                 }:
                     return outcome
-                if outcome.reason in {
+                if single_tool and outcome.reason in {
                     "LEASE_MISMATCH",
                     "MISSING",
                     "STEP_ALREADY_TERMINAL",
@@ -525,6 +542,14 @@ class ExecutionOrchestrator:
                     _REASON_CANCEL_IN_PROGRESS,
                 }:
                     return outcome
+            else:
+                for outcome in outcomes:
+                    disposition = self._effective_disposition(outcome)
+                    if disposition == DISPOSITION_WAIT or outcome.reason in {
+                        "WAITING_APPROVAL",
+                        _REASON_WAITING_INPUT,
+                    }:
+                        return outcome
 
             settled = await self._settle_wave(
                 execution_id=execution_id,
@@ -571,6 +596,48 @@ class ExecutionOrchestrator:
         }:
             return DISPOSITION_KNOWN_STEP_FAILURE
         return DISPOSITION_NOOP
+
+    async def _select_approval_suspension_wave(
+        self,
+        *,
+        execution_id: uuid.UUID,
+        wave_step_ids: list[uuid.UUID],
+    ) -> tuple[uuid.UUID, ...] | None:
+        """If any READY TOOL has pinned requires_approval, return only the first.
+
+        Selection follows Plan/wave order (``wave_step_ids`` already ordered).
+        Returns None when no TOOL in the wave requires approval.
+        """
+        from app.execution.policy_selection import get_expected_tool_policy_snapshot
+
+        async with self._session_factory() as session:
+            executions = ExecutionRepository(session)
+            execution = await executions.get(execution_id)
+            if execution is None:
+                return None
+            steps = await executions.list_steps(execution_id)
+            by_id = {s.id: s for s in steps}
+            for step_id in wave_step_ids:
+                step = by_id.get(step_id)
+                if step is None or step.step_type != AuthorableStepType.TOOL.value:
+                    continue
+                if step.mcp_tool_version_id is None:
+                    continue
+                plan_step_id = str(step.step_snapshot.get("id") or step.step_key)
+                try:
+                    policy = get_expected_tool_policy_snapshot(
+                        execution,
+                        plan_step_id=plan_step_id,
+                        tool_version_id=step.mcp_tool_version_id,
+                    )
+                except AppError:
+                    continue
+                tool_policy = policy.get("tool_policy")
+                if isinstance(tool_policy, dict) and tool_policy.get(
+                    "requires_approval"
+                ):
+                    return (step_id,)
+        return None
 
     async def _prepare_wave(
         self,

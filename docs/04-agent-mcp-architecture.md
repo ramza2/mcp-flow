@@ -757,8 +757,11 @@ Plan APPROVAL Step
 An authorable APPROVAL Step does **not** authorize downstream TOOL invocation,
 ToolPolicy, confirmation, secret usage, or mutable runtime policy. Every
 downstream TOOL must still pass normal invocation-time checks. If that TOOL
-requires ToolPolicy approval, existing single-TOOL rules still apply
-(multi-Step ToolPolicy wait remains `DAG_WAIT_UNSUPPORTED`).
+requires ToolPolicy approval, the runtime enters Execution-level
+`WAITING_APPROVAL` before Attempt/ToolCall/MCP (same ApprovalWaitService as
+AgentRequest single-TOOL). Parallel waves select the first Plan-ordered READY
+TOOL that requires approval and do not start additional new remote TOOL calls
+in that wave. Multi-Step MRTR remains fail-closed (`DAG_WAIT_UNSUPPORTED`).
 
 ### 9.7.1 TOOL/CONDITION/JOIN/APPROVAL DAG wave runtime orchestration
 
@@ -904,10 +907,11 @@ Multi-Step wait boundary:
 - single-TOOL ToolPolicy Approval / MRTR WAITING_* behavior unchanged
 - authorable APPROVAL Step may enter Execution-level WAITING_APPROVAL after the
   current remote wave has fully settled (local reconcile boundary)
-- multi-Step TOOL + ToolPolicy.requires_approval remains fail-closed
-  (`DAG_WAIT_UNSUPPORTED`) until branch-local Tool suspension is designed
+- multi-Step TOOL + ToolPolicy.requires_approval enters Execution-level
+  WAITING_APPROVAL: wave selects the first Plan-ordered READY approval TOOL
+  and does not start additional new remote TOOL calls in that wave
 - multi-Step MRTR remains fail-closed (`DAG_WAIT_UNSUPPORTED` / conservative
-  UNKNOWN_OUTCOME for post-MCP MRTR). Branch-local suspension is deferred.
+  UNKNOWN_OUTCOME for post-MCP MRTR). Branch-local MRTR suspension is deferred.
 
 `completion.success_policy` (현재 유일한 값):
 
@@ -1244,8 +1248,9 @@ plus Agent (`AgentVersion` + `AgentToolGrant`) or Workflow (`workflow.execute` +
 `{PUBLISHED, DEPRECATED}`). After Execution Creation, version supersession must
 not invalidate pinned lineage; logical Workflow `ACTIVE` and current grants
 remain revocable. ToolPolicy confirmation is unsupported for Workflow creation;
-ToolPolicy Execution-level approval wait is `DAG_WAIT_UNSUPPORTED` in this slice
-(authorable APPROVAL Steps remain supported).
+ToolPolicy Execution-level approval wait is supported for Workflow TOOL Steps
+(and schedule-backed WorkflowVersion lineage) via the same ApprovalWaitService /
+same-Execution resume path as AgentRequest single-TOOL.
 
 ### 9.7 Complex Plan static validation foundation
 

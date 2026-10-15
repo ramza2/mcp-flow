@@ -577,9 +577,9 @@ class WorkflowExecutionCreationService:
                     status_code=409,
                 ) from exc
 
-        # Per-TOOL policy snapshots + confirmation/approval boundaries.
-        # ToolPolicy requires_approval is not safely source-generalized for
-        # Workflow in this slice (authorable APPROVAL Steps remain supported).
+        # Per-TOOL policy snapshots + confirmation boundary.
+        # ToolPolicy requires_approval is allowed (Execution-level WAITING_APPROVAL);
+        # requires_confirmation remains unsupported for Workflow sources.
         tool_steps_policy: dict[str, dict[str, Any]] = {}
         for step in _iter_tool_plan_steps(plan):
             cfg = parse_complex_tool_step_config(step.config)
@@ -601,15 +601,9 @@ class WorkflowExecutionCreationService:
                     ),
                     status_code=409,
                 )
-            if authz.tool_policy.requires_approval:
-                raise AppError(
-                    code="DAG_WAIT_UNSUPPORTED",
-                    message=(
-                        "Workflow ToolPolicy requires_approval is not supported "
-                        "in this slice; use an authorable APPROVAL Step."
-                    ),
-                    status_code=409,
-                )
+            # requires_approval: ApprovalPolicy must already be valid via
+            # _authorize_tool_for_create (missing/inactive/integrity → fail-close).
+            # Runtime enters WAITING_APPROVAL before Attempt/ToolCall/MCP.
             tool_steps_policy[step.id] = {
                 "tool_version_id": str(cfg.tool_version_id),
                 "policy": dict(authz.policy_snapshot),

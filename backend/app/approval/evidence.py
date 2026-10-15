@@ -40,6 +40,7 @@ from app.schemas.execution_plan import (
     ExecutionPlanV1,
     ToolStepConfigV1,
     compute_plan_hash,
+    parse_complex_tool_step_config,
 )
 
 
@@ -96,6 +97,20 @@ def validate_stored_context_snapshot(snapshot: Any) -> dict[str, Any]:
                 message=f"ApprovalRequest context_snapshot missing {key!r}.",
                 status_code=409,
             )
+    # Workflow ToolPolicy context: agent_version_id may be null when
+    # workflow_version_id + source_type are present.
+    agent_raw = snapshot.get("agent_version_id")
+    workflow_raw = snapshot.get("workflow_version_id")
+    if agent_raw is None:
+        if workflow_raw is None or "source_type" not in snapshot:
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message=(
+                    "ApprovalRequest context_snapshot requires agent_version_id "
+                    "or workflow_version_id + source_type."
+                ),
+                status_code=409,
+            )
     tool_policy = snapshot["tool_policy"]
     approval_policy = snapshot["approval_policy"]
     if not isinstance(tool_policy, dict) or not isinstance(approval_policy, dict):
@@ -150,7 +165,6 @@ def assert_lineage_matches_snapshot(
         snap_exec = uuid.UUID(str(snapshot["execution_id"]))
         snap_step = uuid.UUID(str(snapshot["step_execution_id"]))
         snap_requester = uuid.UUID(str(snapshot["requester_id"]))
-        snap_agent = uuid.UUID(str(snapshot["agent_version_id"]))
         snap_tool = uuid.UUID(str(snapshot["mcp_tool_version_id"]))
     except (TypeError, ValueError) as exc:
         raise AppError(
@@ -158,12 +172,40 @@ def assert_lineage_matches_snapshot(
             message="ApprovalRequest context_snapshot lineage ids are corrupted.",
             status_code=409,
         ) from exc
+
+    agent_raw = snapshot.get("agent_version_id")
+    workflow_raw = snapshot.get("workflow_version_id")
+    try:
+        snap_agent = (
+            uuid.UUID(str(agent_raw)) if agent_raw is not None else None
+        )
+        snap_workflow = (
+            uuid.UUID(str(workflow_raw)) if workflow_raw is not None else None
+        )
+    except (TypeError, ValueError) as exc:
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message="ApprovalRequest context_snapshot lineage ids are corrupted.",
+            status_code=409,
+        ) from exc
+
+    agent_ok = snap_agent == execution.agent_version_id
+    # Legacy AgentRequest snapshots omit workflow_version_id — treat as None.
+    if "workflow_version_id" not in snapshot:
+        workflow_ok = execution.workflow_version_id is None
+    else:
+        workflow_ok = snap_workflow == execution.workflow_version_id
+    source_ok = True
+    if "source_type" in snapshot:
+        source_ok = snapshot.get("source_type") == execution.source_type
+
     if (
         snap_exec != execution.id
         or snap_step != step.id
         or snap_requester != execution.requester_id
-        or execution.agent_version_id is None
-        or snap_agent != execution.agent_version_id
+        or not agent_ok
+        or not workflow_ok
+        or not source_ok
         or step.mcp_tool_version_id is None
         or snap_tool != step.mcp_tool_version_id
         or snapshot.get("step_key") != step.step_key
@@ -209,13 +251,30 @@ async def rebuild_current_approval_context(
     """Rebuild secret-safe current context from live Execution/Step/policy state."""
     try:
         plan_step = ExecutionPlanStep.model_validate(step.step_snapshot)
-        tool_config = ToolStepConfigV1.model_validate(plan_step.config)
     except Exception as exc:
         raise AppError(
             code="RESOURCE_CONFLICT",
             message="Execution TOOL Step snapshot is invalid for approval context.",
             status_code=409,
         ) from exc
+
+    # AgentRequest uses ToolStepConfigV1; Workflow uses ComplexToolStepConfigV1.
+    tool_version_id: uuid.UUID
+    agent_bindings: dict[str, Any] | None = None
+    try:
+        tool_config = ToolStepConfigV1.model_validate(plan_step.config)
+        tool_version_id = tool_config.tool_version_id
+        agent_bindings = tool_config.bindings
+    except Exception:
+        try:
+            complex_cfg = parse_complex_tool_step_config(plan_step.config)
+            tool_version_id = complex_cfg.tool_version_id
+        except Exception as exc:
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message="Execution TOOL Step snapshot is invalid for approval context.",
+                status_code=409,
+            ) from exc
 
     policy = tool_policy or await load_tool_policy_for_step(session, step=step)
 
@@ -235,14 +294,34 @@ async def rebuild_current_approval_context(
                 status_code=409,
             )
 
-    if step.mcp_tool_version_id != tool_config.tool_version_id:
+    if step.mcp_tool_version_id != tool_version_id:
         raise AppError(
             code="RESOURCE_CONFLICT",
             message="Step mcp_tool_version_id does not match plan TOOL config.",
             status_code=409,
         )
 
-    resolved_input = materialize_secret_safe_resolved_input(tool_config.bindings)
+    # Prefer pinned Step.resolved_input (Workflow dynamic bindings + wait pin).
+    # Fall back to LITERAL/SECRET_REF materialization for AgentRequest foundation.
+    if step.resolved_input is not None:
+        if not isinstance(step.resolved_input, dict):
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message="Step.resolved_input must be an object for approval context.",
+                status_code=409,
+            )
+        resolved_input = dict(step.resolved_input)
+    else:
+        if agent_bindings is None:
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message=(
+                    "Workflow ToolPolicy approval context requires pinned "
+                    "Step.resolved_input."
+                ),
+                status_code=409,
+            )
+        resolved_input = materialize_secret_safe_resolved_input(agent_bindings)
     snapshot = build_approval_context_snapshot(
         execution=execution,
         step=step,

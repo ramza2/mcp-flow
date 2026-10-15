@@ -518,6 +518,7 @@ class McpToolRunner:
         lease_token: uuid.UUID,
         defer_execution_terminalization: bool = False,
         forbid_execution_wait: bool = False,
+        forbid_new_approval_wait: bool | None = None,
     ) -> ToolRunOutcome:
         """Invoke MCP for exactly one TOOL Step (safe-retry loop included).
 
@@ -528,8 +529,10 @@ class McpToolRunner:
         terminalize Execution here unless ``defer_execution_terminalization``
         is set (DAG wave mode — siblings must settle first).
 
-        ``forbid_execution_wait`` fail-closes multi-Step Approval/MRTR waits
-        with ``DAG_WAIT_UNSUPPORTED`` / conservative UNKNOWN_OUTCOME.
+        ``forbid_execution_wait`` fail-closes multi-Step MRTR waits with
+        conservative UNKNOWN_OUTCOME. ``forbid_new_approval_wait`` (defaults to
+        the same value) fail-closes new ToolPolicy WAITING_APPROVAL entry;
+        orchestrator may allow approval wait while still forbidding MRTR.
         """
         while True:
             prep = await self._prepare(
@@ -539,6 +542,7 @@ class McpToolRunner:
                 lease_token=lease_token,
                 defer_execution_terminalization=defer_execution_terminalization,
                 forbid_execution_wait=forbid_execution_wait,
+                forbid_new_approval_wait=forbid_new_approval_wait,
             )
             if prep.prepared is None:
                 assert prep.outcome is not None
@@ -884,10 +888,16 @@ class McpToolRunner:
         lease_token: uuid.UUID,
         defer_execution_terminalization: bool = False,
         forbid_execution_wait: bool = False,
+        forbid_new_approval_wait: bool | None = None,
     ) -> _PrepareResult:
         worker = _normalize_worker_id(worker_id)
         defer = defer_execution_terminalization
         forbid_wait = forbid_execution_wait
+        approval_forbid = (
+            forbid_wait
+            if forbid_new_approval_wait is None
+            else forbid_new_approval_wait
+        )
         async with self._session_factory() as session:
             async with session.begin():
                 executions = ExecutionRepository(session)
@@ -1141,7 +1151,7 @@ class McpToolRunner:
                         worker_id=worker,
                         lease_token=lease_token,
                         now=now,
-                        forbid_new_approval_wait=forbid_wait,
+                        forbid_new_approval_wait=approval_forbid,
                     )
                 except AppError as exc:
                     # Do not strand RUNNING + READY after recovery/claim when
@@ -1229,7 +1239,7 @@ class McpToolRunner:
                     )
 
                 if isinstance(attempt_outcome, ApprovalWaitOutcome):
-                    if forbid_wait:
+                    if approval_forbid:
                         # Should be unreachable when forbid_new_approval_wait is set;
                         # fail closed without leaving a resumable DAG wait.
                         if step.status not in _STEP_TERMINAL_STATUSES:

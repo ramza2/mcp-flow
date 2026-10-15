@@ -40,10 +40,12 @@ from app.repositories.plan_validation import PlanValidationRepository
 from app.schemas.execution_plan import (
     DETERMINISTIC_TOOL_STEP_ID,
     ApprovalStepConfigV1,
+    ComplexToolStepConfigV1,
     ExecutionPlanStep,
     ExecutionPlanV1,
     ToolStepConfigV1,
     compute_plan_hash,
+    parse_complex_tool_step_config,
 )
 
 
@@ -153,16 +155,9 @@ class ApprovalResumeClaimService:
                 now=ts,
             )
 
-        # Existing ToolPolicy path — AgentRequest foundation single TOOL only.
-        if len(steps) != 1:
-            raise AppError(
-                code="RESOURCE_CONFLICT",
-                message="AgentRequest foundation Execution must contain exactly one Step.",
-                status_code=409,
-            )
-
+        # ToolPolicy path — AgentRequest single-TOOL + Workflow/Schedule multi-TOOL.
         tool_config = self._assert_structural_resume_preconditions(
-            execution=execution, step=step, request=request
+            execution=execution, step=step, request=request, steps=steps
         )
         pending = await self._requests.find_pending_for_step(
             execution_id=execution.id, step_execution_id=step.id
@@ -455,13 +450,19 @@ class ApprovalResumeClaimService:
         execution: Execution,
         step: ExecutionStep,
         request: ApprovalRequest,
-    ) -> ToolStepConfigV1:
-        # ToolPolicy Execution-level approval wait remains AgentRequest-only in
-        # this slice. Workflow uses authorable APPROVAL Steps instead.
-        if execution.source_type != ExecutionSourceType.AGENT_REQUEST.value:
+        steps: list[ExecutionStep],
+    ) -> ToolStepConfigV1 | ComplexToolStepConfigV1:
+        if execution.source_type not in {
+            ExecutionSourceType.AGENT_REQUEST.value,
+            ExecutionSourceType.WORKFLOW_VERSION.value,
+            ExecutionSourceType.SCHEDULE_OCCURRENCE.value,
+        }:
             raise AppError(
                 code="RESOURCE_CONFLICT",
-                message="ToolPolicy approval resume supports AgentRequest Executions only.",
+                message=(
+                    "ToolPolicy approval resume supports AGENT_REQUEST / "
+                    "WORKFLOW_VERSION / SCHEDULE_OCCURRENCE Executions only."
+                ),
                 status_code=409,
             )
         if (
@@ -503,19 +504,34 @@ class ApprovalResumeClaimService:
                 status_code=409,
             )
 
-        if (
-            step.step_key != DETERMINISTIC_TOOL_STEP_ID
-            or step.step_type != AuthorableStepType.TOOL.value
-        ):
+        if step.step_type != AuthorableStepType.TOOL.value:
             raise AppError(
                 code="RESOURCE_CONFLICT",
-                message="Approval resume Step is not the foundation TOOL Step.",
+                message="ToolPolicy approval resume requires TOOL Step type.",
                 status_code=409,
             )
+
+        # AgentRequest foundation remains single deterministic TOOL Step.
+        if execution.source_type == ExecutionSourceType.AGENT_REQUEST.value:
+            if len(steps) != 1:
+                raise AppError(
+                    code="RESOURCE_CONFLICT",
+                    message=(
+                        "AgentRequest foundation Execution must contain "
+                        "exactly one Step."
+                    ),
+                    status_code=409,
+                )
+            if step.step_key != DETERMINISTIC_TOOL_STEP_ID:
+                raise AppError(
+                    code="RESOURCE_CONFLICT",
+                    message="Approval resume Step is not the foundation TOOL Step.",
+                    status_code=409,
+                )
+
         try:
             plan = ExecutionPlanV1.model_validate(execution.plan_snapshot)
             plan_step = ExecutionPlanStep.model_validate(step.step_snapshot)
-            tool_config = ToolStepConfigV1.model_validate(plan_step.config)
         except Exception as exc:
             raise AppError(
                 code="RESOURCE_CONFLICT",
@@ -531,12 +547,58 @@ class ApprovalResumeClaimService:
                 message="Execution plan snapshot/hash lineage is inconsistent.",
                 status_code=409,
             )
-        if len(plan.steps) != 1 or plan.steps[0].model_dump(mode="json") != step.step_snapshot:
-            raise AppError(
-                code="RESOURCE_CONFLICT",
-                message="Execution plan/step snapshot lineage is inconsistent.",
-                status_code=409,
-            )
+
+        if execution.source_type == ExecutionSourceType.AGENT_REQUEST.value:
+            try:
+                tool_config: ToolStepConfigV1 | ComplexToolStepConfigV1 = (
+                    ToolStepConfigV1.model_validate(plan_step.config)
+                )
+            except Exception as exc:
+                raise AppError(
+                    code="RESOURCE_CONFLICT",
+                    message="Execution plan/step snapshot is invalid for resume.",
+                    status_code=409,
+                ) from exc
+            if (
+                len(plan.steps) != 1
+                or plan.steps[0].model_dump(mode="json") != step.step_snapshot
+            ):
+                raise AppError(
+                    code="RESOURCE_CONFLICT",
+                    message="Execution plan/step snapshot lineage is inconsistent.",
+                    status_code=409,
+                )
+        else:
+            # Workflow / Schedule: Step must be an exact immutable Plan projection.
+            try:
+                tool_config = parse_complex_tool_step_config(plan_step.config)
+            except Exception as exc:
+                raise AppError(
+                    code="RESOURCE_CONFLICT",
+                    message="Execution plan/step snapshot is invalid for resume.",
+                    status_code=409,
+                ) from exc
+            expected = next((p for p in plan.steps if p.id == step.step_key), None)
+            if (
+                expected is None
+                or expected.model_dump(mode="json") != step.step_snapshot
+                or plan_step.type != AuthorableStepType.TOOL
+            ):
+                raise AppError(
+                    code="RESOURCE_CONFLICT",
+                    message="TOOL Step is not an exact immutable Plan projection.",
+                    status_code=409,
+                )
+            if execution.workflow_version_id is None:
+                raise AppError(
+                    code="RESOURCE_CONFLICT",
+                    message=(
+                        "Workflow ToolPolicy approval resume requires "
+                        "pinned workflow_version_id."
+                    ),
+                    status_code=409,
+                )
+
         if step.mcp_tool_version_id != tool_config.tool_version_id:
             raise AppError(
                 code="RESOURCE_CONFLICT",
@@ -551,10 +613,19 @@ class ApprovalResumeClaimService:
         execution: Execution,
         step: ExecutionStep,
         request: ApprovalRequest,
-        tool_config: ToolStepConfigV1,
+        tool_config: ToolStepConfigV1 | ComplexToolStepConfigV1,
     ) -> None:
         from app.execution.policy_selection import get_expected_tool_policy_snapshot
         from app.execution.runtime_preflight import assert_source_tool_executable
+
+        # Workflow / Schedule: revalidate pinned lineage + mutable authz first.
+        if execution.source_type in {
+            ExecutionSourceType.WORKFLOW_VERSION.value,
+            ExecutionSourceType.SCHEDULE_OCCURRENCE.value,
+        }:
+            await assert_current_workflow_execution_authorized(
+                self._session, execution
+            )
 
         expected_policy = get_expected_tool_policy_snapshot(
             execution,

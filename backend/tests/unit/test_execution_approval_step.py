@@ -530,21 +530,22 @@ async def test_expiry_ignores_mark_partial(
 
 
 @pytest.mark.asyncio
-async def test_toolpolicy_multistep_still_unsupported(
+async def test_toolpolicy_multistep_enters_waiting_approval(
     db_session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """ToolPolicy multi-Step DAG wait remains fail-closed (DAG_WAIT_UNSUPPORTED)."""
+    """Issue #111: multi-Step ToolPolicy approval enters WAITING_APPROVAL (no MCP)."""
     _install_no_side_effects(monkeypatch)
     async with db_session_factory() as session:
         seeded = await _seed_executable(session)
         approval = await ApprovalPolicyRepository(session).create(
             code=f"ap-dag-{uuid.uuid4().hex[:8]}",
-            name="DAG Wait Unsupported Gate",
+            name="DAG ToolPolicy Approval Gate",
             decision_mode="ANY",
             required_approvals=1,
             default_expiry_seconds=3600,
             approver_scope={"role_codes": ["ops"]},
+            allow_self_approval=True,
         )
         await session.flush()
         policy = await MCPToolPolicyRepository(session).get_by_tool_id(seeded["tool_id"])
@@ -564,12 +565,29 @@ async def test_toolpolicy_multistep_still_unsupported(
         db_session_factory, plan=plan, seeded=seeded, client=client
     )
     assert len(client.calls) == 0
-    assert outcome.reason in {"DAG_WAIT_UNSUPPORTED", "EXECUTION_FAILED"}
+    assert outcome.reason == "WAITING_APPROVAL"
     async with db_session_factory() as session:
         execution = await ExecutionRepository(session).get(execution_id)
         assert execution is not None
-        assert execution.status == ExecutionStatus.FAILED.value
-        assert execution.status != ExecutionStatus.WAITING_APPROVAL.value
+        assert execution.status == ExecutionStatus.WAITING_APPROVAL.value
+        steps = await ExecutionRepository(session).list_steps(execution_id)
+        waiting = [s for s in steps if s.status == StepStatus.WAITING_APPROVAL.value]
+        assert len(waiting) == 1
+        assert waiting[0].step_key == "a"
+        ready_or_pending = [
+            s
+            for s in steps
+            if s.step_key == "b"
+            and s.status
+            in {StepStatus.READY.value, StepStatus.PENDING.value}
+        ]
+        assert len(ready_or_pending) == 1
+        from app.repositories.approval_request import ApprovalRequestRepository
+
+        pending = await ApprovalRequestRepository(session).find_pending_for_execution(
+            execution_id=execution_id
+        )
+        assert pending is not None
 
 
 # ---------------------------------------------------------------------------

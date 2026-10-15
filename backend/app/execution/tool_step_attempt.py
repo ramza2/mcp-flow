@@ -176,28 +176,58 @@ class ToolStepAttemptService:
                 )
             await self._assert_confirmation_evidence(execution, authz.policy_snapshot)
 
+        # Resolve bindings before ToolPolicy approval wait so Workflow dynamic
+        # bindings (PLAN_INPUT/STEP_OUTPUT/…) pin into secret-safe context.
+        resolved_input = RuntimeBindingResolver().resolve(
+            execution=execution,
+            step=step,
+            steps=steps,
+            bindings=lineage.bindings,
+            plan=lineage.plan,
+        )
+        # Retry/replay pinning: never silently rewrite resolved_input.
+        if step.resolved_input is not None and step.resolved_input != resolved_input:
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message=(
+                    "Deterministic Binding resolution drifted from pinned "
+                    "Step.resolved_input."
+                ),
+                status_code=409,
+            )
+        if step.resolved_input is None:
+            step.resolved_input = resolved_input
+
+        tool_version = await MCPToolRepository(self._session).get_version(
+            lineage.tool_version_id
+        )
+        if tool_version is None:
+            raise AppError(
+                code="EXECUTION_PRECONDITION_FAILED",
+                message="ToolVersion not found for resolved-input schema validation.",
+                status_code=409,
+            )
+        validate_resolved_tool_arguments(
+            input_schema=tool_version.input_schema,
+            resolved_input=resolved_input,
+        )
+
         # FNC-EXE-009 / FNC-APR-002/004: ToolPolicy approval before Attempt.
         # A) no approval history → create PENDING wait
         # B) exact APPROVED evidence for current context → continue to Attempt
         # C) historical APPROVED but context mismatch → fail closed (no new PENDING)
         if authz.tool_policy.requires_approval:
-            if binding_kinds_include_dynamic(lineage.bindings):
-                raise AppError(
-                    code="EXECUTION_PRECONDITION_FAILED",
-                    message=(
-                        "ToolPolicy requires_approval with dynamic Plan bindings "
-                        "is not supported in this slice."
-                    ),
-                    status_code=409,
-                )
-            tool_config = assert_agent_request_plan_step_lineage(
-                execution, step, steps=steps
-            )
             if authz.approval_policy is None:
                 raise AppError(
                     code="EXECUTION_PRECONDITION_FAILED",
                     message="requires_approval인데 ApprovalPolicy 없음.",
                     status_code=409,
+                )
+            # AgentRequest static path still validates LITERAL/SECRET_REF config.
+            tool_config = None
+            if lineage.agent_request_static_only:
+                tool_config = assert_agent_request_plan_step_lineage(
+                    execution, step, steps=steps
                 )
             evidence = await find_valid_approved_evidence(
                 self._session,
@@ -223,41 +253,10 @@ class ToolStepAttemptService:
                     tool_config=tool_config,
                     tool_policy=authz.tool_policy,
                     approval_policy=authz.approval_policy,
+                    resolved_input=resolved_input,
                     now=ts,
                 )
             # Approval satisfied for exact current context — continue to Attempt.
-
-        resolved_input = RuntimeBindingResolver().resolve(
-            execution=execution,
-            step=step,
-            steps=steps,
-            bindings=lineage.bindings,
-            plan=lineage.plan,
-        )
-        # Retry/replay pinning: never silently rewrite resolved_input.
-        if step.resolved_input is not None and step.resolved_input != resolved_input:
-            raise AppError(
-                code="RESOURCE_CONFLICT",
-                message=(
-                    "Deterministic Binding resolution drifted from pinned "
-                    "Step.resolved_input."
-                ),
-                status_code=409,
-            )
-
-        tool_version = await MCPToolRepository(self._session).get_version(
-            lineage.tool_version_id
-        )
-        if tool_version is None:
-            raise AppError(
-                code="EXECUTION_PRECONDITION_FAILED",
-                message="ToolVersion not found for resolved-input schema validation.",
-                status_code=409,
-            )
-        validate_resolved_tool_arguments(
-            input_schema=tool_version.input_schema,
-            resolved_input=resolved_input,
-        )
 
         next_attempt_no = step.attempt_count + 1
         if next_attempt_no < 1:
