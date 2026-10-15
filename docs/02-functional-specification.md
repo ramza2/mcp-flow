@@ -721,17 +721,17 @@ WAITING_APPROVAL 취소 시 PENDING ApprovalRequest → CANCELLED (Decision 없�
 
 Public API에서 inactive session은 Cookie Session 검증이 먼저 `401 AUTH_SESSION_INVALID`를 반환할 수 있다. 서비스 계층 ACTIVE 검사는 403이며 session 동작을 약화하지 않는다.
 
-Recovery는 기존처럼 `RUNNING`만 candidate로 하며 `CANCEL_REQUESTED`를 일반 retry 대상으로 선택하지 않는다. 이미 in-flight인 ToolCall은 owning live worker가 정산해야 한다. crash/expired-lease cancellation reconciliation은 별도 recovery hardening slice이며 이 범위에서 완전성을 주장하지 않는다.
+`CANCEL_REQUESTED`는 일반 RUNNING recovery/retry candidate가 아니다. 이미 in-flight인 ToolCall은 owning live worker가 정산하는 것이 기본 경로다. worker crash / lease expiry로 `CANCEL_REQUESTED`가 정체되면 cancellation-specific recovery(아래 FNC-EXE-011)가 durable evidence만으로 terminalize한다 — MCP 재호출·새 Attempt·SAFE_RETRY·RUNNING 복귀는 금지한다.
 
 ## FNC-EXE-011. 복구
 
 Worker lease, MCP task handle, persisted state를 사용해 재시작 후 복구한다. 동일 non-idempotent Tool을 무조건 재호출하지 않는다.
 
-이번 vertical slice는 **AgentRequest + single TOOL Step + synchronous Current MCP `tools/call` persisted evidence**를 대상으로 한다. MRTR durable WAITING_INPUT foundation(PR #40: OPEN `mcp_input_requests` + lease clear)은 포함하되, 사용자 response/resume(PR #41)·Cancellation·Workflow multi-step·Schedule recovery는 후속이다. Approval wait foundation(`WAITING_APPROVAL` + PENDING ApprovalRequest)과 MRTR wait(`WAITING_INPUT` + OPEN MCPInputRequest)는 모두 lease 없는 non-terminal 상태이므로 expired RUNNING recovery candidate에 포함되지 않는다.
+이번 vertical slice의 **expired RUNNING** 경로는 **AgentRequest + single TOOL Step + synchronous Current MCP `tools/call` persisted evidence**를 대상으로 한다. MRTR durable WAITING_INPUT foundation(PR #40: OPEN `mcp_input_requests` + lease clear)은 포함하되, 사용자 response/resume(PR #41)·일반 Workflow multi-step RUNNING recovery는 후속이다. Approval wait foundation(`WAITING_APPROVAL` + PENDING ApprovalRequest)과 MRTR wait(`WAITING_INPUT` + OPEN MCPInputRequest)는 모두 lease 없는 non-terminal 상태이므로 expired RUNNING / CANCEL_REQUESTED recovery candidate에 포함되지 않는다.
 
-PostgreSQL이 source of truth다. outbox process가 expired `RUNNING` candidate를 bounded scan하여 Celery `mcpflow.execution.recover`(payload: `execution_id` only)를 publish하고, worker는 DB evidence로 decision 후 필요 시 기존 `McpToolRunner`를 호출한다. Redis/Celery는 delivery/coordination만 담당한다.
+PostgreSQL이 source of truth다. outbox process가 expired `RUNNING` AgentRequest candidate와 expired `CANCEL_REQUESTED` candidate를 bounded scan하여 Celery `mcpflow.execution.recover`(payload: `execution_id` only)를 publish하고, worker는 DB evidence로 decision 후 필요 시 기존 `McpToolRunner`를 호출한다. Redis/Celery는 delivery/coordination만 담당한다.
 
-Recovery candidate:
+Recovery candidate (RUNNING):
 
 ```text
 Execution.status == RUNNING
@@ -740,6 +740,17 @@ lease_expires_at <= now
 source_type == AGENT_REQUEST
 exactly one foundation TOOL Step
 ```
+
+Recovery candidate (CANCEL_REQUESTED — cancellation-only):
+
+```text
+Execution.status == CANCEL_REQUESTED
+lease_expires_at IS NOT NULL
+lease_expires_at <= now
+source_type ∈ {AGENT_REQUEST, WORKFLOW_VERSION, SCHEDULE_OCCURRENCE}
+```
+
+CANCEL_REQUESTED recovery는 Execution 전체 Steps/Attempts/ToolCalls를 검사한다. STARTED ToolCall이 없으면 기존 cancellation reconcile로 `CANCELLED`(또는 기존 UNKNOWN_OUTCOME 증거 시 `FAILED`)한다. STARTED ToolCall이 남아 있으면 risk_class와 무관하게 ToolCall/Attempt/Step을 `UNKNOWN_OUTCOME`으로 terminalize하고 Execution은 `FAILED`다(재호출·retry 금지). 이미 terminal ToolCall 증거는 overwrite하지 않고 parent를 증적에 맞게 맞춘 뒤 남은 DAG를 cancellation coordinator로 정리한다. Schedule REPLACE는 prior가 terminal되면 기존 waiting reconciliation으로 이어진다.
 
 `ExecutionClaimService.claim()`(QUEUED → RUNNING)과 분리된 `ExecutionRecoveryService`가 expired RUNNING을 atomic takeover한다. takeover 성공 시 `worker_id` / 새 `lease_token` / `lease_expires_at` / `heartbeat_at`만 갱신하고 `started_at` / `queued_at` / Step `ready_at`은 재작성하지 않는다. stale worker의 renew/finalize는 이전 `lease_token` fencing으로 거부된다.
 

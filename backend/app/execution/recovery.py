@@ -1,10 +1,13 @@
-"""Expired RUNNING Execution lease recovery (docs/02 FNC-EXE-011).
+"""Expired Execution lease recovery (docs/02 FNC-EXE-011 + cancel hardening).
 
 PostgreSQL is the source of truth. Celery/Redis only deliver recovery work.
 
-This vertical slice covers AgentRequest + single TOOL Step + synchronous
-Current MCP ``tools/call`` persisted evidence only. MRTR WAITING_INPUT,
-Approval WAITING_APPROVAL, and MCP task-handle recovery are out of scope.
+Expired RUNNING recovery covers AgentRequest + single TOOL Step + synchronous
+Current MCP ``tools/call`` persisted evidence only. Expired CANCEL_REQUESTED
+recovery is cancellation-only terminalization for AGENT_REQUEST /
+WORKFLOW_VERSION / SCHEDULE_OCCURRENCE and never re-invokes MCP. MRTR
+WAITING_INPUT, Approval WAITING_APPROVAL, and general Workflow RUNNING
+recovery remain out of scope.
 """
 
 from __future__ import annotations
@@ -81,6 +84,16 @@ class RecoveryDecision(StrEnum):
     FAIL_EXHAUSTED = "FAIL_EXHAUSTED"
     UNKNOWN_OUTCOME = "UNKNOWN_OUTCOME"
     FAIL_INCONSISTENT = "FAIL_INCONSISTENT"
+    CANCEL_RECONCILED = "CANCEL_RECONCILED"
+
+
+_CANCEL_RECOVERY_SOURCES = frozenset(
+    {
+        ExecutionSourceType.AGENT_REQUEST.value,
+        ExecutionSourceType.WORKFLOW_VERSION.value,
+        ExecutionSourceType.SCHEDULE_OCCURRENCE.value,
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -147,6 +160,36 @@ class ExecutionRecoveryService:
         rows = (await self._session.execute(stmt)).scalars().all()
         return list(rows)
 
+    async def list_expired_cancel_requested_ids(
+        self, *, limit: int, now: datetime | None = None
+    ) -> list[uuid.UUID]:
+        """Discover expired CANCEL_REQUESTED leases for cancellation recovery.
+
+        Excludes lease-free WAITING_APPROVAL / WAITING_INPUT (they are never
+        CANCEL_REQUESTED with an active lease in the normal cancel path).
+        Does not expand general Workflow RUNNING recovery.
+        """
+        if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1:
+            raise AppError(
+                code="VALIDATION_ERROR",
+                message="recovery batch limit must be a positive integer.",
+                status_code=400,
+            )
+        ts = now or datetime.now(UTC)
+        stmt = (
+            select(Execution.id)
+            .where(
+                Execution.status == ExecutionStatus.CANCEL_REQUESTED.value,
+                Execution.source_type.in_(tuple(_CANCEL_RECOVERY_SOURCES)),
+                Execution.lease_expires_at.is_not(None),
+                Execution.lease_expires_at <= ts,
+            )
+            .order_by(Execution.lease_expires_at.asc())
+            .limit(limit)
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return list(rows)
+
     async def recover(
         self,
         *,
@@ -172,6 +215,11 @@ class ExecutionRecoveryService:
                 worker_id=None,
                 lease_token=None,
                 reason="MISSING_OR_LOCKED",
+            )
+
+        if execution.status == ExecutionStatus.CANCEL_REQUESTED.value:
+            return await self._recover_cancel_requested(
+                execution=execution, worker_id=worker, now=ts
             )
 
         if execution.status != ExecutionStatus.RUNNING.value:
@@ -382,6 +430,55 @@ class ExecutionRecoveryService:
             code="RESOURCE_CONFLICT",
             message=f"Unsupported recovery decision {decision}.",
             status_code=409,
+        )
+
+    async def _recover_cancel_requested(
+        self,
+        *,
+        execution: Execution,
+        worker_id: str,
+        now: datetime,
+    ) -> RecoveryOutcome:
+        """Reconcile expired CANCEL_REQUESTED without MCP / retry / RUNNING return."""
+        del worker_id  # fencing is via SKIP LOCKED + lease clear; no runner invoke
+        if (
+            execution.lease_expires_at is None
+            or _as_utc(execution.lease_expires_at) > _as_utc(now)
+        ):
+            return RecoveryOutcome(
+                execution_id=execution.id,
+                decision=RecoveryDecision.NO_OP,
+                taken_over=False,
+                invoke_runner=False,
+                worker_id=None,
+                lease_token=None,
+                reason="LEASE_NOT_EXPIRED",
+            )
+        if execution.source_type not in _CANCEL_RECOVERY_SOURCES:
+            return RecoveryOutcome(
+                execution_id=execution.id,
+                decision=RecoveryDecision.NO_OP,
+                taken_over=False,
+                invoke_runner=False,
+                worker_id=None,
+                lease_token=None,
+                reason="UNSUPPORTED_SOURCE",
+            )
+
+        from app.execution.cancellation import recover_expired_cancel_requested_locked
+
+        outcome = await recover_expired_cancel_requested_locked(
+            self._session, execution, now=now
+        )
+        await self._session.flush()
+        return RecoveryOutcome(
+            execution_id=execution.id,
+            decision=RecoveryDecision.CANCEL_RECONCILED,
+            taken_over=True,
+            invoke_runner=False,
+            worker_id=None,
+            lease_token=None,
+            reason=f"CANCEL_{outcome.status}",
         )
 
     async def _decide(

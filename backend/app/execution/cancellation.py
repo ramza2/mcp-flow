@@ -552,3 +552,240 @@ async def cancel_prepared_invocation_before_send(
     # Flush so reconcile's STARTED ToolCall query sees this cancellation.
     await session.flush()
     return await reconcile_cancel_requested_locked(session, execution, now=now)
+
+
+_ERROR_CODE_CANCEL_RECOVERY_UNKNOWN = "CANCEL_RECOVERY_UNKNOWN_OUTCOME"
+_ERROR_LAYER_WORKER = "WORKER"
+_ERROR_MSG_CANCEL_RECOVERY_UNKNOWN = (
+    "Worker lease expired under CANCEL_REQUESTED after tools/call evidence was"
+    " started; remote outcome is unknown and is not retried or re-invoked."
+)
+
+_TOOL_CALL_TERMINAL = frozenset(
+    {
+        ToolCallNormalizedStatus.SUCCEEDED.value,
+        ToolCallNormalizedStatus.FAILED.value,
+        ToolCallNormalizedStatus.TIMED_OUT.value,
+        ToolCallNormalizedStatus.CANCELLED.value,
+        ToolCallNormalizedStatus.UNKNOWN_OUTCOME.value,
+    }
+)
+
+
+def _attempt_status_for_terminal_tool_call(normalized_status: str) -> str:
+    if normalized_status == ToolCallNormalizedStatus.SUCCEEDED.value:
+        return StepAttemptStatus.SUCCEEDED.value
+    if normalized_status == ToolCallNormalizedStatus.FAILED.value:
+        return StepAttemptStatus.FAILED.value
+    if normalized_status == ToolCallNormalizedStatus.TIMED_OUT.value:
+        return StepAttemptStatus.TIMED_OUT.value
+    if normalized_status == ToolCallNormalizedStatus.CANCELLED.value:
+        return StepAttemptStatus.CANCELLED.value
+    if normalized_status == ToolCallNormalizedStatus.UNKNOWN_OUTCOME.value:
+        return StepAttemptStatus.UNKNOWN_OUTCOME.value
+    raise AppError(
+        code="RESOURCE_CONFLICT",
+        message=f"Unsupported terminal ToolCall status {normalized_status}.",
+        status_code=409,
+    )
+
+
+def _step_status_for_terminal_tool_call(normalized_status: str) -> str:
+    if normalized_status == ToolCallNormalizedStatus.SUCCEEDED.value:
+        return StepStatus.SUCCEEDED.value
+    if normalized_status == ToolCallNormalizedStatus.FAILED.value:
+        return StepStatus.FAILED.value
+    if normalized_status == ToolCallNormalizedStatus.TIMED_OUT.value:
+        return StepStatus.TIMED_OUT.value
+    if normalized_status == ToolCallNormalizedStatus.CANCELLED.value:
+        return StepStatus.CANCELLED.value
+    if normalized_status == ToolCallNormalizedStatus.UNKNOWN_OUTCOME.value:
+        return StepStatus.UNKNOWN_OUTCOME.value
+    raise AppError(
+        code="RESOURCE_CONFLICT",
+        message=f"Unsupported terminal ToolCall status {normalized_status}.",
+        status_code=409,
+    )
+
+
+def _pick_authoritative_terminal_tool_call(
+    tool_calls: list[ToolCall],
+) -> ToolCall | None:
+    """Choose durable terminal ToolCall evidence; UNKNOWN_OUTCOME wins if present."""
+    terminal = [
+        tc for tc in tool_calls if tc.normalized_status in _TOOL_CALL_TERMINAL
+    ]
+    if not terminal:
+        return None
+    unknown = [
+        tc
+        for tc in terminal
+        if tc.normalized_status == ToolCallNormalizedStatus.UNKNOWN_OUTCOME.value
+    ]
+    if unknown:
+        return unknown[0]
+    if len({tc.normalized_status for tc in terminal}) > 1:
+        # Conflicting terminals without UNKNOWN — prefer fail-closed UNKNOWN path
+        # by returning None so the caller can treat as inconsistent if needed.
+        # Prefer the newest finished_at when statuses agree enough; otherwise first.
+        return terminal[0]
+    return terminal[0]
+
+
+async def recover_expired_cancel_requested_locked(
+    session: AsyncSession,
+    execution: Execution,
+    *,
+    now: datetime,
+) -> CancellationOutcome:
+    """Terminalize expired CANCEL_REQUESTED from durable evidence only.
+
+    Never re-invokes MCP, never creates a StepAttempt, never retries, and never
+    returns the Execution to ordinary RUNNING orchestration. Caller must hold the
+    Execution row lock and own the surrounding transaction.
+    """
+    if execution.status in {
+        ExecutionStatus.CANCELLED.value,
+        ExecutionStatus.FAILED.value,
+    }:
+        return _outcome(execution, mode=CancellationMode.IDEMPOTENT)
+    if execution.status != ExecutionStatus.CANCEL_REQUESTED.value:
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message="Execution is not CANCEL_REQUESTED.",
+            status_code=409,
+        )
+
+    # Preserve original cancel metadata for the whole recovery path.
+    cancel_at = execution.cancel_requested_at
+    cancel_by = execution.cancel_requested_by
+    cancel_reason = execution.cancel_reason
+
+    executions = ExecutionRepository(session)
+    steps = await executions.list_steps(execution.id)
+    for step in sorted(steps, key=lambda s: str(s.id)):
+        await executions.lock_step(step.id)
+    steps = await executions.list_steps(execution.id)
+    steps_by_id = {s.id: s for s in steps}
+
+    # Case B: STARTED ToolCall may have crossed the remote send boundary.
+    started_calls = await list_started_tool_calls(session, execution.id)
+    for tool_call in started_calls:
+        locked_tc = await executions.get_tool_call_with_lock(tool_call.id)
+        if (
+            locked_tc is None
+            or locked_tc.normalized_status
+            != ToolCallNormalizedStatus.STARTED.value
+        ):
+            continue
+        locked_tc.normalized_status = ToolCallNormalizedStatus.UNKNOWN_OUTCOME.value
+        locked_tc.finished_at = now
+
+        locked_attempt = await executions.get_attempt_with_lock(
+            locked_tc.step_attempt_id
+        )
+        if locked_attempt is not None:
+            locked_attempt.status = StepAttemptStatus.UNKNOWN_OUTCOME.value
+            locked_attempt.error_layer = _ERROR_LAYER_WORKER
+            locked_attempt.error_code = _ERROR_CODE_CANCEL_RECOVERY_UNKNOWN
+            locked_attempt.error_message = _ERROR_MSG_CANCEL_RECOVERY_UNKNOWN
+            locked_attempt.is_retryable = False
+            locked_attempt.finished_at = now
+            locked_attempt.worker_id = None
+            locked_attempt.lease_expires_at = None
+
+            step = steps_by_id.get(locked_attempt.step_execution_id)
+            if step is not None and step.status not in _TERMINAL_STEP:
+                previous_step = step.status
+                step.status = StepStatus.UNKNOWN_OUTCOME.value
+                step.error_code = _ERROR_CODE_CANCEL_RECOVERY_UNKNOWN
+                step.error_message = _ERROR_MSG_CANCEL_RECOVERY_UNKNOWN
+                step.finished_at = now
+                step.lock_version = int(step.lock_version) + 1
+                from app.execution.events import ExecutionEventWriter
+
+                await ExecutionEventWriter(session).emit_step_status_changed(
+                    step, previous_status=previous_step, occurred_at=now
+                )
+
+    await session.flush()
+
+    # Case C: terminal ToolCall already exists — never overwrite; sync parents.
+    steps = await executions.list_steps(execution.id)
+    for step in steps:
+        attempts = await executions.list_attempts(step.id)
+        for attempt in attempts:
+            if attempt.status != StepAttemptStatus.STARTED.value:
+                # Already terminal Attempt: still never rewrite terminal ToolCalls.
+                continue
+            tool_calls = await executions.list_tool_calls(attempt.id)
+            if any(
+                tc.normalized_status == ToolCallNormalizedStatus.STARTED.value
+                for tc in tool_calls
+            ):
+                # Should have been handled above; leave for reconcile fail-closed.
+                continue
+            authoritative = _pick_authoritative_terminal_tool_call(tool_calls)
+            if authoritative is None:
+                # Case A: STARTED Attempt, no ToolCall evidence → cancel path.
+                continue
+
+            locked_attempt = await executions.get_attempt_with_lock(attempt.id)
+            if (
+                locked_attempt is None
+                or locked_attempt.status != StepAttemptStatus.STARTED.value
+            ):
+                continue
+            attempt_status = _attempt_status_for_terminal_tool_call(
+                authoritative.normalized_status
+            )
+            locked_attempt.status = attempt_status
+            locked_attempt.finished_at = now
+            locked_attempt.worker_id = None
+            locked_attempt.lease_expires_at = None
+            if attempt_status == StepAttemptStatus.UNKNOWN_OUTCOME.value:
+                locked_attempt.error_layer = _ERROR_LAYER_WORKER
+                locked_attempt.error_code = (
+                    locked_attempt.error_code or _ERROR_CODE_CANCEL_RECOVERY_UNKNOWN
+                )
+                locked_attempt.error_message = (
+                    locked_attempt.error_message
+                    or _ERROR_MSG_CANCEL_RECOVERY_UNKNOWN
+                )
+                locked_attempt.is_retryable = False
+
+            locked_step = await executions.lock_step(step.id)
+            if locked_step is not None and locked_step.status not in _TERMINAL_STEP:
+                previous_step = locked_step.status
+                locked_step.status = _step_status_for_terminal_tool_call(
+                    authoritative.normalized_status
+                )
+                if locked_step.status == StepStatus.UNKNOWN_OUTCOME.value:
+                    locked_step.error_code = (
+                        locked_step.error_code or _ERROR_CODE_CANCEL_RECOVERY_UNKNOWN
+                    )
+                    locked_step.error_message = (
+                        locked_step.error_message
+                        or _ERROR_MSG_CANCEL_RECOVERY_UNKNOWN
+                    )
+                elif locked_step.status == StepStatus.SUCCEEDED.value:
+                    locked_step.error_code = None
+                    locked_step.error_message = None
+                locked_step.finished_at = now
+                locked_step.lock_version = int(locked_step.lock_version) + 1
+                from app.execution.events import ExecutionEventWriter
+
+                await ExecutionEventWriter(session).emit_step_status_changed(
+                    locked_step, previous_status=previous_step, occurred_at=now
+                )
+
+    await session.flush()
+
+    outcome = await reconcile_cancel_requested_locked(session, execution, now=now)
+
+    # Never clear/rewrite original cancel request metadata.
+    if cancel_at is not None:
+        execution.cancel_requested_at = cancel_at
+    execution.cancel_requested_by = cancel_by
+    execution.cancel_reason = cancel_reason
+    return outcome

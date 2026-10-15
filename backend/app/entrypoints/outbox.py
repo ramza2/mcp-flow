@@ -69,9 +69,24 @@ async def run_iteration(*, settings: Settings | None = None) -> OutboxIterationR
     recovery_published = 0
     recovery_failed = 0
     async with session_scope() as session:
-        recovery_ids = await ExecutionRecoveryService(
+        recovery = ExecutionRecoveryService(
             session, lease_seconds=cfg.execution_lease_seconds
-        ).list_expired_running_ids(limit=cfg.outbox_batch_size)
+        )
+        # Keep expired RUNNING AgentRequest scan; also publish expired
+        # CANCEL_REQUESTED for cancellation-only reconciliation (no MCP).
+        running_ids = await recovery.list_expired_running_ids(
+            limit=cfg.outbox_batch_size
+        )
+        cancel_ids = await recovery.list_expired_cancel_requested_ids(
+            limit=cfg.outbox_batch_size
+        )
+        seen: set[uuid.UUID] = set()
+        recovery_ids: list[uuid.UUID] = []
+        for execution_id in (*running_ids, *cancel_ids):
+            if execution_id in seen:
+                continue
+            seen.add(execution_id)
+            recovery_ids.append(execution_id)
         recovery_selected = len(recovery_ids)
     for execution_id in recovery_ids:
         try:
