@@ -1501,12 +1501,15 @@ POST  /mcp/servers/{server_id}/activate
 - Factory Discovery requires that Connection Test fingerprint for the current
   config; response may include `factory_diff`
   (`MATCHED` / `MISSING_EXPECTED` / `UNEXPECTED_REMOTE` / `CONTRACT_CHANGED`)
-- Preview: no Tool mutation; Apply: fail closed unless plan `CLEAN`; CLEAN
-  apply reconciles MATCHED only (Tools stay `INACTIVE`); mismatch apply →
-  `FACTORY_DISCOVERY_RECONCILE_FAILED` with zero partial mutation
-- CLEAN Discovery stores `connection_discovery_verified_fingerprint`
+- Preview: no Tool mutation and no
+  `connection_discovery_verified_fingerprint` write; Apply: fail closed unless
+  plan `CLEAN`; CLEAN apply reconciles MATCHED only (Tools stay `INACTIVE`)
+  then stores `connection_discovery_verified_fingerprint`; mismatch apply →
+  `FACTORY_DISCOVERY_RECONCILE_FAILED` with zero partial mutation (mismatch /
+  ambiguity clears discovery fingerprint)
 - Factory Activate requires Connection Test + Discovery fingerprints matching
-  current connection config + latest Check `SUCCEEDED`
+  current connection config + latest Check `SUCCEEDED` (CLEAN preview alone
+  does not satisfy Discovery evidence)
 - Non-Factory MCP Server routes keep prior semantics
 
 ### Aspirational (not implemented by this slice)

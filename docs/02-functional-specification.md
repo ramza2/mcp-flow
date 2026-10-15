@@ -1307,10 +1307,15 @@ POST /api/v1/mcp/servers/{server_id}/activate
   incompatible contracts, or auto-ACTIVE Tools/Server
 - Any mismatch/ambiguity on apply → `FACTORY_DISCOVERY_RECONCILE_FAILED`,
   partial mutation 0, historical Discovery retained
-- CLEAN success stores `connection_discovery_verified_fingerprint`; mismatch clears it
+- CLEAN Apply (`apply_changes=true` with clean plan) stores
+  `connection_discovery_verified_fingerprint` after matched-tool reconciliation;
+  CLEAN preview must not store that fingerprint (and must not clear a prior
+  valid Apply fingerprint for the current connection config); mismatch/ambiguity
+  clears it
 - Factory Activate requires: usable non-deferred endpoint + Connection Test
   fingerprint match + latest Check `SUCCEEDED` + Discovery fingerprint match
-  for the same connection config (no unresolved mismatches)
+  for the same connection config (no unresolved mismatches; CLEAN preview alone
+  is insufficient)
 - Non-Factory Discovery/Activate behavior unchanged
 
 **Not implemented yet:**

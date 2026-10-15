@@ -1148,10 +1148,15 @@ class MCPDiscoveryService:
         server.negotiated_protocol_version = negotiated
         if clean:
             server.last_healthy_at = finished
-            server.transport_config = transport_config_with_discovery_fingerprint(
-                server.transport_config,
-                fingerprint=tested_fp,
-            )
+            # Activate evidence only after CLEAN Apply (matched-tool reconciliation).
+            # CLEAN preview must not store connection_discovery_verified_fingerprint
+            # and must not clear a prior valid Apply fingerprint for the current
+            # connection config.
+            if apply_plan:
+                server.transport_config = transport_config_with_discovery_fingerprint(
+                    server.transport_config,
+                    fingerprint=tested_fp,
+                )
         else:
             server.last_error_at = finished
             server.transport_config = transport_config_clear_discovery_fingerprint(
