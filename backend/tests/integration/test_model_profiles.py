@@ -116,6 +116,49 @@ async def test_model_profile_db_constraints(
             await session.commit()
         await session.rollback()
 
+    # Issue #80: request_timeout_ms bounds (NULL allowed; out-of-range rejected).
+    async with integration_session_factory() as session:
+        await session.execute(
+            text(
+                "INSERT INTO llm_profiles "
+                "(id, code, name, provider, model, base_url, request_timeout_ms, "
+                "lock_version) "
+                "VALUES (:id, :code, 'Ok', 'P', 'M', 'https://x', NULL, 1)"
+            ),
+            {"id": uuid.uuid4(), "code": f"to-null-{uuid.uuid4().hex[:6]}"},
+        )
+        await session.commit()
+
+    async with integration_session_factory() as session:
+        with pytest.raises(IntegrityError):
+            await session.execute(
+                text(
+                    "INSERT INTO llm_profiles "
+                    "(id, code, name, provider, model, base_url, request_timeout_ms, "
+                    "lock_version) "
+                    "VALUES (:id, :code, 'Bad', 'P', 'M', 'https://x', 500, 1)"
+                ),
+                {"id": uuid.uuid4(), "code": f"to-bad-{uuid.uuid4().hex[:6]}"},
+            )
+            await session.commit()
+        await session.rollback()
+
+    async with integration_session_factory() as session:
+        with pytest.raises(IntegrityError):
+            await session.execute(
+                text(
+                    "INSERT INTO embedding_profiles "
+                    "(id, code, name, provider, model, base_url, dimension, "
+                    "distance_metric, is_active_for_tools, request_timeout_ms, "
+                    "lock_version) "
+                    "VALUES (:id, :code, 'Bad', 'P', 'M', 'https://x', 8, 'cosine', "
+                    "false, 400000, 1)"
+                ),
+                {"id": uuid.uuid4(), "code": f"eto-bad-{uuid.uuid4().hex[:6]}"},
+            )
+            await session.commit()
+        await session.rollback()
+
 
 @pytest.mark.integration
 @pytest.mark.asyncio

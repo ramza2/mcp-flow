@@ -72,6 +72,7 @@ class LLMProfileService:
             base_url=base_url,
             credential_secret_id=data.credential_secret_id,
             parameters=data.parameters,
+            request_timeout_ms=data.request_timeout_ms,
         )
         await self._session.commit()
         await self._session.refresh(profile)
@@ -143,6 +144,8 @@ class LLMProfileService:
                     model=profile.model,
                     base_url=profile.base_url,
                     credential_secret_id=profile.credential_secret_id,
+                    # Included for target completeness; connection-test ignores it.
+                    request_timeout_ms=profile.request_timeout_ms,
                 )
             )
         finally:

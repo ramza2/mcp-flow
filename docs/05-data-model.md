@@ -275,6 +275,7 @@ id, code, name
 provider, model, base_url
 credential_secret_id
 parameters jsonb
+request_timeout_ms
 status
 created_at, updated_at, lock_version
 ```
@@ -286,12 +287,21 @@ id, code, name
 provider, model, base_url
 dimension, distance_metric
 credential_secret_id
+request_timeout_ms
 status
 is_active_for_tools
 created_at, updated_at, lock_version
 ```
 
 `base_url`은 OpenAI-compatible 등 Provider endpoint 연결을 위한 API root/reference이다.
+
+`request_timeout_ms` is an optional Model Provider **runtime** HTTP timeout
+(milliseconds) for production `generate_json` / `embed_texts`. Bounds:
+`1000`–`300000`. `NULL` keeps the adapter default `15000`. It is not a
+generation parameter and must not be stored in LLM `parameters` JSON.
+Changing Embedding `request_timeout_ms` does **not** mark ToolEmbeddings stale.
+Connection-test probes keep their own explicit/default timeout and are not
+auto-coupled to this field.
 
 Tool 검색용 active embedding profile은 한 시점에 하나를 기본으로 한다. dimension 변경은 migration과 전체 re-embedding을 동반한다.
 

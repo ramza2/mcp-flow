@@ -16,6 +16,7 @@ from app.model_provider.errors import (
     ModelProviderError,
 )
 from app.model_provider.openai_compatible import (
+    DEFAULT_REQUEST_TIMEOUT_MS,
     OPENAI_COMPATIBLE_PROVIDER,
     ConnectionProbeResult,
     OpenAICompatibleAdapter,
@@ -29,6 +30,9 @@ class LLMConnectionTarget:
     model: str
     base_url: str
     credential_secret_id: uuid.UUID | None
+    # Optional profile runtime timeout override (ms). NULL/omitted → default.
+    # Connection-test probes intentionally ignore this field.
+    request_timeout_ms: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,6 +42,17 @@ class EmbeddingConnectionTarget:
     base_url: str
     dimension: int
     credential_secret_id: uuid.UUID | None
+    # Optional profile runtime timeout override (ms). NULL/omitted → default.
+    # Connection-test probes intentionally ignore this field.
+    request_timeout_ms: int | None = None
+
+
+def effective_request_timeout_ms(request_timeout_ms: int | None) -> int:
+    """Resolve runtime timeout: profile override or adapter default (15000)."""
+
+    if request_timeout_ms is None:
+        return DEFAULT_REQUEST_TIMEOUT_MS
+    return int(request_timeout_ms)
 
 
 def _bearer_from_secret(resolved: ResolvedSecret) -> str | None:
@@ -149,6 +164,8 @@ class ModelProviderClient:
                 provider=target.provider, model=target.model, probe=blocked
             )
 
+        # Connection-test timeout stays adapter default / explicit probe args —
+        # never auto-coupled to profile runtime request_timeout_ms.
         probe = await self._adapter.test_llm(
             base_url=target.base_url,
             model=target.model,
@@ -170,6 +187,8 @@ class ModelProviderClient:
                 provider=target.provider, model=target.model, probe=blocked
             )
 
+        # Connection-test timeout stays adapter default / explicit probe args —
+        # never auto-coupled to profile runtime request_timeout_ms.
         probe = await self._adapter.test_embedding(
             base_url=target.base_url,
             model=target.model,
@@ -200,6 +219,7 @@ class ModelProviderClient:
             inputs=inputs,
             expected_dimension=target.dimension,
             bearer_token=bearer,
+            timeout_ms=effective_request_timeout_ms(target.request_timeout_ms),
         )
 
     async def generate_json(
@@ -226,4 +246,5 @@ class ModelProviderClient:
             messages=messages,
             parameters=parameters,
             bearer_token=bearer,
+            timeout_ms=effective_request_timeout_ms(target.request_timeout_ms),
         )

@@ -30,6 +30,7 @@ class EmbeddingProfileRepository:
         dimension: int,
         distance_metric: str,
         credential_secret_id: uuid.UUID | None = None,
+        request_timeout_ms: int | None = None,
         is_active_for_tools: bool = False,
     ) -> EmbeddingProfile:
         profile = EmbeddingProfile(
@@ -41,6 +42,7 @@ class EmbeddingProfileRepository:
             dimension=dimension,
             distance_metric=distance_metric,
             credential_secret_id=credential_secret_id,
+            request_timeout_ms=request_timeout_ms,
             status=None,
             is_active_for_tools=is_active_for_tools,
         )

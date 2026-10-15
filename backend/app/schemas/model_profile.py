@@ -8,6 +8,23 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+# Model Provider runtime HTTP timeout bounds (docs/05 §6).
+REQUEST_TIMEOUT_MS_MIN = 1000
+REQUEST_TIMEOUT_MS_MAX = 300_000
+
+
+def _validate_request_timeout_ms(value: Any) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError("request_timeout_ms must be an integer")
+    if value < REQUEST_TIMEOUT_MS_MIN or value > REQUEST_TIMEOUT_MS_MAX:
+        raise ValueError(
+            f"request_timeout_ms must be between {REQUEST_TIMEOUT_MS_MIN} "
+            f"and {REQUEST_TIMEOUT_MS_MAX}"
+        )
+    return value
+
 
 class LLMProfileCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -18,6 +35,7 @@ class LLMProfileCreate(BaseModel):
     base_url: str = Field(min_length=1, max_length=2048)
     credential_secret_id: uuid.UUID | None = None
     parameters: dict[str, Any] | None = None
+    request_timeout_ms: int | None = None
 
     @field_validator("provider", "model", "name")
     @classmethod
@@ -38,6 +56,11 @@ class LLMProfileCreate(BaseModel):
             raise ValueError("parameters must be a JSON object or null")
         return value
 
+    @field_validator("request_timeout_ms", mode="before")
+    @classmethod
+    def _request_timeout_ms(cls, value: Any) -> int | None:
+        return _validate_request_timeout_ms(value)
+
 
 class LLMProfileUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -48,6 +71,7 @@ class LLMProfileUpdate(BaseModel):
     base_url: str | None = Field(default=None, min_length=1, max_length=2048)
     credential_secret_id: uuid.UUID | None = None
     parameters: dict[str, Any] | None = None
+    request_timeout_ms: int | None = None
     lock_version: int | None = Field(default=None, ge=1)
 
     @field_validator("provider", "model", "name")
@@ -71,9 +95,15 @@ class LLMProfileUpdate(BaseModel):
             raise ValueError("parameters must be a JSON object or null")
         return value
 
+    @field_validator("request_timeout_ms", mode="before")
+    @classmethod
+    def _request_timeout_ms(cls, value: Any) -> int | None:
+        return _validate_request_timeout_ms(value)
+
     @model_validator(mode="after")
     def _reject_explicit_null_required_fields(self) -> LLMProfileUpdate:
         # Omitted fields are fine; explicit JSON null on NOT NULL columns is not.
+        # request_timeout_ms may be cleared with explicit null (NULL → default).
         for field_name in ("name", "provider", "model", "base_url"):
             if field_name in self.model_fields_set and getattr(self, field_name) is None:
                 raise ValueError(f"{field_name} cannot be null")
@@ -91,6 +121,7 @@ class LLMProfileResponse(BaseModel):
     base_url: str
     credential_secret_id: uuid.UUID | None = None
     parameters: dict[str, Any] | None = None
+    request_timeout_ms: int | None = None
     status: str | None = None
     created_at: datetime
     updated_at: datetime
@@ -117,6 +148,7 @@ class EmbeddingProfileCreate(BaseModel):
     dimension: int = Field(gt=0)
     distance_metric: str = Field(min_length=1, max_length=64)
     credential_secret_id: uuid.UUID | None = None
+    request_timeout_ms: int | None = None
 
     @field_validator("provider", "model", "name", "distance_metric")
     @classmethod
@@ -125,6 +157,11 @@ class EmbeddingProfileCreate(BaseModel):
         if not stripped:
             raise ValueError("must be a non-empty string")
         return stripped
+
+    @field_validator("request_timeout_ms", mode="before")
+    @classmethod
+    def _request_timeout_ms(cls, value: Any) -> int | None:
+        return _validate_request_timeout_ms(value)
 
 
 class EmbeddingProfileUpdate(BaseModel):
@@ -137,6 +174,7 @@ class EmbeddingProfileUpdate(BaseModel):
     dimension: int | None = Field(default=None, gt=0)
     distance_metric: str | None = Field(default=None, min_length=1, max_length=64)
     credential_secret_id: uuid.UUID | None = None
+    request_timeout_ms: int | None = None
     lock_version: int | None = Field(default=None, ge=1)
 
     @field_validator("provider", "model", "name", "distance_metric")
@@ -148,6 +186,11 @@ class EmbeddingProfileUpdate(BaseModel):
         if not stripped:
             raise ValueError("must be a non-empty string")
         return stripped
+
+    @field_validator("request_timeout_ms", mode="before")
+    @classmethod
+    def _request_timeout_ms(cls, value: Any) -> int | None:
+        return _validate_request_timeout_ms(value)
 
     @model_validator(mode="after")
     def _reject_explicit_null_required_fields(self) -> EmbeddingProfileUpdate:
@@ -176,6 +219,7 @@ class EmbeddingProfileResponse(BaseModel):
     dimension: int
     distance_metric: str
     credential_secret_id: uuid.UUID | None = None
+    request_timeout_ms: int | None = None
     status: str | None = None
     is_active_for_tools: bool
     created_at: datetime

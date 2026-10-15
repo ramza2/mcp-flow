@@ -285,6 +285,10 @@ Dataset은 평가 전 FROZEN하고 실행 중 정답을 변경하지 않는다.
 - MCP normalized error mapping
 - MRTR round/timeout validation
 - Result validation
+- Model Profile `request_timeout_ms` persistence (LLM/Embedding; NULL → 15000);
+  runtime `generate_json` / `embed_texts` timeout propagation; connection-test
+  probe timeout not auto-coupled; TIMEOUT → retryable; invalid bounds;
+  Embedding timeout change does not mark ToolEmbeddings stale
 
 ---
 

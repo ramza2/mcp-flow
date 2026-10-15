@@ -52,6 +52,7 @@ class _ProfileSnapshot:
     base_url: str
     dimension: int
     credential_secret_id: uuid.UUID | None
+    request_timeout_ms: int | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -218,6 +219,7 @@ class ToolRetrievalService:
             base_url=profile.base_url,
             dimension=int(profile.dimension),
             credential_secret_id=profile.credential_secret_id,
+            request_timeout_ms=profile.request_timeout_ms,
         )
 
     async def _load_active_profile_snapshot(self) -> _ProfileSnapshot:
@@ -243,6 +245,7 @@ class ToolRetrievalService:
                 base_url=snapshot.base_url,
                 dimension=snapshot.dimension,
                 credential_secret_id=snapshot.credential_secret_id,
+                request_timeout_ms=snapshot.request_timeout_ms,
             ),
             [query_text],
         )

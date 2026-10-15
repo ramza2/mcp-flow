@@ -369,6 +369,13 @@ Execution Plan Binding kind와 provenance를 혼용하지 않는다.
 
 LLM/Embedding Provider를 관리하고 OpenAI-compatible API를 기본 adapter로 지원한다. credential은 Secret reference다.
 
+Optional `request_timeout_ms` (1000–300000, nullable) configures production
+Model Provider runtime HTTP timeout per LLM/Embedding Profile. `NULL` keeps the
+adapter default (15000ms). Timeout still maps to retryable
+`ModelProviderError(TIMEOUT)`. Connection-test probe timeout stays separate and
+is not auto-coupled to the profile runtime override. Do not place timeout in
+LLM `parameters` JSON.
+
 ## FNC-AGT-010. Tool 매핑 Evaluation
 
 Dataset, AgentVersion, Prompt, model, embedding, Registry snapshot, threshold, commit SHA를 고정해 재현한다.
