@@ -2051,7 +2051,9 @@ Factory-imported `mcp_servers.transport_config` retains lineage
 kept). Connection Test evidence remains `mcp_server_checks` only; success also
 stores `connection_test_verified_fingerprint` on `transport_config`. Factory
 Discovery evidence remains `mcp_server_discoveries` (`raw_response.factory_reconciliation`);
-CLEAN success stores `connection_discovery_verified_fingerprint`. Factory
+CLEAN Apply stores `connection_discovery_verified_fingerprint` after matched
+reconciliation; CLEAN preview must not store it (prior valid Apply fingerprint
+for the current config is left unchanged); mismatch/ambiguity clears it. Factory
 Activate requires both fingerprints to match the current connection-relevant
 config (transport/endpoint/auth/timeouts), latest Check `SUCCEEDED`, and no
 unresolved Factory mismatches; historical Check/Discovery rows are retained.

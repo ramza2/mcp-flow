@@ -455,6 +455,9 @@ async def test_preview_exact_match_no_mutation(db_session: AsyncSession) -> None
         await db_session.execute(select(MCPTool).where(MCPTool.mcp_server_id == server_id))
     ).scalar_one()
     assert tool.status == MCPToolStatus.INACTIVE.value
+    assert get_verified_discovery_fingerprint(
+        await MCPServerService(db_session).get(server_id)
+    ) is None
 
 
 @pytest.mark.asyncio
@@ -911,9 +914,96 @@ async def test_normal_factory_publish_expected_set_loads(
     assert result.factory_diff is not None
     assert result.factory_diff.status == "CLEAN"
     assert result.factory_diff.matched == 1
+    # Issue #107: CLEAN preview must not store Activate discovery evidence.
     assert get_verified_discovery_fingerprint(
         await MCPServerService(db_session).get(server_id)
-    ) is not None
+    ) is None
+
+
+@pytest.mark.asyncio
+async def test_clean_preview_blocks_activate_apply_enables(
+    db_session: AsyncSession,
+) -> None:
+    """Issue #107: CLEAN preview ≠ Activate evidence; CLEAN Apply enables it."""
+
+    schema = {"type": "object", "properties": {"q": {"type": "string"}}}
+    server_id = await _factory_server_ready(
+        db_session,
+        tools=[{"remote_name": "GET /pets", "input_schema": schema}],
+    )
+    http = _http_with_tools([_desc("GET /pets", input_schema=schema)])
+    svc = MCPServerService(db_session)
+
+    tools_before = (
+        await db_session.execute(select(func.count()).select_from(MCPTool))
+    ).scalar_one()
+    versions_before = (
+        await db_session.execute(select(func.count()).select_from(MCPToolVersion))
+    ).scalar_one()
+
+    preview = await MCPDiscoveryService(db_session, http).discover(
+        server_id, apply_changes=False
+    )
+    assert preview.success is True
+    assert preview.factory_diff is not None
+    assert preview.factory_diff.status == "CLEAN"
+    server = await svc.get(server_id)
+    assert get_verified_discovery_fingerprint(server) is None
+    assert (
+        await db_session.execute(select(func.count()).select_from(MCPTool))
+    ).scalar_one() == tools_before
+    assert (
+        await db_session.execute(select(func.count()).select_from(MCPToolVersion))
+    ).scalar_one() == versions_before
+    with pytest.raises(AppError) as blocked:
+        await svc.activate(server_id)
+    assert blocked.value.code == "RESOURCE_CONFLICT"
+    assert "Discovery" in blocked.value.message
+
+    applied = await MCPDiscoveryService(db_session, http).discover(
+        server_id, apply_changes=True
+    )
+    assert applied.success is True
+    assert applied.factory_diff is not None
+    assert applied.factory_diff.status == "CLEAN"
+    server = await svc.get(server_id)
+    assert get_verified_discovery_fingerprint(server) is not None
+    activated = await svc.activate(server_id)
+    assert activated.status == MCPServerStatus.ACTIVE.value
+
+
+@pytest.mark.asyncio
+async def test_clean_preview_preserves_prior_apply_fingerprint(
+    db_session: AsyncSession,
+) -> None:
+    """CLEAN preview must not clear a prior valid Apply discovery fingerprint."""
+
+    schema = {"type": "object", "properties": {"q": {"type": "string"}}}
+    server_id = await _factory_server_ready(
+        db_session,
+        tools=[{"remote_name": "GET /pets", "input_schema": schema}],
+    )
+    http = _http_with_tools([_desc("GET /pets", input_schema=schema)])
+    await MCPDiscoveryService(db_session, http).discover(
+        server_id, apply_changes=True
+    )
+    fp_after_apply = get_verified_discovery_fingerprint(
+        await MCPServerService(db_session).get(server_id)
+    )
+    assert fp_after_apply is not None
+
+    preview = await MCPDiscoveryService(db_session, http).discover(
+        server_id, apply_changes=False
+    )
+    assert preview.success is True
+    assert preview.factory_diff is not None
+    assert preview.factory_diff.status == "CLEAN"
+    assert (
+        get_verified_discovery_fingerprint(
+            await MCPServerService(db_session).get(server_id)
+        )
+        == fp_after_apply
+    )
 
 
 @pytest.mark.asyncio

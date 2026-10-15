@@ -176,8 +176,9 @@ async def _connection_test_and_clean_discovery(
     http.discover_capabilities = AsyncMock(return_value={})
     http.list_tools = AsyncMock(return_value=remotes)
     await MCPDiscoveryService(session, http).connection_test(server_id)
+    # Issue #107: Activate evidence requires CLEAN Apply, not preview.
     result = await MCPDiscoveryService(session, http).discover(
-        server_id, apply_changes=False
+        server_id, apply_changes=True
     )
     assert result.success is True
 
