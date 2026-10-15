@@ -648,6 +648,11 @@ Dataset은 평가 전 FROZEN하고 실행 중 정답을 변경하지 않는다.
   - complete remote result 후 `result_inline_max_bytes` 초과 →
     `RESULT_TOO_LARGE_FOR_INLINE` / `FAILED` (UNKNOWN_OUTCOME으로 바꾸지 않음;
     `ToolPolicy.max_result_bytes` post-send overflow와 구분)
+  - `isError=true` → `RESULT_TOOL_ERROR` / FAILED semantics 유지 + bounded
+    sanitized diagnostic `result_inline` (content/structuredContent/metadata);
+    secret echo → `[REDACTED]`; oversized diagnostic omits payload marker without
+    changing error_code; `RESULT_SCHEMA_INVALID` 등 다른 validation은
+    `result_inline` null 유지
   - `NON_IDEMPOTENT_WRITE` + timeout `outcome_unknown=true` → 호출 1회만,
     Step `UNKNOWN_OUTCOME`, Execution은 canonical 상태가 없으므로 `FAILED`로 fail-closed
   - `DESTRUCTIVE` + HTTP 5xx `outcome_unknown=true` → Step/Attempt/ToolCall

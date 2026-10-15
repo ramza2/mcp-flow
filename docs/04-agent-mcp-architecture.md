@@ -421,6 +421,13 @@ Persisted TOOL `result_inline` root (canonical snake_case — no camelCase alias
 }
 ```
 
+The same projection is reused for `RESULT_TOOL_ERROR` (`isError=true`) as
+bounded, sanitized operator diagnostic evidence (protected plaintext redacted;
+`result_inline_max_bytes` enforced). Oversized tool-error diagnostics omit the
+payload with `{ "diagnostic_omitted": true, "omit_reason": "RESULT_INLINE_TOO_LARGE" }`
+and keep `RESULT_TOOL_ERROR` status/error_code. Other validation failures
+(`RESULT_SCHEMA_INVALID`, …) keep `result_inline` null.
+
 `EXECUTION_CONTEXT` allowlisted projection:
 
 ```json
@@ -1619,7 +1626,7 @@ Invocation Identity = immutable tool_version_id
 }
 ```
 
-Tool 업무 오류(`isError`)와 transport/protocol 오류를 분리한다. outputSchema가 있으면 `structured_content`를 검증하고 불일치 결과를 `SUCCEEDED`로 처리하지 않는다.
+Tool 업무 오류(`isError`)와 transport/protocol 오류를 분리한다. outputSchema가 있으면 `structured_content`를 검증하고 불일치 결과를 `SUCCEEDED`로 처리하지 않는다. `isError=true`는 `RESULT_TOOL_ERROR`로 Step/Attempt/ToolCall `FAILED`를 유지하면서, redaction·size-bound를 거친 diagnostic `result_inline`을 보존할 수 있다 (raw response 전체 저장 금지).
 
 ### 14.3 구현 위치 (MCP Tool Runner vertical slice)
 

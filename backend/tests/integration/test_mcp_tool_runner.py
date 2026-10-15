@@ -1544,3 +1544,55 @@ async def test_pg_retry_checkpoint_recovery_continues(
     async with integration_session_factory() as session:
         step = (await ExecutionRepository(session).list_steps(execution_id))[0]
         assert step.attempt_count == 2
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_pg_tool_error_preserves_bounded_diagnostic_inline(
+    integration_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Issue #81: isError=true keeps FAILED + sanitized diagnostic result_inline."""
+
+    execution_id, worker_id, lease_token = await _claim_ready_execution(
+        integration_session_factory
+    )
+    client = _StubCurrentMCPClient(
+        result=NormalizedToolResult(
+            protocol_success=True,
+            tool_error=True,
+            content=[{"type": "text", "text": "connection_required"}],
+            structured_content={"code": "auth_required"},
+            metadata={"detail": "reauth"},
+            raw_size_bytes=48,
+            duration_ms=7,
+        )
+    )
+    runner = McpToolRunner(
+        session_factory=integration_session_factory,
+        mcp_client=client,
+        secret_resolver_factory=_unimplemented_resolver_factory,
+        lease_seconds=60,
+        result_inline_max_bytes=256_000,
+    )
+    outcome = await runner.run_claimed_execution(
+        execution_id=execution_id, worker_id=worker_id, lease_token=lease_token
+    )
+    assert outcome.mcp_called is True
+    assert outcome.terminal_status == StepStatus.FAILED.value
+
+    async with integration_session_factory() as session:
+        execution = await ExecutionRepository(session).get(execution_id)
+        assert execution is not None
+        assert execution.status == ExecutionStatus.FAILED.value
+        step = (await ExecutionRepository(session).list_steps(execution_id))[0]
+        assert step.status == StepStatus.FAILED.value
+        assert step.error_code == "RESULT_TOOL_ERROR"
+        assert step.result_inline is not None
+        assert step.result_inline["content"][0]["text"] == "connection_required"
+        assert step.result_inline["structured_content"] == {"code": "auth_required"}
+        attempts = await ExecutionRepository(session).list_attempts(step.id)
+        assert attempts[0].status == StepAttemptStatus.FAILED.value
+        assert attempts[0].error_code == "RESULT_TOOL_ERROR"
+        assert attempts[0].result_inline == step.result_inline
+        tool_calls = await ExecutionRepository(session).list_tool_calls(attempts[0].id)
+        assert tool_calls[0].normalized_status == ToolCallNormalizedStatus.FAILED.value
