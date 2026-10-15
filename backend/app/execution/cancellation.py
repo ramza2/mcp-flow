@@ -701,12 +701,17 @@ async def recover_expired_cancel_requested_locked(
         if not step_has_unknown:
             continue
 
-        # Existing terminal Step UNKNOWN_OUTCOME is preserved; other terminals stay.
-        if step.status in _TERMINAL_STEP:
+        # Child UNKNOWN_OUTCOME outranks any Step terminal (FAILED/CANCELLED/
+        # SUCCEEDED/TIMED_OUT). Promote to Step UNKNOWN so reconcile cannot
+        # finalize a clean CANCELLED Execution. Already-UNKNOWN Steps stay.
+        if step.status == StepStatus.UNKNOWN_OUTCOME.value:
             continue
 
         locked_step = await executions.lock_step(step.id)
-        if locked_step is None or locked_step.status in _TERMINAL_STEP:
+        if (
+            locked_step is None
+            or locked_step.status == StepStatus.UNKNOWN_OUTCOME.value
+        ):
             continue
         previous_step = locked_step.status
         locked_step.status = StepStatus.UNKNOWN_OUTCOME.value
@@ -716,7 +721,8 @@ async def recover_expired_cancel_requested_locked(
         locked_step.error_message = (
             locked_step.error_message or _ERROR_MSG_CANCEL_RECOVERY_UNKNOWN
         )
-        locked_step.finished_at = now
+        if locked_step.finished_at is None:
+            locked_step.finished_at = now
         locked_step.lock_version = int(locked_step.lock_version) + 1
         from app.execution.events import ExecutionEventWriter
 
