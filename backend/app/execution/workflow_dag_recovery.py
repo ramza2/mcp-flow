@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.errors import AppError
 from app.domain.enums import (
     AuthorableStepType,
+    ExecutionSourceType,
     ExecutionStatus,
     RiskClass,
     StepAttemptStatus,
@@ -29,6 +30,7 @@ from app.execution.lineage import assert_resume_attempt_lineage, assert_tool_ste
 from app.execution.loop_reconcile import runtime_plan_step
 from app.execution.orchestrator import assert_execution_plan_lineage
 from app.execution.policy_selection import get_expected_tool_policy_snapshot
+from app.execution.runtime_preflight import _assert_schedule_occurrence_lineage
 from app.models.execution import Execution, ExecutionStep, StepAttempt, ToolCall
 from app.repositories.execution import ExecutionRepository
 from app.schemas.execution_plan import ExecutionPlanV1
@@ -149,6 +151,56 @@ def plan_supports_workflow_running_recovery(plan_snapshot: Any) -> bool:
     return True
 
 
+async def assert_workflow_schedule_recovery_source_lineage(
+    session: AsyncSession,
+    execution: Execution,
+) -> None:
+    """Fail-closed source lineage for Workflow/Schedule RUNNING recovery.
+
+    Does not create or rebind ScheduleOccurrence rows. Reuses the existing
+    ScheduleOccurrence lineage contract for SCHEDULE_OCCURRENCE.
+    """
+    if execution.source_type == ExecutionSourceType.WORKFLOW_VERSION.value:
+        if (
+            execution.workflow_version_id is None
+            or execution.schedule_occurrence_id is not None
+            or execution.agent_request_id is not None
+            or execution.agent_version_id is not None
+            or execution.plan_validation_run_id is not None
+        ):
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message="WORKFLOW_VERSION Execution source lineage is inconsistent.",
+                status_code=409,
+            )
+        return
+
+    if execution.source_type == ExecutionSourceType.SCHEDULE_OCCURRENCE.value:
+        try:
+            await _assert_schedule_occurrence_lineage(session, execution)
+        except AppError as exc:
+            if exc.code in {
+                "RESOURCE_CONFLICT",
+                "EXECUTION_PRECONDITION_FAILED",
+            }:
+                raise AppError(
+                    code="RESOURCE_CONFLICT",
+                    message=exc.message,
+                    status_code=409,
+                ) from exc
+            raise
+        return
+
+    raise AppError(
+        code="RESOURCE_CONFLICT",
+        message=(
+            f"Unsupported source_type for Workflow RUNNING recovery: "
+            f"{execution.source_type!r}."
+        ),
+        status_code=409,
+    )
+
+
 def _tool_policy_risk_and_attempts(policy_snapshot: dict[str, Any]) -> tuple[str, int]:
     """Extract risk_class/max_attempts from Agent-shaped or nested safe snapshot."""
     tool_policy = policy_snapshot.get("tool_policy")
@@ -212,6 +264,9 @@ class WorkflowDagRecovery:
         steps_by_id = {s.id: s for s in steps}
 
         try:
+            await assert_workflow_schedule_recovery_source_lineage(
+                self._session, execution
+            )
             plan = assert_execution_plan_lineage(execution)
             if plan_has_loop(plan):
                 raise AppError(
@@ -265,7 +320,7 @@ class WorkflowDagRecovery:
             await self._session.flush()
             return WorkflowDagRecoveryResult(
                 decision="FAIL_INCONSISTENT",
-                taken_over=True,
+                taken_over=False,
                 invoke_runner=False,
                 worker_id=None,
                 lease_token=None,

@@ -1235,8 +1235,6 @@ async def test_retry_exhausted_mark_partial(
             ),
             max_attempts=1,
         )
-        # Make c optional continuation via MARK_PARTIAL on b; completion may
-        # PARTIALLY_SUCCEEDED when required step fails with MARK_PARTIAL.
         repo = ExecutionRepository(session)
         steps = await repo.list_steps(execution_id)
         by_key = {s.step_key: s for s in steps}
@@ -1262,22 +1260,25 @@ async def test_retry_exhausted_mark_partial(
         assert rec.invoke_runner is True
         lease = rec.lease_token
         assert lease is not None
+        b_attempts_before = await repo.list_attempts(by_key["b"].id)
+        assert len(b_attempts_before) == 1
 
-    await _runner(db_session_factory, _OkClient()).run_claimed_execution(
+    outcome = await _runner(db_session_factory, _OkClient()).run_claimed_execution(
         execution_id=execution_id, worker_id="exh-partial", lease_token=lease
     )
+    assert outcome.reason == "EXECUTION_PARTIALLY_SUCCEEDED"
     async with db_session_factory() as session:
         execution = await ExecutionRepository(session).get(execution_id)
         assert execution is not None
-        assert execution.status in {
-            ExecutionStatus.PARTIALLY_SUCCEEDED.value,
-            ExecutionStatus.SUCCEEDED.value,
-            ExecutionStatus.FAILED.value,
-        }
-        # MARK_PARTIAL exhausted must not hard-fail closed at recovery time.
+        assert execution.status == ExecutionStatus.PARTIALLY_SUCCEEDED.value
         steps = await ExecutionRepository(session).list_steps(execution_id)
         by_key = {s.step_key: s for s in steps}
+        assert by_key["a"].status == StepStatus.SUCCEEDED.value
         assert by_key["b"].status == StepStatus.FAILED.value
+        assert by_key["c"].status == StepStatus.SUCCEEDED.value
+        b_attempts = await ExecutionRepository(session).list_attempts(by_key["b"].id)
+        assert len(b_attempts) == 1
+        assert b_attempts[0].is_retryable is False
 
 
 # ---------------------------------------------------------------------------
@@ -1634,18 +1635,110 @@ async def test_durable_unknown_never_ready(
     assert execution.status == ExecutionStatus.FAILED.value
 
 
+async def _seed_claimed_schedule_occurrence_execution(
+    session: AsyncSession,
+) -> tuple[uuid.UUID, uuid.UUID, datetime, uuid.UUID]:
+    """Real SCHEDULE_OCCURRENCE Execution with occurrence + WorkflowVersion lineage.
+
+    Returns (execution_id, schedule_occurrence_id, claim_now, lease_token).
+    """
+    from app.domain.enums import ScheduleTargetType, ScheduleType
+    from app.repositories.schedule import ScheduleRepository
+    from app.repositories.schedule_occurrence import ScheduleOccurrenceRepository
+    from app.repositories.workflow_version import WorkflowVersionRepository
+    from app.schemas.schedule import ScheduleCreate
+    from app.services.schedule import ScheduleService
+    from app.services.workflow_execution_creation import (
+        WorkflowExecutionCreationService,
+    )
+
+    from tests.unit.test_schedule_runtime import _ensure_tool_execute
+    from tests.unit.test_schedule_service import (
+        _seed_schedule_manager,
+        _seed_workflow_target,
+    )
+
+    owner_id = await _seed_schedule_manager(session, with_workflow_execute=True)
+    workflow_id, version_id = await _seed_workflow_target(session, owner_id)
+    await _ensure_tool_execute(session, owner_id)
+    schedule = await ScheduleService(session).create(
+        ScheduleCreate(
+            name=f"Rec Sch {uuid.uuid4().hex[:6]}",
+            target_type=ScheduleTargetType.WORKFLOW_VERSION,
+            target_id=version_id,
+            schedule_type=ScheduleType.CRON,
+            schedule_expression="0 9 * * *",
+            timezone="UTC",
+            inputs={},
+        ),
+        owner_id=owner_id,
+    )
+    await ScheduleService(session).activate(schedule.id, owner_id=owner_id)
+    # Pin target equals WorkflowVersion used by Execution.
+    pinned = await ScheduleRepository(session).get(schedule.id)
+    assert pinned is not None
+    assert pinned.workflow_version_id == version_id
+    version = await WorkflowVersionRepository(session).get(version_id)
+    assert version is not None
+    assert version.workflow_id == workflow_id
+
+    now = datetime.now(UTC)
+    occ = await ScheduleOccurrenceRepository(session).create_planned(
+        schedule.id, now - timedelta(minutes=5)
+    )
+    await session.flush()
+    materialized = await WorkflowExecutionCreationService(
+        session
+    ).materialize_for_schedule_occurrence(
+        workflow_id=workflow_id,
+        version_id=version_id,
+        requester_id=owner_id,
+        schedule_occurrence_id=occ.id,
+        request_inputs={},
+        trigger_type="SCHEDULE",
+    )
+    await session.commit()
+    execution_id = materialized.execution.id
+    execution = await ExecutionRepository(session).get(execution_id)
+    assert execution is not None
+    assert execution.source_type == ExecutionSourceType.SCHEDULE_OCCURRENCE.value
+    assert execution.schedule_occurrence_id == occ.id
+    assert execution.workflow_version_id == version_id
+    assert execution.agent_request_id is None
+    assert execution.agent_version_id is None
+    assert execution.trigger_type == "SCHEDULE"
+
+    await _pin_all_tool_policies(
+        session,
+        execution_id=execution_id,
+        risk_class=RiskClass.READ_ONLY.value,
+        max_attempts=2,
+    )
+    assert await ExecutionQueueService(session).stage_created_batch(limit=10) >= 1
+    await session.commit()
+    # Occurrence must be ENQUEUED for claim contract.
+    occ_row = await ScheduleOccurrenceRepository(session).get(occ.id)
+    assert occ_row is not None
+    if occ_row.status != "ENQUEUED":
+        occ_row.status = "ENQUEUED"
+        occ_row.enqueued_at = now
+        await session.commit()
+    claim = await ExecutionClaimService(session, lease_seconds=60).claim(
+        execution_id=execution_id, worker_id="sch-old", now=now
+    )
+    await session.commit()
+    assert claim.claimed and claim.lease_token is not None
+    return execution_id, occ.id, now, claim.lease_token
+
+
 @pytest.mark.asyncio
 async def test_schedule_occurrence_source_recover(
     db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _install_no_side_effects(monkeypatch)
-    execution_id, _ctx, now, _w, _tok = await _seed_workflow_execution(
-        db_session, plan_builder=lambda wid, tv: _tool_plan(wid, tv)
+    execution_id, occ_id, now, old_token = (
+        await _seed_claimed_schedule_occurrence_execution(db_session)
     )
-    execution = await ExecutionRepository(db_session).get(execution_id)
-    assert execution is not None
-    execution.source_type = ExecutionSourceType.SCHEDULE_OCCURRENCE.value
-    await db_session.commit()
     await _expire_lease(db_session, execution_id=execution_id, claim_now=now)
     rec = await ExecutionRecoveryService(db_session, lease_seconds=60).recover(
         execution_id=execution_id,
@@ -1656,3 +1749,49 @@ async def test_schedule_occurrence_source_recover(
     assert rec.taken_over is True
     assert rec.invoke_runner is True
     assert rec.decision == RecoveryDecision.TAKEOVER_READY
+    assert rec.lease_token is not None
+    assert rec.lease_token != old_token
+    execution = await ExecutionRepository(db_session).get(execution_id)
+    assert execution is not None
+    # Recovery must not create/rebind occurrence lineage.
+    assert execution.schedule_occurrence_id == occ_id
+    assert execution.source_type == ExecutionSourceType.SCHEDULE_OCCURRENCE.value
+    assert execution.workflow_version_id is not None
+    assert execution.agent_request_id is None
+    assert execution.agent_version_id is None
+
+
+@pytest.mark.asyncio
+async def test_schedule_occurrence_missing_id_fail_closed(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SCHEDULE_OCCURRENCE without schedule_occurrence_id → MCP 0 / FAILED."""
+    _install_no_side_effects(monkeypatch)
+    execution_id, _ctx, now, _w, _tok = await _seed_workflow_execution(
+        db_session, plan_builder=lambda wid, tv: _tool_plan(wid, tv)
+    )
+    execution = await ExecutionRepository(db_session).get(execution_id)
+    assert execution is not None
+    execution.source_type = ExecutionSourceType.SCHEDULE_OCCURRENCE.value
+    execution.schedule_occurrence_id = None
+    execution.trigger_type = "SCHEDULE"
+    await db_session.commit()
+    await _expire_lease(db_session, execution_id=execution_id, claim_now=now)
+
+    rec = await ExecutionRecoveryService(db_session, lease_seconds=60).recover(
+        execution_id=execution_id,
+        worker_id="sch-bad",
+        now=now + timedelta(seconds=1),
+    )
+    await db_session.commit()
+    assert rec.decision == RecoveryDecision.FAIL_INCONSISTENT
+    assert rec.invoke_runner is False
+    assert rec.taken_over is False
+    assert rec.lease_token is None
+    execution = await ExecutionRepository(db_session).get(execution_id)
+    assert execution is not None
+    assert execution.status == ExecutionStatus.FAILED.value
+    assert execution.error_code == "RECOVERY_INCONSISTENT_EVIDENCE"
+    assert execution.worker_id is None
+    assert execution.lease_token is None
+    assert execution.schedule_occurrence_id is None
