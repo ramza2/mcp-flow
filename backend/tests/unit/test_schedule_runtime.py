@@ -626,12 +626,49 @@ async def test_deploy_sh_includes_scheduler() -> None:
     repo_root = Path(__file__).resolve().parents[3]
     deploy_sh = repo_root / "scripts" / "deploy.sh"
     text = deploy_sh.read_text(encoding="utf-8")
-    assert "compose build api worker factory-worker outbox scheduler migration frontend" in text
-    assert "compose up -d api worker factory-worker outbox scheduler frontend" in text
-    assert (
-        'wait_services "runtime services" api worker factory-worker outbox '
-        "scheduler frontend"
-    ) in text
+
+    def _line_containing(needle: str) -> str:
+        for line in text.splitlines():
+            if needle in line:
+                return line.strip()
+        raise AssertionError(f"deploy.sh missing line containing {needle!r}")
+
+    def _services_after(line: str, marker: str) -> list[str]:
+        assert marker in line, line
+        return line.split(marker, 1)[1].split()
+
+    build_line = _line_containing("compose build api")
+    up_line = _line_containing("compose up -d api worker factory-worker")
+    wait_line = _line_containing('wait_services "runtime services"')
+
+    build_services = _services_after(build_line, "compose build ")
+    up_services = _services_after(up_line, "compose up -d ")
+    wait_services = _services_after(wait_line, 'wait_services "runtime services" ')
+
+    for required in (
+        "scheduler",
+        "factory-runtime",
+        "factory-mock-upstream",
+        "migration",
+        "factory-worker",
+        "frontend",
+    ):
+        assert required in build_services, (required, build_line)
+    for required in (
+        "scheduler",
+        "factory-runtime",
+        "factory-mock-upstream",
+        "factory-worker",
+        "frontend",
+    ):
+        assert required in up_services, (required, up_line)
+        assert required in wait_services, (required, wait_line)
+
+    # Dependency order: mock upstream must start before factory-runtime.
+    assert up_services.index("factory-mock-upstream") < up_services.index(
+        "factory-runtime"
+    ), up_line
+
     assert "compose logs -f --tail=200 api worker factory-worker outbox scheduler" in text
     assert "compose restart api worker factory-worker outbox scheduler frontend" in text
 
