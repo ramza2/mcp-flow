@@ -423,9 +423,11 @@ Persisted TOOL `result_inline` root (canonical snake_case — no camelCase alias
 
 The same projection is reused for `RESULT_TOOL_ERROR` (`isError=true`) as
 bounded, sanitized operator diagnostic evidence (protected plaintext redacted;
-`result_inline_max_bytes` enforced). Oversized tool-error diagnostics omit the
-payload with `{ "diagnostic_omitted": true, "omit_reason": "RESULT_INLINE_TOO_LARGE" }`
-and keep `RESULT_TOOL_ERROR` status/error_code. Other validation failures
+`result_inline_max_bytes` enforced — persisted UTF-8 JSON must not exceed the
+limit). Oversized tool-error diagnostics may store
+`{ "diagnostic_omitted": true, "omit_reason": "RESULT_INLINE_TOO_LARGE" }` only
+when that marker itself fits the limit; otherwise `result_inline` is null.
+`RESULT_TOOL_ERROR` status/error_code is unchanged. Other validation failures
 (`RESULT_SCHEMA_INVALID`, …) keep `result_inline` null.
 
 `EXECUTION_CONTEXT` allowlisted projection:

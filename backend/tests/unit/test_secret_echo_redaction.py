@@ -594,6 +594,15 @@ async def test_mcp_result_too_large_regression_still_unknown_for_unsafe(
 # ---------------------------------------------------------------------------
 
 
+def _assert_result_inline_within_limit(
+    result_inline: dict[str, Any] | None, *, max_bytes: int
+) -> None:
+    if result_inline is None:
+        return
+    size = len(json.dumps(result_inline, default=str, ensure_ascii=False).encode("utf-8"))
+    assert size <= max_bytes
+
+
 class _ToolErrorDiagnosticClient:
     def __init__(
         self,
@@ -653,12 +662,13 @@ async def test_tool_error_preserves_text_and_structured_diagnostic(
         structured_content={"code": "auth_required", "detail": "reauth"},
         metadata={"upstream": "oauth"},
     )
+    max_bytes = 256_000
     runner = McpToolRunner(
         session_factory=db_session_factory,
         mcp_client=client,
         secret_resolver_factory=_unimplemented_resolver_factory,
         lease_seconds=60,
-        result_inline_max_bytes=256_000,
+        result_inline_max_bytes=max_bytes,
     )
     outcome = await runner.run_claimed_execution(
         execution_id=execution_id, worker_id=worker_id, lease_token=lease_token
@@ -677,6 +687,7 @@ async def test_tool_error_preserves_text_and_structured_diagnostic(
         assert step.error_message == "MCP tool reported isError=true."
         inline = step.result_inline
         assert inline is not None
+        _assert_result_inline_within_limit(inline, max_bytes=max_bytes)
         assert inline["content"][0]["text"] == "connection_required"
         assert inline["structured_content"] == {
             "code": "auth_required",
@@ -743,7 +754,7 @@ async def test_tool_error_diagnostic_redacts_secret_echo(
 
 
 @pytest.mark.asyncio
-async def test_tool_error_oversized_diagnostic_omits_payload_keeps_error_code(
+async def test_tool_error_oversized_diagnostic_drops_when_marker_exceeds_limit(
     db_session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -779,16 +790,56 @@ async def test_tool_error_oversized_diagnostic_omits_payload_keeps_error_code(
         assert step.status == StepStatus.FAILED.value
         assert step.error_code == "RESULT_TOOL_ERROR"
         assert step.error_message == "MCP tool reported isError=true."
+        assert step.result_inline is None
+        attempts = await ExecutionRepository(session).list_attempts(step.id)
+        assert attempts[0].error_code == "RESULT_TOOL_ERROR"
+        assert attempts[0].result_inline is None
+        tool_calls = await ExecutionRepository(session).list_tool_calls(attempts[0].id)
+        assert tool_calls[0].normalized_status == ToolCallNormalizedStatus.FAILED.value
+
+
+@pytest.mark.asyncio
+async def test_tool_error_oversized_diagnostic_stores_marker_when_limit_allows(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tests.unit.test_execution_creation import _install_no_side_effects
+
+    _install_no_side_effects(monkeypatch)
+    execution_id, worker_id, lease_token = await _claim_ready_execution(
+        db_session_factory
+    )
+    huge = "x" * 400
+    client = _ToolErrorDiagnosticClient(
+        content=[{"type": "text", "text": huge}],
+        structured_content={"blob": huge},
+        metadata={"m": huge},
+    )
+    max_bytes = 128
+    runner = McpToolRunner(
+        session_factory=db_session_factory,
+        mcp_client=client,
+        secret_resolver_factory=_unimplemented_resolver_factory,
+        lease_seconds=60,
+        result_inline_max_bytes=max_bytes,
+    )
+    outcome = await runner.run_claimed_execution(
+        execution_id=execution_id, worker_id=worker_id, lease_token=lease_token
+    )
+    assert outcome.terminal_status == StepStatus.FAILED.value
+
+    async with db_session_factory() as session:
+        step = (await ExecutionRepository(session).list_steps(execution_id))[0]
+        assert step.error_code == "RESULT_TOOL_ERROR"
         assert step.result_inline == {
             "diagnostic_omitted": True,
             "omit_reason": "RESULT_INLINE_TOO_LARGE",
         }
         assert huge not in json.dumps(step.result_inline, default=str)
+        _assert_result_inline_within_limit(step.result_inline, max_bytes=max_bytes)
         attempts = await ExecutionRepository(session).list_attempts(step.id)
         assert attempts[0].error_code == "RESULT_TOOL_ERROR"
         assert attempts[0].result_inline == step.result_inline
-        tool_calls = await ExecutionRepository(session).list_tool_calls(attempts[0].id)
-        assert tool_calls[0].normalized_status == ToolCallNormalizedStatus.FAILED.value
 
 
 @pytest.mark.asyncio

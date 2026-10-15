@@ -301,22 +301,29 @@ _TOOL_ERROR_DIAGNOSTIC_OMITTED = {
 }
 
 
+def _utf8_json_size(value: Any) -> int:
+    return len(json.dumps(value, default=str, ensure_ascii=False).encode("utf-8"))
+
+
 def _tool_error_diagnostic_inline(
     result: NormalizedToolResult,
     *,
     protected: tuple[str, ...],
     result_inline_max_bytes: int,
-) -> dict[str, Any]:
+) -> dict[str, Any] | None:
     """Bounded sanitized diagnostic for MCP ``isError=true`` (RESULT_TOOL_ERROR).
 
     Reuses the success ``result_inline`` projection + persistence redaction.
-    Oversized diagnostics omit the payload via a tiny marker without changing
-    ``RESULT_TOOL_ERROR`` status/error_code semantics.
+    Oversized diagnostics may store a tiny omission marker only when that
+    marker itself fits ``result_inline_max_bytes``; otherwise ``None``.
+    Never changes ``RESULT_TOOL_ERROR`` status/error_code semantics.
     """
     serialized = _serialize_result_inline(result)
-    size = len(json.dumps(serialized, default=str, ensure_ascii=False).encode("utf-8"))
-    if size > result_inline_max_bytes:
-        return dict(_TOOL_ERROR_DIAGNOSTIC_OMITTED)
+    if _utf8_json_size(serialized) > result_inline_max_bytes:
+        marker = dict(_TOOL_ERROR_DIAGNOSTIC_OMITTED)
+        if _utf8_json_size(marker) > result_inline_max_bytes:
+            return None
+        return marker
     return sanitize_for_persistence(serialized, protected)
 
 

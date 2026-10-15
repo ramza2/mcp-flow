@@ -650,9 +650,9 @@ Dataset은 평가 전 FROZEN하고 실행 중 정답을 변경하지 않는다.
     `ToolPolicy.max_result_bytes` post-send overflow와 구분)
   - `isError=true` → `RESULT_TOOL_ERROR` / FAILED semantics 유지 + bounded
     sanitized diagnostic `result_inline` (content/structuredContent/metadata);
-    secret echo → `[REDACTED]`; oversized diagnostic omits payload marker without
-    changing error_code; `RESULT_SCHEMA_INVALID` 등 다른 validation은
-    `result_inline` null 유지
+    secret echo → `[REDACTED]`; oversized diagnostic stores omission marker only
+    when marker UTF-8 size ≤ limit, else `result_inline` null (error_code
+    unchanged); `RESULT_SCHEMA_INVALID` 등 다른 validation은 `result_inline` null 유지
   - `NON_IDEMPOTENT_WRITE` + timeout `outcome_unknown=true` → 호출 1회만,
     Step `UNKNOWN_OUTCOME`, Execution은 canonical 상태가 없으므로 `FAILED`로 fail-closed
   - `DESTRUCTIVE` + HTTP 5xx `outcome_unknown=true` → Step/Attempt/ToolCall
