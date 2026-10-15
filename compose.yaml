@@ -290,6 +290,8 @@ services:
   factory-mock-upstream:
     image: mcpflow-backend:${MCPFLOW_IMAGE_TAG:-local}
     build: *backend-build
+    # Bypass shared /entrypoint.sh DB URL assembly — mock has no DB env/secrets.
+    entrypoint: []
     restart: unless-stopped
     read_only: true
     tmpfs:
