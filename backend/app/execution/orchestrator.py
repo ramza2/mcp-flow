@@ -495,10 +495,34 @@ class ExecutionOrchestrator:
             # forbidding multi-Step MRTR. Do not start sibling remote calls.
             allow_approval_wait = single_tool
             if not single_tool and wave_ids:
-                approval_wave = await self._select_approval_suspension_wave(
-                    execution_id=execution_id,
-                    wave_step_ids=wave_ids,
-                )
+                try:
+                    approval_wave = await self._select_approval_suspension_wave(
+                        execution_id=execution_id,
+                        wave_step_ids=wave_ids,
+                    )
+                except AppError as exc:
+                    # Pinned policy snapshot corruption is immutable Execution
+                    # integrity failure — fail closed before any new MCP call.
+                    failed = await self._fail_closed_pre_wave_policy(
+                        execution_id=execution_id,
+                        worker_id=worker_id,
+                        lease_token=lease_token,
+                        error_code=exc.code,
+                        error_message=exc.message,
+                    )
+                    return ToolRunOutcome(
+                        execution_id=execution_id,
+                        step_execution_id=None,
+                        attempt_id=None,
+                        tool_call_id=None,
+                        mcp_called=False,
+                        terminal_status=(
+                            failed.execution_status
+                            or ExecutionStatus.FAILED.value
+                        ),
+                        reason=failed.reason or _REASON_EXECUTION_FAILED,
+                        disposition=DISPOSITION_FATAL_EXECUTION_FAILURE,
+                    )
                 if approval_wave is not None:
                     wave_ids = list(approval_wave)
                     allow_approval_wait = True
@@ -607,6 +631,9 @@ class ExecutionOrchestrator:
 
         Selection follows Plan/wave order (``wave_step_ids`` already ordered).
         Returns None when no TOOL in the wave requires approval.
+
+        Pinned policy snapshot missing/malformed/mismatch raises ``AppError``
+        (immutable Execution corruption) — callers must fail closed before MCP.
         """
         from app.execution.policy_selection import get_expected_tool_policy_snapshot
 
@@ -614,30 +641,85 @@ class ExecutionOrchestrator:
             executions = ExecutionRepository(session)
             execution = await executions.get(execution_id)
             if execution is None:
-                return None
+                raise AppError(
+                    code="RESOURCE_CONFLICT",
+                    message="Execution missing during approval wave pre-scan.",
+                    status_code=409,
+                )
             steps = await executions.list_steps(execution_id)
             by_id = {s.id: s for s in steps}
             for step_id in wave_step_ids:
                 step = by_id.get(step_id)
-                if step is None or step.step_type != AuthorableStepType.TOOL.value:
+                if step is None:
+                    raise AppError(
+                        code="RESOURCE_CONFLICT",
+                        message="Wave TOOL Step missing during approval pre-scan.",
+                        status_code=409,
+                    )
+                if step.step_type != AuthorableStepType.TOOL.value:
                     continue
                 if step.mcp_tool_version_id is None:
-                    continue
-                plan_step_id = str(step.step_snapshot.get("id") or step.step_key)
-                try:
-                    policy = get_expected_tool_policy_snapshot(
-                        execution,
-                        plan_step_id=plan_step_id,
-                        tool_version_id=step.mcp_tool_version_id,
+                    raise AppError(
+                        code="RESOURCE_CONFLICT",
+                        message=(
+                            "READY TOOL missing mcp_tool_version_id during "
+                            "approval wave pre-scan."
+                        ),
+                        status_code=409,
                     )
-                except AppError:
-                    continue
+                plan_step_id = str(step.step_snapshot.get("id") or step.step_key)
+                policy = get_expected_tool_policy_snapshot(
+                    execution,
+                    plan_step_id=plan_step_id,
+                    tool_version_id=step.mcp_tool_version_id,
+                )
                 tool_policy = policy.get("tool_policy")
                 if isinstance(tool_policy, dict) and tool_policy.get(
                     "requires_approval"
                 ):
                     return (step_id,)
         return None
+
+    async def _fail_closed_pre_wave_policy(
+        self,
+        *,
+        execution_id: uuid.UUID,
+        worker_id: str,
+        lease_token: uuid.UUID,
+        error_code: str,
+        error_message: str,
+    ) -> ProgressOutcome:
+        """Terminalize before dispatching a TOOL wave (no new MCP side effects)."""
+        async with self._session_factory() as session:
+            async with session.begin():
+                executions = ExecutionRepository(session)
+                execution = await executions.lock_execution(execution_id)
+                if execution is None:
+                    return ProgressOutcome(
+                        execution_complete=False,
+                        promoted=False,
+                        reason="MISSING",
+                    )
+                now = datetime.now(UTC)
+                if not self._has_running_lease(
+                    execution, worker_id, lease_token, now
+                ):
+                    return ProgressOutcome(
+                        execution_complete=False,
+                        promoted=False,
+                        reason="STALE_LEASE",
+                        execution_status=execution.status,
+                    )
+                steps = await executions.list_steps(execution.id)
+                by_key = {s.step_key: s for s in steps}
+                return await self._fail_closed_lineage_locked(
+                    session,
+                    execution=execution,
+                    by_key=by_key,
+                    now=now,
+                    error_code=error_code,
+                    error_message=error_message,
+                )
 
     async def _prepare_wave(
         self,

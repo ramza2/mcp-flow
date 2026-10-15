@@ -22,7 +22,6 @@ def _execution(**overrides: object) -> SimpleNamespace:
         "id": uuid.uuid4(),
         "requester_id": uuid.uuid4(),
         "agent_version_id": uuid.uuid4(),
-        "workflow_version_id": None,
         "plan_hash": "a" * 64,
     }
     base.update(overrides)

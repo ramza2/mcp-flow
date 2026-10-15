@@ -385,6 +385,69 @@ async def test_parallel_wave_deterministic_suspension_no_extra_mcp(
 
 
 @pytest.mark.asyncio
+async def test_parallel_wave_pinned_policy_corruption_fail_closed_no_mcp(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pinned policy entry corruption must fail closed before any sibling MCP."""
+    _install_no_side_effects(monkeypatch)
+    async with db_session_factory() as session:
+        tv_a = await _seed_tool_version(session)
+        tool_a = await _activate_tool(session, tv_a)
+        tv_b = await _seed_tool_version(session)
+        tool_b = await _activate_tool(session, tv_b)
+        workflow = await _create_workflow(session)
+        plan = _base_plan(
+            workflow_id=workflow.id,
+            steps=[
+                _tool("a", tool_version_id=tv_a),
+                _tool("b", tool_version_id=tv_b),
+            ],
+            limits={"max_parallelism": 2},
+        )
+        version = await _create_draft_version(session, workflow.id, plan=plan)
+        await _publish_and_activate(session, workflow.id, version.id)
+        user_id = await _seed_authorized_workflow_user(
+            session, workflow_id=workflow.id, tool_ids=[tool_a, tool_b]
+        )
+        await session.commit()
+        ctx = {
+            "workflow_id": workflow.id,
+            "version_id": version.id,
+            "requester_id": user_id,
+        }
+
+    client = _CountingClient()
+    execution_id, worker_id, lease = await _claim_created(db_session_factory, ctx)
+    async with db_session_factory() as session:
+        execution = await ExecutionRepository(session).get(execution_id)
+        assert execution is not None
+        snapshot = dict(execution.policy_snapshot or {})
+        tool_steps = dict(snapshot.get("tool_steps") or {})
+        # Drop one Plan TOOL policy entry → immutable snapshot corruption.
+        tool_steps.pop("b", None)
+        snapshot["tool_steps"] = tool_steps
+        execution.policy_snapshot = snapshot
+        execution.lock_version += 1
+        await session.commit()
+
+    outcome = await _runner(db_session_factory, client).run_claimed_execution(
+        execution_id=execution_id, worker_id=worker_id, lease_token=lease
+    )
+    assert client.calls == 0
+    assert outcome.mcp_called is False
+    async with db_session_factory() as session:
+        execution = await ExecutionRepository(session).get(execution_id)
+        assert execution is not None
+        assert execution.status == ExecutionStatus.FAILED.value
+        assert execution.error_code == "RESOURCE_CONFLICT"
+        steps = await ExecutionRepository(session).list_steps(execution_id)
+        for step in steps:
+            attempts = await ExecutionRepository(session).list_attempts(step.id)
+            assert attempts == []
+
+
+@pytest.mark.asyncio
 async def test_reject_terminalizes_failed_not_rejected_status(
     db_session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,

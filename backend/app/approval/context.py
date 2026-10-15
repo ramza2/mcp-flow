@@ -70,8 +70,10 @@ def build_approval_context_snapshot(
         },
     }
 
-    if execution.workflow_version_id is not None:
-        if execution.agent_version_id is not None:
+    # Optional on minimal AgentRequest fixtures / older in-memory doubles.
+    workflow_version_id = getattr(execution, "workflow_version_id", None)
+    if workflow_version_id is not None:
+        if getattr(execution, "agent_version_id", None) is not None:
             raise AppError(
                 code="EXECUTION_PRECONDITION_FAILED",
                 message=(
@@ -80,14 +82,24 @@ def build_approval_context_snapshot(
                 ),
                 status_code=409,
             )
+        source_type = getattr(execution, "source_type", None)
+        if not isinstance(source_type, str) or not source_type:
+            raise AppError(
+                code="EXECUTION_PRECONDITION_FAILED",
+                message=(
+                    "Workflow ToolPolicy approval context requires source_type."
+                ),
+                status_code=409,
+            )
         return {
             **base,
             "agent_version_id": None,
-            "workflow_version_id": str(execution.workflow_version_id),
-            "source_type": execution.source_type,
+            "workflow_version_id": str(workflow_version_id),
+            "source_type": source_type,
         }
 
-    if execution.agent_version_id is None:
+    agent_version_id = getattr(execution, "agent_version_id", None)
+    if agent_version_id is None:
         raise AppError(
             code="EXECUTION_PRECONDITION_FAILED",
             message="Approval context requires agent_version_id.",
@@ -96,7 +108,7 @@ def build_approval_context_snapshot(
     # Historical AgentRequest / MANUAL_TOOL_TEST shape — do not add keys.
     return {
         **base,
-        "agent_version_id": str(execution.agent_version_id),
+        "agent_version_id": str(agent_version_id),
     }
 
 
