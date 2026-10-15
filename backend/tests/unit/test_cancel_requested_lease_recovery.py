@@ -104,7 +104,10 @@ async def test_cancel_recovery_ready_no_attempt_cancels(
     assert execution is not None
     assert execution.status == ExecutionStatus.CANCELLED.value
     assert execution.cancel_reason == "user-cancel"
-    assert execution.cancel_requested_at == claim_now
+    assert execution.cancel_requested_at is not None
+    assert execution.cancel_requested_at.replace(tzinfo=UTC) == claim_now.replace(
+        tzinfo=UTC
+    )
     assert execution.worker_id is None
     assert execution.lease_token is None
     steps = await repo.list_steps(execution_id)
@@ -659,7 +662,9 @@ async def _materialize_multistep(
     }
     outcome = await ExecutionPlanMaterializer(session).materialize(
         ExecutionMaterializeParams(
-            source_type=ExecutionSourceType.WORKFLOW_VERSION.value,
+            # Claim validates WORKFLOW_VERSION lineage; materialize as
+            # MANUAL_TOOL_TEST then retarget source for cancel-recovery coverage.
+            source_type=ExecutionSourceType.MANUAL_TOOL_TEST.value,
             trigger_type="TEST",
             requester_id=seeded["requester_id"],
             agent_version_id=seeded["agent_version_id"],
@@ -680,6 +685,10 @@ async def _materialize_multistep(
     )
     await session.commit()
     assert claim.claimed and claim.lease_token is not None
+    execution = await ExecutionRepository(session).get(execution.id)
+    assert execution is not None
+    execution.source_type = ExecutionSourceType.WORKFLOW_VERSION.value
+    await session.commit()
     steps = await ExecutionRepository(session).list_steps(execution.id)
     by_key = {s.step_key: s.id for s in steps}
     return execution.id, claim.lease_token, now, by_key
