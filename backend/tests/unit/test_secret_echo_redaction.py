@@ -587,3 +587,304 @@ async def test_mcp_result_too_large_regression_still_unknown_for_unsafe(
             tool_calls[0].normalized_status
             == ToolCallNormalizedStatus.UNKNOWN_OUTCOME.value
         )
+
+
+# ---------------------------------------------------------------------------
+# Issue #81: isError=true diagnostic result_inline (bounded + redacted)
+# ---------------------------------------------------------------------------
+
+
+def _assert_result_inline_within_limit(
+    result_inline: dict[str, Any] | None, *, max_bytes: int
+) -> None:
+    if result_inline is None:
+        return
+    size = len(json.dumps(result_inline, default=str, ensure_ascii=False).encode("utf-8"))
+    assert size <= max_bytes
+
+
+class _ToolErrorDiagnosticClient:
+    def __init__(
+        self,
+        *,
+        content: list[Any] | None = None,
+        structured_content: dict[str, Any] | None = None,
+        metadata: dict[str, Any] | None = None,
+        echo_token_from_auth: bool = False,
+    ) -> None:
+        self._content = content
+        self._structured_content = structured_content
+        self._metadata = metadata or {}
+        self._echo_token_from_auth = echo_token_from_auth
+        self.calls = 0
+
+    async def call_tool(self, endpoint: str, **kwargs: Any):
+        self.calls += 1
+        content = list(self._content or [])
+        structured = (
+            dict(self._structured_content)
+            if self._structured_content is not None
+            else None
+        )
+        metadata = dict(self._metadata)
+        if self._echo_token_from_auth:
+            auth = (kwargs.get("auth_headers") or {}).get("Authorization", "")
+            token = auth.removeprefix("Bearer ").strip() if auth else ""
+            content = [{"type": "text", "text": f"auth failed token={token}"}]
+            structured = {"error": "auth_required", "token": token}
+            metadata = {"echo": token, "hint": f"prefix:{token}:suffix"}
+        result = NormalizedToolResult(
+            protocol_success=True,
+            tool_error=True,
+            content=content,
+            structured_content=structured,
+            metadata=metadata,
+            raw_size_bytes=64,
+            duration_ms=5,
+            result_type="tool_result",
+        )
+        return result, {"http_status": 200}, datetime.now(UTC)
+
+
+@pytest.mark.asyncio
+async def test_tool_error_preserves_text_and_structured_diagnostic(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tests.unit.test_execution_creation import _install_no_side_effects
+
+    _install_no_side_effects(monkeypatch)
+    execution_id, worker_id, lease_token = await _claim_ready_execution(
+        db_session_factory
+    )
+    client = _ToolErrorDiagnosticClient(
+        content=[{"type": "text", "text": "connection_required"}],
+        structured_content={"code": "auth_required", "detail": "reauth"},
+        metadata={"upstream": "oauth"},
+    )
+    max_bytes = 256_000
+    runner = McpToolRunner(
+        session_factory=db_session_factory,
+        mcp_client=client,
+        secret_resolver_factory=_unimplemented_resolver_factory,
+        lease_seconds=60,
+        result_inline_max_bytes=max_bytes,
+    )
+    outcome = await runner.run_claimed_execution(
+        execution_id=execution_id, worker_id=worker_id, lease_token=lease_token
+    )
+    assert outcome.mcp_called is True
+    assert outcome.terminal_status == StepStatus.FAILED.value
+    assert client.calls == 1
+
+    async with db_session_factory() as session:
+        execution = await ExecutionRepository(session).get(execution_id)
+        assert execution is not None
+        assert execution.status == ExecutionStatus.FAILED.value
+        step = (await ExecutionRepository(session).list_steps(execution_id))[0]
+        assert step.status == StepStatus.FAILED.value
+        assert step.error_code == "RESULT_TOOL_ERROR"
+        assert step.error_message == "MCP tool reported isError=true."
+        inline = step.result_inline
+        assert inline is not None
+        _assert_result_inline_within_limit(inline, max_bytes=max_bytes)
+        assert inline["content"][0]["text"] == "connection_required"
+        assert inline["structured_content"] == {
+            "code": "auth_required",
+            "detail": "reauth",
+        }
+        assert inline["metadata"] == {"upstream": "oauth"}
+        assert inline["result_type"] == "tool_result"
+        assert inline["duration_ms"] == 5
+        attempts = await ExecutionRepository(session).list_attempts(step.id)
+        assert attempts[0].status == StepAttemptStatus.FAILED.value
+        assert attempts[0].error_layer == "TOOL"
+        assert attempts[0].error_code == "RESULT_TOOL_ERROR"
+        assert attempts[0].result_inline == inline
+        tool_calls = await ExecutionRepository(session).list_tool_calls(attempts[0].id)
+        assert tool_calls[0].normalized_status == ToolCallNormalizedStatus.FAILED.value
+
+
+@pytest.mark.asyncio
+async def test_tool_error_diagnostic_redacts_secret_echo(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    master_key = _random_master_key()
+    async with db_session_factory() as session:
+        secret_id = await _seed_secret_record(
+            session, master_key=master_key, value=_SENTINEL
+        )
+
+    def _set_bearer(server: Any) -> None:
+        server.auth_type = MCPAuthType.BEARER.value
+        server.auth_secret_id = secret_id
+
+    execution_id, worker_id, lease_token = await _claim_ready_execution(
+        db_session_factory, mutate_server=_set_bearer
+    )
+
+    def _resolver_factory(session: AsyncSession) -> DatabaseSecretResolver:
+        return DatabaseSecretResolver(session, master_key=master_key)
+
+    runner = McpToolRunner(
+        session_factory=db_session_factory,
+        mcp_client=_ToolErrorDiagnosticClient(echo_token_from_auth=True),
+        secret_resolver_factory=_resolver_factory,
+        lease_seconds=60,
+        result_inline_max_bytes=256_000,
+    )
+    outcome = await runner.run_claimed_execution(
+        execution_id=execution_id, worker_id=worker_id, lease_token=lease_token
+    )
+    assert outcome.mcp_called is True
+    assert outcome.terminal_status == StepStatus.FAILED.value
+
+    payload = await _assert_no_sentinel(db_session_factory, execution_id=execution_id)
+    async with db_session_factory() as session:
+        step = (await ExecutionRepository(session).list_steps(execution_id))[0]
+        attempts = await ExecutionRepository(session).list_attempts(step.id)
+        assert attempts[0].error_code == "RESULT_TOOL_ERROR"
+        assert step.error_code == "RESULT_TOOL_ERROR"
+    inline = payload["step_result_inline"] or {}
+    blob = json.dumps(inline, default=str)
+    assert REDACTION_MARKER in blob
+    assert inline["structured_content"]["error"] == "auth_required"
+    assert inline["structured_content"]["token"] == REDACTION_MARKER
+    assert inline["metadata"]["echo"] == REDACTION_MARKER
+
+
+@pytest.mark.asyncio
+async def test_tool_error_oversized_diagnostic_drops_when_marker_exceeds_limit(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tests.unit.test_execution_creation import _install_no_side_effects
+
+    _install_no_side_effects(monkeypatch)
+    execution_id, worker_id, lease_token = await _claim_ready_execution(
+        db_session_factory
+    )
+    huge = "x" * 400
+    client = _ToolErrorDiagnosticClient(
+        content=[{"type": "text", "text": huge}],
+        structured_content={"blob": huge},
+        metadata={"m": huge},
+    )
+    runner = McpToolRunner(
+        session_factory=db_session_factory,
+        mcp_client=client,
+        secret_resolver_factory=_unimplemented_resolver_factory,
+        lease_seconds=60,
+        result_inline_max_bytes=32,
+    )
+    outcome = await runner.run_claimed_execution(
+        execution_id=execution_id, worker_id=worker_id, lease_token=lease_token
+    )
+    assert outcome.terminal_status == StepStatus.FAILED.value
+
+    async with db_session_factory() as session:
+        execution = await ExecutionRepository(session).get(execution_id)
+        assert execution is not None
+        assert execution.status == ExecutionStatus.FAILED.value
+        step = (await ExecutionRepository(session).list_steps(execution_id))[0]
+        assert step.status == StepStatus.FAILED.value
+        assert step.error_code == "RESULT_TOOL_ERROR"
+        assert step.error_message == "MCP tool reported isError=true."
+        assert step.result_inline is None
+        attempts = await ExecutionRepository(session).list_attempts(step.id)
+        assert attempts[0].error_code == "RESULT_TOOL_ERROR"
+        assert attempts[0].result_inline is None
+        tool_calls = await ExecutionRepository(session).list_tool_calls(attempts[0].id)
+        assert tool_calls[0].normalized_status == ToolCallNormalizedStatus.FAILED.value
+
+
+@pytest.mark.asyncio
+async def test_tool_error_oversized_diagnostic_stores_marker_when_limit_allows(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tests.unit.test_execution_creation import _install_no_side_effects
+
+    _install_no_side_effects(monkeypatch)
+    execution_id, worker_id, lease_token = await _claim_ready_execution(
+        db_session_factory
+    )
+    huge = "x" * 400
+    client = _ToolErrorDiagnosticClient(
+        content=[{"type": "text", "text": huge}],
+        structured_content={"blob": huge},
+        metadata={"m": huge},
+    )
+    max_bytes = 128
+    runner = McpToolRunner(
+        session_factory=db_session_factory,
+        mcp_client=client,
+        secret_resolver_factory=_unimplemented_resolver_factory,
+        lease_seconds=60,
+        result_inline_max_bytes=max_bytes,
+    )
+    outcome = await runner.run_claimed_execution(
+        execution_id=execution_id, worker_id=worker_id, lease_token=lease_token
+    )
+    assert outcome.terminal_status == StepStatus.FAILED.value
+
+    async with db_session_factory() as session:
+        step = (await ExecutionRepository(session).list_steps(execution_id))[0]
+        assert step.error_code == "RESULT_TOOL_ERROR"
+        assert step.result_inline == {
+            "diagnostic_omitted": True,
+            "omit_reason": "RESULT_INLINE_TOO_LARGE",
+        }
+        assert huge not in json.dumps(step.result_inline, default=str)
+        _assert_result_inline_within_limit(step.result_inline, max_bytes=max_bytes)
+        attempts = await ExecutionRepository(session).list_attempts(step.id)
+        assert attempts[0].error_code == "RESULT_TOOL_ERROR"
+        assert attempts[0].result_inline == step.result_inline
+
+
+@pytest.mark.asyncio
+async def test_schema_invalid_still_omits_result_inline(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tests.unit.test_execution_creation import _install_no_side_effects
+    from tests.unit.test_tool_runner_security import _TEMP_OUTPUT_SCHEMA
+
+    _install_no_side_effects(monkeypatch)
+
+    def _set_output_schema(tool_version: Any) -> None:
+        tool_version.output_schema = _TEMP_OUTPUT_SCHEMA
+
+    execution_id, worker_id, lease_token = await _claim_ready_execution(
+        db_session_factory, mutate_tool_version=_set_output_schema
+    )
+
+    class _SchemaInvalid:
+        async def call_tool(self, *args: Any, **kwargs: Any):
+            result = NormalizedToolResult(
+                protocol_success=True,
+                tool_error=False,
+                content=[{"type": "text", "text": "should-not-persist"}],
+                structured_content={"temp_c": "not-a-number"},
+                raw_size_bytes=16,
+                duration_ms=1,
+            )
+            return result, {"http_status": 200}, datetime.now(UTC)
+
+    runner = McpToolRunner(
+        session_factory=db_session_factory,
+        mcp_client=_SchemaInvalid(),
+        secret_resolver_factory=_unimplemented_resolver_factory,
+        lease_seconds=60,
+        result_inline_max_bytes=256_000,
+    )
+    outcome = await runner.run_claimed_execution(
+        execution_id=execution_id, worker_id=worker_id, lease_token=lease_token
+    )
+    assert outcome.terminal_status == StepStatus.FAILED.value
+    async with db_session_factory() as session:
+        step = (await ExecutionRepository(session).list_steps(execution_id))[0]
+        attempts = await ExecutionRepository(session).list_attempts(step.id)
+        assert attempts[0].error_code == "RESULT_SCHEMA_INVALID"
+        assert attempts[0].result_inline is None
+        assert step.result_inline is None

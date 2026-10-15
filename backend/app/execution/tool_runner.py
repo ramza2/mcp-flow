@@ -295,6 +295,38 @@ def _serialize_result_inline(result: NormalizedToolResult) -> dict[str, Any]:
     }
 
 
+_TOOL_ERROR_DIAGNOSTIC_OMITTED = {
+    "diagnostic_omitted": True,
+    "omit_reason": "RESULT_INLINE_TOO_LARGE",
+}
+
+
+def _utf8_json_size(value: Any) -> int:
+    return len(json.dumps(value, default=str, ensure_ascii=False).encode("utf-8"))
+
+
+def _tool_error_diagnostic_inline(
+    result: NormalizedToolResult,
+    *,
+    protected: tuple[str, ...],
+    result_inline_max_bytes: int,
+) -> dict[str, Any] | None:
+    """Bounded sanitized diagnostic for MCP ``isError=true`` (RESULT_TOOL_ERROR).
+
+    Reuses the success ``result_inline`` projection + persistence redaction.
+    Oversized diagnostics may store a tiny omission marker only when that
+    marker itself fits ``result_inline_max_bytes``; otherwise ``None``.
+    Never changes ``RESULT_TOOL_ERROR`` status/error_code semantics.
+    """
+    serialized = _serialize_result_inline(result)
+    if _utf8_json_size(serialized) > result_inline_max_bytes:
+        marker = dict(_TOOL_ERROR_DIAGNOSTIC_OMITTED)
+        if _utf8_json_size(marker) > result_inline_max_bytes:
+            return None
+        return marker
+    return sanitize_for_persistence(serialized, protected)
+
+
 def _plan_timeout_seconds(step: ExecutionStep) -> int | None:
     timeout = step.step_snapshot.get("timeout_seconds")
     if timeout is None:
@@ -2470,7 +2502,16 @@ async def _apply_terminal_transition(
             error_layer = "TOOL" if validation.error_code == "RESULT_TOOL_ERROR" else "PROTOCOL"
             error_code = validation.error_code
             error_message = redact_text(validation.error_message or "", protected) or None
-            result_inline = None
+            # Issue #81: preserve bounded sanitized upstream diagnostic for
+            # isError=true only. Other validation failures stay result_inline=None.
+            if validation.error_code == "RESULT_TOOL_ERROR":
+                result_inline = _tool_error_diagnostic_inline(
+                    result,
+                    protected=protected,
+                    result_inline_max_bytes=result_inline_max_bytes,
+                )
+            else:
+                result_inline = None
 
     finished_at = now
 

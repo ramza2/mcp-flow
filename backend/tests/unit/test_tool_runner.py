@@ -176,7 +176,14 @@ async def test_runner_tool_error_marks_failed_tool_layer(
     execution_id, worker_id, lease_token = await _claim_ready_execution(db_session_factory)
 
     client = _StubCurrentMCPClient(
-        result=NormalizedToolResult(protocol_success=True, tool_error=True)
+        result=NormalizedToolResult(
+            protocol_success=True,
+            tool_error=True,
+            content=[{"type": "text", "text": "auth_required"}],
+            structured_content={"code": "connection_required"},
+            metadata={"detail": "reauth"},
+            duration_ms=3,
+        )
     )
     runner = McpToolRunner(
         session_factory=db_session_factory,
@@ -197,9 +204,23 @@ async def test_runner_tool_error_marks_failed_tool_layer(
         assert execution.status == ExecutionStatus.FAILED.value
 
         steps = await ExecutionRepository(session).list_steps(execution_id)
-        attempts = await ExecutionRepository(session).list_attempts(steps[0].id)
+        step = steps[0]
+        assert step.status == StepStatus.FAILED.value
+        assert step.error_code == "RESULT_TOOL_ERROR"
+        assert step.result_inline is not None
+        assert step.result_inline["content"][0]["text"] == "auth_required"
+        assert step.result_inline["structured_content"] == {
+            "code": "connection_required"
+        }
+        assert step.result_inline["metadata"] == {"detail": "reauth"}
+        assert step.result_inline["duration_ms"] == 3
+        attempts = await ExecutionRepository(session).list_attempts(step.id)
         assert attempts[0].error_layer == "TOOL"
         assert attempts[0].error_code == "RESULT_TOOL_ERROR"
+        assert attempts[0].status == StepAttemptStatus.FAILED.value
+        assert attempts[0].result_inline == step.result_inline
+        tool_calls = await ExecutionRepository(session).list_tool_calls(attempts[0].id)
+        assert tool_calls[0].normalized_status == ToolCallNormalizedStatus.FAILED.value
 
 
 @pytest.mark.asyncio

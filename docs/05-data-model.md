@@ -1481,8 +1481,14 @@ Canonical SECRET_REF shape is exact `{kind, secret_id}` with a UUID `secret_id`
 
 `result_inline`은 TOOL SUCCEEDED의 canonical snake_case projection이며
 `STEP_OUTPUT` runtime root다 (`structured_content` 등; camelCase alias 없음).
-`STEP_OUTPUT` resolve는 source `step_snapshot` ↔ Plan Step exact lineage를
-먼저 검증한다. Attempt 생성 전 resolve하며, retry/replay는 pinned
+`RESULT_TOOL_ERROR` (`isError=true`) may also persist the same bounded
+snake_case projection as operator diagnostic evidence after protected-plaintext
+redaction and `result_inline_max_bytes` enforcement (persisted UTF-8 JSON must
+not exceed the limit); oversized diagnostics may store
+`{diagnostic_omitted, omit_reason}` only when that marker fits, else null,
+without changing `RESULT_TOOL_ERROR` status/error_code. Other protocol/schema
+validation failures keep `result_inline` null. `STEP_OUTPUT` resolve still
+requires a SUCCEEDED ancestor. Attempt 생성 전 resolve하며, retry/replay는 pinned
 `resolved_input`과 deterministic recompute equality를 요구한다.
 
 ### 13.5 Step 상태전이
