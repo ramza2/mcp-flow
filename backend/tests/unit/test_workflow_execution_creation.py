@@ -464,9 +464,10 @@ async def test_tool_policy_requires_confirmation_unsupported(
 
 
 @pytest.mark.asyncio
-async def test_tool_policy_requires_approval_dag_wait_unsupported(
+async def test_tool_policy_requires_approval_creates_execution(
     db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Issue #111: Workflow ToolPolicy requires_approval is allowed at creation."""
     _install_no_side_effects(monkeypatch)
     from app.repositories.approval_policy import ApprovalPolicyRepository
 
@@ -474,6 +475,9 @@ async def test_tool_policy_requires_approval_dag_wait_unsupported(
         code=f"ap-{uuid.uuid4().hex[:8]}",
         name="Tool Approval",
         status="ACTIVE",
+        decision_mode="ANY",
+        required_approvals=1,
+        default_expiry_seconds=3600,
     )
     await db_session.flush()
     ctx = await _seed_ready_workflow(
@@ -483,10 +487,17 @@ async def test_tool_policy_requires_approval_dag_wait_unsupported(
             "approval_policy_id": approval.id,
         },
     )
-    with pytest.raises(AppError) as exc:
-        await _create(db_session, ctx)
-    assert exc.value.status_code == 409
-    assert exc.value.code == "DAG_WAIT_UNSUPPORTED"
+    outcome = await _create(db_session, ctx)
+    assert outcome.http_status == 201
+    assert outcome.result.status == ExecutionStatus.CREATED.value
+    execution = await ExecutionRepository(db_session).get(outcome.result.id)
+    assert execution is not None
+    assert execution.source_type == ExecutionSourceType.WORKFLOW_VERSION.value
+    tool_steps = execution.policy_snapshot.get("tool_steps") or {}
+    assert any(
+        (entry.get("policy") or {}).get("tool_policy", {}).get("requires_approval")
+        for entry in tool_steps.values()
+    )
 
 
 # ---------------------------------------------------------------------------

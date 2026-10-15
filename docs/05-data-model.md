@@ -1397,10 +1397,12 @@ orchestrator local-reconcile boundary after the current remote TOOL wave has
 settled. This is an Execution-level checkpoint and may freeze unrelated READY
 sibling branches; branch-local suspension is out of scope.
 
-Multi-Step TOOL + ToolPolicy.requires_approval and multi-Step MRTR must not
-enter Execution-level wait while siblings may be in flight (fail closed:
-`DAG_WAIT_UNSUPPORTED`). Single-TOOL ToolPolicy / MRTR wait paths remain
-unchanged.
+Multi-Step TOOL + ToolPolicy.requires_approval enters Execution-level
+`WAITING_APPROVAL` (lease cleared; no Attempt budget). Parallel waves must
+select the approval TOOL deterministically and must not start additional new
+remote TOOL calls after that wait decision. Multi-Step MRTR must not enter
+Execution-level wait while siblings may be in flight (fail closed:
+`DAG_WAIT_UNSUPPORTED`). Single-TOOL MRTR wait paths remain unchanged.
 
 Multi-Step parallel-wave recovery remains fail-closed: never re-invoke a
 terminal Attempt/ToolCall; ambiguous in-flight parallel evidence must not cause

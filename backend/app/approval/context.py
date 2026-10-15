@@ -24,15 +24,12 @@ def build_approval_context_snapshot(
 ) -> dict[str, Any]:
     """Build the smallest reproducible, secret-safe approval context.
 
-    No prior Step results exist in the AgentRequest single-TOOL foundation.
-    SECRET_REF values must already be reference-only in ``resolved_input``.
+    AgentRequest / MANUAL_TOOL_TEST keep the historical field set (agent_version_id
+    required, no workflow_version_id key) so in-flight hashes stay stable.
+
+    WORKFLOW_VERSION / SCHEDULE_OCCURRENCE use the same schema_version with
+    nullable agent_version_id plus workflow_version_id + source_type.
     """
-    if execution.agent_version_id is None:
-        raise AppError(
-            code="EXECUTION_PRECONDITION_FAILED",
-            message="Approval context requires agent_version_id.",
-            status_code=409,
-        )
     if step.mcp_tool_version_id is None:
         raise AppError(
             code="EXECUTION_PRECONDITION_FAILED",
@@ -41,13 +38,12 @@ def build_approval_context_snapshot(
         )
     _assert_secret_safe_resolved_input(resolved_input)
 
-    return {
+    base = {
         "schema_version": APPROVAL_CONTEXT_SCHEMA_VERSION,
         "execution_id": str(execution.id),
         "step_execution_id": str(step.id),
         "step_key": step.step_key,
         "requester_id": str(execution.requester_id),
-        "agent_version_id": str(execution.agent_version_id),
         "mcp_tool_version_id": str(step.mcp_tool_version_id),
         "plan_hash": execution.plan_hash,
         "risk_class": tool_policy.risk_class,
@@ -72,6 +68,47 @@ def build_approval_context_snapshot(
             "allow_self_approval": approval_policy.allow_self_approval,
             "reject_comment_required": approval_policy.reject_comment_required,
         },
+    }
+
+    # Optional on minimal AgentRequest fixtures / older in-memory doubles.
+    workflow_version_id = getattr(execution, "workflow_version_id", None)
+    if workflow_version_id is not None:
+        if getattr(execution, "agent_version_id", None) is not None:
+            raise AppError(
+                code="EXECUTION_PRECONDITION_FAILED",
+                message=(
+                    "ToolPolicy approval context cannot include both "
+                    "agent_version_id and workflow_version_id."
+                ),
+                status_code=409,
+            )
+        source_type = getattr(execution, "source_type", None)
+        if not isinstance(source_type, str) or not source_type:
+            raise AppError(
+                code="EXECUTION_PRECONDITION_FAILED",
+                message=(
+                    "Workflow ToolPolicy approval context requires source_type."
+                ),
+                status_code=409,
+            )
+        return {
+            **base,
+            "agent_version_id": None,
+            "workflow_version_id": str(workflow_version_id),
+            "source_type": source_type,
+        }
+
+    agent_version_id = getattr(execution, "agent_version_id", None)
+    if agent_version_id is None:
+        raise AppError(
+            code="EXECUTION_PRECONDITION_FAILED",
+            message="Approval context requires agent_version_id.",
+            status_code=409,
+        )
+    # Historical AgentRequest / MANUAL_TOOL_TEST shape — do not add keys.
+    return {
+        **base,
+        "agent_version_id": str(agent_version_id),
     }
 
 

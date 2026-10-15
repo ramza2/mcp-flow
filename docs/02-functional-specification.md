@@ -481,9 +481,13 @@ policy_snapshot.schema_version = workflow_execution_policy.v1
 정상 경로는 queue staging → claim → 기존 TOOL/CONDITION/JOIN/APPROVAL/FOR_EACH/WHILE
 runtime을 사용한다. ToolPolicy `requires_confirmation`은
 `WORKFLOW_CONFIRMATION_UNSUPPORTED`로 Creation 전 fail-closed한다. ToolPolicy
-`requires_approval`은 이번 slice에서 `DAG_WAIT_UNSUPPORTED`(authorable APPROVAL
-Step은 지원). Complex Workflow expired-lease recovery는 follow-up이며 recovery
-sweeper는 `AGENT_REQUEST`만 선택한다.
+`requires_approval=true`는 Attempt/ToolCall/MCP 전 Execution-level
+`WAITING_APPROVAL`로 들어가며, 승인 resume는 동일 Execution + pinned
+WorkflowVersion lineage를 유지한다(`WORKFLOW_VERSION` /
+`SCHEDULE_OCCURRENCE`). authorable APPROVAL Step 경로와 AgentRequest
+single-TOOL ToolPolicy approval 경로는 그대로 유지한다. Complex Workflow
+expired-lease recovery는 follow-up이며 recovery sweeper는 `AGENT_REQUEST`만
+선택한다.
 
 ### Creation eligibility vs pinned Execution runtime
 
