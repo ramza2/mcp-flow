@@ -640,69 +640,89 @@ async def recover_expired_cancel_requested_locked(
 
     await session.flush()
 
-    # Historical terminal ToolCalls (incl. MRTR input_required SUCCEEDED rounds)
-    # do not mean the logical Attempt completed. Preserve terminal ToolCall rows;
-    # never promote STARTED Attempt/Step to SUCCEEDED/FAILED/TIMED_OUT from row
-    # order. Only historical UNKNOWN_OUTCOME propagates conservatively; otherwise
-    # leave STARTED Attempt for existing cancel reconcile → CANCELLED.
+    # Before clean cancellation reconcile: scan the whole Execution for durable
+    # UNKNOWN_OUTCOME evidence on any Attempt/ToolCall (not only STARTED Attempts).
+    # Historical SUCCEEDED/FAILED/TIMED_OUT ToolCalls alone never promote a STARTED
+    # Attempt/Step to terminal success/failure (MRTR multi-round cancel semantics).
+    # UNKNOWN evidence must never be hidden behind a clean CANCELLED Execution.
     steps = await executions.list_steps(execution.id)
-    for step in steps:
+    for step in sorted(steps, key=lambda s: str(s.id)):
         attempts = await executions.list_attempts(step.id)
+        step_has_unknown = False
         for attempt in attempts:
-            if attempt.status != StepAttemptStatus.STARTED.value:
-                continue
             tool_calls = await executions.list_tool_calls(attempt.id)
             if any(
                 tc.normalized_status == ToolCallNormalizedStatus.STARTED.value
                 for tc in tool_calls
             ):
-                # Should have been handled above; leave for reconcile fail-closed.
+                # Inflight STARTED ToolCall should already be terminalized above.
                 continue
-            has_unknown = any(
+
+            attempt_unknown = (
+                attempt.status == StepAttemptStatus.UNKNOWN_OUTCOME.value
+            )
+            toolcall_unknown = any(
                 tc.normalized_status
                 == ToolCallNormalizedStatus.UNKNOWN_OUTCOME.value
                 for tc in tool_calls
             )
-            if not has_unknown:
-                # Case A / historical SUCCEEDED|FAILED|… only → cancel path.
+            if not attempt_unknown and not toolcall_unknown:
+                # STARTED + historical SUCCEEDED/FAILED/… only → cancel path later.
                 continue
 
-            locked_attempt = await executions.get_attempt_with_lock(attempt.id)
+            step_has_unknown = True
+
+            # Preserve truthful terminal ToolCall rows. Only lift STARTED Attempts
+            # that carry UNKNOWN ToolCall evidence onto UNKNOWN_OUTCOME.
             if (
-                locked_attempt is None
-                or locked_attempt.status != StepAttemptStatus.STARTED.value
+                attempt.status == StepAttemptStatus.STARTED.value
+                and toolcall_unknown
             ):
-                continue
-            locked_attempt.status = StepAttemptStatus.UNKNOWN_OUTCOME.value
-            locked_attempt.error_layer = _ERROR_LAYER_WORKER
-            locked_attempt.error_code = (
-                locked_attempt.error_code or _ERROR_CODE_CANCEL_RECOVERY_UNKNOWN
-            )
-            locked_attempt.error_message = (
-                locked_attempt.error_message or _ERROR_MSG_CANCEL_RECOVERY_UNKNOWN
-            )
-            locked_attempt.is_retryable = False
-            locked_attempt.finished_at = now
-            locked_attempt.worker_id = None
-            locked_attempt.lease_expires_at = None
+                locked_attempt = await executions.get_attempt_with_lock(attempt.id)
+                if (
+                    locked_attempt is not None
+                    and locked_attempt.status == StepAttemptStatus.STARTED.value
+                ):
+                    locked_attempt.status = StepAttemptStatus.UNKNOWN_OUTCOME.value
+                    locked_attempt.error_layer = _ERROR_LAYER_WORKER
+                    locked_attempt.error_code = (
+                        locked_attempt.error_code
+                        or _ERROR_CODE_CANCEL_RECOVERY_UNKNOWN
+                    )
+                    locked_attempt.error_message = (
+                        locked_attempt.error_message
+                        or _ERROR_MSG_CANCEL_RECOVERY_UNKNOWN
+                    )
+                    locked_attempt.is_retryable = False
+                    locked_attempt.finished_at = now
+                    locked_attempt.worker_id = None
+                    locked_attempt.lease_expires_at = None
 
-            locked_step = await executions.lock_step(step.id)
-            if locked_step is not None and locked_step.status not in _TERMINAL_STEP:
-                previous_step = locked_step.status
-                locked_step.status = StepStatus.UNKNOWN_OUTCOME.value
-                locked_step.error_code = (
-                    locked_step.error_code or _ERROR_CODE_CANCEL_RECOVERY_UNKNOWN
-                )
-                locked_step.error_message = (
-                    locked_step.error_message or _ERROR_MSG_CANCEL_RECOVERY_UNKNOWN
-                )
-                locked_step.finished_at = now
-                locked_step.lock_version = int(locked_step.lock_version) + 1
-                from app.execution.events import ExecutionEventWriter
+        if not step_has_unknown:
+            continue
 
-                await ExecutionEventWriter(session).emit_step_status_changed(
-                    locked_step, previous_status=previous_step, occurred_at=now
-                )
+        # Existing terminal Step UNKNOWN_OUTCOME is preserved; other terminals stay.
+        if step.status in _TERMINAL_STEP:
+            continue
+
+        locked_step = await executions.lock_step(step.id)
+        if locked_step is None or locked_step.status in _TERMINAL_STEP:
+            continue
+        previous_step = locked_step.status
+        locked_step.status = StepStatus.UNKNOWN_OUTCOME.value
+        locked_step.error_code = (
+            locked_step.error_code or _ERROR_CODE_CANCEL_RECOVERY_UNKNOWN
+        )
+        locked_step.error_message = (
+            locked_step.error_message or _ERROR_MSG_CANCEL_RECOVERY_UNKNOWN
+        )
+        locked_step.finished_at = now
+        locked_step.lock_version = int(locked_step.lock_version) + 1
+        from app.execution.events import ExecutionEventWriter
+
+        await ExecutionEventWriter(session).emit_step_status_changed(
+            locked_step, previous_status=previous_step, occurred_at=now
+        )
 
     await session.flush()
 

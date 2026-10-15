@@ -623,6 +623,235 @@ async def test_cancel_recovery_historical_unknown_propagates_failed(
 
 
 @pytest.mark.asyncio
+async def test_cancel_recovery_running_step_terminal_unknown_attempt_fails(
+    db_session: AsyncSession,
+) -> None:
+    """A: RUNNING Step + Attempt UNKNOWN + ToolCall UNKNOWN → Step UNKNOWN / FAILED."""
+    execution_id, old_worker, _old_token, claim_now = await _claim_ready(db_session)
+    repo = ExecutionRepository(db_session)
+    step = (await repo.list_steps(execution_id))[0]
+    server_id, tool_version_id = await _tool_ids(db_session, step.id)
+
+    step.status = StepStatus.RUNNING.value
+    step.started_at = claim_now
+    step.attempt_count = 1
+    step.lock_version += 1
+    attempt = await repo.create_attempt(
+        step_execution_id=step.id,
+        attempt_no=1,
+        status=StepAttemptStatus.UNKNOWN_OUTCOME.value,
+        worker_id=old_worker,
+        lease_expires_at=None,
+        idempotency_key=f"cancel-run-unk-att-{execution_id}",
+        request_snapshot={"tool_version_id": str(tool_version_id)},
+        started_at=claim_now,
+    )
+    attempt.finished_at = claim_now
+    attempt.error_code = "MCP_CONNECTION_TIMEOUT"
+    attempt.error_message = "timeout after send"
+    attempt.is_retryable = False
+    tool_call = await repo.create_tool_call(
+        step_attempt_id=attempt.id,
+        mcp_server_id=server_id,
+        mcp_tool_version_id=tool_version_id,
+        protocol_era=MCPProtocolEra.CURRENT.value,
+        protocol_version=CURRENT_MCP_PROTOCOL_VERSION,
+        transport_type=MCPTransportType.STREAMABLE_HTTP.value,
+        remote_request_id=str(uuid.uuid4()),
+        request_meta={"method": "tools/call"},
+        normalized_status=ToolCallNormalizedStatus.UNKNOWN_OUTCOME.value,
+        started_at=claim_now,
+    )
+    tool_call.finished_at = claim_now
+    await db_session.commit()
+    await _expire_as_cancel_requested(
+        db_session, execution_id=execution_id, claim_now=claim_now
+    )
+
+    outcome = await ExecutionRecoveryService(db_session, lease_seconds=60).recover(
+        execution_id=execution_id,
+        worker_id="cancel-recovery",
+        now=claim_now + timedelta(seconds=5),
+    )
+    await db_session.commit()
+    assert outcome.decision == RecoveryDecision.CANCEL_RECONCILED
+    assert outcome.invoke_runner is False
+
+    execution = await repo.get(execution_id)
+    assert execution is not None
+    assert execution.status == ExecutionStatus.FAILED.value
+    assert execution.status != ExecutionStatus.CANCELLED.value
+    tool_calls = await repo.list_tool_calls(attempt.id)
+    assert tool_calls[0].id == tool_call.id
+    assert (
+        tool_calls[0].normalized_status
+        == ToolCallNormalizedStatus.UNKNOWN_OUTCOME.value
+    )
+    attempts = await repo.list_attempts(step.id)
+    assert attempts[0].status == StepAttemptStatus.UNKNOWN_OUTCOME.value
+    step = (await repo.list_steps(execution_id))[0]
+    assert step.status == StepStatus.UNKNOWN_OUTCOME.value
+
+
+@pytest.mark.asyncio
+async def test_cancel_recovery_running_step_terminal_attempt_unknown_toolcall(
+    db_session: AsyncSession,
+) -> None:
+    """B: RUNNING Step + terminal Attempt + UNKNOWN ToolCall → fail-closed FAILED."""
+    execution_id, old_worker, _old_token, claim_now = await _claim_ready(db_session)
+    repo = ExecutionRepository(db_session)
+    step = (await repo.list_steps(execution_id))[0]
+    server_id, tool_version_id = await _tool_ids(db_session, step.id)
+
+    step.status = StepStatus.RUNNING.value
+    step.started_at = claim_now
+    step.attempt_count = 1
+    step.lock_version += 1
+    # Attempt already terminal FAILED while ToolCall is UNKNOWN — fail-closed.
+    attempt = await repo.create_attempt(
+        step_execution_id=step.id,
+        attempt_no=1,
+        status=StepAttemptStatus.FAILED.value,
+        worker_id=old_worker,
+        lease_expires_at=None,
+        idempotency_key=f"cancel-run-term-unk-tc-{execution_id}",
+        request_snapshot={"tool_version_id": str(tool_version_id)},
+        started_at=claim_now,
+    )
+    attempt.finished_at = claim_now
+    attempt.error_code = "WORKER_LEASE_EXPIRED"
+    attempt.error_message = "orphaned before settle"
+    attempt.is_retryable = False
+    tool_call = await repo.create_tool_call(
+        step_attempt_id=attempt.id,
+        mcp_server_id=server_id,
+        mcp_tool_version_id=tool_version_id,
+        protocol_era=MCPProtocolEra.CURRENT.value,
+        protocol_version=CURRENT_MCP_PROTOCOL_VERSION,
+        transport_type=MCPTransportType.STREAMABLE_HTTP.value,
+        remote_request_id=str(uuid.uuid4()),
+        request_meta={"method": "tools/call"},
+        normalized_status=ToolCallNormalizedStatus.UNKNOWN_OUTCOME.value,
+        started_at=claim_now,
+    )
+    tool_call.finished_at = claim_now
+    await db_session.commit()
+    await _expire_as_cancel_requested(
+        db_session, execution_id=execution_id, claim_now=claim_now
+    )
+
+    outcome = await ExecutionRecoveryService(db_session, lease_seconds=60).recover(
+        execution_id=execution_id,
+        worker_id="cancel-recovery",
+        now=claim_now + timedelta(seconds=5),
+    )
+    await db_session.commit()
+    assert outcome.decision == RecoveryDecision.CANCEL_RECONCILED
+    assert outcome.invoke_runner is False
+
+    execution = await repo.get(execution_id)
+    assert execution is not None
+    assert execution.status == ExecutionStatus.FAILED.value
+    tool_calls = await repo.list_tool_calls(attempt.id)
+    assert (
+        tool_calls[0].normalized_status
+        == ToolCallNormalizedStatus.UNKNOWN_OUTCOME.value
+    )
+    attempts = await repo.list_attempts(step.id)
+    assert attempts[0].status == StepAttemptStatus.FAILED.value
+    step = (await repo.list_steps(execution_id))[0]
+    assert step.status == StepStatus.UNKNOWN_OUTCOME.value
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "toolcall_order",
+    [
+        (
+            ToolCallNormalizedStatus.SUCCEEDED.value,
+            ToolCallNormalizedStatus.UNKNOWN_OUTCOME.value,
+        ),
+        (
+            ToolCallNormalizedStatus.UNKNOWN_OUTCOME.value,
+            ToolCallNormalizedStatus.SUCCEEDED.value,
+        ),
+        (
+            ToolCallNormalizedStatus.FAILED.value,
+            ToolCallNormalizedStatus.UNKNOWN_OUTCOME.value,
+            ToolCallNormalizedStatus.SUCCEEDED.value,
+        ),
+    ],
+)
+async def test_cancel_recovery_unknown_evidence_independent_of_row_order(
+    db_session: AsyncSession,
+    toolcall_order: tuple[str, ...],
+) -> None:
+    """C: UNKNOWN evidence fail-closes regardless of ToolCall history/row order."""
+    execution_id, old_worker, _old_token, claim_now = await _claim_ready(db_session)
+    repo = ExecutionRepository(db_session)
+    step = (await repo.list_steps(execution_id))[0]
+    server_id, tool_version_id = await _tool_ids(db_session, step.id)
+
+    step.status = StepStatus.RUNNING.value
+    step.started_at = claim_now
+    step.attempt_count = 1
+    step.lock_version += 1
+    attempt = await repo.create_attempt(
+        step_execution_id=step.id,
+        attempt_no=1,
+        status=StepAttemptStatus.UNKNOWN_OUTCOME.value,
+        worker_id=old_worker,
+        lease_expires_at=None,
+        idempotency_key=f"cancel-order-unk-{execution_id}-{toolcall_order[0][:4]}",
+        request_snapshot={"tool_version_id": str(tool_version_id)},
+        started_at=claim_now,
+    )
+    attempt.finished_at = claim_now
+    attempt.is_retryable = False
+    created: list[tuple[uuid.UUID, str]] = []
+    for idx, status in enumerate(toolcall_order):
+        tc = await repo.create_tool_call(
+            step_attempt_id=attempt.id,
+            mcp_server_id=server_id,
+            mcp_tool_version_id=tool_version_id,
+            protocol_era=MCPProtocolEra.CURRENT.value,
+            protocol_version=CURRENT_MCP_PROTOCOL_VERSION,
+            transport_type=MCPTransportType.STREAMABLE_HTTP.value,
+            remote_request_id=str(uuid.uuid4()),
+            request_meta={"round": idx, "status": status},
+            normalized_status=status,
+            started_at=claim_now + timedelta(seconds=idx),
+        )
+        tc.finished_at = claim_now + timedelta(seconds=idx)
+        created.append((tc.id, status))
+    await db_session.commit()
+    await _expire_as_cancel_requested(
+        db_session, execution_id=execution_id, claim_now=claim_now
+    )
+
+    outcome = await ExecutionRecoveryService(db_session, lease_seconds=60).recover(
+        execution_id=execution_id,
+        worker_id="cancel-recovery",
+        now=claim_now + timedelta(seconds=5),
+    )
+    await db_session.commit()
+    assert outcome.decision == RecoveryDecision.CANCEL_RECONCILED
+    assert outcome.invoke_runner is False
+
+    execution = await repo.get(execution_id)
+    assert execution is not None
+    assert execution.status == ExecutionStatus.FAILED.value
+    tool_calls = await repo.list_tool_calls(attempt.id)
+    by_id = {tc.id: tc for tc in tool_calls}
+    for tc_id, status in created:
+        assert by_id[tc_id].normalized_status == status
+    step = (await repo.list_steps(execution_id))[0]
+    assert step.status == StepStatus.UNKNOWN_OUTCOME.value
+    attempts = await repo.list_attempts(step.id)
+    assert attempts[0].status == StepAttemptStatus.UNKNOWN_OUTCOME.value
+
+
+@pytest.mark.asyncio
 async def test_cancel_recovery_existing_unknown_outcome_stays_failed(
     db_session: AsyncSession,
 ) -> None:
