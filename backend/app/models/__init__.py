@@ -28,6 +28,7 @@ from app.models.factory import (
     ToolFactoryJob,
     ToolFactoryPublish,
     ToolFactoryReview,
+    ToolFactoryRuntimeBinding,
     ToolFactoryTestResult,
     ToolFactoryTestRun,
 )
@@ -85,6 +86,7 @@ __all__ = [
     "ToolFactoryJob",
     "ToolFactoryPublish",
     "ToolFactoryReview",
+    "ToolFactoryRuntimeBinding",
     "ToolFactoryTestResult",
     "ToolFactoryTestRun",
     "StepAttempt",

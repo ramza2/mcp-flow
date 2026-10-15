@@ -180,6 +180,17 @@ def transport_config_clear_discovery_fingerprint(
     return cfg
 
 
+def transport_config_clear_verified_fingerprints(
+    transport_config: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Clear Connection Test + Discovery verified fingerprints; keep lineage."""
+
+    cfg = dict(transport_config) if isinstance(transport_config, dict) else {}
+    cfg.pop(_CONNECTION_TEST_VERIFIED_FP_KEY, None)
+    cfg.pop(_CONNECTION_DISCOVERY_VERIFIED_FP_KEY, None)
+    return cfg
+
+
 class MCPServerService:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
@@ -570,4 +581,38 @@ class MCPServerService:
         )
         await self._session.commit()
         await self._session.refresh(updated)
+        return updated
+
+    async def invalidate_factory_runtime_evidence(
+        self,
+        server_id: uuid.UUID,
+        *,
+        commit: bool = False,
+    ) -> MCPServer:
+        """Invalidate Factory Activate evidence after RuntimeBinding mutation.
+
+        RuntimeBinding MCP endpoint URLs are stable (binding_id routes), so
+        execution-relevant upstream/auth changes must clear verified
+        Connection Test / Discovery fingerprints and move ACTIVE → INACTIVE
+        via this service (never a direct status write outside MCPServerService).
+
+        When ``commit=False`` (default), the caller owns the transaction.
+        """
+
+        server = await self._require(server_id)
+        if not is_factory_imported(server):
+            return server
+
+        fields: dict[str, Any] = {
+            "transport_config": transport_config_clear_verified_fingerprints(
+                server.transport_config
+            ),
+        }
+        if server.status == MCPServerStatus.ACTIVE.value:
+            fields["status"] = MCPServerStatus.INACTIVE
+
+        updated = await self._servers.update(server, **fields)
+        if commit:
+            await self._session.commit()
+            await self._session.refresh(updated)
         return updated

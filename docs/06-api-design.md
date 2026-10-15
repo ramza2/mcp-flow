@@ -1449,6 +1449,35 @@ GET  /factory/builds/{build_id}
 - Publish itself does **not** Activate / Connection Test / Discovery / package
   execution
 
+### RuntimeBindings (safe declarative adapter foundation)
+
+```text
+POST /factory/publishes/{publish_id}/runtime-bindings
+GET  /factory/publishes/{publish_id}/runtime-binding
+GET  /factory/runtime-bindings/{binding_id}
+PATCH /factory/runtime-bindings/{binding_id}
+POST /factory/runtime-bindings/{binding_id}/ready
+POST /factory/runtime-bindings/{binding_id}/disable
+```
+
+- Auth: `mcp.server.manage` mutate; `mcp.server.read` detail; ACTIVE user
+- Create validates FactoryPublish + APPROVE Review + GeneratedPackage bytes
+  SHA-256 + MCP Server lineage + non-empty `mcp_tool_ids` (server-derived;
+  client lineage fields are not accepted)
+- Unique one RuntimeBinding per `publish_id` / `mcp_server_id`
+  (`FACTORY_RUNTIME_ALREADY_EXISTS`)
+- PATCH configures explicit `base_url` (SSRF-validated; OpenAPI servers inference
+  forbidden), optional canonical `auth_type` + `auth_secret_id` Secret reference,
+  and bounded timeouts/response size; READY→DRAFT on config change
+- `POST .../ready` requires valid lineage + `base_url` + loadable reviewed
+  contracts; response may include `mcp_endpoint_url` only when status is READY
+- Endpoint form (shared `factory-runtime` service):
+  `{FACTORY_RUNTIME_PUBLIC_BASE_URL}/factory-runtime/{binding_id}/mcp`
+- MCP Server `endpoint_url` provisioning still uses canonical
+  `PATCH /mcp/servers/{server_id}` (Issue #97 fingerprint lifecycle); RuntimeBinding
+  READY alone does **not** Connection Test / Discovery / Activate
+- Responses never expose raw secrets, package bytes, or Object Storage keys
+
 ### Factory connection configuration + Connection Test + Discovery (reuses MCP Server API)
 
 Factory-imported DRAFT servers continue on the canonical MCP Server routes

@@ -1967,12 +1967,13 @@ tool_factory_generated_packages
 tool_factory_test_runs
 tool_factory_reviews
 tool_factory_publishes
+tool_factory_runtime_bindings
 tool_factory_test_results
 ```
 
 생성 artifact hash, generator version, sandbox policy, 시험 결과를 보존한다. 운영 활성화는 관리자 승인 후 별도 MCP Server 등록 흐름을 사용한다.
 
-**Implemented durable foundation (migrations `20261008_0028`, `20261013_0029`, `20261013_0030`, `20261013_0031`, `20261013_0032`, `20261014_0033`, `20261014_0034`, `20261014_0035`):**
+**Implemented durable foundation (migrations `20261008_0028`, `20261013_0029`, `20261013_0030`, `20261013_0031`, `20261013_0032`, `20261014_0033`, `20261014_0034`, `20261014_0035`, `20261014_0036`):**
 
 - `tool_factory_jobs` — OpenAPI analysis Jobs; canonical `JobStatus` CHECK;
   **no** raw source/body column; stores `source_sha256`, Object Storage
@@ -2030,6 +2031,16 @@ tool_factory_test_results
   deferred) and `tool_count` `MCPTool` rows (`INACTIVE`) with ToolVersion
   declarative descriptors; Publish itself does **not** Activate / Connection
   Test / Discovery
+- `tool_factory_runtime_bindings` — durable Factory RuntimeBinding for the safe
+  declarative OpenAPI→MCP adapter; unique `publish_id` + unique `mcp_server_id`;
+  snapshotted lineage (`review_id`, `generated_package_id`,
+  `package_content_sha256`); status `DRAFT` / `READY` / `DISABLED`; explicit
+  `base_url` + optional `auth_secret_id` (Secret reference only); bounded
+  `connect_timeout_ms` / `call_timeout_ms` / `max_response_bytes`;
+  `lock_version` CAS; runtime state is **not** stuffed into
+  `mcp_servers.transport_config`. READY advertises a deterministic MCP endpoint
+  on shared `factory-runtime`; does **not** auto Connection Test / Discovery /
+  Activate
 - `tool_factory_test_results` — forward-compatible evidence table (legacy
   placeholder; sandbox TestRun evidence uses `tool_factory_test_runs`)
 

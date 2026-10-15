@@ -558,3 +558,12 @@ BOOTSTRAP_PERMISSION_CODES: tuple[str, ...] = (
     "audit.export",
     "schedule.manage",
 )
+
+
+class FactoryRuntimeBindingStatus(StrEnum):
+    """docs/05 tool_factory_runtime_bindings.status."""
+
+    DRAFT = "DRAFT"
+    READY = "READY"
+    DISABLED = "DISABLED"
+

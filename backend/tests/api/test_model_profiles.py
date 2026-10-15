@@ -580,8 +580,10 @@ async def test_embedding_connection_test_dimension(
             "error_code",
             "error_message",
         }
-        # Must not leak embedding vectors in the public response body
-        assert "0.1" not in ok.text
+        # Must not leak embedding vectors in the public response body.
+        # Avoid bare "0.1" substring checks — checked_at timestamps can contain it.
+        assert "[0.1" not in ok.text
+        assert "embedding" not in ok.text
 
         scenarios["dim"] = 4
         mismatch = await client.post(f"{EMB_API}/{profile_id}/connection-tests")

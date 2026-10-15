@@ -1,0 +1,12 @@
+"""Bounded limits for Factory runtime HTTP adapter (Issue #101)."""
+
+from __future__ import annotations
+
+DEFAULT_CONNECT_TIMEOUT_MS = 5_000
+DEFAULT_CALL_TIMEOUT_MS = 30_000
+DEFAULT_MAX_REQUEST_BODY_BYTES = 262_144
+DEFAULT_MAX_RESPONSE_BYTES = 262_144
+DEFAULT_MAX_TEXT_PREVIEW_CHARS = 4_096
+DEFAULT_MAX_CONCURRENCY = 32
+# Redirects are disabled (SSRF). No follow.
+FOLLOW_REDIRECTS = False

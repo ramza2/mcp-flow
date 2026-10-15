@@ -17,6 +17,7 @@ from app.models.factory import (
     ToolFactoryJob,
     ToolFactoryPublish,
     ToolFactoryReview,
+    ToolFactoryRuntimeBinding,
     ToolFactoryTestRun,
 )
 from app.schemas.common_page import parse_sort
@@ -803,5 +804,70 @@ class FactoryRepository:
     ) -> ToolFactoryPublish | None:
         stmt = select(ToolFactoryPublish).where(
             ToolFactoryPublish.review_id == review_id
+        )
+        return (await self._session.execute(stmt)).scalar_one_or_none()
+
+    async def create_runtime_binding(
+        self,
+        *,
+        binding_id: uuid.UUID,
+        publish_id: uuid.UUID,
+        mcp_server_id: uuid.UUID,
+        review_id: uuid.UUID,
+        generated_package_id: uuid.UUID,
+        package_content_sha256: str,
+        status: str,
+        created_by: uuid.UUID,
+        connect_timeout_ms: int = 5000,
+        call_timeout_ms: int = 30000,
+        max_response_bytes: int = 262144,
+    ) -> ToolFactoryRuntimeBinding:
+        row = ToolFactoryRuntimeBinding(
+            id=binding_id,
+            publish_id=publish_id,
+            mcp_server_id=mcp_server_id,
+            review_id=review_id,
+            generated_package_id=generated_package_id,
+            package_content_sha256=package_content_sha256,
+            status=status,
+            created_by=created_by,
+            connect_timeout_ms=connect_timeout_ms,
+            call_timeout_ms=call_timeout_ms,
+            max_response_bytes=max_response_bytes,
+            lock_version=1,
+        )
+        self._session.add(row)
+        await self._session.flush()
+        await self._session.refresh(row)
+        return row
+
+    async def get_runtime_binding(
+        self, binding_id: uuid.UUID
+    ) -> ToolFactoryRuntimeBinding | None:
+        return await self._session.get(ToolFactoryRuntimeBinding, binding_id)
+
+    async def get_runtime_binding_for_publish(
+        self, publish_id: uuid.UUID
+    ) -> ToolFactoryRuntimeBinding | None:
+        stmt = select(ToolFactoryRuntimeBinding).where(
+            ToolFactoryRuntimeBinding.publish_id == publish_id
+        )
+        return (await self._session.execute(stmt)).scalar_one_or_none()
+
+    async def get_runtime_binding_for_server(
+        self, mcp_server_id: uuid.UUID
+    ) -> ToolFactoryRuntimeBinding | None:
+        stmt = select(ToolFactoryRuntimeBinding).where(
+            ToolFactoryRuntimeBinding.mcp_server_id == mcp_server_id
+        )
+        return (await self._session.execute(stmt)).scalar_one_or_none()
+
+    async def lock_runtime_binding(
+        self, binding_id: uuid.UUID
+    ) -> ToolFactoryRuntimeBinding | None:
+        stmt = (
+            select(ToolFactoryRuntimeBinding)
+            .where(ToolFactoryRuntimeBinding.id == binding_id)
+            .with_for_update()
         )
         return (await self._session.execute(stmt)).scalar_one_or_none()
