@@ -2,12 +2,14 @@
 
 PostgreSQL is the source of truth. Celery/Redis only deliver recovery work.
 
-Expired RUNNING recovery covers AgentRequest + single TOOL Step + synchronous
-Current MCP ``tools/call`` persisted evidence only. Expired CANCEL_REQUESTED
-recovery is cancellation-only terminalization for AGENT_REQUEST /
-WORKFLOW_VERSION / SCHEDULE_OCCURRENCE and never re-invokes MCP. MRTR
-WAITING_INPUT, Approval WAITING_APPROVAL, and general Workflow RUNNING
-recovery remain out of scope.
+Expired RUNNING recovery covers:
+- AgentRequest + single TOOL Step + synchronous Current MCP evidence
+- non-LOOP WORKFLOW_VERSION / SCHEDULE_OCCURRENCE DAGs (TOOL/CONDITION/JOIN/
+  APPROVAL) via whole-DAG classification before any MCP (Issue #115)
+
+Expired CANCEL_REQUESTED recovery is cancellation-only terminalization and
+never re-invokes MCP. MRTR WAITING_INPUT, Approval WAITING_APPROVAL, and LOOP
+Plan RUNNING recovery remain out of scope.
 """
 
 from __future__ import annotations
@@ -95,6 +97,13 @@ _CANCEL_RECOVERY_SOURCES = frozenset(
     }
 )
 
+_WORKFLOW_RUNNING_RECOVERY_SOURCES = frozenset(
+    {
+        ExecutionSourceType.WORKFLOW_VERSION.value,
+        ExecutionSourceType.SCHEDULE_OCCURRENCE.value,
+    }
+)
+
 
 @dataclass(frozen=True, slots=True)
 class RecoveryOutcome:
@@ -146,7 +155,7 @@ class ExecutionRecoveryService:
                 status_code=400,
             )
         ts = now or datetime.now(UTC)
-        stmt = (
+        agent_stmt = (
             select(Execution.id)
             .where(
                 Execution.status == ExecutionStatus.RUNNING.value,
@@ -157,8 +166,60 @@ class ExecutionRecoveryService:
             .order_by(Execution.lease_expires_at.asc())
             .limit(limit)
         )
-        rows = (await self._session.execute(stmt)).scalars().all()
-        return list(rows)
+        agent_ids = list((await self._session.execute(agent_stmt)).scalars().all())
+
+        # Workflow/Schedule: fetch a bounded expired RUNNING set, then filter out
+        # LOOP Plans so unsupported executions are not republished every poll.
+        wf_stmt = (
+            select(Execution)
+            .where(
+                Execution.status == ExecutionStatus.RUNNING.value,
+                Execution.source_type.in_(tuple(_WORKFLOW_RUNNING_RECOVERY_SOURCES)),
+                Execution.lease_expires_at.is_not(None),
+                Execution.lease_expires_at <= ts,
+            )
+            .order_by(Execution.lease_expires_at.asc())
+            .limit(max(limit * 4, limit))
+        )
+        wf_rows = list((await self._session.execute(wf_stmt)).scalars().all())
+        from app.execution.workflow_dag_recovery import (
+            plan_supports_workflow_running_recovery,
+        )
+
+        wf_ids: list[uuid.UUID] = []
+        for row in wf_rows:
+            if plan_supports_workflow_running_recovery(row.plan_snapshot):
+                wf_ids.append(row.id)
+            if len(wf_ids) >= limit:
+                break
+
+        # Merge by lease expiry order using already-fetched rows where possible.
+        merged: list[tuple[datetime, uuid.UUID]] = []
+        if agent_ids:
+            agent_meta = (
+                await self._session.execute(
+                    select(Execution.id, Execution.lease_expires_at).where(
+                        Execution.id.in_(agent_ids)
+                    )
+                )
+            ).all()
+            for exec_id, expires in agent_meta:
+                if expires is not None:
+                    merged.append((_as_utc(expires), exec_id))
+        for row in wf_rows:
+            if row.id in wf_ids and row.lease_expires_at is not None:
+                merged.append((_as_utc(row.lease_expires_at), row.id))
+        merged.sort(key=lambda item: item[0])
+        seen: set[uuid.UUID] = set()
+        ordered: list[uuid.UUID] = []
+        for _expires, exec_id in merged:
+            if exec_id in seen:
+                continue
+            seen.add(exec_id)
+            ordered.append(exec_id)
+            if len(ordered) >= limit:
+                break
+        return ordered
 
     async def list_expired_cancel_requested_ids(
         self, *, limit: int, now: datetime | None = None
@@ -244,6 +305,21 @@ class ExecutionRecoveryService:
                 worker_id=None,
                 lease_token=None,
                 reason="LEASE_NOT_EXPIRED",
+            )
+
+        if execution.source_type in _WORKFLOW_RUNNING_RECOVERY_SOURCES:
+            return await self._recover_workflow_dag(
+                execution=execution, worker_id=worker, now=ts
+            )
+        if execution.source_type != ExecutionSourceType.AGENT_REQUEST.value:
+            return RecoveryOutcome(
+                execution_id=execution.id,
+                decision=RecoveryDecision.NO_OP,
+                taken_over=False,
+                invoke_runner=False,
+                worker_id=None,
+                lease_token=None,
+                reason="UNSUPPORTED_SOURCE",
             )
 
         try:
@@ -430,6 +506,47 @@ class ExecutionRecoveryService:
             code="RESOURCE_CONFLICT",
             message=f"Unsupported recovery decision {decision}.",
             status_code=409,
+        )
+
+    async def _recover_workflow_dag(
+        self,
+        *,
+        execution: Execution,
+        worker_id: str,
+        now: datetime,
+    ) -> RecoveryOutcome:
+        """Whole-DAG expired RUNNING recovery for non-LOOP Workflow/Schedule."""
+        from app.execution.workflow_dag_recovery import (
+            WorkflowDagRecovery,
+            plan_supports_workflow_running_recovery,
+        )
+
+        if not plan_supports_workflow_running_recovery(execution.plan_snapshot):
+            return RecoveryOutcome(
+                execution_id=execution.id,
+                decision=RecoveryDecision.NO_OP,
+                taken_over=False,
+                invoke_runner=False,
+                worker_id=None,
+                lease_token=None,
+                reason="UNSUPPORTED_PLAN",
+            )
+
+        result = await WorkflowDagRecovery(
+            self._session,
+            lease_seconds=self._lease_seconds,
+            assign_lease=self._assign_lease,
+            clear_lease=self._clear_lease,
+            terminalize_orphan=self._terminalize_orphan_attempt_tool_call,
+        ).recover(execution=execution, worker_id=worker_id, now=now)
+        return RecoveryOutcome(
+            execution_id=execution.id,
+            decision=RecoveryDecision(result.decision),
+            taken_over=result.taken_over,
+            invoke_runner=result.invoke_runner,
+            worker_id=result.worker_id,
+            lease_token=result.lease_token,
+            reason=result.reason,
         )
 
     async def _recover_cancel_requested(

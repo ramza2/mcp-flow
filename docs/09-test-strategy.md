@@ -531,6 +531,11 @@ Dataset은 평가 전 FROZEN하고 실행 중 정답을 변경하지 않는다.
 
 추가 (FNC-EXE-011 expired RUNNING lease recovery vertical slice):
 
+- non-LOOP Workflow/Schedule DAG RUNNING recovery (Issue #115): discovery for
+  WORKFLOW_VERSION/SCHEDULE_OCCURRENCE without LOOP; whole-DAG classify before MCP;
+  per-Step `get_expected_tool_policy_snapshot`; parallel unsafe blocks sibling retry;
+  ErrorPolicy FAIL_EXECUTION/CONTINUE/MARK_PARTIAL; CONDITION/JOIN/APPROVAL via
+  existing orchestrator; LOOP Plans not selected; AgentRequest regressions green
 - expired CANCEL_REQUESTED lease recovery (Issue #113): discovery includes
   CANCEL_REQUESTED + expired lease for AGENT_REQUEST/WORKFLOW_VERSION/
   SCHEDULE_OCCURRENCE; evidence A→CANCELLED, B STARTED ToolCall→UNKNOWN_OUTCOME+
