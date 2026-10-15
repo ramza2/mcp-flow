@@ -227,6 +227,7 @@ async def test_timeout_and_auth_mapping() -> None:
             messages=[{"role": "user", "content": "hi"}],
         )
     assert timed_out.value.error_code == TIMEOUT
+    assert timed_out.value.retryable is True
     await adapter.aclose()
 
     def unauthorized(_request: httpx.Request) -> httpx.Response:

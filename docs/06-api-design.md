@@ -335,6 +335,11 @@ POST  /model-profiles/embeddings/{profile_id}/activate-for-tools
 
 credential은 `secret_id`로만 전달한다.
 
+Create/Update/Response may include optional `request_timeout_ms`
+(integer, `1000`–`300000`, or `null`). `null`/omitted keeps runtime default
+`15000` for production `generate_json` / `embed_texts`. Connection-test
+endpoints do not use this field for probe timeout.
+
 ---
 
 ## 8. MCP Server API

@@ -115,6 +115,70 @@ async def test_llm_crud_list_patch_and_injections(db_client: AsyncClient) -> Non
 
 
 @pytest.mark.asyncio
+async def test_llm_request_timeout_ms_persistence_and_validation(
+    db_client: AsyncClient,
+) -> None:
+    created = await db_client.post(
+        LLM_API, json=_llm_body(request_timeout_ms=45_000)
+    )
+    assert created.status_code == 201, created.text
+    assert created.json()["request_timeout_ms"] == 45_000
+    profile_id = created.json()["id"]
+
+    omitted = await db_client.post(LLM_API, json=_llm_body(name="No Timeout LLM"))
+    assert omitted.status_code == 201
+    assert omitted.json()["request_timeout_ms"] is None
+
+    patched = await db_client.patch(
+        f"{LLM_API}/{profile_id}",
+        headers={"If-Match": "1"},
+        json={"request_timeout_ms": 60_000, "lock_version": 1},
+    )
+    assert patched.status_code == 200
+    assert patched.json()["request_timeout_ms"] == 60_000
+
+    cleared = await db_client.patch(
+        f"{LLM_API}/{profile_id}",
+        headers={"If-Match": "2"},
+        json={"request_timeout_ms": None, "lock_version": 2},
+    )
+    assert cleared.status_code == 200
+    assert cleared.json()["request_timeout_ms"] is None
+
+    for bad in (0, -1, 999, 300_001, True):
+        resp = await db_client.post(
+            LLM_API, json=_llm_body(name=f"bad-{bad}", request_timeout_ms=bad)
+        )
+        assert resp.status_code == 422, bad
+
+
+@pytest.mark.asyncio
+async def test_embedding_request_timeout_ms_persistence_and_validation(
+    db_client: AsyncClient,
+) -> None:
+    created = await db_client.post(
+        EMB_API, json=_emb_body(name="Timeout Emb", request_timeout_ms=30_000)
+    )
+    assert created.status_code == 201, created.text
+    assert created.json()["request_timeout_ms"] == 30_000
+    profile_id = created.json()["id"]
+
+    patched = await db_client.patch(
+        f"{EMB_API}/{profile_id}",
+        headers={"If-Match": "1"},
+        json={"request_timeout_ms": 90_000, "lock_version": 1},
+    )
+    assert patched.status_code == 200
+    assert patched.json()["request_timeout_ms"] == 90_000
+
+    for bad in (0, -5, 300_001):
+        resp = await db_client.post(
+            EMB_API, json=_emb_body(name=f"bad-emb-{bad}", request_timeout_ms=bad)
+        )
+        assert resp.status_code == 422, bad
+
+
+@pytest.mark.asyncio
 async def test_embedding_crud_activation_and_injections(db_client: AsyncClient) -> None:
     a = await db_client.post(EMB_API, json=_emb_body(name="Emb A", dimension=8))
     assert a.status_code == 201, a.text

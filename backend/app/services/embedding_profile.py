@@ -24,6 +24,7 @@ from app.schemas.model_profile import (
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
 
 # Fields that change embedding generation semantics (docs/05 §8.6).
+# request_timeout_ms is runtime HTTP only — not a stale trigger.
 _EMBEDDING_GENERATION_FIELDS = frozenset(
     {
         "provider",
@@ -86,6 +87,7 @@ class EmbeddingProfileService:
             dimension=data.dimension,
             distance_metric=data.distance_metric,
             credential_secret_id=data.credential_secret_id,
+            request_timeout_ms=data.request_timeout_ms,
             is_active_for_tools=False,
         )
         await self._session.commit()
@@ -257,6 +259,8 @@ class EmbeddingProfileService:
                     base_url=profile.base_url,
                     dimension=int(profile.dimension),
                     credential_secret_id=profile.credential_secret_id,
+                    # Included for target completeness; connection-test ignores it.
+                    request_timeout_ms=profile.request_timeout_ms,
                 )
             )
         finally:

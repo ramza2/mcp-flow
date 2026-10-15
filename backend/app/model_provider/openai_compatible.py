@@ -29,7 +29,10 @@ logger = logging.getLogger(__name__)
 OPENAI_COMPATIBLE_PROVIDER = "OPENAI_COMPATIBLE"
 
 _EMBEDDING_PROBE_INPUT = "mcpflow connection test"
-_DEFAULT_TIMEOUT_MS = 15000
+# Default Model Provider runtime / connection-probe HTTP timeout (ms).
+# Profile `request_timeout_ms` may override runtime generate_json/embed_texts only.
+DEFAULT_REQUEST_TIMEOUT_MS = 15000
+_DEFAULT_TIMEOUT_MS = DEFAULT_REQUEST_TIMEOUT_MS
 
 
 @dataclass(frozen=True, slots=True)

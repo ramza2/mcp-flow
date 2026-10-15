@@ -220,6 +220,7 @@ class ToolSelectorService:
             model=profile.model,
             base_url=profile.base_url,
             credential_secret_id=profile.credential_secret_id,
+            request_timeout_ms=profile.request_timeout_ms,
         )
         profile_parameters = dict(profile.parameters) if profile.parameters else None
         profile_id = profile.id

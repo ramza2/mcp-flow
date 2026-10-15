@@ -29,6 +29,7 @@ class LLMProfileRepository:
         base_url: str,
         credential_secret_id: uuid.UUID | None = None,
         parameters: dict[str, Any] | None = None,
+        request_timeout_ms: int | None = None,
     ) -> LLMProfile:
         profile = LLMProfile(
             code=code,
@@ -38,6 +39,7 @@ class LLMProfileRepository:
             base_url=base_url,
             credential_secret_id=credential_secret_id,
             parameters=parameters,
+            request_timeout_ms=request_timeout_ms,
             status=None,
         )
         self._session.add(profile)

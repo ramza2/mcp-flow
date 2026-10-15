@@ -25,6 +25,11 @@ class LLMProfile(Base, TimestampMixin, LockVersionMixin):
     __table_args__ = (
         UniqueConstraint("code", name="uq_llm_profiles_code"),
         CheckConstraint("lock_version >= 1", name="ck_llm_profiles_lock_version"),
+        CheckConstraint(
+            "request_timeout_ms IS NULL OR "
+            "(request_timeout_ms >= 1000 AND request_timeout_ms <= 300000)",
+            name="ck_llm_profiles_request_timeout_ms",
+        ),
         Index("ix_llm_profiles_updated_at", "updated_at"),
         Index("ix_llm_profiles_provider", "provider"),
     )
@@ -41,6 +46,8 @@ class LLMProfile(Base, TimestampMixin, LockVersionMixin):
         UUID(as_uuid=True), nullable=True
     )
     parameters: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    # Optional Model Provider runtime HTTP timeout (ms). NULL → adapter default.
+    request_timeout_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # Canonical status values are not defined in docs — nullable / system-reserved.
     status: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
@@ -52,6 +59,11 @@ class EmbeddingProfile(Base, TimestampMixin, LockVersionMixin):
         CheckConstraint("dimension > 0", name="ck_embedding_profiles_dimension"),
         CheckConstraint(
             "lock_version >= 1", name="ck_embedding_profiles_lock_version"
+        ),
+        CheckConstraint(
+            "request_timeout_ms IS NULL OR "
+            "(request_timeout_ms >= 1000 AND request_timeout_ms <= 300000)",
+            name="ck_embedding_profiles_request_timeout_ms",
         ),
         Index("ix_embedding_profiles_updated_at", "updated_at"),
         Index("ix_embedding_profiles_provider", "provider"),
@@ -78,6 +90,9 @@ class EmbeddingProfile(Base, TimestampMixin, LockVersionMixin):
     credential_secret_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), nullable=True
     )
+    # Optional Model Provider runtime HTTP timeout (ms). NULL → adapter default.
+    # Not an embedding-generation semantic; does not mark ToolEmbeddings stale.
+    request_timeout_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     status: Mapped[str | None] = mapped_column(String(32), nullable=True)
     is_active_for_tools: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default=text("false")

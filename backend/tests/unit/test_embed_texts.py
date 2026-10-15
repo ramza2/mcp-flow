@@ -223,6 +223,7 @@ async def test_embed_texts_timeout() -> None:
             expected_dimension=3,
         )
     assert exc.value.error_code == TIMEOUT
+    assert exc.value.retryable is True
     await adapter.aclose()
 
 

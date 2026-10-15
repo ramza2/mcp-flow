@@ -154,6 +154,7 @@ class RequestAnalyzerService:
             model=profile.model,
             base_url=profile.base_url,
             credential_secret_id=profile.credential_secret_id,
+            request_timeout_ms=profile.request_timeout_ms,
         )
         profile_parameters = dict(profile.parameters) if profile.parameters else None
         system_instruction = version.system_instruction
