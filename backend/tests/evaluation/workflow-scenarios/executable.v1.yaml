@@ -1,0 +1,48 @@
+# Official KPI-05 executable composite scenarios (live_official).
+# One attempt/result per scenario_id. Mock-only / whole-module pytest health
+# belongs in offline diagnostics, not here.
+scenarios_version: workflow-executable.v1
+
+# Live prerequisites (all required for MEASURED evidence):
+#   TEST_DATABASE_URL or DATABASE_URL
+#   MCPFLOW_KPI_LIVE_COMPOSITE=1
+# Optional pin identities recorded when present:
+#   MCPFLOW_KPI_AGENT_VERSION_ID
+#   MCPFLOW_KPI_WORKFLOW_VERSION_ID
+
+scenarios:
+  - scenario_id: sequential_tool_chain
+    title: Sequential multi-TOOL workflow execution
+    kind: sequential
+    requires_env:
+      - MCPFLOW_KPI_LIVE_COMPOSITE
+
+  - scenario_id: parallel_join_wave
+    title: Parallel TOOL + JOIN wave
+    kind: parallel
+    requires_env:
+      - MCPFLOW_KPI_LIVE_COMPOSITE
+
+  - scenario_id: condition_branch
+    title: CONDITION branch selection
+    kind: condition
+    requires_env:
+      - MCPFLOW_KPI_LIVE_COMPOSITE
+
+  - scenario_id: foreach_loop
+    title: FOR_EACH LOOP completion
+    kind: foreach
+    requires_env:
+      - MCPFLOW_KPI_LIVE_COMPOSITE
+
+  - scenario_id: while_loop
+    title: WHILE LOOP completion
+    kind: while
+    requires_env:
+      - MCPFLOW_KPI_LIVE_COMPOSITE
+
+  - scenario_id: approval_wait_resume
+    title: ToolPolicy approval wait / approve / resume
+    kind: approval
+    requires_env:
+      - MCPFLOW_KPI_LIVE_COMPOSITE

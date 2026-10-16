@@ -1,0 +1,19 @@
+# Live official KPI-01 / KPI-02 prerequisites (pinned identities).
+# When any required key is missing, official metrics are NOT_MEASURED.
+prerequisites_version: tool-mapping-live.v1
+
+required_env:
+  - TEST_DATABASE_URL  # or DATABASE_URL (either accepted)
+  - MCPFLOW_KPI_AGENT_VERSION_ID
+  - MCPFLOW_KPI_LLM_PROFILE_ID
+  - MCPFLOW_KPI_EMBEDDING_PROFILE_ID
+
+optional_env_recorded:
+  - MCPFLOW_KPI_TOOL_INVENTORY_SNAPSHOT_ID
+  - MCPFLOW_KPI_EVAL_DATASET_VERSION
+
+# Official KPI-01 timing window (when live measurement is enabled):
+#   t_start = AgentRequest accepted (status RECEIVED / analyze entry)
+#   t_end   = ToolSelectionOutcome committed (AUTO_SELECT / CONFIRM / CLARIFY / NO_MATCH)
+# Segments may additionally record analyzer / retrieval / rerank durations.
+# Selector-only microbenchmarks are offline diagnostics only.

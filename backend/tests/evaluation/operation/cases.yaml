@@ -1,6 +1,15 @@
-# KPI-06 — operations-function pass rate.
+# KPI-06 — operations-function pass rate (test-based official metric allowed).
+# Denominator = declared cases (fixed). Required categories must all run.
+# Missing required path → NOT_RUN → official status INCOMPLETE (no fake 100%).
 cases_version: operation.v1
-denominator_zero_policy: report measured_value null and skip_reason DENOMINATOR_ZERO
+evidence_role: official_test_based
+denominator_policy: fixed_declared_cases
+required_categories:
+  - authorization
+  - approval
+  - audit
+  - cancellation
+  - recovery
 
 cases:
   - id: authorization

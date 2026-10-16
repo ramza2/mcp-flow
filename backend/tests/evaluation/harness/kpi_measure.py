@@ -1,13 +1,18 @@
-"""KPI measurement harness for the six project KPIs (docs/09 §25–27)."""
+"""KPI measurement harness — offline diagnostics vs live official evidence.
+
+docs/09 §25–27 / Issue #119 review: never present selector microbenchmarks or
+frozen-rerank decision tests as official project KPI values.
+"""
 
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import time
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from unittest.mock import MagicMock
 
 from app.agent.tool_selector import ToolSelectorService
@@ -32,30 +37,59 @@ from tests.evaluation.harness.common import (
     write_json,
 )
 
+MetricStatus = Literal["MEASURED", "INCOMPLETE", "NOT_MEASURED"]
+EvidenceMode = Literal["offline_regression", "live_official"]
+
 
 def _targets() -> dict[str, Any]:
     return load_yaml(eval_root() / "targets.yaml")
 
 
-def _metric_base(
+def _db_url() -> str:
+    return (
+        os.environ.get("TEST_DATABASE_URL")
+        or os.environ.get("DATABASE_URL")
+        or ""
+    ).strip()
+
+
+def _env_present(name: str) -> bool:
+    if name in {"TEST_DATABASE_URL", "DATABASE_URL"}:
+        return bool(_db_url())
+    return bool(os.environ.get(name, "").strip())
+
+
+def _missing_env(names: list[str]) -> list[str]:
+    return [name for name in names if not _env_present(name)]
+
+
+def _official_metric(
     *,
     kpi_id: str,
     name: str,
-    numerator: int | None,
-    denominator: int | None,
+    status: MetricStatus,
+    evidence_mode: EvidenceMode,
+    numerator: int | float | None,
+    denominator: int | float | None,
     measured_value: float | int | None,
     unit: str,
     target: Any,
+    evidence_complete: bool,
+    reason: str,
     extra: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "kpi_id": kpi_id,
         "name": name,
+        "status": status,
+        "evidence_mode": evidence_mode,
         "numerator": numerator,
         "denominator": denominator,
         "measured_value": measured_value,
         "unit": unit,
         "target": target,
+        "evidence_complete": evidence_complete,
+        "reason": reason,
         "measured_at": measured_at(),
         "git_sha": git_sha(),
         "environment": environment_label(),
@@ -65,51 +99,35 @@ def _metric_base(
     return payload
 
 
-def measure_kpi_01_response_time() -> dict[str, Any]:
-    """Wall-clock segments for a representative frozen Tool selection decide path."""
-    dataset = load_json(eval_root() / "tool-mapping" / "dataset.v1.json")
-    case = dataset["cases"][0]
-    settings = SelectionSettings.model_validate(dataset["selection_settings"])
-
-    t0 = time.perf_counter()
-    structured, candidates, rerank = _build_selection_inputs(case)
-    t_build = time.perf_counter()
-    service = ToolSelectorService(MagicMock())
-    outcome = service._decide(
-        structured=structured,
-        prompt_candidates=candidates,
-        rerank=rerank,
-        selection_settings=settings,
-        existing_missing=[],
-    )
-    t_decide = time.perf_counter()
-
-    segments = {
-        "request_accept_ms": round((t_build - t0) * 1000.0, 3),
-        "planning_ms": round((t_decide - t_build) * 1000.0, 3),
-        "total_response_ms": round((t_decide - t0) * 1000.0, 3),
-    }
-    # KPI-01 has no approved numeric target in-repo; report measurement only.
-    targets = _targets()["targets"]["KPI-01"]
-    return _metric_base(
-        kpi_id="KPI-01",
-        name="response_time",
+def _not_measured(
+    *,
+    kpi_id: str,
+    name: str,
+    evidence_mode: EvidenceMode,
+    unit: str,
+    target: Any,
+    reason: str,
+    extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    return _official_metric(
+        kpi_id=kpi_id,
+        name=name,
+        status="NOT_MEASURED",
+        evidence_mode=evidence_mode,
         numerator=None,
         denominator=None,
-        measured_value=segments["total_response_ms"],
-        unit=targets.get("measured_value_unit", "milliseconds"),
-        target=targets.get("target"),
-        extra={
-            "segments": segments,
-            "fixture_case_id": case["id"],
-            "dataset_version": dataset["dataset_version"],
-            "notes": (
-                "Representative frozen ToolSelector._decide path timing. "
-                "Not an end-to-end HTTP SLA; NFR-PERF targets not configured in-repo."
-            ),
-            "decision": outcome.decision,
-        },
+        measured_value=None,
+        unit=unit,
+        target=target,
+        evidence_complete=False,
+        reason=reason,
+        extra=extra,
     )
+
+
+# ---------------------------------------------------------------------------
+# Offline diagnostics (never official KPI values)
+# ---------------------------------------------------------------------------
 
 
 def _build_selection_inputs(
@@ -178,16 +196,57 @@ def _build_selection_inputs(
     return structured, candidates, rerank
 
 
-def measure_kpi_02_tool_mapping() -> dict[str, Any]:
-    """Top-1 accuracy over frozen dataset (docs/09 §26)."""
+def diagnostic_selector_decide_timing() -> dict[str, Any]:
+    """Offline diagnostic only — not official KPI-01 response_time."""
+    dataset = load_json(eval_root() / "tool-mapping" / "dataset.v1.json")
+    case = dataset["cases"][0]
+    settings = SelectionSettings.model_validate(dataset["selection_settings"])
+    t0 = time.perf_counter()
+    structured, candidates, rerank = _build_selection_inputs(case)
+    t_build = time.perf_counter()
+    service = ToolSelectorService(MagicMock())
+    outcome = service._decide(
+        structured=structured,
+        prompt_candidates=candidates,
+        rerank=rerank,
+        selection_settings=settings,
+        existing_missing=[],
+    )
+    t_decide = time.perf_counter()
+    segments = {
+        "fixture_build_ms": round((t_build - t0) * 1000.0, 3),
+        "selector_decide_ms": round((t_decide - t_build) * 1000.0, 3),
+        "total_diagnostic_ms": round((t_decide - t0) * 1000.0, 3),
+    }
+    return {
+        "diagnostic_id": "selector_decide_microbenchmark",
+        "name": "tool_selector_decide_timing_ms",
+        "evidence_mode": "offline_regression",
+        "measured_value": segments["total_diagnostic_ms"],
+        "unit": "milliseconds",
+        "segments": segments,
+        "fixture_case_id": case["id"],
+        "dataset_version": dataset["dataset_version"],
+        "decision": outcome.decision,
+        "notes": (
+            "Diagnostic only. Times ToolSelector._decide with MagicMock; "
+            "excludes HTTP/analyzer/retrieval/rerank/plan/execution. "
+            "Must not be used as official KPI-01 response_time."
+        ),
+        "measured_at": measured_at(),
+        "git_sha": git_sha(),
+        "environment": environment_label(),
+    }
+
+
+def diagnostic_selector_decision_regression() -> dict[str, Any]:
+    """Frozen StructuredRequest/candidates/rerank → _decide regression."""
     dataset = load_json(eval_root() / "tool-mapping" / "dataset.v1.json")
     settings = SelectionSettings.model_validate(dataset["selection_settings"])
     service = ToolSelectorService(MagicMock())
-
     valid = 0
     correct = 0
     case_results: list[dict[str, Any]] = []
-
     for case in dataset["cases"]:
         valid_for_top1 = case.get("valid_for_top1", True)
         structured, candidates, rerank = _build_selection_inputs(case)
@@ -211,12 +270,10 @@ def measure_kpi_02_tool_mapping() -> dict[str, Any]:
                 case.get("expected_decision") is None
                 or outcome.decision == case.get("expected_decision")
             )
-
         if valid_for_top1:
             valid += 1
             if is_correct:
                 correct += 1
-
         case_results.append(
             {
                 "id": case["id"],
@@ -228,33 +285,419 @@ def measure_kpi_02_tool_mapping() -> dict[str, Any]:
                 "correct": is_correct if valid_for_top1 else None,
             }
         )
+    return {
+        "diagnostic_id": "selector_decision_regression",
+        "name": "frozen_selector_decision_top1_accuracy",
+        "evidence_mode": "offline_regression",
+        "numerator": correct,
+        "denominator": valid,
+        "measured_value": percent(correct, valid),
+        "unit": "percent",
+        "dataset_version": dataset["dataset_version"],
+        "cases": case_results,
+        "notes": (
+            "Selector-decision regression with frozen StructuredRequest, "
+            "candidates, and frozen_rerank. Not official KPI-02 NL→Tool accuracy."
+        ),
+        "measured_at": measured_at(),
+        "git_sha": git_sha(),
+        "environment": environment_label(),
+    }
 
+
+def _run_fixed_denominator_pytest_groups(
+    groups: list[dict[str, Any]],
+    *,
+    path_key: str = "pytest",
+    include_optional_integration: bool,
+) -> dict[str, Any]:
+    """Fixed denominator = declared groups. Missing required paths → NOT_RUN."""
+    declared = len(groups)
+    passed = 0
+    failed = 0
+    not_run = 0
+    details: list[dict[str, Any]] = []
+
+    for group in groups:
+        required_paths = list(group.get(path_key) or [])
+        optional_paths = list(group.get("optional_integration") or [])
+        extra = list(group.get("pytest_args") or [])
+        missing_required = [p for p in required_paths if p not in existing_paths(required_paths)]
+        present_required = existing_paths(required_paths)
+
+        if missing_required or not present_required:
+            not_run += 1
+            details.append(
+                {
+                    "id": group["id"],
+                    "title": group.get("title"),
+                    "status": "NOT_RUN",
+                    "reason": "MISSING_REQUIRED_PATH",
+                    "missing_required_paths": missing_required or required_paths,
+                    "paths": present_required,
+                }
+            )
+            continue
+
+        unitish = [p for p in present_required if "/integration/" not in p]
+        integ_required = [p for p in present_required if "/integration/" in p]
+        optional_present = (
+            existing_paths(optional_paths) if include_optional_integration else []
+        )
+
+        ok = True
+        ran_any = False
+        if unitish:
+            proc = run_pytest(unitish, extra_args=extra, integration=False)
+            ok = ok and proc.returncode == 0
+            ran_any = True
+        if integ_required:
+            if not include_optional_integration and not _db_url():
+                not_run += 1
+                details.append(
+                    {
+                        "id": group["id"],
+                        "title": group.get("title"),
+                        "status": "NOT_RUN",
+                        "reason": "INTEGRATION_REQUIRED_BUT_DISABLED",
+                        "paths": present_required,
+                    }
+                )
+                continue
+            proc = run_pytest(integ_required, extra_args=extra, integration=True)
+            ok = ok and proc.returncode == 0
+            ran_any = True
+        if optional_present:
+            proc = run_pytest(optional_present, extra_args=extra, integration=True)
+            # Optional integration failure does not mark NOT_RUN; records separately.
+            details_optional_ok = proc.returncode == 0
+        else:
+            details_optional_ok = None
+
+        if not ran_any:
+            not_run += 1
+            details.append(
+                {
+                    "id": group["id"],
+                    "title": group.get("title"),
+                    "status": "NOT_RUN",
+                    "reason": "NO_EXECUTABLE_LAYER",
+                    "paths": present_required,
+                }
+            )
+            continue
+
+        if ok:
+            passed += 1
+            status = "PASS"
+        else:
+            failed += 1
+            status = "FAIL"
+        details.append(
+            {
+                "id": group["id"],
+                "title": group.get("title"),
+                "status": status,
+                "paths": present_required,
+                "optional_integration_ok": details_optional_ok,
+            }
+        )
+
+    evidence_complete = not_run == 0
+    return {
+        "declared": declared,
+        "passed": passed,
+        "failed": failed,
+        "not_run": not_run,
+        "evidence_complete": evidence_complete,
+        "details": details,
+    }
+
+
+def diagnostic_registration_pytest_health() -> dict[str, Any]:
+    cases_doc = load_yaml(eval_root() / "registration" / "cases.yaml")
+    result = _run_fixed_denominator_pytest_groups(
+        list(cases_doc.get("cases") or []),
+        include_optional_integration=bool(_db_url()),
+    )
+    return {
+        "diagnostic_id": "registration_pytest_group_health",
+        "name": "registration_pytest_pass_rate",
+        "evidence_mode": "offline_regression",
+        "numerator": result["passed"],
+        "denominator": result["declared"],
+        "measured_value": (
+            percent(result["passed"], result["declared"])
+            if result["evidence_complete"]
+            else None
+        ),
+        "evidence_complete": result["evidence_complete"],
+        "not_run": result["not_run"],
+        "failed": result["failed"],
+        "cases_version": cases_doc.get("cases_version"),
+        "cases": result["details"],
+        "notes": (
+            "Pytest group health only. Not official KPI-04 connection/registration "
+            "attempt success rate. Fixed denominator = declared cases."
+        ),
+        "measured_at": measured_at(),
+        "git_sha": git_sha(),
+        "environment": environment_label(),
+    }
+
+
+def diagnostic_composite_pytest_health() -> dict[str, Any]:
+    cases_doc = load_yaml(eval_root() / "workflow-scenarios" / "scenarios.yaml")
+    result = _run_fixed_denominator_pytest_groups(
+        list(cases_doc.get("scenarios") or []),
+        include_optional_integration=bool(_db_url()),
+    )
+    return {
+        "diagnostic_id": "composite_pytest_module_health",
+        "name": "workflow_pytest_module_pass_rate",
+        "evidence_mode": "offline_regression",
+        "numerator": result["passed"],
+        "denominator": result["declared"],
+        "measured_value": (
+            percent(result["passed"], result["declared"])
+            if result["evidence_complete"]
+            else None
+        ),
+        "evidence_complete": result["evidence_complete"],
+        "not_run": result["not_run"],
+        "failed": result["failed"],
+        "scenarios_version": cases_doc.get("scenarios_version"),
+        "scenarios": result["details"],
+        "notes": (
+            "Whole pytest-module health. Not official KPI-05 (one attempt per "
+            "executable composite scenario). Fixed denominator = declared scenarios."
+        ),
+        "measured_at": measured_at(),
+        "git_sha": git_sha(),
+        "environment": environment_label(),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Official KPIs
+# ---------------------------------------------------------------------------
+
+
+def _live_agent_pins() -> dict[str, Any]:
+    return {
+        "dataset_version": os.environ.get("MCPFLOW_KPI_EVAL_DATASET_VERSION")
+        or "tool-mapping.v1",
+        "agent_version_id": os.environ.get("MCPFLOW_KPI_AGENT_VERSION_ID") or None,
+        "llm_profile_id": os.environ.get("MCPFLOW_KPI_LLM_PROFILE_ID") or None,
+        "embedding_profile_id": os.environ.get("MCPFLOW_KPI_EMBEDDING_PROFILE_ID")
+        or None,
+        "tool_inventory_snapshot_id": os.environ.get(
+            "MCPFLOW_KPI_TOOL_INVENTORY_SNAPSHOT_ID"
+        )
+        or None,
+        "git_sha": git_sha(),
+        "environment": environment_label(),
+    }
+
+
+def _live_prereq_missing() -> list[str]:
+    missing: list[str] = []
+    if not _db_url():
+        missing.append("TEST_DATABASE_URL|DATABASE_URL")
+    for key in (
+        "MCPFLOW_KPI_AGENT_VERSION_ID",
+        "MCPFLOW_KPI_LLM_PROFILE_ID",
+        "MCPFLOW_KPI_EMBEDDING_PROFILE_ID",
+    ):
+        if not _env_present(key):
+            missing.append(key)
+    return missing
+
+
+def measure_official_kpi_01(*, mode: str) -> dict[str, Any]:
+    targets = _targets()["targets"]["KPI-01"]
+    unit = targets.get("measured_value_unit", "milliseconds")
+    target = targets.get("target")
+    timing_window = (
+        "t_start=AgentRequest accept/analyze entry; "
+        "t_end=ToolSelectionOutcome commit "
+        "(AUTO_SELECT|CONFIRM|CLARIFY|NO_MATCH)"
+    )
+    if mode != "live":
+        return _not_measured(
+            kpi_id="KPI-01",
+            name="response_time",
+            evidence_mode="offline_regression",
+            unit=unit,
+            target=target,
+            reason=(
+                "OFFLINE_MODE: official response_time requires live canonical "
+                "Agent path (Analyzer→retrieval→rerank→selector). "
+                "Selector microbenchmark is offline diagnostic only."
+            ),
+            extra={"timing_window": timing_window},
+        )
+    missing = _live_prereq_missing()
+    if missing:
+        return _not_measured(
+            kpi_id="KPI-01",
+            name="response_time",
+            evidence_mode="live_official",
+            unit=unit,
+            target=target,
+            reason=f"LIVE_PREREQUISITES_MISSING: {', '.join(missing)}",
+            extra={"timing_window": timing_window, "pins": _live_agent_pins()},
+        )
+    # Live E2E wall-clock against pinned identities is not auto-executed here to
+    # avoid inventing a second runtime or mutating undesignated resources.
+    # When a pilot runner records results, set MCPFLOW_KPI_01_LIVE_RESULT_MS.
+    raw = os.environ.get("MCPFLOW_KPI_01_LIVE_RESULT_MS", "").strip()
+    if not raw:
+        return _not_measured(
+            kpi_id="KPI-01",
+            name="response_time",
+            evidence_mode="live_official",
+            unit=unit,
+            target=target,
+            reason=(
+                "LIVE_RESULT_UNAVAILABLE: prerequisites present but no recorded "
+                "end-to-end timing (set MCPFLOW_KPI_01_LIVE_RESULT_MS from the "
+                "canonical AgentRequest→selection path). Fake selector timings "
+                "are rejected."
+            ),
+            extra={"timing_window": timing_window, "pins": _live_agent_pins()},
+        )
+    try:
+        value = float(raw)
+    except ValueError:
+        return _not_measured(
+            kpi_id="KPI-01",
+            name="response_time",
+            evidence_mode="live_official",
+            unit=unit,
+            target=target,
+            reason="LIVE_RESULT_INVALID: MCPFLOW_KPI_01_LIVE_RESULT_MS not a number",
+            extra={"timing_window": timing_window, "pins": _live_agent_pins()},
+        )
+    return _official_metric(
+        kpi_id="KPI-01",
+        name="response_time",
+        status="MEASURED",
+        evidence_mode="live_official",
+        numerator=None,
+        denominator=None,
+        measured_value=value,
+        unit=unit,
+        target=target,
+        evidence_complete=True,
+        reason="LIVE_RECORDED_E2E_AGENT_PATH",
+        extra={"timing_window": timing_window, "pins": _live_agent_pins()},
+    )
+
+
+def measure_official_kpi_02(*, mode: str) -> dict[str, Any]:
     targets = _targets()["targets"]["KPI-02"]
-    value = percent(correct, valid)
-    return _metric_base(
+    unit = targets.get("measured_value_unit", "percent")
+    target = targets.get("target")
+    if mode != "live":
+        return _not_measured(
+            kpi_id="KPI-02",
+            name="nl_to_tool_mapping_top1_accuracy",
+            evidence_mode="offline_regression",
+            unit=unit,
+            target=target,
+            reason=(
+                "OFFLINE_MODE: official Top-1 accuracy requires live "
+                "request_text → Analyzer → retrieval/embedding → LLM rerank → "
+                "selector. Frozen rerank/_decide is offline diagnostic only."
+            ),
+            extra={"counting_rule": targets.get("counting_rule")},
+        )
+    missing = _live_prereq_missing()
+    if missing:
+        return _not_measured(
+            kpi_id="KPI-02",
+            name="nl_to_tool_mapping_top1_accuracy",
+            evidence_mode="live_official",
+            unit=unit,
+            target=target,
+            reason=f"LIVE_PREREQUISITES_MISSING: {', '.join(missing)}",
+            extra={
+                "counting_rule": targets.get("counting_rule"),
+                "pins": _live_agent_pins(),
+            },
+        )
+    # Accept only an explicitly recorded live evaluation summary (numerator/denom),
+    # never frozen diagnostic accuracy.
+    num_raw = os.environ.get("MCPFLOW_KPI_02_LIVE_NUMERATOR", "").strip()
+    den_raw = os.environ.get("MCPFLOW_KPI_02_LIVE_DENOMINATOR", "").strip()
+    if not num_raw or not den_raw:
+        return _not_measured(
+            kpi_id="KPI-02",
+            name="nl_to_tool_mapping_top1_accuracy",
+            evidence_mode="live_official",
+            unit=unit,
+            target=target,
+            reason=(
+                "LIVE_RESULT_UNAVAILABLE: prerequisites present but no recorded "
+                "live evaluation counts "
+                "(MCPFLOW_KPI_02_LIVE_NUMERATOR / MCPFLOW_KPI_02_LIVE_DENOMINATOR). "
+                "Frozen selector regression must not fill official KPI-02."
+            ),
+            extra={
+                "counting_rule": targets.get("counting_rule"),
+                "pins": _live_agent_pins(),
+            },
+        )
+    try:
+        numerator = int(num_raw)
+        denominator = int(den_raw)
+    except ValueError:
+        return _not_measured(
+            kpi_id="KPI-02",
+            name="nl_to_tool_mapping_top1_accuracy",
+            evidence_mode="live_official",
+            unit=unit,
+            target=target,
+            reason="LIVE_RESULT_INVALID: numerator/denominator must be integers",
+            extra={"pins": _live_agent_pins()},
+        )
+    if denominator <= 0:
+        return _official_metric(
+            kpi_id="KPI-02",
+            name="nl_to_tool_mapping_top1_accuracy",
+            status="INCOMPLETE",
+            evidence_mode="live_official",
+            numerator=numerator,
+            denominator=denominator,
+            measured_value=None,
+            unit=unit,
+            target=target,
+            evidence_complete=False,
+            reason="DENOMINATOR_ZERO",
+            extra={"pins": _live_agent_pins()},
+        )
+    return _official_metric(
         kpi_id="KPI-02",
         name="nl_to_tool_mapping_top1_accuracy",
-        numerator=correct,
-        denominator=valid,
-        measured_value=value,
-        unit=targets.get("measured_value_unit", "percent"),
-        target=targets.get("target"),
+        status="MEASURED",
+        evidence_mode="live_official",
+        numerator=numerator,
+        denominator=denominator,
+        measured_value=percent(numerator, denominator),
+        unit=unit,
+        target=target,
+        evidence_complete=True,
+        reason="LIVE_RECORDED_CANONICAL_MAPPING_PATH",
         extra={
-            "dataset_version": dataset["dataset_version"],
             "counting_rule": targets.get("counting_rule"),
-            "cases": case_results,
-            "notes": (
-                "Top-1 accuracy = Correct Top-1 / Valid Evaluation Cases × 100. "
-                "Frozen rerank pins model output (FNC-AGT-010). "
-                "Cases with valid_for_top1=false are excluded from the denominator."
-            ),
+            "pins": _live_agent_pins(),
         },
     )
 
 
 async def _count_verified_tools_async() -> dict[str, Any]:
-    """Query live DB for KPI-03 when TEST_DATABASE_URL / DATABASE_URL is available."""
-    import os
+    from datetime import UTC, datetime
 
     from app.domain.enums import ToolVerificationStatus
     from app.models.factory import ToolFactoryPublish
@@ -263,11 +706,7 @@ async def _count_verified_tools_async() -> dict[str, Any]:
     from sqlalchemy import and_, func, or_, select
     from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-    db_url = (
-        os.environ.get("TEST_DATABASE_URL")
-        or os.environ.get("DATABASE_URL")
-        or ""
-    ).strip()
+    db_url = _db_url()
     if not db_url:
         return {
             "status": "UNAVAILABLE",
@@ -283,10 +722,6 @@ async def _count_verified_tools_async() -> dict[str, Any]:
             total = await MCPToolVerificationRepository(
                 session
             ).count_tools_with_effective_current_verification()
-
-            # Breakdown: factory-published servers = internal; others = external/manual.
-            from datetime import UTC, datetime
-
             as_of = datetime.now(UTC)
             verified_join = and_(
                 MCPToolVerification.mcp_tool_version_id == MCPTool.current_version_id,
@@ -335,269 +770,491 @@ async def _count_verified_tools_async() -> dict[str, Any]:
         await engine.dispose()
 
 
-def measure_kpi_03_tool_count() -> dict[str, Any]:
+def measure_official_kpi_03(*, mode: str) -> dict[str, Any]:
     import asyncio
 
     targets = _targets()["targets"]["KPI-03"]
     target_min = targets.get("target_min")
+    evidence_mode: EvidenceMode = (
+        "live_official" if mode == "live" else "offline_regression"
+    )
     try:
         inventory = asyncio.run(_count_verified_tools_async())
-    except Exception as exc:  # noqa: BLE001 — harness must not crash measurement
+    except Exception as exc:  # noqa: BLE001
         inventory = {
             "status": "ERROR",
             "reason": type(exc).__name__,
             "count": None,
             "breakdown": None,
         }
-
     count = inventory.get("count")
-    gap = None
-    if isinstance(count, int) and isinstance(target_min, int):
-        gap = max(target_min - count, 0)
-
-    return _metric_base(
+    if inventory.get("status") != "OK" or not isinstance(count, int):
+        return _not_measured(
+            kpi_id="KPI-03",
+            name="verified_mcp_tool_count",
+            evidence_mode=evidence_mode,
+            unit=targets.get("measured_value_unit", "count"),
+            target=targets.get("target"),
+            reason=f"INVENTORY_UNAVAILABLE: {inventory.get('reason')}",
+            extra={
+                "target_min": target_min,
+                "inventory_status": inventory.get("status"),
+                "counting_rule": targets.get("counting_rule"),
+            },
+        )
+    gap = max(target_min - count, 0) if isinstance(target_min, int) else None
+    return _official_metric(
         kpi_id="KPI-03",
         name="verified_mcp_tool_count",
+        status="MEASURED",
+        evidence_mode=evidence_mode,
         numerator=count,
         denominator=None,
         measured_value=count,
         unit=targets.get("measured_value_unit", "count"),
         target=targets.get("target"),
+        evidence_complete=True,
+        reason="VERIFIED_CURRENT_TOOLVERSION_AGGREGATE",
         extra={
             "target_min": target_min,
             "gap_to_target_min": gap,
             "meets_target_min": (
-                isinstance(count, int)
-                and isinstance(target_min, int)
-                and count >= target_min
+                isinstance(target_min, int) and count >= target_min
             ),
-            "inventory_status": inventory.get("status"),
-            "inventory_reason": inventory.get("reason"),
             "breakdown": inventory.get("breakdown"),
             "counting_rule": targets.get("counting_rule"),
             "notes": (
-                "Count distinct Tools with effective VERIFIED current ToolVersion. "
+                "Distinct Tools with effective VERIFIED current ToolVersion. "
                 "Does not fabricate Tools when below target_min=10."
             ),
         },
     )
 
 
-def _run_case_pytest_groups(
-    groups: list[dict[str, Any]],
-    *,
-    path_key: str = "pytest",
-    include_integration: bool,
-) -> tuple[int, int, list[dict[str, Any]]]:
-    passed = 0
-    attempted = 0
+def measure_official_kpi_04(*, mode: str) -> dict[str, Any]:
+    targets = _targets()["targets"]["KPI-04"]
+    unit = targets.get("measured_value_unit", "percent")
+    target = targets.get("target")
+    attempts_doc = load_yaml(eval_root() / "registration" / "attempts.v1.yaml")
+    attempts = list(attempts_doc.get("attempts") or [])
+    denominator = len(attempts)
+
+    if mode != "live":
+        return _not_measured(
+            kpi_id="KPI-04",
+            name="mcp_connection_registration_success_rate",
+            evidence_mode="offline_regression",
+            unit=unit,
+            target=target,
+            reason=(
+                "OFFLINE_MODE: official KPI-04 requires live designated smoke "
+                "connect/discovery/apply/verification attempts "
+                f"(denominator={denominator} declared). Pytest group health is "
+                "offline diagnostic only."
+            ),
+            extra={
+                "denominator_declared": denominator,
+                "attempts_version": attempts_doc.get("attempts_version"),
+            },
+        )
+
     details: list[dict[str, Any]] = []
-    for group in groups:
-        paths = list(group.get(path_key) or [])
-        if include_integration:
-            paths.extend(list(group.get("optional_integration") or []))
-        present = existing_paths(paths)
-        extra = list(group.get("pytest_args") or [])
-        if not present:
+    passed = 0
+    not_run = 0
+    for attempt in attempts:
+        req = list(attempt.get("requires_env") or [])
+        missing = _missing_env(req)
+        if not _db_url():
+            missing = ["TEST_DATABASE_URL|DATABASE_URL", *missing]
+        # Deduplicate while preserving order
+        seen: set[str] = set()
+        missing_unique = []
+        for item in missing:
+            if item not in seen:
+                seen.add(item)
+                missing_unique.append(item)
+        if missing_unique:
+            not_run += 1
             details.append(
                 {
-                    "id": group["id"],
-                    "status": "SKIP",
-                    "reason": "NO_PATHS_FOUND",
-                    "paths": paths,
+                    "attempt_id": attempt["attempt_id"],
+                    "operation": attempt.get("operation"),
+                    "success": False,
+                    "status": "NOT_RUN",
+                    "failure_category": "PREREQUISITE_MISSING",
+                    "missing_env": missing_unique,
                 }
             )
             continue
-        # Prefer unit/api (not integration) unless only integration paths remain.
-        unitish = [p for p in present if "/integration/" not in p]
-        integ = [p for p in present if "/integration/" in p]
-        ok = True
-        if unitish:
-            proc = run_pytest(unitish, extra_args=extra, integration=False)
-            ok = ok and proc.returncode == 0
-        if include_integration and integ:
-            proc = run_pytest(integ, extra_args=extra, integration=True)
-            ok = ok and proc.returncode == 0
-        if not unitish and not (include_integration and integ):
+        # Designated smoke execution is opt-in via recorded results to avoid
+        # mutating arbitrary MCP servers from the harness.
+        result_key = f"MCPFLOW_KPI_04_RESULT_{attempt['attempt_id'].upper().replace('-', '_')}"
+        raw = os.environ.get(result_key, "").strip().lower()
+        if raw not in {"pass", "fail", "1", "0", "true", "false"}:
+            not_run += 1
             details.append(
                 {
-                    "id": group["id"],
-                    "status": "SKIP",
-                    "reason": "INTEGRATION_DISABLED",
-                    "paths": present,
+                    "attempt_id": attempt["attempt_id"],
+                    "operation": attempt.get("operation"),
+                    "success": False,
+                    "status": "NOT_RUN",
+                    "failure_category": "LIVE_RESULT_UNAVAILABLE",
+                    "result_env": result_key,
                 }
             )
             continue
-        attempted += 1
-        if ok:
+        success = raw in {"pass", "1", "true"}
+        if success:
             passed += 1
         details.append(
             {
-                "id": group["id"],
-                "title": group.get("title"),
-                "status": "PASS" if ok else "FAIL",
-                "paths": present,
+                "attempt_id": attempt["attempt_id"],
+                "operation": attempt.get("operation"),
+                "success": success,
+                "status": "PASS" if success else "FAIL",
+                "failure_category": None if success else "SMOKE_ATTEMPT_FAILED",
             }
         )
-    return passed, attempted, details
 
-
-def measure_kpi_04_registration() -> dict[str, Any]:
-    import os
-
-    cases_doc = load_yaml(eval_root() / "registration" / "cases.yaml")
-    include_integration = bool(os.environ.get("TEST_DATABASE_URL", "").strip())
-    passed, attempted, details = _run_case_pytest_groups(
-        list(cases_doc.get("cases") or []),
-        include_integration=include_integration,
-    )
-    targets = _targets()["targets"]["KPI-04"]
-    value = percent(passed, attempted)
-    return _metric_base(
+    if not_run > 0:
+        return _official_metric(
+            kpi_id="KPI-04",
+            name="mcp_connection_registration_success_rate",
+            status="INCOMPLETE",
+            evidence_mode="live_official",
+            numerator=passed,
+            denominator=denominator,
+            measured_value=None,
+            unit=unit,
+            target=target,
+            evidence_complete=False,
+            reason="REQUIRED_ATTEMPTS_NOT_RUN",
+            extra={
+                "attempts_version": attempts_doc.get("attempts_version"),
+                "attempts": details,
+                "smoke_mcp_server_id_present": _env_present(
+                    "MCPFLOW_KPI_SMOKE_MCP_SERVER_ID"
+                ),
+            },
+        )
+    return _official_metric(
         kpi_id="KPI-04",
         name="mcp_connection_registration_success_rate",
+        status="MEASURED",
+        evidence_mode="live_official",
         numerator=passed,
-        denominator=attempted,
-        measured_value=value,
-        unit=targets.get("measured_value_unit", "percent"),
-        target=targets.get("target"),
+        denominator=denominator,
+        measured_value=percent(passed, denominator),
+        unit=unit,
+        target=target,
+        evidence_complete=True,
+        reason="LIVE_SMOKE_ATTEMPTS_COMPLETE",
         extra={
-            "cases_version": cases_doc.get("cases_version"),
-            "denominator_zero_policy": cases_doc.get("denominator_zero_policy"),
-            "cases": details,
-            "counting_rule": targets.get("counting_rule"),
-            "notes": (
-                "Attempt = predefined registration case with at least one existing "
-                "pytest path executed. Denominator 0 → measured_value null."
-            ),
+            "attempts_version": attempts_doc.get("attempts_version"),
+            "attempts": details,
         },
     )
 
 
-def measure_kpi_05_composite() -> dict[str, Any]:
-    import os
-
-    cases_doc = load_yaml(eval_root() / "workflow-scenarios" / "scenarios.yaml")
-    include_integration = bool(os.environ.get("TEST_DATABASE_URL", "").strip())
-    passed, attempted, details = _run_case_pytest_groups(
-        list(cases_doc.get("scenarios") or []),
-        include_integration=include_integration,
-    )
+def measure_official_kpi_05(*, mode: str) -> dict[str, Any]:
     targets = _targets()["targets"]["KPI-05"]
-    value = percent(passed, attempted)
-    return _metric_base(
+    unit = targets.get("measured_value_unit", "percent")
+    target = targets.get("target")
+    exec_doc = load_yaml(eval_root() / "workflow-scenarios" / "executable.v1.yaml")
+    scenarios = list(exec_doc.get("scenarios") or [])
+    denominator = len(scenarios)
+
+    if mode != "live":
+        return _not_measured(
+            kpi_id="KPI-05",
+            name="composite_scenario_completion_rate",
+            evidence_mode="offline_regression",
+            unit=unit,
+            target=target,
+            reason=(
+                "OFFLINE_MODE: official KPI-05 requires one live executable "
+                f"attempt per scenario_id (declared={denominator}). Whole unit "
+                "pytest modules are offline diagnostic only."
+            ),
+            extra={
+                "denominator_declared": denominator,
+                "scenarios_version": exec_doc.get("scenarios_version"),
+            },
+        )
+
+    details: list[dict[str, Any]] = []
+    passed = 0
+    not_run = 0
+    for scenario in scenarios:
+        req = list(scenario.get("requires_env") or [])
+        missing = _missing_env(req)
+        if not _db_url():
+            missing = ["TEST_DATABASE_URL|DATABASE_URL", *missing]
+        missing_unique: list[str] = []
+        seen: set[str] = set()
+        for item in missing:
+            if item not in seen:
+                seen.add(item)
+                missing_unique.append(item)
+        if missing_unique:
+            not_run += 1
+            details.append(
+                {
+                    "scenario_id": scenario["scenario_id"],
+                    "status": "NOT_RUN",
+                    "success": False,
+                    "reason": "PREREQUISITE_MISSING",
+                    "missing_env": missing_unique,
+                }
+            )
+            continue
+        result_key = (
+            "MCPFLOW_KPI_05_RESULT_"
+            + scenario["scenario_id"].upper().replace("-", "_")
+        )
+        raw = os.environ.get(result_key, "").strip().lower()
+        if raw not in {"pass", "fail", "1", "0", "true", "false"}:
+            not_run += 1
+            details.append(
+                {
+                    "scenario_id": scenario["scenario_id"],
+                    "status": "NOT_RUN",
+                    "success": False,
+                    "reason": "LIVE_RESULT_UNAVAILABLE",
+                    "result_env": result_key,
+                }
+            )
+            continue
+        success = raw in {"pass", "1", "true"}
+        if success:
+            passed += 1
+        details.append(
+            {
+                "scenario_id": scenario["scenario_id"],
+                "status": "PASS" if success else "FAIL",
+                "success": success,
+            }
+        )
+
+    if not_run > 0:
+        return _official_metric(
+            kpi_id="KPI-05",
+            name="composite_scenario_completion_rate",
+            status="INCOMPLETE",
+            evidence_mode="live_official",
+            numerator=passed,
+            denominator=denominator,
+            measured_value=None,
+            unit=unit,
+            target=target,
+            evidence_complete=False,
+            reason="REQUIRED_SCENARIOS_NOT_RUN",
+            extra={
+                "scenarios_version": exec_doc.get("scenarios_version"),
+                "scenarios": details,
+                "pins": {
+                    "agent_version_id": os.environ.get("MCPFLOW_KPI_AGENT_VERSION_ID"),
+                    "workflow_version_id": os.environ.get(
+                        "MCPFLOW_KPI_WORKFLOW_VERSION_ID"
+                    ),
+                },
+            },
+        )
+    return _official_metric(
         kpi_id="KPI-05",
         name="composite_scenario_completion_rate",
+        status="MEASURED",
+        evidence_mode="live_official",
         numerator=passed,
-        denominator=attempted,
-        measured_value=value,
+        denominator=denominator,
+        measured_value=percent(passed, denominator),
+        unit=unit,
+        target=target,
+        evidence_complete=True,
+        reason="LIVE_EXECUTABLE_SCENARIOS_COMPLETE",
+        extra={
+            "scenarios_version": exec_doc.get("scenarios_version"),
+            "scenarios": details,
+        },
+    )
+
+
+def measure_official_kpi_06(*, mode: str) -> dict[str, Any]:
+    """Test-based official ops pass rate with fixed declared denominator."""
+    targets = _targets()["targets"]["KPI-06"]
+    cases_doc = load_yaml(eval_root() / "operation" / "cases.yaml")
+    groups = list(cases_doc.get("cases") or [])
+    required_categories = list(
+        cases_doc.get("required_categories")
+        or ["authorization", "approval", "audit", "cancellation", "recovery"]
+    )
+    result = _run_fixed_denominator_pytest_groups(
+        groups,
+        include_optional_integration=bool(_db_url()),
+    )
+    categories_present = sorted(
+        {c.get("category") for c in groups if c.get("category")}
+    )
+    missing_required_cats = [
+        cat for cat in required_categories if cat not in categories_present
+    ]
+    evidence_mode: EvidenceMode = (
+        "live_official" if mode == "live" else "offline_regression"
+    )
+    denominator = result["declared"]
+    numerator = result["passed"]
+
+    if missing_required_cats or not result["evidence_complete"]:
+        return _official_metric(
+            kpi_id="KPI-06",
+            name="operations_function_pass_rate",
+            status="INCOMPLETE",
+            evidence_mode=evidence_mode,
+            numerator=numerator,
+            denominator=denominator,
+            measured_value=None,
+            unit=targets.get("measured_value_unit", "percent"),
+            target=targets.get("target"),
+            evidence_complete=False,
+            reason=(
+                "REQUIRED_EVIDENCE_INCOMPLETE: "
+                + (
+                    f"missing_categories={missing_required_cats}; "
+                    if missing_required_cats
+                    else ""
+                )
+                + f"not_run={result['not_run']}"
+            ),
+            extra={
+                "cases_version": cases_doc.get("cases_version"),
+                "required_categories": required_categories,
+                "categories_present": categories_present,
+                "cases": result["details"],
+                "failed": result["failed"],
+                "not_run": result["not_run"],
+                "counting_rule": (
+                    "Passed declared ops cases / declared cases × 100; "
+                    "NOT_RUN keeps denominator fixed; INCOMPLETE ⇒ measured_value null"
+                ),
+            },
+        )
+
+    return _official_metric(
+        kpi_id="KPI-06",
+        name="operations_function_pass_rate",
+        status="MEASURED",
+        evidence_mode=evidence_mode,
+        numerator=numerator,
+        denominator=denominator,
+        measured_value=percent(numerator, denominator),
         unit=targets.get("measured_value_unit", "percent"),
         target=targets.get("target"),
+        evidence_complete=True,
+        reason="FIXED_DENOMINATOR_OPS_TESTS_COMPLETE",
         extra={
-            "scenarios_version": cases_doc.get("scenarios_version"),
-            "denominator_zero_policy": cases_doc.get("denominator_zero_policy"),
-            "scenarios": details,
-            "counting_rule": targets.get("counting_rule"),
-            "notes": (
-                "Uses real executable workflow/execution pytest modules "
-                "(not mock-only success placeholders)."
+            "cases_version": cases_doc.get("cases_version"),
+            "required_categories": required_categories,
+            "categories_present": categories_present,
+            "cases": result["details"],
+            "failed": result["failed"],
+            "not_run": result["not_run"],
+            "counting_rule": (
+                "Passed declared ops cases / declared cases × 100 "
+                "(authorization, approval, audit, cancellation, recovery required)"
             ),
         },
     )
 
 
-def measure_kpi_06_operations() -> dict[str, Any]:
-    import os
-
-    cases_doc = load_yaml(eval_root() / "operation" / "cases.yaml")
-    include_integration = bool(os.environ.get("TEST_DATABASE_URL", "").strip())
-    passed, attempted, details = _run_case_pytest_groups(
-        list(cases_doc.get("cases") or []),
-        include_integration=include_integration,
-    )
-    targets = _targets()["targets"]["KPI-06"]
-    value = percent(passed, attempted)
-    categories = sorted(
-        {
-            c.get("category")
-            for c in (cases_doc.get("cases") or [])
-            if c.get("category")
-        }
-    )
-    return _metric_base(
-        kpi_id="KPI-06",
-        name="operations_function_pass_rate",
-        numerator=passed,
-        denominator=attempted,
-        measured_value=value,
-        unit=targets.get("measured_value_unit", "percent"),
-        target=targets.get("target"),
-        extra={
-            "cases_version": cases_doc.get("cases_version"),
-            "denominator_zero_policy": cases_doc.get("denominator_zero_policy"),
-            "required_categories": [
-                "authorization",
-                "approval",
-                "audit",
-                "cancellation",
-                "recovery",
-            ],
-            "categories_present": categories,
-            "cases": details,
-            "counting_rule": targets.get("counting_rule"),
-        },
-    )
-
-
-def measure_all() -> dict[str, Any]:
-    targets_doc = _targets()
-    metrics = [
-        measure_kpi_01_response_time(),
-        measure_kpi_02_tool_mapping(),
-        measure_kpi_03_tool_count(),
-        measure_kpi_04_registration(),
-        measure_kpi_05_composite(),
-        measure_kpi_06_operations(),
+def collect_offline_diagnostics(*, include_heavy: bool = True) -> list[dict[str, Any]]:
+    diagnostics = [
+        diagnostic_selector_decide_timing(),
+        diagnostic_selector_decision_regression(),
     ]
-    report = {
-        "schema_version": "mcpflow.kpi_report.v1",
+    if include_heavy:
+        diagnostics.extend(
+            [
+                diagnostic_registration_pytest_health(),
+                diagnostic_composite_pytest_health(),
+            ]
+        )
+    return diagnostics
+
+
+def measure_all(
+    *,
+    mode: str,
+    include_diagnostics: bool = True,
+    include_heavy_diagnostics: bool | None = None,
+) -> dict[str, Any]:
+    targets_doc = _targets()
+    official = [
+        measure_official_kpi_01(mode=mode),
+        measure_official_kpi_02(mode=mode),
+        measure_official_kpi_03(mode=mode),
+        measure_official_kpi_04(mode=mode),
+        measure_official_kpi_05(mode=mode),
+        measure_official_kpi_06(mode=mode),
+    ]
+    report: dict[str, Any] = {
+        "schema_version": "mcpflow.kpi_report.v2",
+        "mode": mode,
         "dataset_bundle_version": targets_doc.get("dataset_bundle_version"),
         "measured_at": measured_at(),
         "git_sha": git_sha(),
         "environment": environment_label(),
-        "metrics": metrics,
+        "official_metrics": official,
     }
+    if include_diagnostics:
+        heavy = (
+            include_heavy_diagnostics
+            if include_heavy_diagnostics is not None
+            else (mode == "offline")
+        )
+        report["offline_diagnostics"] = collect_offline_diagnostics(
+            include_heavy=heavy
+        )
     return redact_secrets(report)
 
 
 def print_human_summary(report: dict[str, Any]) -> None:
     print("=== MCPFlow KPI Measurement ===")
+    print(f"mode           : {report.get('mode')}")
     print(f"dataset_bundle : {report.get('dataset_bundle_version')}")
     print(f"git_sha        : {report.get('git_sha')}")
     print(f"environment    : {report.get('environment')}")
     print(f"measured_at    : {report.get('measured_at')}")
     print("")
-    for metric in report["metrics"]:
-        num = metric.get("numerator")
-        den = metric.get("denominator")
-        value = metric.get("measured_value")
-        target = metric.get("target")
-        line = (
-            f"{metric['kpi_id']} {metric['name']}: "
-            f"value={value} {metric.get('unit')} "
-            f"(numerator={num}, denominator={den}, target={target})"
+    print("--- official_metrics ---")
+    for metric in report.get("official_metrics") or []:
+        print(
+            f"{metric['kpi_id']} {metric['name']}: status={metric['status']} "
+            f"evidence_mode={metric['evidence_mode']} "
+            f"value={metric.get('measured_value')} "
+            f"num={metric.get('numerator')} den={metric.get('denominator')} "
+            f"complete={metric.get('evidence_complete')} "
+            f"reason={metric.get('reason')}"
         )
-        if metric["kpi_id"] == "KPI-03":
-            line += (
-                f" target_min={metric.get('target_min')} "
-                f"gap={metric.get('gap_to_target_min')} "
-                f"inventory={metric.get('inventory_status')}"
+    diagnostics = report.get("offline_diagnostics") or []
+    if diagnostics:
+        print("")
+        print("--- offline_diagnostics (not official KPI) ---")
+        for item in diagnostics:
+            print(
+                f"{item.get('diagnostic_id')}: value={item.get('measured_value')} "
+                f"num={item.get('numerator')} den={item.get('denominator')}"
             )
-        print(line)
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="MCPFlow KPI measurement harness")
+    parser.add_argument(
+        "--mode",
+        choices=("offline", "live"),
+        default=os.environ.get("MCPFLOW_KPI_MODE", "offline"),
+        help="offline=diagnostics + official NOT_MEASURED/INCOMPLETE where required; "
+        "live=official evidence with pinned prerequisites",
+    )
     parser.add_argument(
         "--out",
         default="",
@@ -606,39 +1263,63 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--only",
         default="",
-        help="Comma-separated KPI ids to measure (default: all)",
+        help="Comma-separated KPI ids for official section (default: all)",
+    )
+    parser.add_argument(
+        "--no-diagnostics",
+        action="store_true",
+        help="Omit offline_diagnostics section",
     )
     args = parser.parse_args(argv)
+    mode = args.mode
 
     if args.only.strip():
         wanted = {part.strip().upper() for part in args.only.split(",") if part.strip()}
         mapping = {
-            "KPI-01": measure_kpi_01_response_time,
-            "KPI-02": measure_kpi_02_tool_mapping,
-            "KPI-03": measure_kpi_03_tool_count,
-            "KPI-04": measure_kpi_04_registration,
-            "KPI-05": measure_kpi_05_composite,
-            "KPI-06": measure_kpi_06_operations,
+            "KPI-01": lambda: measure_official_kpi_01(mode=mode),
+            "KPI-02": lambda: measure_official_kpi_02(mode=mode),
+            "KPI-03": lambda: measure_official_kpi_03(mode=mode),
+            "KPI-04": lambda: measure_official_kpi_04(mode=mode),
+            "KPI-05": lambda: measure_official_kpi_05(mode=mode),
+            "KPI-06": lambda: measure_official_kpi_06(mode=mode),
         }
-        metrics = [mapping[k]() for k in mapping if k in wanted]
+        official = [mapping[k]() for k in mapping if k in wanted]
         targets_doc = _targets()
         report = redact_secrets(
             {
-                "schema_version": "mcpflow.kpi_report.v1",
+                "schema_version": "mcpflow.kpi_report.v2",
+                "mode": mode,
                 "dataset_bundle_version": targets_doc.get("dataset_bundle_version"),
                 "measured_at": measured_at(),
                 "git_sha": git_sha(),
                 "environment": environment_label(),
-                "metrics": metrics,
+                "official_metrics": official,
+                "offline_diagnostics": (
+                    []
+                    if args.no_diagnostics
+                    else collect_offline_diagnostics(include_heavy=False)
+                ),
             }
         )
     else:
-        report = measure_all()
+        report = measure_all(
+            mode=mode, include_diagnostics=not args.no_diagnostics
+        )
 
     out_path = Path(args.out) if args.out else artifact_dir("kpi") / "latest.json"
     write_json(out_path, report)
     print_human_summary(report)
     print(f"\nJSON: {out_path}")
+
+    # Live mode without any MEASURED official KPI should not look like success.
+    if mode == "live":
+        statuses = {m["status"] for m in report.get("official_metrics") or []}
+        if "MEASURED" not in statuses:
+            print(
+                "\nNOTE: live mode produced no MEASURED official KPIs "
+                f"(statuses={sorted(statuses)}); exit 2."
+            )
+            return 2
     return 0
 
 

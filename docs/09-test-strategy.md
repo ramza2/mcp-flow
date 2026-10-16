@@ -1479,64 +1479,97 @@ Output:
 - human-readable per-scenario PASS/FAIL/SKIP + summary
 - JSON: `artifacts/regression/latest.json` (gitignored runtime artifact)
 - non-zero exit when any scenario FAILs
+- missing non-optional matrix paths → scenario `FAIL` (not silent PASS)
+- `--unit-only` sets `scope=unit_api_only_integration_omitted` and
+  `full_integration_regression=false` (do not call this “final integration PASS”)
 
 ### 25.2 KPI measurement harness
 
 ```bash
-./scripts/measure-kpi.sh
-./scripts/measure-kpi.sh --only KPI-01,KPI-02,KPI-03
+./scripts/measure-kpi.sh --mode offline   # default
+./scripts/measure-kpi.sh --mode live
+./scripts/measure-kpi.sh --mode offline --only KPI-01,KPI-02,KPI-03
 ```
 
-Dataset / case versions live under `backend/tests/evaluation/`:
+**Evidence separation**
+
+| Section | Role |
+|---|---|
+| `official_metrics` | Project KPI evidence (`status`: `MEASURED` / `INCOMPLETE` / `NOT_MEASURED`) |
+| `offline_diagnostics` | Regression-only (selector microbenchmark, frozen `_decide`, pytest module health) — never official KPI values |
+
+`evidence_mode`: `offline_regression` | `live_official`.
+
+Dataset / case versions under `backend/tests/evaluation/`:
 
 | Path | Role |
 |---|---|
 | `targets.yaml` | configured targets (`target` / `target_min`); never invent undocumented SLAs |
-| `tool-mapping/dataset.v1.json` | frozen NL→Tool Top-1 cases (`tool-mapping.v1`) |
-| `registration/cases.yaml` | KPI-04 attempt definitions |
-| `workflow-scenarios/scenarios.yaml` | KPI-05 composite scenarios |
-| `operation/cases.yaml` | KPI-06 ops cases (auth/approval/audit/cancel/recovery/schedule) |
+| `tool-mapping/dataset.v1.json` | frozen selector-decision regression dataset |
+| `tool-mapping/live_prerequisites.yaml` | live KPI-01/02 pin requirements |
+| `registration/cases.yaml` | offline registration pytest health (fixed denominator) |
+| `registration/attempts.v1.yaml` | official KPI-04 live attempt units |
+| `workflow-scenarios/scenarios.yaml` | offline workflow pytest module health |
+| `workflow-scenarios/executable.v1.yaml` | official KPI-05 live scenarios (1 attempt each) |
+| `operation/cases.yaml` | official KPI-06 test-based ops cases (fixed denominator) |
 
 JSON output: `artifacts/kpi/latest.json` (gitignored). Schema sketch:
 
 ```json
 {
-  "schema_version": "mcpflow.kpi_report.v1",
+  "schema_version": "mcpflow.kpi_report.v2",
+  "mode": "offline",
   "dataset_bundle_version": "evaluation.v1",
   "measured_at": "2026-10-16T00:00:00Z",
   "git_sha": "<commit>",
   "environment": "local-dev",
-  "metrics": [
+  "official_metrics": [
     {
-      "kpi_id": "KPI-02",
-      "name": "nl_to_tool_mapping_top1_accuracy",
-      "numerator": 4,
-      "denominator": 4,
-      "measured_value": 100.0,
-      "unit": "percent",
+      "kpi_id": "KPI-01",
+      "name": "response_time",
+      "status": "NOT_MEASURED",
+      "evidence_mode": "offline_regression",
+      "numerator": null,
+      "denominator": null,
+      "measured_value": null,
+      "unit": "milliseconds",
       "target": null,
-      "dataset_version": "tool-mapping.v1"
+      "evidence_complete": false,
+      "reason": "OFFLINE_MODE: ...",
+      "measured_at": "...",
+      "git_sha": "...",
+      "environment": "..."
+    }
+  ],
+  "offline_diagnostics": [
+    {
+      "diagnostic_id": "selector_decide_microbenchmark",
+      "name": "tool_selector_decide_timing_ms",
+      "evidence_mode": "offline_regression",
+      "measured_value": 0.28
     }
   ]
 }
 ```
 
-Counting rules:
+Counting rules (official):
 
 | KPI | Rule |
 |---|---|
-| `KPI-01` | Representative frozen ToolSelector decide-path wall clock (`total_response_ms` + segments). No in-repo numeric SLA (`target: null`). |
-| `KPI-02` | Top-1 Accuracy = Correct Top-1 / Valid Evaluation Cases × 100. Frozen `frozen_rerank` pins model output (FNC-AGT-010). Cases with `valid_for_top1=false` excluded from denominator. |
-| `KPI-03` | Distinct Tools whose *current* ToolVersion has non-expired `VERIFIED` evidence (`count_tools_with_effective_current_verification`). `target_min=10` (docs §25). Report `gap_to_target_min` when below; do not fabricate Tools. Breakdown: factory-published servers = internal; others = external/manual when DB available. |
-| `KPI-04` | Predefined registration case pass / attempted × 100. Attempt = case with ≥1 existing pytest path executed. Denominator 0 → `measured_value: null`. |
-| `KPI-05` | Composite workflow scenario pass / attempted × 100 using real executable pytest modules (not mock-only placeholders). |
-| `KPI-06` | Operations case pass / attempted × 100. Required categories: authorization, approval, audit, cancellation, recovery (+ schedule). |
+| `KPI-01` | Live canonical Agent path wall clock only (`t_start`=AgentRequest accept/analyze entry, `t_end`=ToolSelectionOutcome commit). Offline → `NOT_MEASURED`. Selector microbenchmark is diagnostic only. |
+| `KPI-02` | Live Top-1 = Correct / Valid × 100 over `request_text` → Analyzer → retrieval/embedding → LLM rerank → selector with pinned AgentVersion / inventory / Model Profile / dataset / git SHA / environment. Offline frozen `_decide` is diagnostic only → official `NOT_MEASURED`. |
+| `KPI-03` | Distinct Tools with effective VERIFIED current ToolVersion. `target_min=10`; report gap; do not fabricate Tools. |
+| `KPI-04` | Live designated smoke attempts (`connect` / `discovery` / `apply/register` / `verification`); denominator = declared attempts. Incomplete attempts → `INCOMPLETE` + `measured_value=null`. Pytest group health is diagnostic only. |
+| `KPI-05` | Live executable composite scenarios; denominator = declared scenario_ids (one attempt each). Module-level unit pytest health is diagnostic only. |
+| `KPI-06` | Test-based ops pass rate with **fixed** declared denominator. Required categories: authorization, approval, audit, cancellation, recovery. Any `NOT_RUN` / missing required evidence → `INCOMPLETE` (`measured_value=null`), never a shrunk 100%. |
+
+Denominator policy: for fixed case/scenario/attempt lists, denominator = declared eligible rows. Missing required paths/results are `NOT_RUN` / `INCOMPLETE`, never silently excluded.
 
 Known exclusions:
 
 - Nested LOOP / LOOP-body APPROVAL recovery (out of scope; fail-closed elsewhere)
-- Live LLM non-determinism for KPI-02 (uses frozen rerank snapshot)
-- KPI-03 live inventory requires `TEST_DATABASE_URL` or `DATABASE_URL`; otherwise `inventory_status=UNAVAILABLE`
+- Offline mode does not invent live Agent/ModelOps timings or Top-1 accuracy
+- Live modes require explicit pin/smoke env (see `live_prerequisites.yaml` / attempts YAML); otherwise `NOT_MEASURED`
 - Generated evidence under `artifacts/` / `evidence/` is not committed
 
 ### 25.3 Production smoke evidence references

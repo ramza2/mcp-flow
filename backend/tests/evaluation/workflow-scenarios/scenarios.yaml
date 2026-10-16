@@ -1,6 +1,9 @@
-# KPI-05 — composite scenario completion (real executable tests).
+# Offline regression evidence: pytest module health for workflow/execution paths.
+# Official KPI-05 uses executable.v1.yaml (one attempt per scenario_id, live).
+# Denominator for this file = declared scenarios (fixed); missing required paths → NOT_RUN.
 scenarios_version: workflow-scenarios.v1
-denominator_zero_policy: report measured_value null and skip_reason DENOMINATOR_ZERO
+evidence_role: offline_regression
+denominator_policy: fixed_declared_cases
 
 scenarios:
   - id: sequential

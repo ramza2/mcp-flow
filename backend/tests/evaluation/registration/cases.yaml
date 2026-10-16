@@ -1,7 +1,9 @@
-# KPI-04 — predefined MCP server connection / Tool registration success cases.
-# Attempts are real existing pytest modules (not mocked success placeholders).
+# Offline regression evidence for MCP registration-related pytest groups.
+# Official KPI-04 uses registration/attempts.v1.yaml (live attempt units).
+# Denominator for this file = declared cases (fixed); missing required paths → NOT_RUN.
 cases_version: registration.v1
-denominator_zero_policy: report measured_value null and skip_reason DENOMINATOR_ZERO
+evidence_role: offline_regression
+denominator_policy: fixed_declared_cases
 
 cases:
   - id: mcp_server_api_lifecycle

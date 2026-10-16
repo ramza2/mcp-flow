@@ -5,21 +5,23 @@ dataset_bundle_version: evaluation.v1
 
 targets:
   KPI-01:
-    # NFR-PERF segments are recorded; no approved numeric SLA in-repo yet.
     measured_value_unit: milliseconds
     target: null
-    notes: Report segment timings only; do not invent latency SLAs.
+    notes: >
+      Official evidence is live canonical Agent path only. Offline selector
+      microbenchmark is diagnostic, never official response_time.
 
   KPI-02:
     measured_value_unit: percent
-    # Top-1 accuracy formula is canonical; numeric goal lives in approved project docs.
     target: null
     counting_rule: Correct Top-1 / Valid Evaluation Cases × 100
     dataset: tool-mapping/dataset.v1.json
+    notes: >
+      Official evidence requires live Analyzer→retrieval→rerank→selector.
+      Frozen _decide dataset is offline selector-decision regression only.
 
   KPI-03:
     measured_value_unit: count
-    # docs/09 §25 development floor (internal + external aggregate).
     target_min: 10
     target: null
     counting_rule: >
@@ -30,17 +32,25 @@ targets:
   KPI-04:
     measured_value_unit: percent
     target: null
-    counting_rule: Successful predefined registration cases / attempted cases × 100
-    cases: registration/cases.yaml
+    counting_rule: >
+      Successful live smoke attempts / declared attempts × 100
+      (connect, discovery, apply/register, verification).
+    attempts: registration/attempts.v1.yaml
+    offline_regression: registration/cases.yaml
 
   KPI-05:
     measured_value_unit: percent
     target: null
-    counting_rule: Passed composite workflow scenarios / attempted scenarios × 100
-    cases: workflow-scenarios/scenarios.yaml
+    counting_rule: >
+      Passed live executable composite scenarios / declared scenario_ids × 100
+      (one attempt per scenario_id).
+    executable: workflow-scenarios/executable.v1.yaml
+    offline_regression: workflow-scenarios/scenarios.yaml
 
   KPI-06:
     measured_value_unit: percent
     target: null
-    counting_rule: Passed operations cases / attempted cases × 100
+    counting_rule: >
+      Passed declared ops cases / declared cases × 100 (fixed denominator).
+      Required: authorization, approval, audit, cancellation, recovery.
     cases: operation/cases.yaml
