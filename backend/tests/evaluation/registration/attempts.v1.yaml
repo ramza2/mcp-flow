@@ -1,33 +1,37 @@
 # Official KPI-04 attempt units (live_official evidence).
-# Each attempt is one connect/discovery/apply/verification operation against a
-# designated smoke resource. Never mutate arbitrary production resources.
-attempts_version: registration-attempts.v1
+# Outcomes come from durable MCP check/discovery/tool/verification rows.
+# Naked MCPFLOW_KPI_04_RESULT_* pass/fail flags are ignored.
+attempts_version: registration-attempts.v2
 
-# Required environment for live measurement (all must be set):
-#   MCPFLOW_KPI_SMOKE_MCP_SERVER_ID  — designated smoke MCP server UUID
+# Required selectors:
 #   TEST_DATABASE_URL or DATABASE_URL
+#   MCPFLOW_KPI_SMOKE_MCP_SERVER_ID
+# Optional evidence pins (else latest for smoke server is resolved):
+#   MCPFLOW_KPI_SMOKE_CHECK_ID
+#   MCPFLOW_KPI_SMOKE_DISCOVERY_ID
+#   MCPFLOW_KPI_SMOKE_VERIFICATION_ID
 
 attempts:
   - attempt_id: smoke-connect
     operation: connect
-    title: Smoke MCP server connection check
+    title: Smoke MCP server connection check (mcp_server_checks)
     requires_env:
       - MCPFLOW_KPI_SMOKE_MCP_SERVER_ID
 
   - attempt_id: smoke-discovery
     operation: discovery
-    title: Smoke MCP server discovery
+    title: Smoke MCP server discovery (mcp_server_discoveries)
     requires_env:
       - MCPFLOW_KPI_SMOKE_MCP_SERVER_ID
 
   - attempt_id: smoke-apply-register
     operation: apply/register
-    title: Smoke discovery apply / tool registration
+    title: Smoke registered tools on server (mcp_tools)
     requires_env:
       - MCPFLOW_KPI_SMOKE_MCP_SERVER_ID
 
   - attempt_id: smoke-verification
     operation: verification
-    title: Smoke ToolVersion verification evidence
+    title: Smoke ToolVersion verification (mcp_tool_verifications)
     requires_env:
       - MCPFLOW_KPI_SMOKE_MCP_SERVER_ID

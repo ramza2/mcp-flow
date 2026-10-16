@@ -1,6 +1,6 @@
-# Live official KPI-01 / KPI-02 prerequisites (pinned identities).
-# When any required key is missing, official metrics are NOT_MEASURED.
-prerequisites_version: tool-mapping-live.v1
+# Live official KPI-01 / KPI-02 prerequisites (pinned identities + evidence selectors).
+# Env vars select durable IDs only. Naked result values never produce MEASURED.
+prerequisites_version: tool-mapping-live.v2
 
 required_env:
   - TEST_DATABASE_URL  # or DATABASE_URL (either accepted)
@@ -8,12 +8,17 @@ required_env:
   - MCPFLOW_KPI_LLM_PROFILE_ID
   - MCPFLOW_KPI_EMBEDDING_PROFILE_ID
 
+# KPI-01 durable evidence selector (required for MEASURED):
+#   MCPFLOW_KPI_AGENT_REQUEST_ID — persisted agent_requests.id
+# Duration = tool_selection_runs.created_at - agent_requests.created_at
+# REJECTED as official evidence: MCPFLOW_KPI_01_LIVE_RESULT_MS
+
+# KPI-02 durable evidence selector (required for MEASURED):
+#   MCPFLOW_KPI_02_EVIDENCE_MAP — JSON path with cases:
+#     [{case_id, agent_request_id, expected_tool_version_id, expected_decision?}]
+# Outcomes are read from tool_selection_runs for each agent_request_id.
+# REJECTED as official evidence: MCPFLOW_KPI_02_LIVE_NUMERATOR / DENOMINATOR
+
 optional_env_recorded:
   - MCPFLOW_KPI_TOOL_INVENTORY_SNAPSHOT_ID
   - MCPFLOW_KPI_EVAL_DATASET_VERSION
-
-# Official KPI-01 timing window (when live measurement is enabled):
-#   t_start = AgentRequest accepted (status RECEIVED / analyze entry)
-#   t_end   = ToolSelectionOutcome committed (AUTO_SELECT / CONFIRM / CLARIFY / NO_MATCH)
-# Segments may additionally record analyzer / retrieval / rerank durations.
-# Selector-only microbenchmarks are offline diagnostics only.

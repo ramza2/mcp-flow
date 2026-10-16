@@ -1556,12 +1556,14 @@ Counting rules (official):
 
 | KPI | Rule |
 |---|---|
-| `KPI-01` | Live canonical Agent path wall clock only (`t_start`=AgentRequest accept/analyze entry, `t_end`=ToolSelectionOutcome commit). Offline → `NOT_MEASURED`. Selector microbenchmark is diagnostic only. |
-| `KPI-02` | Live Top-1 = Correct / Valid × 100 over `request_text` → Analyzer → retrieval/embedding → LLM rerank → selector with pinned AgentVersion / inventory / Model Profile / dataset / git SHA / environment. Offline frozen `_decide` is diagnostic only → official `NOT_MEASURED`. |
+| `KPI-01` | Live duration from durable timestamps only: `tool_selection_runs.created_at − agent_requests.created_at` for `MCPFLOW_KPI_AGENT_REQUEST_ID`. Offline → `NOT_MEASURED`. Selector microbenchmark is diagnostic only. Naked `MCPFLOW_KPI_01_LIVE_RESULT_MS` cannot produce `MEASURED`. |
+| `KPI-02` | Live Top-1 from durable `ToolSelectionRun` rows per case in `MCPFLOW_KPI_02_EVIDENCE_MAP` (IDs only). Offline frozen `_decide` is diagnostic only → official `NOT_MEASURED`. Naked numerator/denominator env values cannot produce `MEASURED`. |
 | `KPI-03` | Distinct Tools with effective VERIFIED current ToolVersion. `target_min=10`; report gap; do not fabricate Tools. |
-| `KPI-04` | Live designated smoke attempts (`connect` / `discovery` / `apply/register` / `verification`); denominator = declared attempts. Incomplete attempts → `INCOMPLETE` + `measured_value=null`. Pytest group health is diagnostic only. |
-| `KPI-05` | Live executable composite scenarios; denominator = declared scenario_ids (one attempt each). Module-level unit pytest health is diagnostic only. |
+| `KPI-04` | Live designated smoke attempts scored from durable `mcp_server_checks` / `mcp_server_discoveries` / `mcp_tools` / `mcp_tool_verifications` for `MCPFLOW_KPI_SMOKE_MCP_SERVER_ID`. Denominator = declared attempts. Naked `MCPFLOW_KPI_04_RESULT_*` flags cannot produce `MEASURED`. |
+| `KPI-05` | Live executable scenarios scored from durable `executions.status` via `MCPFLOW_KPI_EXECUTION_ID_<SCENARIO_ID>`. Denominator = declared scenario_ids. Naked `MCPFLOW_KPI_05_RESULT_*` flags cannot produce `MEASURED`. |
 | `KPI-06` | Test-based ops pass rate with **fixed** declared denominator. Required categories: authorization, approval, audit, cancellation, recovery. Any `NOT_RUN` / missing required evidence → `INCOMPLETE` (`measured_value=null`), never a shrunk 100%. |
+
+Every `MEASURED live_official` metric includes `evidence_ids` (request/run/check/discovery/execution IDs + timestamps) for audit. Secrets are never emitted.
 
 Denominator policy: for fixed case/scenario/attempt lists, denominator = declared eligible rows. Missing required paths/results are `NOT_RUN` / `INCOMPLETE`, never silently excluded.
 

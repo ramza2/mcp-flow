@@ -179,6 +179,8 @@ def test_live_mode_without_prereq_not_measured() -> None:
         "MCPFLOW_KPI_AGENT_VERSION_ID",
         "MCPFLOW_KPI_LLM_PROFILE_ID",
         "MCPFLOW_KPI_EMBEDDING_PROFILE_ID",
+        "MCPFLOW_KPI_AGENT_REQUEST_ID",
+        "MCPFLOW_KPI_02_EVIDENCE_MAP",
         "MCPFLOW_KPI_01_LIVE_RESULT_MS",
         "MCPFLOW_KPI_02_LIVE_NUMERATOR",
         "MCPFLOW_KPI_02_LIVE_DENOMINATOR",
@@ -203,6 +205,84 @@ def test_live_mode_without_prereq_not_measured() -> None:
         assert m4["denominator"] == 4
     if m5["status"] == "INCOMPLETE":
         assert m5["denominator"] == 6
+
+
+def test_naked_env_result_values_cannot_produce_measured(monkeypatch) -> None:
+    """Review blocker: self-asserted env values must never yield MEASURED."""
+    monkeypatch.setenv("MCPFLOW_KPI_AGENT_VERSION_ID", "00000000-0000-4000-8000-000000000001")
+    monkeypatch.setenv("MCPFLOW_KPI_LLM_PROFILE_ID", "00000000-0000-4000-8000-000000000002")
+    monkeypatch.setenv(
+        "MCPFLOW_KPI_EMBEDDING_PROFILE_ID", "00000000-0000-4000-8000-000000000003"
+    )
+    monkeypatch.setenv("MCPFLOW_KPI_01_LIVE_RESULT_MS", "123.4")
+    monkeypatch.setenv("MCPFLOW_KPI_02_LIVE_NUMERATOR", "4")
+    monkeypatch.setenv("MCPFLOW_KPI_02_LIVE_DENOMINATOR", "4")
+    monkeypatch.setenv("MCPFLOW_KPI_04_RESULT_SMOKE_CONNECT", "pass")
+    monkeypatch.setenv("MCPFLOW_KPI_04_RESULT_SMOKE_DISCOVERY", "pass")
+    monkeypatch.setenv("MCPFLOW_KPI_04_RESULT_SMOKE_APPLY_REGISTER", "pass")
+    monkeypatch.setenv("MCPFLOW_KPI_04_RESULT_SMOKE_VERIFICATION", "pass")
+    monkeypatch.setenv("MCPFLOW_KPI_05_RESULT_SEQUENTIAL_TOOL_CHAIN", "pass")
+    monkeypatch.setenv("MCPFLOW_KPI_05_RESULT_PARALLEL_JOIN_WAVE", "pass")
+    monkeypatch.setenv("MCPFLOW_KPI_05_RESULT_CONDITION_BRANCH", "pass")
+    monkeypatch.setenv("MCPFLOW_KPI_05_RESULT_FOREACH_LOOP", "pass")
+    monkeypatch.setenv("MCPFLOW_KPI_05_RESULT_WHILE_LOOP", "pass")
+    monkeypatch.setenv("MCPFLOW_KPI_05_RESULT_APPROVAL_WAIT_RESUME", "pass")
+    # Intentionally omit durable selectors / evidence map / smoke server id.
+    monkeypatch.delenv("MCPFLOW_KPI_AGENT_REQUEST_ID", raising=False)
+    monkeypatch.delenv("MCPFLOW_KPI_02_EVIDENCE_MAP", raising=False)
+    monkeypatch.delenv("MCPFLOW_KPI_SMOKE_MCP_SERVER_ID", raising=False)
+
+    m1 = measure_official_kpi_01(mode="live")
+    m2 = measure_official_kpi_02(mode="live")
+    m4 = measure_official_kpi_04(mode="live")
+    m5 = measure_official_kpi_05(mode="live")
+    assert m1["status"] != "MEASURED"
+    assert m1["measured_value"] is None
+    assert m2["status"] != "MEASURED"
+    assert m2["measured_value"] is None
+    assert m4["status"] != "MEASURED"
+    assert m4["measured_value"] is None
+    assert m5["status"] != "MEASURED"
+    assert m5["measured_value"] is None
+
+
+def test_durable_helpers_can_score_measured_paths() -> None:
+    """Valid durable evidence helpers can produce MEASURED inputs (no env results)."""
+    from datetime import UTC, datetime, timedelta
+    from uuid import uuid4
+
+    from tests.evaluation.harness.live_evidence import (
+        compute_kpi_01_duration_ms,
+        score_execution_terminal,
+        score_kpi_02_case,
+    )
+
+    start = datetime(2026, 10, 16, 8, 0, 0, tzinfo=UTC)
+    end = start + timedelta(milliseconds=1500)
+    assert compute_kpi_01_duration_ms(t_start=start, t_end=end) == 1500.0
+
+    tool_a = uuid4()
+    assert (
+        score_kpi_02_case(
+            expected_tool_version_id=tool_a,
+            expected_decision="AUTO_SELECT",
+            selected_tool_version_id=tool_a,
+            decision="AUTO_SELECT",
+        )
+        is True
+    )
+    assert (
+        score_kpi_02_case(
+            expected_tool_version_id=tool_a,
+            expected_decision="AUTO_SELECT",
+            selected_tool_version_id=uuid4(),
+            decision="AUTO_SELECT",
+        )
+        is False
+    )
+    assert score_execution_terminal("SUCCEEDED") == "PASS"
+    assert score_execution_terminal("FAILED") == "FAIL"
+    assert score_execution_terminal("RUNNING") == "NOT_RUN"
 
 
 def test_redact_secrets_strips_credential_keys() -> None:

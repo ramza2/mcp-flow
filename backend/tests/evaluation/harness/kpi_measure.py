@@ -515,13 +515,20 @@ def _live_prereq_missing() -> list[str]:
 
 
 def measure_official_kpi_01(*, mode: str) -> dict[str, Any]:
+    import asyncio
+
+    from tests.evaluation.harness.live_evidence import (
+        load_kpi_01_evidence,
+        parse_uuid,
+        with_session,
+    )
+
     targets = _targets()["targets"]["KPI-01"]
     unit = targets.get("measured_value_unit", "milliseconds")
     target = targets.get("target")
     timing_window = (
-        "t_start=AgentRequest accept/analyze entry; "
-        "t_end=ToolSelectionOutcome commit "
-        "(AUTO_SELECT|CONFIRM|CLARIFY|NO_MATCH)"
+        "t_start=agent_requests.created_at; "
+        "t_end=tool_selection_runs.created_at (latest for request)"
     )
     if mode != "live":
         return _not_measured(
@@ -531,13 +538,14 @@ def measure_official_kpi_01(*, mode: str) -> dict[str, Any]:
             unit=unit,
             target=target,
             reason=(
-                "OFFLINE_MODE: official response_time requires live canonical "
-                "Agent path (Analyzer→retrieval→rerank→selector). "
+                "OFFLINE_MODE: official response_time requires durable "
+                "AgentRequest + ToolSelectionRun evidence. "
                 "Selector microbenchmark is offline diagnostic only."
             ),
             extra={"timing_window": timing_window},
         )
     missing = _live_prereq_missing()
+    request_id = parse_uuid(os.environ.get("MCPFLOW_KPI_AGENT_REQUEST_ID"))
     if missing:
         return _not_measured(
             kpi_id="KPI-01",
@@ -548,11 +556,7 @@ def measure_official_kpi_01(*, mode: str) -> dict[str, Any]:
             reason=f"LIVE_PREREQUISITES_MISSING: {', '.join(missing)}",
             extra={"timing_window": timing_window, "pins": _live_agent_pins()},
         )
-    # Live E2E wall-clock against pinned identities is not auto-executed here to
-    # avoid inventing a second runtime or mutating undesignated resources.
-    # When a pilot runner records results, set MCPFLOW_KPI_01_LIVE_RESULT_MS.
-    raw = os.environ.get("MCPFLOW_KPI_01_LIVE_RESULT_MS", "").strip()
-    if not raw:
+    if request_id is None:
         return _not_measured(
             kpi_id="KPI-01",
             name="response_time",
@@ -560,24 +564,42 @@ def measure_official_kpi_01(*, mode: str) -> dict[str, Any]:
             unit=unit,
             target=target,
             reason=(
-                "LIVE_RESULT_UNAVAILABLE: prerequisites present but no recorded "
-                "end-to-end timing (set MCPFLOW_KPI_01_LIVE_RESULT_MS from the "
-                "canonical AgentRequest→selection path). Fake selector timings "
-                "are rejected."
+                "DURABLE_EVIDENCE_SELECTOR_MISSING: set MCPFLOW_KPI_AGENT_REQUEST_ID "
+                "to a persisted AgentRequest. Naked MCPFLOW_KPI_01_LIVE_RESULT_MS "
+                "is ignored and cannot produce MEASURED."
             ),
             extra={"timing_window": timing_window, "pins": _live_agent_pins()},
         )
     try:
-        value = float(raw)
-    except ValueError:
+        evidence = asyncio.run(
+            with_session(lambda session: load_kpi_01_evidence(session, agent_request_id=request_id))
+        )
+    except Exception as exc:  # noqa: BLE001
         return _not_measured(
             kpi_id="KPI-01",
             name="response_time",
             evidence_mode="live_official",
             unit=unit,
             target=target,
-            reason="LIVE_RESULT_INVALID: MCPFLOW_KPI_01_LIVE_RESULT_MS not a number",
+            reason=f"DURABLE_EVIDENCE_READ_ERROR: {type(exc).__name__}",
             extra={"timing_window": timing_window, "pins": _live_agent_pins()},
+        )
+    if evidence is None:
+        return _not_measured(
+            kpi_id="KPI-01",
+            name="response_time",
+            evidence_mode="live_official",
+            unit=unit,
+            target=target,
+            reason=(
+                "DURABLE_EVIDENCE_NOT_FOUND: AgentRequest or ToolSelectionRun "
+                f"missing for {request_id}"
+            ),
+            extra={
+                "timing_window": timing_window,
+                "pins": _live_agent_pins(),
+                "evidence_ids": {"agent_request_id": str(request_id)},
+            },
         )
     return _official_metric(
         kpi_id="KPI-01",
@@ -586,16 +608,36 @@ def measure_official_kpi_01(*, mode: str) -> dict[str, Any]:
         evidence_mode="live_official",
         numerator=None,
         denominator=None,
-        measured_value=value,
+        measured_value=evidence.duration_ms,
         unit=unit,
         target=target,
         evidence_complete=True,
-        reason="LIVE_RECORDED_E2E_AGENT_PATH",
-        extra={"timing_window": timing_window, "pins": _live_agent_pins()},
+        reason="DURABLE_AGENTREQUEST_SELECTION_TIMESTAMPS",
+        extra={
+            "timing_window": timing_window,
+            "pins": _live_agent_pins(),
+            "evidence_ids": {
+                "agent_request_id": str(evidence.agent_request_id),
+                "tool_selection_run_id": str(evidence.tool_selection_run_id),
+                "agent_version_id": str(evidence.agent_version_id),
+                "t_start": evidence.t_start.isoformat(),
+                "t_end": evidence.t_end.isoformat(),
+                "decision": evidence.decision,
+            },
+        },
     )
 
 
 def measure_official_kpi_02(*, mode: str) -> dict[str, Any]:
+    import asyncio
+    from pathlib import Path
+
+    from tests.evaluation.harness.live_evidence import (
+        evaluate_kpi_02_cases,
+        load_kpi_02_evidence_map,
+        with_session,
+    )
+
     targets = _targets()["targets"]["KPI-02"]
     unit = targets.get("measured_value_unit", "percent")
     target = targets.get("target")
@@ -607,9 +649,9 @@ def measure_official_kpi_02(*, mode: str) -> dict[str, Any]:
             unit=unit,
             target=target,
             reason=(
-                "OFFLINE_MODE: official Top-1 accuracy requires live "
-                "request_text → Analyzer → retrieval/embedding → LLM rerank → "
-                "selector. Frozen rerank/_decide is offline diagnostic only."
+                "OFFLINE_MODE: official Top-1 accuracy requires durable "
+                "AgentRequest/ToolSelectionRun evidence per case. "
+                "Frozen rerank/_decide is offline diagnostic only."
             ),
             extra={"counting_rule": targets.get("counting_rule")},
         )
@@ -627,11 +669,8 @@ def measure_official_kpi_02(*, mode: str) -> dict[str, Any]:
                 "pins": _live_agent_pins(),
             },
         )
-    # Accept only an explicitly recorded live evaluation summary (numerator/denom),
-    # never frozen diagnostic accuracy.
-    num_raw = os.environ.get("MCPFLOW_KPI_02_LIVE_NUMERATOR", "").strip()
-    den_raw = os.environ.get("MCPFLOW_KPI_02_LIVE_DENOMINATOR", "").strip()
-    if not num_raw or not den_raw:
+    map_path = os.environ.get("MCPFLOW_KPI_02_EVIDENCE_MAP", "").strip()
+    if not map_path:
         return _not_measured(
             kpi_id="KPI-02",
             name="nl_to_tool_mapping_top1_accuracy",
@@ -639,30 +678,90 @@ def measure_official_kpi_02(*, mode: str) -> dict[str, Any]:
             unit=unit,
             target=target,
             reason=(
-                "LIVE_RESULT_UNAVAILABLE: prerequisites present but no recorded "
-                "live evaluation counts "
-                "(MCPFLOW_KPI_02_LIVE_NUMERATOR / MCPFLOW_KPI_02_LIVE_DENOMINATOR). "
-                "Frozen selector regression must not fill official KPI-02."
+                "DURABLE_EVIDENCE_SELECTOR_MISSING: set MCPFLOW_KPI_02_EVIDENCE_MAP "
+                "to a JSON file of {case_id, agent_request_id, expected_tool_version_id}. "
+                "Naked MCPFLOW_KPI_02_LIVE_NUMERATOR/DENOMINATOR are ignored."
             ),
             extra={
                 "counting_rule": targets.get("counting_rule"),
                 "pins": _live_agent_pins(),
             },
         )
-    try:
-        numerator = int(num_raw)
-        denominator = int(den_raw)
-    except ValueError:
+    path = Path(map_path)
+    if not path.is_file():
         return _not_measured(
             kpi_id="KPI-02",
             name="nl_to_tool_mapping_top1_accuracy",
             evidence_mode="live_official",
             unit=unit,
             target=target,
-            reason="LIVE_RESULT_INVALID: numerator/denominator must be integers",
+            reason=f"EVIDENCE_MAP_NOT_FOUND: {map_path}",
             extra={"pins": _live_agent_pins()},
         )
-    if denominator <= 0:
+    cases = load_kpi_02_evidence_map(path)
+    denominator = len(cases)
+    if denominator == 0:
+        return _official_metric(
+            kpi_id="KPI-02",
+            name="nl_to_tool_mapping_top1_accuracy",
+            status="INCOMPLETE",
+            evidence_mode="live_official",
+            numerator=0,
+            denominator=0,
+            measured_value=None,
+            unit=unit,
+            target=target,
+            evidence_complete=False,
+            reason="DENOMINATOR_ZERO",
+            extra={"pins": _live_agent_pins()},
+        )
+    try:
+        evaluated = asyncio.run(
+            with_session(lambda session: evaluate_kpi_02_cases(session, cases))
+        )
+    except Exception as exc:  # noqa: BLE001
+        return _not_measured(
+            kpi_id="KPI-02",
+            name="nl_to_tool_mapping_top1_accuracy",
+            evidence_mode="live_official",
+            unit=unit,
+            target=target,
+            reason=f"DURABLE_EVIDENCE_READ_ERROR: {type(exc).__name__}",
+            extra={"pins": _live_agent_pins()},
+        )
+    not_run = sum(1 for item in evaluated if item.status == "NOT_RUN")
+    numerator = sum(1 for item in evaluated if item.status == "PASS")
+    case_details = [
+        {
+            "case_id": item.case_id,
+            "status": item.status,
+            "correct": item.correct,
+            "decision": item.decision,
+            "evidence_ids": {
+                "agent_request_id": (
+                    str(item.agent_request_id) if item.agent_request_id else None
+                ),
+                "tool_selection_run_id": (
+                    str(item.tool_selection_run_id)
+                    if item.tool_selection_run_id
+                    else None
+                ),
+                "selected_tool_version_id": (
+                    str(item.selected_tool_version_id)
+                    if item.selected_tool_version_id
+                    else None
+                ),
+                "expected_tool_version_id": (
+                    str(item.expected_tool_version_id)
+                    if item.expected_tool_version_id
+                    else None
+                ),
+            },
+            "reason": item.reason,
+        }
+        for item in evaluated
+    ]
+    if not_run > 0:
         return _official_metric(
             kpi_id="KPI-02",
             name="nl_to_tool_mapping_top1_accuracy",
@@ -674,8 +773,13 @@ def measure_official_kpi_02(*, mode: str) -> dict[str, Any]:
             unit=unit,
             target=target,
             evidence_complete=False,
-            reason="DENOMINATOR_ZERO",
-            extra={"pins": _live_agent_pins()},
+            reason="REQUIRED_CASES_NOT_RUN",
+            extra={
+                "counting_rule": targets.get("counting_rule"),
+                "pins": _live_agent_pins(),
+                "cases": case_details,
+                "evidence_map": map_path,
+            },
         )
     return _official_metric(
         kpi_id="KPI-02",
@@ -688,10 +792,12 @@ def measure_official_kpi_02(*, mode: str) -> dict[str, Any]:
         unit=unit,
         target=target,
         evidence_complete=True,
-        reason="LIVE_RECORDED_CANONICAL_MAPPING_PATH",
+        reason="DURABLE_TOOL_SELECTION_RUN_CASE_SCORES",
         extra={
             "counting_rule": targets.get("counting_rule"),
             "pins": _live_agent_pins(),
+            "cases": case_details,
+            "evidence_map": map_path,
         },
     )
 
@@ -832,6 +938,14 @@ def measure_official_kpi_03(*, mode: str) -> dict[str, Any]:
 
 
 def measure_official_kpi_04(*, mode: str) -> dict[str, Any]:
+    import asyncio
+
+    from tests.evaluation.harness.live_evidence import (
+        evaluate_kpi_04_attempts,
+        parse_uuid,
+        with_session,
+    )
+
     targets = _targets()["targets"]["KPI-04"]
     unit = targets.get("measured_value_unit", "percent")
     target = targets.get("target")
@@ -847,8 +961,8 @@ def measure_official_kpi_04(*, mode: str) -> dict[str, Any]:
             unit=unit,
             target=target,
             reason=(
-                "OFFLINE_MODE: official KPI-04 requires live designated smoke "
-                "connect/discovery/apply/verification attempts "
+                "OFFLINE_MODE: official KPI-04 requires durable smoke "
+                "check/discovery/registry/verification evidence "
                 f"(denominator={denominator} declared). Pytest group health is "
                 "offline diagnostic only."
             ),
@@ -858,64 +972,78 @@ def measure_official_kpi_04(*, mode: str) -> dict[str, Any]:
             },
         )
 
-    details: list[dict[str, Any]] = []
-    passed = 0
-    not_run = 0
-    for attempt in attempts:
-        req = list(attempt.get("requires_env") or [])
-        missing = _missing_env(req)
-        if not _db_url():
-            missing = ["TEST_DATABASE_URL|DATABASE_URL", *missing]
-        # Deduplicate while preserving order
-        seen: set[str] = set()
-        missing_unique = []
-        for item in missing:
-            if item not in seen:
-                seen.add(item)
-                missing_unique.append(item)
-        if missing_unique:
-            not_run += 1
-            details.append(
-                {
-                    "attempt_id": attempt["attempt_id"],
-                    "operation": attempt.get("operation"),
-                    "success": False,
-                    "status": "NOT_RUN",
-                    "failure_category": "PREREQUISITE_MISSING",
-                    "missing_env": missing_unique,
-                }
-            )
-            continue
-        # Designated smoke execution is opt-in via recorded results to avoid
-        # mutating arbitrary MCP servers from the harness.
-        result_key = f"MCPFLOW_KPI_04_RESULT_{attempt['attempt_id'].upper().replace('-', '_')}"
-        raw = os.environ.get(result_key, "").strip().lower()
-        if raw not in {"pass", "fail", "1", "0", "true", "false"}:
-            not_run += 1
-            details.append(
-                {
-                    "attempt_id": attempt["attempt_id"],
-                    "operation": attempt.get("operation"),
-                    "success": False,
-                    "status": "NOT_RUN",
-                    "failure_category": "LIVE_RESULT_UNAVAILABLE",
-                    "result_env": result_key,
-                }
-            )
-            continue
-        success = raw in {"pass", "1", "true"}
-        if success:
-            passed += 1
-        details.append(
-            {
-                "attempt_id": attempt["attempt_id"],
-                "operation": attempt.get("operation"),
-                "success": success,
-                "status": "PASS" if success else "FAIL",
-                "failure_category": None if success else "SMOKE_ATTEMPT_FAILED",
-            }
+    smoke_id = parse_uuid(os.environ.get("MCPFLOW_KPI_SMOKE_MCP_SERVER_ID"))
+    if not _db_url() or smoke_id is None:
+        return _official_metric(
+            kpi_id="KPI-04",
+            name="mcp_connection_registration_success_rate",
+            status="INCOMPLETE",
+            evidence_mode="live_official",
+            numerator=0,
+            denominator=denominator,
+            measured_value=None,
+            unit=unit,
+            target=target,
+            evidence_complete=False,
+            reason=(
+                "DURABLE_EVIDENCE_SELECTOR_MISSING: require DATABASE_URL/"
+                "TEST_DATABASE_URL and MCPFLOW_KPI_SMOKE_MCP_SERVER_ID. "
+                "Naked MCPFLOW_KPI_04_RESULT_* pass flags are ignored."
+            ),
+            extra={
+                "attempts_version": attempts_doc.get("attempts_version"),
+                "attempts": [
+                    {
+                        "attempt_id": a["attempt_id"],
+                        "operation": a.get("operation"),
+                        "status": "NOT_RUN",
+                        "success": False,
+                        "failure_category": "PREREQUISITE_MISSING",
+                    }
+                    for a in attempts
+                ],
+            },
         )
 
+    check_id = parse_uuid(os.environ.get("MCPFLOW_KPI_SMOKE_CHECK_ID"))
+    discovery_id = parse_uuid(os.environ.get("MCPFLOW_KPI_SMOKE_DISCOVERY_ID"))
+    verification_id = parse_uuid(os.environ.get("MCPFLOW_KPI_SMOKE_VERIFICATION_ID"))
+    try:
+        evaluated = asyncio.run(
+            with_session(
+                lambda session: evaluate_kpi_04_attempts(
+                    session,
+                    smoke_server_id=smoke_id,
+                    check_id=check_id,
+                    discovery_id=discovery_id,
+                    verification_id=verification_id,
+                )
+            )
+        )
+    except Exception as exc:  # noqa: BLE001
+        return _not_measured(
+            kpi_id="KPI-04",
+            name="mcp_connection_registration_success_rate",
+            evidence_mode="live_official",
+            unit=unit,
+            target=target,
+            reason=f"DURABLE_EVIDENCE_READ_ERROR: {type(exc).__name__}",
+            extra={"attempts_version": attempts_doc.get("attempts_version")},
+        )
+
+    details = [
+        {
+            "attempt_id": item.attempt_id,
+            "operation": item.operation,
+            "success": item.success,
+            "status": item.status,
+            "failure_category": item.failure_category,
+            "evidence_ids": item.evidence_ids,
+        }
+        for item in evaluated
+    ]
+    passed = sum(1 for item in evaluated if item.status == "PASS")
+    not_run = sum(1 for item in evaluated if item.status == "NOT_RUN")
     if not_run > 0:
         return _official_metric(
             kpi_id="KPI-04",
@@ -932,9 +1060,6 @@ def measure_official_kpi_04(*, mode: str) -> dict[str, Any]:
             extra={
                 "attempts_version": attempts_doc.get("attempts_version"),
                 "attempts": details,
-                "smoke_mcp_server_id_present": _env_present(
-                    "MCPFLOW_KPI_SMOKE_MCP_SERVER_ID"
-                ),
             },
         )
     return _official_metric(
@@ -948,7 +1073,7 @@ def measure_official_kpi_04(*, mode: str) -> dict[str, Any]:
         unit=unit,
         target=target,
         evidence_complete=True,
-        reason="LIVE_SMOKE_ATTEMPTS_COMPLETE",
+        reason="DURABLE_SMOKE_MCP_EVIDENCE",
         extra={
             "attempts_version": attempts_doc.get("attempts_version"),
             "attempts": details,
@@ -957,6 +1082,13 @@ def measure_official_kpi_04(*, mode: str) -> dict[str, Any]:
 
 
 def measure_official_kpi_05(*, mode: str) -> dict[str, Any]:
+    import asyncio
+
+    from tests.evaluation.harness.live_evidence import (
+        evaluate_kpi_05_scenarios,
+        with_session,
+    )
+
     targets = _targets()["targets"]["KPI-05"]
     unit = targets.get("measured_value_unit", "percent")
     target = targets.get("target")
@@ -972,9 +1104,9 @@ def measure_official_kpi_05(*, mode: str) -> dict[str, Any]:
             unit=unit,
             target=target,
             reason=(
-                "OFFLINE_MODE: official KPI-05 requires one live executable "
-                f"attempt per scenario_id (declared={denominator}). Whole unit "
-                "pytest modules are offline diagnostic only."
+                "OFFLINE_MODE: official KPI-05 requires durable Execution IDs "
+                f"per scenario_id (declared={denominator}). Whole unit pytest "
+                "modules are offline diagnostic only."
             ),
             extra={
                 "denominator_declared": denominator,
@@ -982,60 +1114,65 @@ def measure_official_kpi_05(*, mode: str) -> dict[str, Any]:
             },
         )
 
-    details: list[dict[str, Any]] = []
-    passed = 0
-    not_run = 0
-    for scenario in scenarios:
-        req = list(scenario.get("requires_env") or [])
-        missing = _missing_env(req)
-        if not _db_url():
-            missing = ["TEST_DATABASE_URL|DATABASE_URL", *missing]
-        missing_unique: list[str] = []
-        seen: set[str] = set()
-        for item in missing:
-            if item not in seen:
-                seen.add(item)
-                missing_unique.append(item)
-        if missing_unique:
-            not_run += 1
-            details.append(
-                {
-                    "scenario_id": scenario["scenario_id"],
-                    "status": "NOT_RUN",
-                    "success": False,
-                    "reason": "PREREQUISITE_MISSING",
-                    "missing_env": missing_unique,
-                }
-            )
-            continue
-        result_key = (
-            "MCPFLOW_KPI_05_RESULT_"
-            + scenario["scenario_id"].upper().replace("-", "_")
-        )
-        raw = os.environ.get(result_key, "").strip().lower()
-        if raw not in {"pass", "fail", "1", "0", "true", "false"}:
-            not_run += 1
-            details.append(
-                {
-                    "scenario_id": scenario["scenario_id"],
-                    "status": "NOT_RUN",
-                    "success": False,
-                    "reason": "LIVE_RESULT_UNAVAILABLE",
-                    "result_env": result_key,
-                }
-            )
-            continue
-        success = raw in {"pass", "1", "true"}
-        if success:
-            passed += 1
-        details.append(
-            {
-                "scenario_id": scenario["scenario_id"],
-                "status": "PASS" if success else "FAIL",
-                "success": success,
-            }
+    if not _db_url():
+        return _official_metric(
+            kpi_id="KPI-05",
+            name="composite_scenario_completion_rate",
+            status="INCOMPLETE",
+            evidence_mode="live_official",
+            numerator=0,
+            denominator=denominator,
+            measured_value=None,
+            unit=unit,
+            target=target,
+            evidence_complete=False,
+            reason=(
+                "DURABLE_EVIDENCE_SELECTOR_MISSING: require DATABASE_URL/"
+                "TEST_DATABASE_URL and MCPFLOW_KPI_EXECUTION_ID_<SCENARIO_ID>. "
+                "Naked MCPFLOW_KPI_05_RESULT_* pass flags are ignored."
+            ),
+            extra={
+                "scenarios_version": exec_doc.get("scenarios_version"),
+                "scenarios": [
+                    {
+                        "scenario_id": s["scenario_id"],
+                        "status": "NOT_RUN",
+                        "success": False,
+                        "reason": "NO_DATABASE_URL",
+                    }
+                    for s in scenarios
+                ],
+            },
         )
 
+    try:
+        evaluated = asyncio.run(
+            with_session(lambda session: evaluate_kpi_05_scenarios(session, scenarios))
+        )
+    except Exception as exc:  # noqa: BLE001
+        return _not_measured(
+            kpi_id="KPI-05",
+            name="composite_scenario_completion_rate",
+            evidence_mode="live_official",
+            unit=unit,
+            target=target,
+            reason=f"DURABLE_EVIDENCE_READ_ERROR: {type(exc).__name__}",
+            extra={"scenarios_version": exec_doc.get("scenarios_version")},
+        )
+
+    details = [
+        {
+            "scenario_id": item.scenario_id,
+            "status": item.status,
+            "success": item.success,
+            "execution_status": item.execution_status,
+            "evidence_ids": item.evidence_ids,
+            "reason": item.reason,
+        }
+        for item in evaluated
+    ]
+    passed = sum(1 for item in evaluated if item.status == "PASS")
+    not_run = sum(1 for item in evaluated if item.status == "NOT_RUN")
     if not_run > 0:
         return _official_metric(
             kpi_id="KPI-05",
@@ -1071,7 +1208,7 @@ def measure_official_kpi_05(*, mode: str) -> dict[str, Any]:
         unit=unit,
         target=target,
         evidence_complete=True,
-        reason="LIVE_EXECUTABLE_SCENARIOS_COMPLETE",
+        reason="DURABLE_EXECUTION_TERMINAL_EVIDENCE",
         extra={
             "scenarios_version": exec_doc.get("scenarios_version"),
             "scenarios": details,
