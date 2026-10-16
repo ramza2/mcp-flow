@@ -88,6 +88,7 @@ def _parallel_plan(
 
 
 def _loop_plan(workflow_id: uuid.UUID, tool_version_id: uuid.UUID) -> dict[str, Any]:
+    """Flat FOR_EACH Plan — recoverable under Issue #117."""
     plan = _base_plan(
         workflow_id=workflow_id,
         steps=[
@@ -114,10 +115,11 @@ def _loop_plan(workflow_id: uuid.UUID, tool_version_id: uuid.UUID) -> dict[str, 
                 "body",
                 tool_version_id=tool_version_id,
                 depends_on=["loop1"],
+                # Seeded Workflow tools expect `location`; keep body MCP-valid.
                 bindings={
-                    "item": {
-                        "kind": BindingKind.LOOP_CONTEXT.value,
-                        "path": "/item",
+                    "location": {
+                        "kind": BindingKind.LITERAL.value,
+                        "value": "Seoul",
                     }
                 },
             ),
@@ -128,6 +130,72 @@ def _loop_plan(workflow_id: uuid.UUID, tool_version_id: uuid.UUID) -> dict[str, 
         "items": {"type": "array", "required": True, "secret": False}
     }
     plan["completion"]["response_step_ids"] = ["loop1"]
+    return plan
+
+
+def _nested_loop_plan(
+    workflow_id: uuid.UUID, tool_version_id: uuid.UUID
+) -> dict[str, Any]:
+    """Nested LOOP — not a RUNNING recovery candidate."""
+    plan = _base_plan(
+        workflow_id=workflow_id,
+        steps=[
+            {
+                "id": "outer",
+                "name": "outer",
+                "type": AuthorableStepType.LOOP.value,
+                "required": True,
+                "depends_on": [],
+                "when": None,
+                "timeout_seconds": 30,
+                "on_error": "FAIL_EXECUTION",
+                "config": {
+                    "mode": "FOR_EACH",
+                    "collection": {
+                        "kind": BindingKind.PLAN_INPUT.value,
+                        "path": "/items",
+                    },
+                    "body_step_ids": ["inner"],
+                    "max_iterations": 10,
+                },
+            },
+            {
+                "id": "inner",
+                "name": "inner",
+                "type": AuthorableStepType.LOOP.value,
+                "required": True,
+                "depends_on": ["outer"],
+                "when": None,
+                "timeout_seconds": 30,
+                "on_error": "FAIL_EXECUTION",
+                "config": {
+                    "mode": "FOR_EACH",
+                    "collection": {
+                        "kind": BindingKind.LITERAL.value,
+                        "value": [1],
+                    },
+                    "body_step_ids": ["body"],
+                    "max_iterations": 10,
+                },
+            },
+            _tool(
+                "body",
+                tool_version_id=tool_version_id,
+                depends_on=["inner"],
+                bindings={
+                    "item": {
+                        "kind": BindingKind.LOOP_CONTEXT.value,
+                        "path": "/item",
+                    }
+                },
+            ),
+        ],
+        limits={"max_loop_iterations": 10, "max_steps": 40},
+    )
+    plan["inputs"] = {
+        "items": {"type": "array", "required": True, "secret": False}
+    }
+    plan["completion"]["response_step_ids"] = ["outer"]
     return plan
 
 
@@ -492,41 +560,33 @@ async def test_discovery_workflow_schedule_loop_waiting_agent(
     wait_exec.lease_token = None
     await db_session.commit()
 
-    # 5) LOOP Plan not selected
-    loop_ctx = await _seed_ready_workflow(db_session)
-    loop_wf = await _create_workflow(db_session)
-    loop_plan = _loop_plan(loop_wf.id, loop_ctx["tool_version_id"])
-    loop_ver = await _create_draft_version(db_session, loop_wf.id, plan=loop_plan)
-    await _publish_and_activate(db_session, loop_wf.id, loop_ver.id)
-    loop_user = await _seed_authorized_workflow_user(
-        db_session, workflow_id=loop_wf.id, tool_ids=[loop_ctx["tool_id"]]
-    )
-    await db_session.commit()
-    loop_out = await _create(
+    # 5) flat FOR_EACH LOOP Plan is selected (Issue #117)
+    loop_id, _lc, now_l, _wl, _tl = await _seed_workflow_execution(
         db_session,
-        {
-            "workflow_id": loop_wf.id,
-            "version_id": loop_ver.id,
-            "tool_id": loop_ctx["tool_id"],
-            "tool_version_id": loop_ctx["tool_version_id"],
-            "requester_id": loop_user,
-        },
-        idempotency_key=_idem_key(),
+        plan_builder=_loop_plan,
         inputs={"items": [{"id": 1}]},
     )
+    await _expire_lease(db_session, execution_id=loop_id, claim_now=now_l)
+    loop_exec = await ExecutionRepository(db_session).get(loop_id)
+    assert loop_exec is not None
+    assert plan_supports_workflow_running_recovery(loop_exec.plan_snapshot) is True
+
+    # 6) nested LOOP Plan is not selected
+    nested_ctx = await _seed_ready_workflow(db_session)
+    nested_wf = await _create_workflow(db_session)
+    nested_plan = _nested_loop_plan(nested_wf.id, nested_ctx["tool_version_id"])
+    # Nested Plans fail static validation on publish — plant lightweight row.
     await db_session.commit()
-    await ExecutionQueueService(db_session).stage_created_batch(limit=20)
-    await db_session.commit()
-    claim = await ExecutionClaimService(db_session, lease_seconds=60).claim(
-        execution_id=loop_out.result.id, worker_id="loop-w", now=now
+    template = await ExecutionRepository(db_session).get(wf_id)
+    assert template is not None
+    nested_id = await _plant_expired_unsupported_workflow(
+        db_session,
+        template=template,
+        plan_snapshot=nested_plan,
+        lease_expires_at=now - timedelta(seconds=1),
     )
     await db_session.commit()
-    assert claim.claimed
-    loop_exec = await ExecutionRepository(db_session).get(loop_out.result.id)
-    assert loop_exec is not None
-    loop_exec.lease_expires_at = now - timedelta(seconds=1)
-    await db_session.commit()
-    assert plan_supports_workflow_running_recovery(loop_exec.plan_snapshot) is False
+    assert plan_supports_workflow_running_recovery(nested_plan) is False
 
     ids = await ExecutionRecoveryService(
         db_session, lease_seconds=60
@@ -535,7 +595,8 @@ async def test_discovery_workflow_schedule_loop_waiting_agent(
     assert sch_id in ids
     assert fresh_id not in ids
     assert wait_id not in ids
-    assert loop_out.result.id not in ids
+    assert loop_id in ids
+    assert nested_id not in ids
 
 
 @pytest.mark.asyncio
@@ -612,11 +673,11 @@ async def test_discovery_starvation_free_past_unsupported_prefix(
     assert template is not None
 
     base = now - timedelta(seconds=unsupported_count + 10)
-    loop_plan = _loop_plan(uuid.uuid4(), _ctx["tool_version_id"])
+    nested_plan = _nested_loop_plan(uuid.uuid4(), _ctx["tool_version_id"])
     for i in range(unsupported_count):
-        # Alternate LOOP and malformed so both unsupported shapes are skipped.
+        # Alternate nested LOOP and malformed so both unsupported shapes skip.
         if i % 2 == 0:
-            snap = loop_plan
+            snap = nested_plan
         else:
             snap = {"not": "a-valid-plan", "i": i}
         await _plant_expired_unsupported_workflow(
@@ -678,45 +739,30 @@ async def test_discovery_merge_agent_and_workflow_global_order_limit(
 
 
 @pytest.mark.asyncio
-async def test_discovery_loop_plan_never_returned(
+async def test_discovery_nested_loop_plan_never_returned(
     db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """C: LOOP Plan expired RUNNING Workflow is never a candidate."""
+    """C: nested LOOP Plan expired RUNNING Workflow is never a candidate."""
     _install_no_side_effects(monkeypatch)
-    loop_ctx = await _seed_ready_workflow(db_session)
-    loop_wf = await _create_workflow(db_session)
-    loop_plan = _loop_plan(loop_wf.id, loop_ctx["tool_version_id"])
-    loop_ver = await _create_draft_version(db_session, loop_wf.id, plan=loop_plan)
-    await _publish_and_activate(db_session, loop_wf.id, loop_ver.id)
-    loop_user = await _seed_authorized_workflow_user(
-        db_session, workflow_id=loop_wf.id, tool_ids=[loop_ctx["tool_id"]]
+    eligible_id, ctx, now, _w, _tok = await _seed_workflow_execution(
+        db_session, plan_builder=lambda wid, tv: _tool_plan(wid, tv)
     )
-    await db_session.commit()
-    loop_out = await _create(
+    await _expire_lease(db_session, execution_id=eligible_id, claim_now=now)
+    template = await ExecutionRepository(db_session).get(eligible_id)
+    assert template is not None
+    nested_id = await _plant_expired_unsupported_workflow(
         db_session,
-        {
-            "workflow_id": loop_wf.id,
-            "version_id": loop_ver.id,
-            "requester_id": loop_user,
-        },
-        idempotency_key=_idem_key(),
-        inputs={"items": [{"id": 1}]},
+        template=template,
+        plan_snapshot=_nested_loop_plan(uuid.uuid4(), ctx["tool_version_id"]),
+        lease_expires_at=now - timedelta(seconds=1),
     )
     await db_session.commit()
-    await ExecutionQueueService(db_session).stage_created_batch(limit=10)
-    await db_session.commit()
-    now = datetime.now(UTC)
-    claim = await ExecutionClaimService(db_session, lease_seconds=60).claim(
-        execution_id=loop_out.result.id, worker_id="loop-only", now=now
-    )
-    await db_session.commit()
-    assert claim.claimed
-    await _expire_lease(db_session, execution_id=loop_out.result.id, claim_now=now)
 
     ids = await ExecutionRecoveryService(
         db_session, lease_seconds=60
     ).list_expired_running_ids(limit=50, now=now)
-    assert loop_out.result.id not in ids
+    assert nested_id not in ids
+    assert eligible_id in ids
 
 
 # ---------------------------------------------------------------------------

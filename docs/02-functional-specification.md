@@ -727,12 +727,15 @@ Public API에서 inactive session은 Cookie Session 검증이 먼저 `401 AUTH_S
 
 Worker lease, MCP task handle, persisted state를 사용해 재시작 후 복구한다. 동일 non-idempotent Tool을 무조건 재호출하지 않는다.
 
-**expired RUNNING** recovery covers AgentRequest single-TOOL evidence and non-LOOP
-`WORKFLOW_VERSION` / `SCHEDULE_OCCURRENCE` DAGs (TOOL/CONDITION/JOIN/APPROVAL).
-Whole-DAG classification must complete before any new MCP call; parallel siblings
-with any unsafe/UNKNOWN/corrupt evidence fail closed with MCP 0. LOOP Plans are
-filtered from discovery (dedicated follow-up). Approval `WAITING_APPROVAL` and MRTR
-`WAITING_INPUT` remain lease-free and are not RUNNING recovery candidates.
+**expired RUNNING** recovery covers AgentRequest single-TOOL evidence,
+`WORKFLOW_VERSION` / `SCHEDULE_OCCURRENCE` DAGs (TOOL/CONDITION/JOIN/APPROVAL),
+and runtime-supported flat `FOR_EACH` / `WHILE` LOOP Plans. Whole-Execution
+classification (including LOOP parents, control evidence, every iteration child,
+and active TOOL Attempt/ToolCall evidence) must complete before any new MCP call;
+parallel siblings or LOOP children with any unsafe/UNKNOWN/corrupt evidence fail
+closed with MCP 0. Nested LOOP and LOOP body APPROVAL Plans are not recovery
+candidates. Approval `WAITING_APPROVAL` and MRTR `WAITING_INPUT` remain lease-free
+and are not RUNNING recovery candidates.
 
 PostgreSQL이 source of truth다. outbox process가 expired `RUNNING` AgentRequest /
 supported Workflow·Schedule candidate와 expired `CANCEL_REQUESTED` candidate를
@@ -750,14 +753,15 @@ source_type == AGENT_REQUEST
 exactly one foundation TOOL Step
 ```
 
-Recovery candidate (RUNNING Workflow/Schedule — Issue #115):
+Recovery candidate (RUNNING Workflow/Schedule — Issues #115 / #117):
 
 ```text
 Execution.status == RUNNING
 lease_expires_at IS NOT NULL
 lease_expires_at <= now
 source_type ∈ {WORKFLOW_VERSION, SCHEDULE_OCCURRENCE}
-pinned Plan has no LOOP Step
+pinned Plan is non-LOOP TOOL/CONDITION/JOIN/APPROVAL
+  or runtime-supported flat FOR_EACH / WHILE (no nested LOOP / body APPROVAL)
 ```
 
 Recovery candidate (CANCEL_REQUESTED — cancellation-only):

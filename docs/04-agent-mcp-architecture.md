@@ -942,9 +942,10 @@ A TOOL → C CONDITION → PASS TOOL (when C.condition_result==true)
 
 - one Celery/Execution task; not one task per Step
 - duplicate orchestrator delivery seeing RUNNING TOOL under lease → `WAVE_IN_PROGRESS` NOOP
-- Non-LOOP Workflow/Schedule expired RUNNING recovery classifies the whole DAG
-  before any MCP; unsafe/UNKNOWN sibling evidence fail-closes with MCP 0.
-  LOOP Plan RUNNING recovery remains out of scope. Expired CANCEL_REQUESTED
+- Workflow/Schedule expired RUNNING recovery classifies the whole Execution
+  before any MCP (non-LOOP DAG + flat FOR_EACH/WHILE LOOP checkpoints);
+  unsafe/UNKNOWN sibling or LOOP-child evidence fail-closes with MCP 0.
+  Nested LOOP / body APPROVAL remain unsupported. Expired CANCEL_REQUESTED
   multi-step recovery is cancellation-only terminalization (MCP 0).
 - runtime Binding resolve unchanged for TOOL args; STEP_OUTPUT still requires
   SUCCEEDED source + exact Plan↔Step lineage; CONDITION `result_inline` is a
@@ -1183,13 +1184,17 @@ WHILE Predicate must not reference LOOP body templates via `STEP_OUTPUT`.
 - WHILE parent result: `{mode, iterations_completed}` (history/hashes stay in
   `resolved_input`).
 
-#### Recovery limitation
+#### Recovery (expired lease)
 
 Same-lease duplicate orchestration reconstructs WHILE progress from
 `predicate_history` + durable iteration child rows (never duplicate history
 entries, recreate an existing iteration, rerun a terminal ToolCall, or
-reinterpret a false gate as true). Robust resume of a partially completed
-complex LOOP after worker lease loss remains follow-up work.
+reinterpret a false gate as true).
+
+Expired-lease recovery (Issue #117) validates durable FOR_EACH collection pins /
+WHILE `predicate_history`, iteration topology, and every dynamic child lineage
+before assigning one fresh Execution lease, then reuses `ExecutionOrchestrator`
+LOOP reconciliation. Nested LOOP and body APPROVAL remain out of scope.
 
 ### 9.6 CONDITION / TOOL config (complex Plan)
 

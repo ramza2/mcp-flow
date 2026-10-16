@@ -4,12 +4,15 @@ PostgreSQL is the source of truth. Celery/Redis only deliver recovery work.
 
 Expired RUNNING recovery covers:
 - AgentRequest + single TOOL Step + synchronous Current MCP evidence
-- non-LOOP WORKFLOW_VERSION / SCHEDULE_OCCURRENCE DAGs (TOOL/CONDITION/JOIN/
-  APPROVAL) via whole-DAG classification before any MCP (Issue #115)
+- WORKFLOW_VERSION / SCHEDULE_OCCURRENCE DAGs (TOOL/CONDITION/JOIN/APPROVAL)
+  via whole-DAG classification before any MCP (Issue #115)
+- flat FOR_EACH / WHILE LOOP Plans via whole-Execution checkpoint validation
+  before takeover, then existing Orchestrator LOOP reconcile (Issue #117)
 
 Expired CANCEL_REQUESTED recovery is cancellation-only terminalization and
-never re-invokes MCP. MRTR WAITING_INPUT, Approval WAITING_APPROVAL, and LOOP
-Plan RUNNING recovery remain out of scope.
+never re-invokes MCP. MRTR WAITING_INPUT and Approval WAITING_APPROVAL remain
+lease-free and are not RUNNING recovery candidates. Nested LOOP and LOOP body
+APPROVAL Plans remain unsupported.
 """
 
 from __future__ import annotations

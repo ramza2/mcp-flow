@@ -109,11 +109,13 @@ async def _seed_claimed_workflow(
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_pg_discovery_workflow_schedule_excludes_loop(
+async def test_pg_discovery_workflow_includes_flat_loop_excludes_nested(
     integration_session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _install_no_side_effects(monkeypatch)
+    from tests.unit.test_workflow_dag_recovery import _nested_loop_plan
+
     wf_id, now, _w, _tok = await _seed_claimed_workflow(
         integration_session_factory,
         plan_builder=lambda wid, tv: _tool_plan(wid, tv),
@@ -134,22 +136,55 @@ async def test_pg_discovery_workflow_schedule_excludes_loop(
     async with integration_session_factory() as session:
         loop_exec = await ExecutionRepository(session).get(loop_id)
         assert loop_exec is not None
-        assert plan_supports_workflow_running_recovery(loop_exec.plan_snapshot) is False
+        assert plan_supports_workflow_running_recovery(loop_exec.plan_snapshot) is True
         loop_exec.lease_expires_at = now3 - timedelta(seconds=1)
         await session.commit()
+
+        # Nested LOOP: plant lightweight unsupported row (not publishable).
+        # Insert as QUEUED first — PG check forbids RUNNING without lease.
+        nested_snap = _nested_loop_plan(uuid.uuid4(), uuid.uuid4())
+        assert plan_supports_workflow_running_recovery(nested_snap) is False
+        from app.schemas.execution_plan import EXECUTION_PLAN_SCHEMA_VERSION
+
+        nested = await ExecutionRepository(session).create_execution(
+            source_type=ExecutionSourceType.WORKFLOW_VERSION.value,
+            trigger_type="USER",
+            requester_id=loop_exec.requester_id,
+            agent_request_id=None,
+            agent_version_id=None,
+            plan_validation_run_id=None,
+            status=ExecutionStatus.QUEUED.value,
+            plan_schema_version=EXECUTION_PLAN_SCHEMA_VERSION,
+            plan_snapshot=nested_snap,
+            plan_hash="b" * 64,
+            input_snapshot={},
+            policy_snapshot=dict(loop_exec.policy_snapshot),
+            trace_id=None,
+            requested_at=now3,
+            workflow_version_id=loop_exec.workflow_version_id,
+        )
+        nested.status = ExecutionStatus.RUNNING.value
+        nested.worker_id = "nested-old"
+        nested.lease_token = uuid.uuid4()
+        nested.lease_expires_at = now3 - timedelta(seconds=1)
+        nested.started_at = now3
+        await session.commit()
+        nested_id = nested.id
 
     async with integration_session_factory() as session:
         first = await ExecutionRecoveryService(
             session, lease_seconds=60
         ).list_expired_running_ids(limit=50, now=now)
         assert wf_id in first
-        assert loop_id not in first
+        assert loop_id in first
+        assert nested_id not in first
         # Outbox restart: rediscovery remains durable in PostgreSQL.
         second = await ExecutionRecoveryService(
             session, lease_seconds=60
         ).list_expired_running_ids(limit=50, now=now)
         assert wf_id in second
-        assert loop_id not in second
+        assert loop_id in second
+        assert nested_id not in second
 
 
 @pytest.mark.integration

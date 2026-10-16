@@ -447,7 +447,7 @@ Dataset은 평가 전 FROZEN하고 실행 중 정답을 변경하지 않는다.
 - PostgreSQL A–J: happy path, empty, body DAG, LOOP_CONTEXT+STEP_OUTPUT,
   conditional body, CONTINUE partial, max_iterations, duplicate iteration race,
   duplicate child dispatch, lineage tamper
-- recovery limitation: partial LOOP after lease loss remains follow-up
+- expired-lease flat FOR_EACH recovery covered under Issue #117 suite
 
 추가 (flat WHILE LOOP runtime):
 
@@ -467,8 +467,8 @@ Dataset은 평가 전 FROZEN하고 실행 중 정답을 변경하지 않는다.
 - PostgreSQL A–K: zero iter, 3-iter previous, body LOOP_CONTEXT, body DAG,
   max_iterations CONTINUE, max_steps, duplicate gate races, evidence drift,
   mixed FOR_EACH+WHILE
-- recovery limitation: same-lease reconstructs from history + durable rows;
-  expired-lease partial complex LOOP remains follow-up
+- same-lease reconstructs from history + durable rows;
+  expired-lease flat WHILE recovery covered under Issue #117 suite
 
 추가 (authorable APPROVAL Step runtime):
 
@@ -531,11 +531,14 @@ Dataset은 평가 전 FROZEN하고 실행 중 정답을 변경하지 않는다.
 
 추가 (FNC-EXE-011 expired RUNNING lease recovery vertical slice):
 
-- non-LOOP Workflow/Schedule DAG RUNNING recovery (Issue #115): discovery for
-  WORKFLOW_VERSION/SCHEDULE_OCCURRENCE without LOOP; whole-DAG classify before MCP;
-  per-Step `get_expected_tool_policy_snapshot`; parallel unsafe blocks sibling retry;
-  ErrorPolicy FAIL_EXECUTION/CONTINUE/MARK_PARTIAL; CONDITION/JOIN/APPROVAL via
-  existing orchestrator; LOOP Plans not selected; AgentRequest regressions green
+- Workflow/Schedule DAG RUNNING recovery (Issues #115 / #117): discovery for
+  WORKFLOW_VERSION/SCHEDULE_OCCURRENCE non-LOOP and runtime-supported flat
+  FOR_EACH/WHILE; whole-Execution classify before MCP; per-Step
+  `get_expected_tool_policy_snapshot` (body template Plan id, never synthetic
+  step_key); parallel unsafe blocks sibling/LOOP retry; ErrorPolicy
+  FAIL_EXECUTION/CONTINUE/MARK_PARTIAL; CONDITION/JOIN/APPROVAL via existing
+  orchestrator; nested LOOP / body APPROVAL not selected; FOR_EACH pin /
+  WHILE history crash checkpoints; AgentRequest regressions green
 - expired CANCEL_REQUESTED lease recovery (Issue #113): discovery includes
   CANCEL_REQUESTED + expired lease for AGENT_REQUEST/WORKFLOW_VERSION/
   SCHEDULE_OCCURRENCE; evidence A→CANCELLED, B STARTED ToolCall→UNKNOWN_OUTCOME+
