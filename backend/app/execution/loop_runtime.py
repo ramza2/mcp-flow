@@ -885,14 +885,29 @@ def assert_while_parent_control_state(
 
     if status == StepStatus.RUNNING.value:
         if max_n < 1:
-            # Durable TX: gate append + materialize are same reconcile pass.
-            # Only brief empty history before first gate is valid.
-            if history:
+            # Same-lease brief empty history after control pin, or durable
+            # crash after candidate-1 gate persistence before materialize /
+            # parent terminalize (Issue #117 A/B — orchestrator replays).
+            if not history:
+                return
+            if len(history) != 1:
                 raise AppError(
                     code="RESOURCE_CONFLICT",
                     message=(
                         f"WHILE {parent.step_key!r} RUNNING with no children "
-                        "must have empty predicate_history."
+                        "must have empty predicate_history or exactly "
+                        "gate 1=true/false."
+                    ),
+                    status_code=409,
+                )
+            entry = history_entry_for(history, next_iteration_no=1)
+            if entry is None or not isinstance(entry.get("result"), bool):
+                raise AppError(
+                    code="RESOURCE_CONFLICT",
+                    message=(
+                        f"WHILE {parent.step_key!r} RUNNING with no children "
+                        "requires history gate 1=true or 1=false "
+                        "(or empty history)."
                     ),
                     status_code=409,
                 )
@@ -933,32 +948,52 @@ def assert_while_parent_control_state(
                 )
         nxt = history_entry_for(history, next_iteration_no=max_n + 1)
         if nxt is not None:
-            if nxt["result"] is False:
+            # Issue #117 checkpoints C/D: next gate persisted before
+            # materialize (true) or before parent terminalization (false).
+            # Prior iterations 1..N must be complete/terminal; no N+1 rows yet.
+            if max_n + 1 in present:
                 raise AppError(
                     code="RESOURCE_CONFLICT",
                     message=(
-                        f"WHILE {parent.step_key!r} RUNNING cannot retain a "
-                        f"false gate at candidate {max_n + 1}."
+                        f"WHILE {parent.step_key!r} RUNNING has gate "
+                        f"{max_n + 1} while iteration rows already exist."
                     ),
                     status_code=409,
                 )
-            # Durable TX: true gate N+1 implies iteration N+1 rows exist.
-            if max_n + 1 not in present:
+            for n in range(1, max_n + 1):
+                _assert_iteration_set_complete_terminal(
+                    steps=steps,
+                    parent=parent,
+                    iteration_no=n,
+                    body_step_ids=body_ids,
+                    plan=plan,
+                )
+            if len(history) != max_n + 1:
                 raise AppError(
                     code="RESOURCE_CONFLICT",
                     message=(
-                        f"WHILE {parent.step_key!r} RUNNING has true gate "
-                        f"{max_n + 1} without iteration rows."
+                        f"WHILE {parent.step_key!r} RUNNING history length "
+                        f"{len(history)} != materialized+1 ({max_n + 1})."
                     ),
                     status_code=409,
                 )
-        # No history beyond max_n+1 while still RUNNING without those iters.
-        if len(history) > max_n + 1:
+            if nxt["result"] is not True and nxt["result"] is not False:
+                raise AppError(
+                    code="RESOURCE_CONFLICT",
+                    message=(
+                        f"WHILE {parent.step_key!r} RUNNING gate "
+                        f"{max_n + 1} result must be bool."
+                    ),
+                    status_code=409,
+                )
+            return
+        # No history beyond max_n while still RUNNING without next gate.
+        if len(history) > max_n:
             raise AppError(
                 code="RESOURCE_CONFLICT",
                 message=(
                     f"WHILE {parent.step_key!r} RUNNING history extends past "
-                    f"candidate {max_n + 1}."
+                    f"candidate {max_n}."
                 ),
                 status_code=409,
             )

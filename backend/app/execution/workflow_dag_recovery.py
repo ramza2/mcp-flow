@@ -1,7 +1,8 @@
-"""Expired RUNNING non-LOOP Workflow/Schedule DAG recovery (Issue #115).
+"""Expired RUNNING Workflow/Schedule DAG recovery (Issues #115 / #117).
 
-Whole-DAG classification must complete before any new MCP call. LOOP Plans are
-out of scope for this slice.
+Whole-Execution classification must complete before any new MCP call. Flat
+FOR_EACH / WHILE LOOP Plans are supported via durable checkpoint validation
+(``loop_recovery``) before takeover; progression reuses ExecutionOrchestrator.
 """
 
 from __future__ import annotations
@@ -28,6 +29,11 @@ from app.execution.completion import is_continuable_known_failure
 from app.execution.dag import cancel_unused_ready_tools, skip_all_pending
 from app.execution.lineage import assert_resume_attempt_lineage, assert_tool_step_lineage
 from app.execution.loop_reconcile import runtime_plan_step
+from app.execution.loop_recovery import (
+    assert_execution_loop_recovery_checkpoints,
+    assert_loop_recovery_ownership,
+    plan_supports_flat_loop_running_recovery,
+)
 from app.execution.orchestrator import assert_execution_plan_lineage
 from app.execution.policy_selection import get_expected_tool_policy_snapshot
 from app.execution.runtime_preflight import _assert_schedule_occurrence_lineage
@@ -66,6 +72,16 @@ _ERROR_CODE_INCONSISTENT = "RECOVERY_INCONSISTENT_EVIDENCE"
 _ERROR_LAYER = "WORKER"
 
 _SUPPORTED_STEP_TYPES = frozenset(
+    {
+        AuthorableStepType.TOOL.value,
+        AuthorableStepType.CONDITION.value,
+        AuthorableStepType.JOIN.value,
+        AuthorableStepType.APPROVAL.value,
+        AuthorableStepType.LOOP.value,
+    }
+)
+
+_NON_LOOP_STEP_TYPES = frozenset(
     {
         AuthorableStepType.TOOL.value,
         AuthorableStepType.CONDITION.value,
@@ -138,15 +154,15 @@ def plan_has_loop(plan: ExecutionPlanV1) -> bool:
 
 
 def plan_supports_workflow_running_recovery(plan_snapshot: Any) -> bool:
-    """True when pinned Plan is non-LOOP TOOL/CONDITION/JOIN/APPROVAL only."""
+    """True for non-LOOP DAGs or runtime-supported flat FOR_EACH/WHILE Plans."""
     try:
         plan = ExecutionPlanV1.model_validate(plan_snapshot)
     except Exception:
         return False
     if plan_has_loop(plan):
-        return False
+        return plan_supports_flat_loop_running_recovery(plan)
     for step in plan.steps:
-        if str(step.type) not in _SUPPORTED_STEP_TYPES:
+        if str(step.type) not in _NON_LOOP_STEP_TYPES:
             return False
     return True
 
@@ -268,12 +284,26 @@ class WorkflowDagRecovery:
                 self._session, execution
             )
             plan = assert_execution_plan_lineage(execution)
+            ownership = None
             if plan_has_loop(plan):
-                raise AppError(
-                    code="RESOURCE_CONFLICT",
-                    message="LOOP Plan expired RUNNING recovery is unsupported.",
-                    status_code=409,
+                ownership = assert_loop_recovery_ownership(plan)
+                assert_execution_loop_recovery_checkpoints(
+                    execution=execution,
+                    plan=plan,
+                    steps=steps,
+                    ownership=ownership,
                 )
+            else:
+                for step in steps:
+                    if step.step_type not in _NON_LOOP_STEP_TYPES:
+                        raise AppError(
+                            code="RESOURCE_CONFLICT",
+                            message=(
+                                f"Unsupported Step type {step.step_type!r} for "
+                                "Workflow RUNNING recovery."
+                            ),
+                            status_code=409,
+                        )
             for step in steps:
                 if step.step_type not in _SUPPORTED_STEP_TYPES:
                     raise AppError(
@@ -307,7 +337,10 @@ class WorkflowDagRecovery:
                     )
                 )
         except AppError as exc:
-            if exc.code != "RESOURCE_CONFLICT":
+            if exc.code not in {
+                "RESOURCE_CONFLICT",
+                "EXECUTION_PRECONDITION_FAILED",
+            }:
                 raise
             await self._fail_closed(
                 execution=execution,
