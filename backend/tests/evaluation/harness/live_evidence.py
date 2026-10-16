@@ -15,7 +15,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from app.domain.enums import ApprovalStatus, ExecutionStatus
+from app.domain.enums import ExecutionStatus
 from app.models.approval import ApprovalRequest
 from app.repositories.agent_request import AgentRequestRepository
 from app.repositories.agent_version import AgentVersionRepository

@@ -422,8 +422,10 @@ def test_kpi02_unknown_duplicate_missing_case_incomplete(monkeypatch, tmp_path: 
     # Unknown case id
     unk_map = tmp_path / "unk.json"
     unk_map.write_text(
-        '{"cases":[{"case_id":"not-a-real-case","agent_request_id":"%s"}]}'
-        % uuid4(),
+        (
+            '{"cases":[{"case_id":"not-a-real-case",'
+            f'"agent_request_id":"{uuid4()}"}}]}}'
+        ),
         encoding="utf-8",
     )
     monkeypatch.setenv("MCPFLOW_KPI_02_EVIDENCE_MAP", str(unk_map))
@@ -443,7 +445,7 @@ def test_kpi02_unknown_duplicate_missing_case_incomplete(monkeypatch, tmp_path: 
     first = str(eligible[0]["id"])
     miss_map = tmp_path / "miss.json"
     miss_map.write_text(
-        '{"cases":[{"case_id":"%s","agent_request_id":"%s"}]}' % (first, uuid4()),
+        f'{{"cases":[{{"case_id":"{first}","agent_request_id":"{uuid4()}"}}]}}',
         encoding="utf-8",
     )
     monkeypatch.setenv("MCPFLOW_KPI_02_EVIDENCE_MAP", str(miss_map))
