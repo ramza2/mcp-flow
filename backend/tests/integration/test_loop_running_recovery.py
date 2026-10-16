@@ -13,10 +13,10 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from tests.unit.test_execution_creation import _install_no_side_effects
 from tests.unit.test_loop_running_recovery import (
-    _OkClient,
     _child_key,
     _loop_parent,
     _materialize_foreach_iters,
+    _OkClient,
     _recover,
     _recover_and_run,
     _seed_foreach,

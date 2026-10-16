@@ -28,12 +28,12 @@ from app.domain.enums import (
 from app.execution.completion import is_continuable_known_failure
 from app.execution.dag import cancel_unused_ready_tools, skip_all_pending
 from app.execution.lineage import assert_resume_attempt_lineage, assert_tool_step_lineage
+from app.execution.loop_reconcile import runtime_plan_step
 from app.execution.loop_recovery import (
     assert_execution_loop_recovery_checkpoints,
     assert_loop_recovery_ownership,
     plan_supports_flat_loop_running_recovery,
 )
-from app.execution.loop_reconcile import runtime_plan_step
 from app.execution.orchestrator import assert_execution_plan_lineage
 from app.execution.policy_selection import get_expected_tool_policy_snapshot
 from app.execution.runtime_preflight import _assert_schedule_occurrence_lineage

@@ -7,18 +7,14 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
-from app.core.secrets import UnimplementedSecretResolver
 from app.domain.enums import (
     AuthorableStepType,
     BindingKind,
-    ExecutionSourceType,
     ExecutionStatus,
     RiskClass,
     StepAttemptStatus,
     StepStatus,
-    ToolCallNormalizedStatus,
 )
-from app.execution.claim import ExecutionClaimService
 from app.execution.loop_reconcile import (
     build_while_evidence_object,
     materialize_iteration,
@@ -33,26 +29,22 @@ from app.execution.loop_runtime import (
     parse_while_predicate_history,
     tool_version_for_template,
 )
+from app.execution.recovery import ExecutionRecoveryService, RecoveryDecision
+from app.execution.workflow_dag_recovery import plan_supports_workflow_running_recovery
+from app.repositories.execution import ExecutionRepository
 from app.schemas.execution_plan import (
     ExecutionPlanStep,
     ExecutionPlanV1,
     LoopStepConfigV1,
 )
-from app.execution.queue import ExecutionQueueService
-from app.execution.recovery import ExecutionRecoveryService, RecoveryDecision
-from app.execution.tool_runner import McpToolRunner
-from app.execution.workflow_dag_recovery import plan_supports_workflow_running_recovery
-from app.mcp.contracts import NormalizedToolResult
-from app.repositories.execution import ExecutionRepository
-from app.repositories.mcp_tool import MCPToolRepository
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from tests.unit.test_execution_creation import _idem_key, _install_no_side_effects
+from tests.unit.test_execution_creation import _install_no_side_effects
 from tests.unit.test_workflow_dag_recovery import (
-    _OkClient,
-    _NeverClient,
     _expire_lease,
     _nested_loop_plan,
+    _NeverClient,
+    _OkClient,
     _pin_all_tool_policies,
     _pin_step_risk,
     _plant_started_toolcall,
@@ -60,20 +52,11 @@ from tests.unit.test_workflow_dag_recovery import (
     _seed_workflow_execution,
     _start_attempt_no_toolcall,
 )
-from tests.unit.test_workflow_execution_creation import (
-    _create,
-    _publish_and_activate,
-    _seed_authorized_workflow_user,
-    _seed_ready_workflow,
-)
 from tests.unit.test_workflow_registry import (
     _base_plan,
-    _create_draft_version,
-    _create_workflow,
     _tool,
     _tool_plan,
 )
-
 
 # ---------------------------------------------------------------------------
 # Plan builders
@@ -817,7 +800,6 @@ async def test_foreach_unsafe_started_toolcall_unknown_mcp0(
         )
         await _expire_lease(session, execution_id=eid, claim_now=now)
 
-    client = _NeverClient()
     async with db_session_factory() as session:
         outcome = await _recover(session, execution_id=eid)
         await session.commit()
