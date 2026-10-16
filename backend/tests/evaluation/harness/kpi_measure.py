@@ -397,6 +397,7 @@ def _run_case_pytest_groups(
         if include_integration:
             paths.extend(list(group.get("optional_integration") or []))
         present = existing_paths(paths)
+        extra = list(group.get("pytest_args") or [])
         if not present:
             details.append(
                 {
@@ -412,10 +413,10 @@ def _run_case_pytest_groups(
         integ = [p for p in present if "/integration/" in p]
         ok = True
         if unitish:
-            proc = run_pytest(unitish, integration=False)
+            proc = run_pytest(unitish, extra_args=extra, integration=False)
             ok = ok and proc.returncode == 0
         if include_integration and integ:
-            proc = run_pytest(integ, integration=True)
+            proc = run_pytest(integ, extra_args=extra, integration=True)
             ok = ok and proc.returncode == 0
         if not unitish and not (include_integration and integ):
             details.append(
