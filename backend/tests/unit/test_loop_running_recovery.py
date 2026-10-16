@@ -21,6 +21,7 @@ from app.execution.loop_reconcile import (
     pin_collection_evidence,
     pin_while_control_evidence,  # used by empty-history fail-closed plant
     resolve_foreach_collection,
+    succeed_while_loop,
 )
 from app.execution.loop_runtime import (
     append_or_replay_while_history,
@@ -239,6 +240,25 @@ def _loop_plus_top_tool_plan(
     plan["steps"].append(
         _tool("top", tool_version_id=tool_version_id)
     )
+    plan["limits"]["max_parallelism"] = 2
+    plan["completion"]["response_step_ids"] = ["loop1", "top"]
+    return plan
+
+
+def _while_plus_top_tool_plan(
+    workflow_id: uuid.UUID, tool_version_id: uuid.UUID
+) -> dict[str, Any]:
+    """WHILE (one iter then false) + independent top-level TOOL."""
+    pred = {
+        "op": "lt",
+        "left": {
+            "kind": BindingKind.LOOP_CONTEXT.value,
+            "path": "/iteration_no",
+        },
+        "right": {"kind": BindingKind.LITERAL.value, "value": 2},
+    }
+    plan = _while_plan(workflow_id, tool_version_id, predicate=pred)
+    plan["steps"].append(_tool("top", tool_version_id=tool_version_id))
     plan["limits"]["max_parallelism"] = 2
     plan["completion"]["response_step_ids"] = ["loop1", "top"]
     return plan
@@ -1619,6 +1639,140 @@ async def test_while_max_iterations_and_timeout_started_at(
 # ---------------------------------------------------------------------------
 # Lineage / parallel / races (35–46)
 # ---------------------------------------------------------------------------
+
+
+async def _plant_terminal_succeeded_while_with_child(
+    session: AsyncSession,
+    *,
+    execution_id: uuid.UUID,
+    now: datetime,
+) -> Any:
+    """SUCCEEDED WHILE with one SUCCEEDED body child + false gate at candidate 2."""
+    await _append_while_gate(
+        session, execution_id=execution_id, candidate=1, result=True
+    )
+    await _materialize_while_iters(
+        session, execution_id=execution_id, through=1, terminal_through=1, now=now
+    )
+    await _append_while_gate(
+        session, execution_id=execution_id, candidate=2, result=False
+    )
+    parent = _loop_parent(await ExecutionRepository(session).list_steps(execution_id))
+    succeed_while_loop(parent, iterations_completed=1, now=now)
+    await session.commit()
+    return parent
+
+
+@pytest.mark.asyncio
+async def test_terminal_while_child_lineage_tamper_fail_closed(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A: terminal SUCCEEDED WHILE + tampered child lineage blocks whole recovery."""
+    _install_no_side_effects(monkeypatch)
+    async with db_session_factory() as session:
+        eid, _c, now, _w, _tok = await _seed_workflow_execution(
+            session,
+            plan_builder=_while_plus_top_tool_plan,
+        )
+        await _plant_terminal_succeeded_while_with_child(
+            session, execution_id=eid, now=now
+        )
+        steps = await ExecutionRepository(session).list_steps(eid)
+        parent = _loop_parent(steps)
+        child = next(s for s in steps if s.parent_step_id == parent.id)
+        child.step_key = "tampered-while-child-key"
+        # Top-level TOOL remains READY-eligible so recovery would otherwise proceed.
+        top = next(s for s in steps if s.step_key == "top")
+        top.status = StepStatus.READY.value
+        top.ready_at = now
+        top.lock_version += 1
+        await session.commit()
+        await _expire_lease(session, execution_id=eid, claim_now=now)
+
+    async with db_session_factory() as session:
+        outcome = await _recover(session, execution_id=eid)
+        await session.commit()
+    assert outcome.decision == RecoveryDecision.FAIL_INCONSISTENT
+    assert outcome.taken_over is False
+    assert outcome.invoke_runner is False
+    async with db_session_factory() as session:
+        execution = await ExecutionRepository(session).get(eid)
+        assert execution is not None
+        assert execution.status == ExecutionStatus.FAILED.value
+        assert execution.lease_token is None
+
+
+@pytest.mark.asyncio
+async def test_terminal_while_history_result_inline_tamper_fail_closed(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """B: terminal SUCCEEDED WHILE history/result_inline drift fail-closes."""
+    _install_no_side_effects(monkeypatch)
+    async with db_session_factory() as session:
+        eid, _c, now, _w, _tok = await _seed_workflow_execution(
+            session,
+            plan_builder=_while_plus_top_tool_plan,
+        )
+        await _plant_terminal_succeeded_while_with_child(
+            session, execution_id=eid, now=now
+        )
+        parent = _loop_parent(await ExecutionRepository(session).list_steps(eid))
+        # Corrupt result_inline while history still says iterations_completed=1.
+        parent.result_inline = {
+            "mode": "WHILE",
+            "iterations_completed": 99,
+        }
+        parent.lock_version += 1
+        top = next(
+            s
+            for s in await ExecutionRepository(session).list_steps(eid)
+            if s.step_key == "top"
+        )
+        top.status = StepStatus.READY.value
+        top.ready_at = now
+        top.lock_version += 1
+        await session.commit()
+        await _expire_lease(session, execution_id=eid, claim_now=now)
+
+    async with db_session_factory() as session:
+        outcome = await _recover(session, execution_id=eid)
+        await session.commit()
+    assert outcome.decision == RecoveryDecision.FAIL_INCONSISTENT
+    assert outcome.taken_over is False
+    assert outcome.invoke_runner is False
+    async with db_session_factory() as session:
+        execution = await ExecutionRepository(session).get(eid)
+        assert execution is not None
+        assert execution.status == ExecutionStatus.FAILED.value
+        assert execution.lease_token is None
+
+    # Also history tamper (remove final false gate) with valid result_inline.
+    async with db_session_factory() as session:
+        eid2, _c2, now2, _w2, _tok2 = await _seed_workflow_execution(
+            session,
+            plan_builder=_while_plus_top_tool_plan,
+        )
+        await _plant_terminal_succeeded_while_with_child(
+            session, execution_id=eid2, now=now2
+        )
+        parent = _loop_parent(await ExecutionRepository(session).list_steps(eid2))
+        hist = parse_while_predicate_history(parent.resolved_input)
+        parent.resolved_input = {
+            "mode": "WHILE",
+            "predicate_history": hist["predicate_history"][:1],
+        }
+        parent.lock_version += 1
+        await session.commit()
+        await _expire_lease(session, execution_id=eid2, claim_now=now2)
+
+    async with db_session_factory() as session:
+        outcome2 = await _recover(session, execution_id=eid2)
+        await session.commit()
+    assert outcome2.decision == RecoveryDecision.FAIL_INCONSISTENT
+    assert outcome2.taken_over is False
+    assert outcome2.invoke_runner is False
 
 
 @pytest.mark.asyncio

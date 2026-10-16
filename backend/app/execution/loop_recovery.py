@@ -22,6 +22,7 @@ from app.execution.loop_runtime import (
     LoopBodyOwnership,
     assert_flat_foreach_runtime_compatible,
     assert_while_child_immutable_lineage,
+    assert_while_parent_control_state,
     child_instances_for_iteration,
     hash_while_predicate_evidence,
     history_entry_for,
@@ -584,19 +585,16 @@ def _assert_while_recovery_checkpoint(
 ) -> None:
     _assert_parent_plan_projection(parent=parent, plan_step=plan_step)
     if parent.status != StepStatus.RUNNING.value:
-        if parent.status in _STEP_TERMINAL and parent.resolved_input is not None:
-            # Defer full terminal invariants to DAG validation after takeover;
-            # still reject active children under terminal parent.
-            children = [s for s in steps if s.parent_step_id == parent.id]
-            if children and any(c.status in _ACTIVE_NONTERMINAL for c in children):
-                raise AppError(
-                    code="RESOURCE_CONFLICT",
-                    message=(
-                        f"Terminal WHILE {parent.step_key!r} still has active "
-                        "child evidence."
-                    ),
-                    status_code=409,
-                )
+        # Terminal / non-RUNNING: reuse canonical WHILE parent↔history↔child
+        # invariants (immutable lineage, result_inline, history shape). Do not
+        # skip to classify-only TERMINAL_OK for body TOOLs.
+        if parent.status in _STEP_TERMINAL:
+            assert_while_parent_control_state(
+                parent=parent,
+                plan=plan,
+                steps=steps,
+                cfg=cfg,
+            )
         return
 
     if parent.resolved_input is None:
