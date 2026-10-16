@@ -1,0 +1,59 @@
+# KPI-06 — operations-function pass rate (test-based official metric allowed).
+# Denominator = declared cases (fixed). Required categories must all run.
+# Missing required path → NOT_RUN → official status INCOMPLETE (no fake 100%).
+cases_version: operation.v1
+evidence_role: official_test_based
+denominator_policy: fixed_declared_cases
+required_categories:
+  - authorization
+  - approval
+  - audit
+  - cancellation
+  - recovery
+
+cases:
+  - id: authorization
+    category: authorization
+    title: RBAC / missing grant fail-closed
+    pytest:
+      - tests/api/test_auth_rbac.py
+      - tests/unit/test_authorization_snapshot.py
+
+  - id: approval
+    category: approval
+    title: Approval wait / decide / resume
+    pytest:
+      - tests/unit/test_approval_wait.py
+      - tests/unit/test_approval_decision_resume.py
+      - tests/api/test_approval_decisions.py
+
+  - id: audit_evidence
+    category: audit
+    title: Audit ledger / sanitize / API
+    pytest:
+      - tests/unit/test_audit_sanitize.py
+      - tests/unit/test_audit_instrumentation.py
+      - tests/api/test_audit_api.py
+
+  - id: cancellation
+    category: cancellation
+    title: Execution cancellation
+    pytest:
+      - tests/unit/test_execution_cancellation.py
+      - tests/api/test_execution_cancel.py
+
+  - id: recovery
+    category: recovery
+    title: Expired lease recovery (non-LOOP / LOOP / cancel-requested)
+    pytest:
+      - tests/unit/test_execution_recovery.py
+      - tests/unit/test_workflow_dag_recovery.py
+      - tests/unit/test_loop_running_recovery.py
+      - tests/unit/test_cancel_requested_lease_recovery.py
+
+  - id: schedule
+    category: schedule
+    title: Schedule registry / runtime occurrence
+    pytest:
+      - tests/unit/test_schedule_runtime.py
+      - tests/unit/test_schedule_service.py

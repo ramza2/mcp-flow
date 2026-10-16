@@ -1441,6 +1441,151 @@ total_response_ms
 
 공식 수치목표는 최신 협약/수행계획서의 승인값을 우선하며 `tests/evaluation/targets.yaml`로 관리한다.
 
+### 25.1 Final regression harness
+
+Deterministic entrypoint (composes existing pytest modules; no second runtime):
+
+```bash
+./scripts/final-regression.sh            # unit/api; integration if TEST_DATABASE_URL set
+./scripts/final-regression.sh --unit-only
+./scripts/final-regression.sh --integration
+```
+
+Matrix definition: `backend/tests/evaluation/regression_matrix.yaml`.
+
+Coverage (scenario ids):
+
+```text
+agent_request_nl_to_mcp
+workflow_sequential
+workflow_parallel
+condition
+foreach
+while
+tool_policy_approval
+authorization_deny
+schedule_occurrence
+cancellation
+recovery_non_loop
+recovery_foreach
+recovery_while
+recovery_unsafe_ambiguous
+tool_factory_execution_path
+modelops_timeout_error
+```
+
+Output:
+
+- human-readable per-scenario PASS/FAIL/SKIP + summary
+- JSON: `artifacts/regression/latest.json` (gitignored runtime artifact)
+- non-zero exit when any scenario FAILs
+- missing non-optional matrix paths → scenario `FAIL` (not silent PASS)
+- `--unit-only` sets `scope=unit_api_only_integration_omitted` and
+  `full_integration_regression=false` (do not call this “final integration PASS”)
+
+### 25.2 KPI measurement harness
+
+```bash
+./scripts/measure-kpi.sh --mode offline   # default
+./scripts/measure-kpi.sh --mode live
+./scripts/measure-kpi.sh --mode offline --only KPI-01,KPI-02,KPI-03
+```
+
+**Evidence separation**
+
+| Section | Role |
+|---|---|
+| `official_metrics` | Project KPI evidence (`status`: `MEASURED` / `INCOMPLETE` / `NOT_MEASURED`) |
+| `offline_diagnostics` | Regression-only (selector microbenchmark, frozen `_decide`, pytest module health) — never official KPI values |
+
+`evidence_mode`: `offline_regression` | `live_official`.
+
+Dataset / case versions under `backend/tests/evaluation/`:
+
+| Path | Role |
+|---|---|
+| `targets.yaml` | configured targets (`target` / `target_min`); never invent undocumented SLAs |
+| `tool-mapping/dataset.v1.json` | frozen selector-decision regression dataset |
+| `tool-mapping/live_prerequisites.yaml` | live KPI-01/02 pin requirements |
+| `registration/cases.yaml` | offline registration pytest health (fixed denominator) |
+| `registration/attempts.v1.yaml` | official KPI-04 live attempt units |
+| `workflow-scenarios/scenarios.yaml` | offline workflow pytest module health |
+| `workflow-scenarios/executable.v1.yaml` | official KPI-05 live scenarios (1 attempt each) |
+| `operation/cases.yaml` | official KPI-06 test-based ops cases (fixed denominator) |
+
+JSON output: `artifacts/kpi/latest.json` (gitignored). Schema sketch:
+
+```json
+{
+  "schema_version": "mcpflow.kpi_report.v2",
+  "mode": "offline",
+  "dataset_bundle_version": "evaluation.v1",
+  "measured_at": "2026-10-16T00:00:00Z",
+  "git_sha": "<commit>",
+  "environment": "local-dev",
+  "official_metrics": [
+    {
+      "kpi_id": "KPI-01",
+      "name": "response_time",
+      "status": "NOT_MEASURED",
+      "evidence_mode": "offline_regression",
+      "numerator": null,
+      "denominator": null,
+      "measured_value": null,
+      "unit": "milliseconds",
+      "target": null,
+      "evidence_complete": false,
+      "reason": "OFFLINE_MODE: ...",
+      "measured_at": "...",
+      "git_sha": "...",
+      "environment": "..."
+    }
+  ],
+  "offline_diagnostics": [
+    {
+      "diagnostic_id": "selector_decide_microbenchmark",
+      "name": "tool_selector_decide_timing_ms",
+      "evidence_mode": "offline_regression",
+      "measured_value": 0.28
+    }
+  ]
+}
+```
+
+Counting rules (official):
+
+| KPI | Rule |
+|---|---|
+| `KPI-01` | Live duration from durable timestamps only: `tool_selection_runs.created_at − agent_requests.created_at` for `MCPFLOW_KPI_AGENT_REQUEST_ID`. Offline → `NOT_MEASURED`. Selector microbenchmark is diagnostic only. Naked `MCPFLOW_KPI_01_LIVE_RESULT_MS` cannot produce `MEASURED`. |
+| `KPI-02` | Live Top-1 from durable `ToolSelectionRun` rows per case in `MCPFLOW_KPI_02_EVIDENCE_MAP` (IDs only). Offline frozen `_decide` is diagnostic only → official `NOT_MEASURED`. Naked numerator/denominator env values cannot produce `MEASURED`. |
+| `KPI-03` | Distinct Tools with effective VERIFIED current ToolVersion. `target_min=10`; report gap; do not fabricate Tools. |
+| `KPI-04` | Live designated smoke attempts scored from durable `mcp_server_checks` / `mcp_server_discoveries` / `mcp_tools` / `mcp_tool_verifications` for `MCPFLOW_KPI_SMOKE_MCP_SERVER_ID`. Denominator = declared attempts. Naked `MCPFLOW_KPI_04_RESULT_*` flags cannot produce `MEASURED`. |
+| `KPI-05` | Live executable scenarios scored from durable `executions.status` via `MCPFLOW_KPI_EXECUTION_ID_<SCENARIO_ID>`. Denominator = declared scenario_ids. Naked `MCPFLOW_KPI_05_RESULT_*` flags cannot produce `MEASURED`. |
+| `KPI-06` | Test-based ops pass rate with **fixed** declared denominator. Required categories: authorization, approval, audit, cancellation, recovery. Any `NOT_RUN` / missing required evidence → `INCOMPLETE` (`measured_value=null`), never a shrunk 100%. |
+
+Every `MEASURED live_official` metric includes `evidence_ids` (request/run/check/discovery/execution IDs + timestamps) for audit. Secrets are never emitted.
+
+Denominator policy: for fixed case/scenario/attempt lists, denominator = declared eligible rows. Missing required paths/results are `NOT_RUN` / `INCOMPLETE`, never silently excluded.
+
+Known exclusions:
+
+- Nested LOOP / LOOP-body APPROVAL recovery (out of scope; fail-closed elsewhere)
+- Offline mode does not invent live Agent/ModelOps timings or Top-1 accuracy
+- Live modes require explicit pin/smoke env (see `live_prerequisites.yaml` / attempts YAML); otherwise `NOT_MEASURED`
+- Generated evidence under `artifacts/` / `evidence/` is not committed
+
+### 25.3 Production smoke evidence references
+
+Prior close-out smoke/recovery chains (issue references; not re-run by this harness):
+
+| Issue | Evidence theme |
+|---|---|
+| #101 / #103 / #105 / #107 | Tool Factory chain (analyze → build/package → sandbox/review → publish/import → connection/discovery) |
+| #111 | Approval wait / decide / same-Execution resume |
+| #113 | Cancellation + cancel-requested lease recovery |
+| #115 | Non-LOOP expired RUNNING lease recovery |
+| #117 | Flat FOR_EACH / WHILE expired RUNNING lease recovery |
+
 ---
 
 ## 26. KPI-02 Tool Mapping
@@ -1728,6 +1873,11 @@ evidence/
 ```
 
 Evidence에는 최소 commit SHA, environment, dataset/config version, 실행시각, 결과요약을 기록한다.
+
+Issue #119 harnesses write runtime JSON under gitignored `artifacts/regression/` and
+`artifacts/kpi/` (override with `MCPFLOW_ARTIFACT_DIR`). Schema/examples and counting
+rules are documented in §25.1–§25.2; do not commit generated reports containing
+environment-specific inventory.
 
 ---
 

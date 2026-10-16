@@ -221,3 +221,7 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Runtime evidence / KPI artifacts (Issue #119) — do not commit generated reports
+/artifacts/
+/evidence/

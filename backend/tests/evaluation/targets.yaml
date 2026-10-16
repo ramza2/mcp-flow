@@ -1,0 +1,56 @@
+# Configured KPI targets (docs/09 §25).
+# Do not invent thresholds that are not already defined in canonical docs.
+# `null` means no numeric pass/fail gate is configured for that KPI.
+dataset_bundle_version: evaluation.v1
+
+targets:
+  KPI-01:
+    measured_value_unit: milliseconds
+    target: null
+    notes: >
+      Official evidence is live canonical Agent path only. Offline selector
+      microbenchmark is diagnostic, never official response_time.
+
+  KPI-02:
+    measured_value_unit: percent
+    target: null
+    counting_rule: Correct Top-1 / Valid Evaluation Cases × 100
+    dataset: tool-mapping/dataset.v1.json
+    notes: >
+      Official evidence requires live Analyzer→retrieval→rerank→selector.
+      Frozen _decide dataset is offline selector-decision regression only.
+
+  KPI-03:
+    measured_value_unit: count
+    target_min: 10
+    target: null
+    counting_rule: >
+      Distinct MCPTool rows (deleted_at IS NULL) whose current_version_id has
+      non-expired VERIFIED evidence (MCPToolVerificationRepository
+      .count_tools_with_effective_current_verification).
+
+  KPI-04:
+    measured_value_unit: percent
+    target: null
+    counting_rule: >
+      Successful live smoke attempts / declared attempts × 100
+      (connect, discovery, apply/register, verification).
+    attempts: registration/attempts.v1.yaml
+    offline_regression: registration/cases.yaml
+
+  KPI-05:
+    measured_value_unit: percent
+    target: null
+    counting_rule: >
+      Passed live executable composite scenarios / declared scenario_ids × 100
+      (one attempt per scenario_id).
+    executable: workflow-scenarios/executable.v1.yaml
+    offline_regression: workflow-scenarios/scenarios.yaml
+
+  KPI-06:
+    measured_value_unit: percent
+    target: null
+    counting_rule: >
+      Passed declared ops cases / declared cases × 100 (fixed denominator).
+      Required: authorization, approval, audit, cancellation, recovery.
+    cases: operation/cases.yaml

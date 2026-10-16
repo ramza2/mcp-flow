@@ -1,0 +1,35 @@
+# Offline regression evidence for MCP registration-related pytest groups.
+# Official KPI-04 uses registration/attempts.v1.yaml (live attempt units).
+# Denominator for this file = declared cases (fixed); missing required paths → NOT_RUN.
+cases_version: registration.v1
+evidence_role: offline_regression
+denominator_policy: fixed_declared_cases
+
+cases:
+  - id: mcp_server_api_lifecycle
+    title: MCP server create/connect/discovery API contract
+    pytest:
+      - tests/api/test_mcp_servers.py
+
+  - id: mcp_tool_lifecycle
+    title: MCP tool lifecycle (discover → activate path)
+    pytest:
+      - tests/api/test_mcp_tools_lifecycle.py
+
+  - id: tool_verification_evidence
+    title: Tool verification VERIFIED evidence persistence
+    # Unit module is not present; use API lifecycle + optional PG integration.
+    # Exclude Alembic downgrade/upgrade roundtrip (environment schema drift noise).
+    pytest:
+      - tests/api/test_mcp_tools_lifecycle.py
+    optional_integration:
+      - tests/integration/test_mcp_tool_policy_verification.py
+    pytest_args:
+      - -k
+      - "not alembic and not downgrade and not upgrade_roundtrip"
+
+  - id: factory_publish_import
+    title: Factory publish/import registration path
+    pytest:
+      - tests/unit/test_factory_publish.py
+      - tests/api/test_factory.py

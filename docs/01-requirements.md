@@ -486,6 +486,15 @@ SUCCEEDED FAILED SKIPPED TIMED_OUT CANCELLED UNKNOWN_OUTCOME
 
 공식 수치 목표와 측정 상세는 최신 과제 문서 및 `09-test-strategy.md`를 따른다.
 
+재현 가능한 측정 진입점:
+
+```text
+./scripts/final-regression.sh   # final integration regression matrix
+./scripts/measure-kpi.sh        # KPI-01..KPI-06 JSON + summary
+```
+
+Dataset/target 정의는 `backend/tests/evaluation/` 및 `docs/09-test-strategy.md` §25를 따른다.
+
 ---
 
 ## 11. 추적성 규칙

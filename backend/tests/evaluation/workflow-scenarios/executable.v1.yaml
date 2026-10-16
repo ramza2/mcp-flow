@@ -1,0 +1,30 @@
+# Official KPI-05 executable composite scenarios (live_official).
+# One attempt/result per scenario_id, scored from durable executions.status.
+# Selectors: MCPFLOW_KPI_EXECUTION_ID_<SCENARIO_ID>
+# Naked MCPFLOW_KPI_05_RESULT_* pass/fail flags are ignored.
+scenarios_version: workflow-executable.v2
+
+scenarios:
+  - scenario_id: sequential_tool_chain
+    title: Sequential multi-TOOL workflow execution
+    kind: sequential
+
+  - scenario_id: parallel_join_wave
+    title: Parallel TOOL + JOIN wave
+    kind: parallel
+
+  - scenario_id: condition_branch
+    title: CONDITION branch selection
+    kind: condition
+
+  - scenario_id: foreach_loop
+    title: FOR_EACH LOOP completion
+    kind: foreach
+
+  - scenario_id: while_loop
+    title: WHILE LOOP completion
+    kind: while
+
+  - scenario_id: approval_wait_resume
+    title: ToolPolicy approval wait / approve / resume
+    kind: approval

@@ -1,0 +1,26 @@
+# Live official KPI-01 / KPI-02 prerequisites (pinned identities + evidence selectors).
+# Env vars select durable IDs only. Naked result values never produce MEASURED.
+prerequisites_version: tool-mapping-live.v2
+
+required_env:
+  - TEST_DATABASE_URL  # or DATABASE_URL (either accepted)
+  - MCPFLOW_KPI_AGENT_VERSION_ID
+  - MCPFLOW_KPI_LLM_PROFILE_ID
+  - MCPFLOW_KPI_EMBEDDING_PROFILE_ID
+
+# KPI-01 durable evidence selector (required for MEASURED):
+#   MCPFLOW_KPI_AGENT_REQUEST_ID — persisted agent_requests.id
+# Duration = tool_selection_runs.created_at - agent_requests.created_at
+# REJECTED as official evidence: MCPFLOW_KPI_01_LIVE_RESULT_MS
+
+# KPI-02 durable evidence selector (required for MEASURED):
+#   MCPFLOW_KPI_02_EVIDENCE_MAP — selector-only JSON:
+#     {cases:[{case_id, agent_request_id}]}
+# Expected labels are read only from tool-mapping/dataset.v1.json.
+# Forbidden map keys: expected_tool_version_id, expected_decision, etc.
+# Unknown/duplicate case_id → INCOMPLETE. Missing declared case → INCOMPLETE.
+# REJECTED as official evidence: MCPFLOW_KPI_02_LIVE_NUMERATOR / DENOMINATOR
+
+optional_env_recorded:
+  - MCPFLOW_KPI_TOOL_INVENTORY_SNAPSHOT_ID
+  - MCPFLOW_KPI_EVAL_DATASET_VERSION
