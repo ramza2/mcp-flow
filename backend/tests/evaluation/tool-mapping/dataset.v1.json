@@ -1,0 +1,177 @@
+{
+  "dataset_version": "tool-mapping.v1",
+  "description": "Frozen NL → Tool Top-1 evaluation cases (docs/09 §26). Candidates and frozen_rerank pin the registry/model snapshot for repeatability (FNC-AGT-010).",
+  "selection_settings": {
+    "auto_select_threshold": 0.75,
+    "confirmation_threshold": 0.55,
+    "max_candidates": 8
+  },
+  "cases": [
+    {
+      "id": "weather-seoul-ko",
+      "request_text": "서울 날씨 알려줘",
+      "intent": "날씨 조회",
+      "entities": [{"name": "location", "value": "서울", "source": "USER_EXPLICIT"}],
+      "expected_tool_name": "lookup_weather",
+      "expected_decision": "AUTO_SELECT",
+      "candidates": [
+        {
+          "name": "lookup_weather",
+          "description": "lookup weather by location",
+          "tags": ["weather"],
+          "required_inputs": ["location"],
+          "retrieval_score": 0.92,
+          "allow_auto_select": true
+        },
+        {
+          "name": "echo",
+          "description": "echo text",
+          "tags": ["util"],
+          "required_inputs": ["text"],
+          "retrieval_score": 0.21,
+          "allow_auto_select": true
+        }
+      ],
+      "frozen_rerank": [
+        {"name": "lookup_weather", "llm_fit_score": 0.96, "reason_summary": "weather intent"},
+        {"name": "echo", "llm_fit_score": 0.12, "reason_summary": "unrelated"}
+      ]
+    },
+    {
+      "id": "echo-text-en",
+      "request_text": "Echo the text hello world",
+      "intent": "echo",
+      "entities": [{"name": "text", "value": "hello world", "source": "USER_EXPLICIT"}],
+      "expected_tool_name": "echo",
+      "expected_decision": "AUTO_SELECT",
+      "candidates": [
+        {
+          "name": "echo",
+          "description": "echo text",
+          "tags": ["util"],
+          "required_inputs": ["text"],
+          "retrieval_score": 0.88,
+          "allow_auto_select": true
+        },
+        {
+          "name": "lookup_weather",
+          "description": "lookup weather by location",
+          "tags": ["weather"],
+          "required_inputs": ["location"],
+          "retrieval_score": 0.18,
+          "allow_auto_select": true
+        }
+      ],
+      "frozen_rerank": [
+        {"name": "echo", "llm_fit_score": 0.94, "reason_summary": "echo intent"},
+        {"name": "lookup_weather", "llm_fit_score": 0.1, "reason_summary": "unrelated"}
+      ]
+    },
+    {
+      "id": "ambiguous-two-tools",
+      "request_text": "lookup something",
+      "intent": "unknown",
+      "entities": [],
+      "expected_tool_name": null,
+      "expected_decision": "CONFIRM",
+      "valid_for_top1": false,
+      "notes": "Ambiguous mid-band case; excluded from Top-1 accuracy denominator (Safe Deferral).",
+      "candidates": [
+        {
+          "name": "lookup_weather",
+          "description": "lookup weather",
+          "tags": ["weather"],
+          "required_inputs": [],
+          "retrieval_score": 0.7,
+          "allow_auto_select": true
+        },
+        {
+          "name": "echo",
+          "description": "echo text",
+          "tags": ["util"],
+          "required_inputs": [],
+          "retrieval_score": 0.68,
+          "allow_auto_select": true
+        }
+      ],
+      "frozen_rerank": [
+        {"name": "lookup_weather", "llm_fit_score": 0.7, "reason_summary": "weak fit"},
+        {"name": "echo", "llm_fit_score": 0.68, "reason_summary": "weak fit"}
+      ]
+    },
+    {
+      "id": "no-match-unrelated",
+      "request_text": "Launch the rocket now",
+      "intent": "unsupported",
+      "entities": [],
+      "expected_tool_name": null,
+      "expected_decision": "NO_MATCH",
+      "valid_for_top1": true,
+      "top1_match_mode": "decision",
+      "candidates": [
+        {
+          "name": "lookup_weather",
+          "description": "lookup weather",
+          "tags": ["weather"],
+          "required_inputs": [],
+          "retrieval_score": 0.11,
+          "allow_auto_select": true
+        },
+        {
+          "name": "echo",
+          "description": "echo text",
+          "tags": ["util"],
+          "required_inputs": [],
+          "retrieval_score": 0.09,
+          "allow_auto_select": true
+        }
+      ],
+      "frozen_rerank": [
+        {"name": "lookup_weather", "llm_fit_score": 0.2, "reason_summary": "poor fit"},
+        {"name": "echo", "llm_fit_score": 0.18, "reason_summary": "poor fit"}
+      ]
+    },
+    {
+      "id": "calendar-create-event",
+      "request_text": "내일 오후 3시에 팀 미팅 일정 잡아줘",
+      "intent": "일정 생성",
+      "entities": [
+        {"name": "title", "value": "팀 미팅", "source": "USER_EXPLICIT"},
+        {"name": "when", "value": "tomorrow 15:00", "source": "USER_EXPLICIT"}
+      ],
+      "expected_tool_name": "create_calendar_event",
+      "expected_decision": "AUTO_SELECT",
+      "candidates": [
+        {
+          "name": "create_calendar_event",
+          "description": "create a calendar event",
+          "tags": ["calendar"],
+          "required_inputs": ["title", "when"],
+          "retrieval_score": 0.9,
+          "allow_auto_select": true
+        },
+        {
+          "name": "list_calendar_events",
+          "description": "list calendar events",
+          "tags": ["calendar"],
+          "required_inputs": [],
+          "retrieval_score": 0.45,
+          "allow_auto_select": true
+        },
+        {
+          "name": "echo",
+          "description": "echo text",
+          "tags": ["util"],
+          "required_inputs": ["text"],
+          "retrieval_score": 0.15,
+          "allow_auto_select": true
+        }
+      ],
+      "frozen_rerank": [
+        {"name": "create_calendar_event", "llm_fit_score": 0.97, "reason_summary": "create event"},
+        {"name": "list_calendar_events", "llm_fit_score": 0.4, "reason_summary": "list not create"},
+        {"name": "echo", "llm_fit_score": 0.08, "reason_summary": "unrelated"}
+      ]
+    }
+  ]
+}

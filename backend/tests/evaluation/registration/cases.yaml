@@ -1,0 +1,29 @@
+# KPI-04 — predefined MCP server connection / Tool registration success cases.
+# Attempts are real existing pytest modules (not mocked success placeholders).
+cases_version: registration.v1
+denominator_zero_policy: report measured_value null and skip_reason DENOMINATOR_ZERO
+
+cases:
+  - id: mcp_server_api_lifecycle
+    title: MCP server create/connect/discovery API contract
+    pytest:
+      - tests/api/test_mcp_servers.py
+
+  - id: mcp_tool_lifecycle
+    title: MCP tool lifecycle (discover → activate path)
+    pytest:
+      - tests/api/test_mcp_tools_lifecycle.py
+
+  - id: tool_verification_evidence
+    title: Tool verification VERIFIED evidence persistence
+    # Unit module is not present; use API lifecycle + optional PG integration.
+    pytest:
+      - tests/api/test_mcp_tools_lifecycle.py
+    optional_integration:
+      - tests/integration/test_mcp_tool_policy_verification.py
+
+  - id: factory_publish_import
+    title: Factory publish/import registration path
+    pytest:
+      - tests/unit/test_factory_publish.py
+      - tests/api/test_factory.py

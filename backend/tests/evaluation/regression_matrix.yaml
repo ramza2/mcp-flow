@@ -1,0 +1,177 @@
+# Final integration regression matrix (Issue #119).
+# Each scenario points at existing pytest paths — no second runtime.
+# Paths are relative to backend/ (pytest cwd).
+matrix_version: regression.v1
+
+scenarios:
+  - id: agent_request_nl_to_mcp
+    title: AgentRequest NL → retrieval/selection → parameters → plan → Execution → MCP
+    layers: [unit, integration]
+    unit:
+      - tests/unit/test_request_analyzer.py
+      - tests/unit/test_tool_retrieval.py
+      - tests/unit/test_tool_selector.py
+      - tests/unit/test_parameter_builder.py
+      - tests/unit/test_plan_generator.py
+      - tests/unit/test_plan_validator.py
+      - tests/unit/test_execution_creation.py
+      - tests/unit/test_tool_runner.py
+    integration:
+      - tests/integration/test_request_analyzer.py
+      - tests/integration/test_tool_retrieval.py
+      - tests/integration/test_tool_selector.py
+      - tests/integration/test_parameter_builder.py
+      - tests/integration/test_plan_generator.py
+      - tests/integration/test_plan_validator.py
+      - tests/integration/test_execution_creation.py
+      - tests/integration/test_mcp_tool_runner.py
+
+  - id: workflow_sequential
+    title: Workflow sequential execution
+    layers: [unit, integration]
+    unit:
+      - tests/unit/test_execution_orchestrator.py
+      - tests/unit/test_workflow_execution_creation.py
+    integration:
+      - tests/integration/test_execution_orchestrator.py
+      - tests/integration/test_workflow_execution.py
+
+  - id: workflow_parallel
+    title: Workflow parallel DAG / JOIN waves
+    layers: [unit, integration]
+    unit:
+      - tests/unit/test_execution_tool_join_dag.py
+    integration:
+      - tests/integration/test_execution_tool_join_dag.py
+
+  - id: condition
+    title: CONDITION / when predicate
+    layers: [unit, integration]
+    unit:
+      - tests/unit/test_execution_condition_when.py
+    integration:
+      - tests/integration/test_execution_condition_when.py
+
+  - id: foreach
+    title: FOR_EACH LOOP
+    layers: [unit, integration]
+    unit:
+      - tests/unit/test_execution_loop_foreach.py
+    integration:
+      - tests/integration/test_execution_loop_foreach.py
+
+  - id: while
+    title: WHILE LOOP
+    layers: [unit, integration]
+    unit:
+      - tests/unit/test_execution_loop_while.py
+    integration:
+      - tests/integration/test_execution_loop_while.py
+
+  - id: tool_policy_approval
+    title: ToolPolicy approval wait / approve / resume
+    layers: [unit, integration]
+    unit:
+      - tests/unit/test_approval_wait.py
+      - tests/unit/test_approval_decision_resume.py
+      - tests/unit/test_workflow_tool_policy_approval.py
+    integration:
+      - tests/integration/test_approval_wait.py
+      - tests/integration/test_approval_decision_resume.py
+
+  - id: authorization_deny
+    title: Authorization deny / missing grant fail-closed
+    layers: [unit, api]
+    unit:
+      - tests/unit/test_authorization_snapshot.py
+      - tests/unit/test_tool_runner_presend_gate.py
+    api:
+      - tests/api/test_auth_rbac.py
+
+  - id: schedule_occurrence
+    title: ScheduleOccurrence execution
+    layers: [unit, integration]
+    unit:
+      - tests/unit/test_schedule_runtime.py
+      - tests/unit/test_schedule_service.py
+    integration:
+      - tests/integration/test_schedule_runtime.py
+
+  - id: cancellation
+    title: Execution cancellation
+    layers: [unit, integration, api]
+    unit:
+      - tests/unit/test_execution_cancellation.py
+      - tests/unit/test_cancel_requested_lease_recovery.py
+    integration:
+      - tests/integration/test_execution_cancellation.py
+    api:
+      - tests/api/test_execution_cancel.py
+
+  - id: recovery_non_loop
+    title: Expired lease recovery (non-LOOP DAG)
+    layers: [unit, integration]
+    unit:
+      - tests/unit/test_workflow_dag_recovery.py
+      - tests/unit/test_execution_recovery.py
+    integration:
+      - tests/integration/test_workflow_dag_recovery.py
+      - tests/integration/test_execution_recovery.py
+
+  - id: recovery_foreach
+    title: Expired lease recovery (FOR_EACH)
+    layers: [unit, integration]
+    unit:
+      - tests/unit/test_loop_running_recovery.py
+    integration:
+      - tests/integration/test_loop_running_recovery.py
+    pytest_args:
+      - -k
+      - foreach
+
+  - id: recovery_while
+    title: Expired lease recovery (WHILE)
+    layers: [unit, integration]
+    unit:
+      - tests/unit/test_loop_running_recovery.py
+    integration:
+      - tests/integration/test_loop_running_recovery.py
+    pytest_args:
+      - -k
+      - while
+
+  - id: recovery_unsafe_ambiguous
+    title: Unsafe ambiguous ToolCall fail-closed / sibling MCP 0
+    layers: [unit]
+    unit:
+      - tests/unit/test_execution_recovery.py
+      - tests/unit/test_workflow_dag_recovery.py
+    pytest_args:
+      - -k
+      - "ambiguous or unknown_outcome or fail_closed or sibling"
+
+  - id: tool_factory_execution_path
+    title: Tool Factory generated Tool path (analyze→build→publish→runtime)
+    layers: [unit, api]
+    unit:
+      - tests/unit/test_factory_openapi_analyzer.py
+      - tests/unit/test_factory_service.py
+      - tests/unit/test_factory_package_generator.py
+      - tests/unit/test_factory_sandbox.py
+      - tests/unit/test_factory_test_run.py
+      - tests/unit/test_factory_review.py
+      - tests/unit/test_factory_publish.py
+      - tests/unit/test_factory_connection_config.py
+      - tests/unit/test_factory_discovery_reconcile.py
+      - tests/unit/test_factory_runtime_adapter.py
+      - tests/unit/test_factory_runtime_binding.py
+    api:
+      - tests/api/test_factory.py
+
+  - id: modelops_timeout_error
+    title: ModelOps-backed LLM/Embedding timeout/error handling
+    layers: [unit]
+    unit:
+      - tests/unit/test_model_profile_request_timeout.py
+      - tests/unit/test_generate_json.py
+      - tests/unit/test_embed_texts.py

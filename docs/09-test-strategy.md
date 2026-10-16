@@ -1441,6 +1441,116 @@ total_response_ms
 
 공식 수치목표는 최신 협약/수행계획서의 승인값을 우선하며 `tests/evaluation/targets.yaml`로 관리한다.
 
+### 25.1 Final regression harness
+
+Deterministic entrypoint (composes existing pytest modules; no second runtime):
+
+```bash
+./scripts/final-regression.sh            # unit/api; integration if TEST_DATABASE_URL set
+./scripts/final-regression.sh --unit-only
+./scripts/final-regression.sh --integration
+```
+
+Matrix definition: `backend/tests/evaluation/regression_matrix.yaml`.
+
+Coverage (scenario ids):
+
+```text
+agent_request_nl_to_mcp
+workflow_sequential
+workflow_parallel
+condition
+foreach
+while
+tool_policy_approval
+authorization_deny
+schedule_occurrence
+cancellation
+recovery_non_loop
+recovery_foreach
+recovery_while
+recovery_unsafe_ambiguous
+tool_factory_execution_path
+modelops_timeout_error
+```
+
+Output:
+
+- human-readable per-scenario PASS/FAIL/SKIP + summary
+- JSON: `artifacts/regression/latest.json` (gitignored runtime artifact)
+- non-zero exit when any scenario FAILs
+
+### 25.2 KPI measurement harness
+
+```bash
+./scripts/measure-kpi.sh
+./scripts/measure-kpi.sh --only KPI-01,KPI-02,KPI-03
+```
+
+Dataset / case versions live under `backend/tests/evaluation/`:
+
+| Path | Role |
+|---|---|
+| `targets.yaml` | configured targets (`target` / `target_min`); never invent undocumented SLAs |
+| `tool-mapping/dataset.v1.json` | frozen NL→Tool Top-1 cases (`tool-mapping.v1`) |
+| `registration/cases.yaml` | KPI-04 attempt definitions |
+| `workflow-scenarios/scenarios.yaml` | KPI-05 composite scenarios |
+| `operation/cases.yaml` | KPI-06 ops cases (auth/approval/audit/cancel/recovery/schedule) |
+
+JSON output: `artifacts/kpi/latest.json` (gitignored). Schema sketch:
+
+```json
+{
+  "schema_version": "mcpflow.kpi_report.v1",
+  "dataset_bundle_version": "evaluation.v1",
+  "measured_at": "2026-10-16T00:00:00Z",
+  "git_sha": "<commit>",
+  "environment": "local-dev",
+  "metrics": [
+    {
+      "kpi_id": "KPI-02",
+      "name": "nl_to_tool_mapping_top1_accuracy",
+      "numerator": 4,
+      "denominator": 4,
+      "measured_value": 100.0,
+      "unit": "percent",
+      "target": null,
+      "dataset_version": "tool-mapping.v1"
+    }
+  ]
+}
+```
+
+Counting rules:
+
+| KPI | Rule |
+|---|---|
+| `KPI-01` | Representative frozen ToolSelector decide-path wall clock (`total_response_ms` + segments). No in-repo numeric SLA (`target: null`). |
+| `KPI-02` | Top-1 Accuracy = Correct Top-1 / Valid Evaluation Cases × 100. Frozen `frozen_rerank` pins model output (FNC-AGT-010). Cases with `valid_for_top1=false` excluded from denominator. |
+| `KPI-03` | Distinct Tools whose *current* ToolVersion has non-expired `VERIFIED` evidence (`count_tools_with_effective_current_verification`). `target_min=10` (docs §25). Report `gap_to_target_min` when below; do not fabricate Tools. Breakdown: factory-published servers = internal; others = external/manual when DB available. |
+| `KPI-04` | Predefined registration case pass / attempted × 100. Attempt = case with ≥1 existing pytest path executed. Denominator 0 → `measured_value: null`. |
+| `KPI-05` | Composite workflow scenario pass / attempted × 100 using real executable pytest modules (not mock-only placeholders). |
+| `KPI-06` | Operations case pass / attempted × 100. Required categories: authorization, approval, audit, cancellation, recovery (+ schedule). |
+
+Known exclusions:
+
+- Nested LOOP / LOOP-body APPROVAL recovery (out of scope; fail-closed elsewhere)
+- Live LLM non-determinism for KPI-02 (uses frozen rerank snapshot)
+- KPI-03 live inventory requires `TEST_DATABASE_URL` or `DATABASE_URL`; otherwise `inventory_status=UNAVAILABLE`
+- Generated evidence under `artifacts/` / `evidence/` is not committed
+
+### 25.3 Production smoke evidence references
+
+Prior close-out smoke/recovery chains (issue references; not re-run by this harness):
+
+| Issue | Evidence theme |
+|---|---|
+| #101 / #103 / #105 / #107 | Tool Factory chain (analyze → build/package → sandbox/review → publish/import → connection/discovery) |
+| #111 | Approval wait / decide / same-Execution resume |
+| #113 | Cancellation + cancel-requested lease recovery |
+| #115 | Non-LOOP expired RUNNING lease recovery |
+| #117 | Flat FOR_EACH / WHILE expired RUNNING lease recovery |
+
 ---
 
 ## 26. KPI-02 Tool Mapping
@@ -1728,6 +1838,11 @@ evidence/
 ```
 
 Evidence에는 최소 commit SHA, environment, dataset/config version, 실행시각, 결과요약을 기록한다.
+
+Issue #119 harnesses write runtime JSON under gitignored `artifacts/regression/` and
+`artifacts/kpi/` (override with `MCPFLOW_ARTIFACT_DIR`). Schema/examples and counting
+rules are documented in §25.1–§25.2; do not commit generated reports containing
+environment-specific inventory.
 
 ---
 

@@ -1,0 +1,36 @@
+# KPI-05 — composite scenario completion (real executable tests).
+scenarios_version: workflow-scenarios.v1
+denominator_zero_policy: report measured_value null and skip_reason DENOMINATOR_ZERO
+
+scenarios:
+  - id: sequential
+    title: Sequential workflow execution
+    pytest:
+      - tests/unit/test_execution_orchestrator.py
+      - tests/unit/test_workflow_execution_creation.py
+
+  - id: parallel_join
+    title: Parallel TOOL + JOIN DAG
+    pytest:
+      - tests/unit/test_execution_tool_join_dag.py
+
+  - id: condition
+    title: CONDITION / when
+    pytest:
+      - tests/unit/test_execution_condition_when.py
+
+  - id: foreach
+    title: FOR_EACH LOOP
+    pytest:
+      - tests/unit/test_execution_loop_foreach.py
+
+  - id: while
+    title: WHILE LOOP
+    pytest:
+      - tests/unit/test_execution_loop_while.py
+
+  - id: approval_resume
+    title: Approval wait and resume in execution
+    pytest:
+      - tests/unit/test_approval_wait.py
+      - tests/unit/test_approval_decision_resume.py
