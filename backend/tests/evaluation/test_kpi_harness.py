@@ -249,7 +249,6 @@ def test_naked_env_result_values_cannot_produce_measured(monkeypatch) -> None:
 def test_durable_helpers_can_score_measured_paths() -> None:
     """Valid durable evidence helpers can produce MEASURED inputs (no env results)."""
     from datetime import UTC, datetime, timedelta
-    from uuid import uuid4
 
     from tests.evaluation.harness.live_evidence import (
         compute_kpi_01_duration_ms,
@@ -261,21 +260,20 @@ def test_durable_helpers_can_score_measured_paths() -> None:
     end = start + timedelta(milliseconds=1500)
     assert compute_kpi_01_duration_ms(t_start=start, t_end=end) == 1500.0
 
-    tool_a = uuid4()
     assert (
         score_kpi_02_case(
-            expected_tool_version_id=tool_a,
+            expected_tool_name="lookup_weather",
             expected_decision="AUTO_SELECT",
-            selected_tool_version_id=tool_a,
+            selected_tool_name="lookup_weather",
             decision="AUTO_SELECT",
         )
         is True
     )
     assert (
         score_kpi_02_case(
-            expected_tool_version_id=tool_a,
+            expected_tool_name="lookup_weather",
             expected_decision="AUTO_SELECT",
-            selected_tool_version_id=uuid4(),
+            selected_tool_name="echo",
             decision="AUTO_SELECT",
         )
         is False
@@ -283,6 +281,490 @@ def test_durable_helpers_can_score_measured_paths() -> None:
     assert score_execution_terminal("SUCCEEDED") == "PASS"
     assert score_execution_terminal("FAILED") == "FAIL"
     assert score_execution_terminal("RUNNING") == "NOT_RUN"
+
+
+def test_kpi01_wrong_agent_version_pin_blocks_measured(monkeypatch) -> None:
+    """KPI-01: AgentRequest.agent_version_id must match pin for MEASURED."""
+    from datetime import UTC, datetime
+    from uuid import uuid4
+
+    from tests.evaluation.harness import kpi_measure as km
+    from tests.evaluation.harness.live_evidence import Kpi01Evidence
+
+    pinned = uuid4()
+    other = uuid4()
+    monkeypatch.setenv("MCPFLOW_KPI_AGENT_VERSION_ID", str(pinned))
+    monkeypatch.setenv("MCPFLOW_KPI_LLM_PROFILE_ID", str(uuid4()))
+    monkeypatch.setenv("MCPFLOW_KPI_EMBEDDING_PROFILE_ID", str(uuid4()))
+    monkeypatch.setenv("MCPFLOW_KPI_AGENT_REQUEST_ID", str(uuid4()))
+    monkeypatch.setenv("TEST_DATABASE_URL", "postgresql+asyncpg://unused/db")
+
+    evidence = Kpi01Evidence(
+        agent_request_id=uuid4(),
+        tool_selection_run_id=uuid4(),
+        agent_version_id=other,
+        t_start=datetime(2026, 10, 16, 8, 0, 0, tzinfo=UTC),
+        t_end=datetime(2026, 10, 16, 8, 0, 1, tzinfo=UTC),
+        duration_ms=1000.0,
+        decision="AUTO_SELECT",
+        lineage_ok=False,
+        lineage_reasons=("AGENT_VERSION_PIN_MISMATCH",),
+        evidence_ids={"agent_version_id": str(other)},
+    )
+
+    async def fake_with_session(factory):
+        return evidence
+
+    monkeypatch.setattr(km, "_live_prereq_missing", lambda: [])
+    monkeypatch.setattr(
+        "tests.evaluation.harness.live_evidence.with_session", fake_with_session
+    )
+    monkeypatch.setattr(
+        "tests.evaluation.harness.live_evidence.load_kpi_01_evidence",
+        lambda *a, **k: evidence,
+    )
+
+    metric = measure_official_kpi_01(mode="live")
+    assert metric["status"] != "MEASURED"
+    assert metric["measured_value"] is None
+    assert "LINEAGE_MISMATCH" in metric["reason"]
+    assert "AGENT_VERSION_PIN_MISMATCH" in metric["reason"]
+
+
+def test_kpi01_valid_lineage_can_measure(monkeypatch) -> None:
+    from datetime import UTC, datetime
+    from uuid import uuid4
+
+    from tests.evaluation.harness import kpi_measure as km
+    from tests.evaluation.harness.live_evidence import Kpi01Evidence
+
+    pinned = uuid4()
+    monkeypatch.setenv("MCPFLOW_KPI_AGENT_VERSION_ID", str(pinned))
+    monkeypatch.setenv("MCPFLOW_KPI_LLM_PROFILE_ID", str(uuid4()))
+    monkeypatch.setenv("MCPFLOW_KPI_EMBEDDING_PROFILE_ID", str(uuid4()))
+    monkeypatch.setenv("MCPFLOW_KPI_AGENT_REQUEST_ID", str(uuid4()))
+    monkeypatch.setenv("TEST_DATABASE_URL", "postgresql+asyncpg://unused/db")
+
+    evidence = Kpi01Evidence(
+        agent_request_id=uuid4(),
+        tool_selection_run_id=uuid4(),
+        agent_version_id=pinned,
+        t_start=datetime(2026, 10, 16, 8, 0, 0, tzinfo=UTC),
+        t_end=datetime(2026, 10, 16, 8, 0, 1, tzinfo=UTC),
+        duration_ms=1500.0,
+        decision="AUTO_SELECT",
+        lineage_ok=True,
+        lineage_reasons=(),
+        evidence_ids={"agent_version_id": str(pinned)},
+    )
+
+    async def fake_with_session(factory):
+        return evidence
+
+    monkeypatch.setattr(km, "_live_prereq_missing", lambda: [])
+    monkeypatch.setattr(
+        "tests.evaluation.harness.live_evidence.with_session", fake_with_session
+    )
+
+    metric = measure_official_kpi_01(mode="live")
+    assert metric["status"] == "MEASURED"
+    assert metric["measured_value"] == 1500.0
+
+
+def test_kpi02_selector_map_rejects_expected_label_override() -> None:
+    from uuid import uuid4
+
+    from tests.evaluation.harness.live_evidence import parse_kpi_02_selector_map
+
+    payload = {
+        "cases": [
+            {
+                "case_id": "weather-seoul-ko",
+                "agent_request_id": str(uuid4()),
+                "expected_tool_version_id": str(uuid4()),
+                "expected_decision": "AUTO_SELECT",
+            }
+        ]
+    }
+    selectors, errors = parse_kpi_02_selector_map(payload)
+    assert selectors == {}
+    assert any("FORBIDDEN_EXPECTED_LABEL_KEYS" in e for e in errors)
+
+
+def test_kpi02_unknown_duplicate_missing_case_incomplete(monkeypatch, tmp_path: Path) -> None:
+    from uuid import uuid4
+
+    from tests.evaluation.harness import kpi_measure as km
+
+    pinned = uuid4()
+    monkeypatch.setenv("MCPFLOW_KPI_AGENT_VERSION_ID", str(pinned))
+    monkeypatch.setenv("MCPFLOW_KPI_LLM_PROFILE_ID", str(uuid4()))
+    monkeypatch.setenv("MCPFLOW_KPI_EMBEDDING_PROFILE_ID", str(uuid4()))
+    monkeypatch.setenv("TEST_DATABASE_URL", "postgresql+asyncpg://unused/db")
+    monkeypatch.setattr(km, "_live_prereq_missing", lambda: [])
+
+    # Duplicate case id
+    dup_map = tmp_path / "dup.json"
+    rid = str(uuid4())
+    dup_map.write_text(
+        '{"cases":['
+        f'{{"case_id":"weather-seoul-ko","agent_request_id":"{rid}"}},'
+        f'{{"case_id":"weather-seoul-ko","agent_request_id":"{uuid4()}"}}'
+        "]}",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("MCPFLOW_KPI_02_EVIDENCE_MAP", str(dup_map))
+    dup_metric = measure_official_kpi_02(mode="live")
+    assert dup_metric["status"] == "INCOMPLETE"
+    assert dup_metric["measured_value"] is None
+    assert "DUPLICATE_CASE_ID" in dup_metric["reason"]
+
+    # Unknown case id
+    unk_map = tmp_path / "unk.json"
+    unk_map.write_text(
+        '{"cases":[{"case_id":"not-a-real-case","agent_request_id":"%s"}]}'
+        % uuid4(),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("MCPFLOW_KPI_02_EVIDENCE_MAP", str(unk_map))
+    unk_metric = measure_official_kpi_02(mode="live")
+    assert unk_metric["status"] == "INCOMPLETE"
+    assert "UNKNOWN_CASE_ID" in unk_metric["reason"]
+
+    # Missing required case → NOT_RUN → INCOMPLETE (fixed denominator)
+    from tests.evaluation.harness.live_evidence import (
+        Kpi02CaseEvidence,
+        load_canonical_kpi_02_cases,
+    )
+
+    dataset = load_json(eval_root() / "tool-mapping" / "dataset.v1.json")
+    eligible = load_canonical_kpi_02_cases(dataset)
+    assert len(eligible) >= 1
+    first = str(eligible[0]["id"])
+    miss_map = tmp_path / "miss.json"
+    miss_map.write_text(
+        '{"cases":[{"case_id":"%s","agent_request_id":"%s"}]}' % (first, uuid4()),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("MCPFLOW_KPI_02_EVIDENCE_MAP", str(miss_map))
+
+    async def fake_eval(session, *, dataset_cases, selectors):
+        return [
+            Kpi02CaseEvidence(
+                case_id=str(c["id"]),
+                agent_request_id=selectors.get(str(c["id"])),
+                expected_tool_name=c.get("expected_tool_name"),
+                expected_decision=c.get("expected_decision"),
+                tool_selection_run_id=None,
+                selected_tool_name=None,
+                decision=None,
+                correct=None,
+                status="PASS" if str(c["id"]) in selectors else "NOT_RUN",
+                reason=None if str(c["id"]) in selectors else "MISSING_SELECTOR_FOR_DECLARED_CASE",
+            )
+            for c in dataset_cases
+        ]
+
+    async def fake_with_session(factory):
+        return await factory(None)
+
+    monkeypatch.setattr(
+        "tests.evaluation.harness.live_evidence.evaluate_kpi_02_cases", fake_eval
+    )
+    monkeypatch.setattr(
+        "tests.evaluation.harness.live_evidence.with_session", fake_with_session
+    )
+    miss_metric = measure_official_kpi_02(mode="live")
+    assert miss_metric["status"] == "INCOMPLETE"
+    assert miss_metric["measured_value"] is None
+    assert miss_metric["denominator"] == len(eligible)
+
+
+def test_kpi02_wrong_agent_version_blocks_official_score() -> None:
+    from uuid import uuid4
+
+    from tests.evaluation.harness.live_evidence import validate_agent_request_lineage
+
+    pinned = uuid4()
+    reasons = validate_agent_request_lineage(
+        request_agent_version_id=uuid4(),
+        selection_agent_version_id=None,
+        selection_llm_profile_id=None,
+        selection_embedding_profile_id=None,
+        agent_version_llm_profile_id=None,
+        pinned_agent_version_id=pinned,
+        pinned_llm_profile_id=None,
+        pinned_embedding_profile_id=None,
+    )
+    assert "AGENT_VERSION_PIN_MISMATCH" in reasons
+
+
+def test_kpi04_other_server_verification_and_missing_apply_block_pass() -> None:
+    from tests.evaluation.harness.live_evidence import discovery_has_durable_apply
+
+    assert discovery_has_durable_apply(None) is False
+    assert discovery_has_durable_apply({"tools_registered": 3}) is False
+    assert discovery_has_durable_apply({"factory_apply_executed": True}) is True
+    assert (
+        discovery_has_durable_apply(
+            {
+                "factory_reconciliation": {"status": "CLEAN", "apply_executed": True},
+            }
+        )
+        is True
+    )
+
+
+def test_kpi04_evaluate_rejects_wrong_server_verification() -> None:
+    """Unit-level: VERIFICATION_SERVER_MISMATCH status is FAIL not PASS."""
+    from tests.evaluation.harness.live_evidence import Kpi04AttemptEvidence
+
+    bad = Kpi04AttemptEvidence(
+        attempt_id="smoke-verification",
+        operation="verification",
+        success=False,
+        status="FAIL",
+        evidence_ids={"failure": "server_mismatch"},
+        failure_category="VERIFICATION_SERVER_MISMATCH",
+    )
+    apply_missing = Kpi04AttemptEvidence(
+        attempt_id="smoke-apply-register",
+        operation="apply/register",
+        success=False,
+        status="NOT_RUN",
+        evidence_ids={},
+        failure_category="DURABLE_APPLY_EVIDENCE_MISSING",
+    )
+    assert bad.status != "PASS"
+    assert apply_missing.status != "PASS"
+
+
+def test_kpi04_incomplete_when_apply_not_run(monkeypatch) -> None:
+    from uuid import uuid4
+
+    from tests.evaluation.harness.live_evidence import Kpi04AttemptEvidence
+
+    monkeypatch.setenv("TEST_DATABASE_URL", "postgresql+asyncpg://unused/db")
+    monkeypatch.setenv("MCPFLOW_KPI_SMOKE_MCP_SERVER_ID", str(uuid4()))
+
+    attempts = [
+        Kpi04AttemptEvidence(
+            attempt_id="smoke-connect",
+            operation="connect",
+            success=True,
+            status="PASS",
+            evidence_ids={},
+        ),
+        Kpi04AttemptEvidence(
+            attempt_id="smoke-discovery",
+            operation="discovery",
+            success=True,
+            status="PASS",
+            evidence_ids={},
+        ),
+        Kpi04AttemptEvidence(
+            attempt_id="smoke-apply-register",
+            operation="apply/register",
+            success=False,
+            status="NOT_RUN",
+            evidence_ids={},
+            failure_category="DURABLE_APPLY_EVIDENCE_MISSING",
+        ),
+        Kpi04AttemptEvidence(
+            attempt_id="smoke-verification",
+            operation="verification",
+            success=False,
+            status="FAIL",
+            evidence_ids={},
+            failure_category="VERIFICATION_SERVER_MISMATCH",
+        ),
+    ]
+
+    async def fake_with_session(factory):
+        return attempts
+
+    monkeypatch.setattr(
+        "tests.evaluation.harness.live_evidence.with_session", fake_with_session
+    )
+    metric = measure_official_kpi_04(mode="live")
+    assert metric["status"] != "MEASURED" or metric["measured_value"] != 100.0
+    assert metric["status"] == "INCOMPLETE"
+    assert metric["measured_value"] is None
+    assert any(
+        a.get("failure_category") == "DURABLE_APPLY_EVIDENCE_MISSING"
+        for a in metric["attempts"]
+    )
+
+
+def test_kpi05_plan_shape_and_execution_reuse() -> None:
+    from tests.evaluation.harness.live_evidence import plan_matches_scenario_kind
+
+    seq_ok = {
+        "steps": [
+            {"id": "t1", "type": "TOOL", "depends_on": []},
+            {"id": "t2", "type": "TOOL", "depends_on": ["t1"]},
+        ]
+    }
+    assert plan_matches_scenario_kind(seq_ok, "sequential")[0] is True
+    assert plan_matches_scenario_kind(
+        {"steps": [{"id": "t1", "type": "TOOL", "depends_on": []}]},
+        "sequential",
+    )[0] is False
+
+    par_ok = {
+        "steps": [
+            {"id": "a", "type": "TOOL", "depends_on": []},
+            {"id": "b", "type": "TOOL", "depends_on": []},
+            {"id": "j", "type": "JOIN", "depends_on": ["a", "b"]},
+        ]
+    }
+    assert plan_matches_scenario_kind(par_ok, "parallel")[0] is True
+    assert plan_matches_scenario_kind(seq_ok, "parallel")[0] is False
+
+    assert plan_matches_scenario_kind(
+        {"steps": [{"id": "c", "type": "CONDITION", "depends_on": []}]},
+        "condition",
+    )[0] is True
+    assert plan_matches_scenario_kind(
+        {
+            "steps": [
+                {
+                    "id": "l",
+                    "type": "LOOP",
+                    "depends_on": [],
+                    "config": {"mode": "FOR_EACH"},
+                }
+            ]
+        },
+        "foreach",
+    )[0] is True
+    assert plan_matches_scenario_kind(
+        {
+            "steps": [
+                {
+                    "id": "l",
+                    "type": "LOOP",
+                    "depends_on": [],
+                    "config": {"mode": "WHILE"},
+                }
+            ]
+        },
+        "while",
+    )[0] is True
+    # Wrong shape for while (foreach config) must not pass.
+    assert plan_matches_scenario_kind(
+        {
+            "steps": [
+                {
+                    "id": "l",
+                    "type": "LOOP",
+                    "depends_on": [],
+                    "config": {"mode": "FOR_EACH"},
+                }
+            ]
+        },
+        "while",
+    )[0] is False
+
+
+def test_kpi05_reused_execution_blocks_perfect_score(monkeypatch) -> None:
+    from uuid import uuid4
+
+    from tests.evaluation.harness.live_evidence import Kpi05ScenarioEvidence
+
+    shared = uuid4()
+    monkeypatch.setenv("TEST_DATABASE_URL", "postgresql+asyncpg://unused/db")
+    results = [
+        Kpi05ScenarioEvidence(
+            scenario_id="sequential_tool_chain",
+            execution_id=shared,
+            status="PASS",
+            success=True,
+            execution_status="SUCCEEDED",
+            evidence_ids={"execution_id": str(shared)},
+        ),
+        Kpi05ScenarioEvidence(
+            scenario_id="parallel_join_wave",
+            execution_id=shared,
+            status="FAIL",
+            success=False,
+            execution_status=None,
+            evidence_ids={"execution_id": str(shared)},
+            reason="EXECUTION_ID_REUSED_ACROSS_SCENARIOS",
+        ),
+        Kpi05ScenarioEvidence(
+            scenario_id="condition_branch",
+            execution_id=shared,
+            status="FAIL",
+            success=False,
+            execution_status=None,
+            evidence_ids={"execution_id": str(shared)},
+            reason="EXECUTION_ID_REUSED_ACROSS_SCENARIOS",
+        ),
+        Kpi05ScenarioEvidence(
+            scenario_id="foreach_loop",
+            execution_id=shared,
+            status="FAIL",
+            success=False,
+            execution_status=None,
+            evidence_ids={"execution_id": str(shared)},
+            reason="EXECUTION_ID_REUSED_ACROSS_SCENARIOS",
+        ),
+        Kpi05ScenarioEvidence(
+            scenario_id="while_loop",
+            execution_id=shared,
+            status="FAIL",
+            success=False,
+            execution_status=None,
+            evidence_ids={"execution_id": str(shared)},
+            reason="EXECUTION_ID_REUSED_ACROSS_SCENARIOS",
+        ),
+        Kpi05ScenarioEvidence(
+            scenario_id="approval_wait_resume",
+            execution_id=shared,
+            status="FAIL",
+            success=False,
+            execution_status=None,
+            evidence_ids={"execution_id": str(shared)},
+            reason="EXECUTION_ID_REUSED_ACROSS_SCENARIOS",
+        ),
+    ]
+
+    async def fake_with_session(factory):
+        return results
+
+    monkeypatch.setattr(
+        "tests.evaluation.harness.live_evidence.with_session", fake_with_session
+    )
+    metric = measure_official_kpi_05(mode="live")
+    assert metric["status"] == "MEASURED"
+    assert metric["measured_value"] != 100.0
+    assert metric["numerator"] == 1
+    assert metric["denominator"] == 6
+    assert any(
+        s.get("reason") == "EXECUTION_ID_REUSED_ACROSS_SCENARIOS"
+        for s in metric["scenarios"]
+    )
+
+
+def test_kpi05_succeeded_wrong_plan_shape_not_pass() -> None:
+    from tests.evaluation.harness.live_evidence import plan_matches_scenario_kind
+
+    succeeded_but_wrong = {
+        "steps": [
+            {"id": "t1", "type": "TOOL", "depends_on": []},
+            {"id": "t2", "type": "TOOL", "depends_on": []},  # no chain
+        ]
+    }
+    ok, reason = plan_matches_scenario_kind(succeeded_but_wrong, "sequential")
+    assert ok is False
+    assert reason == "SEQUENTIAL_DEPENDENCY_CHAIN_MISSING"
+    # Same SUCCEEDED plan cannot satisfy all six kinds.
+    kinds = ("sequential", "parallel", "condition", "foreach", "while", "approval")
+    passes = sum(
+        1 for kind in kinds if plan_matches_scenario_kind(succeeded_but_wrong, kind)[0]
+    )
+    assert passes < 6
 
 
 def test_redact_secrets_strips_credential_keys() -> None:

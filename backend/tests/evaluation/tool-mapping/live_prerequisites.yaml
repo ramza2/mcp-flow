@@ -14,9 +14,11 @@ required_env:
 # REJECTED as official evidence: MCPFLOW_KPI_01_LIVE_RESULT_MS
 
 # KPI-02 durable evidence selector (required for MEASURED):
-#   MCPFLOW_KPI_02_EVIDENCE_MAP — JSON path with cases:
-#     [{case_id, agent_request_id, expected_tool_version_id, expected_decision?}]
-# Outcomes are read from tool_selection_runs for each agent_request_id.
+#   MCPFLOW_KPI_02_EVIDENCE_MAP — selector-only JSON:
+#     {cases:[{case_id, agent_request_id}]}
+# Expected labels are read only from tool-mapping/dataset.v1.json.
+# Forbidden map keys: expected_tool_version_id, expected_decision, etc.
+# Unknown/duplicate case_id → INCOMPLETE. Missing declared case → INCOMPLETE.
 # REJECTED as official evidence: MCPFLOW_KPI_02_LIVE_NUMERATOR / DENOMINATOR
 
 optional_env_recorded:

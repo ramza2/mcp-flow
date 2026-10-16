@@ -601,6 +601,26 @@ def measure_official_kpi_01(*, mode: str) -> dict[str, Any]:
                 "evidence_ids": {"agent_request_id": str(request_id)},
             },
         )
+    if not evidence.lineage_ok:
+        return _official_metric(
+            kpi_id="KPI-01",
+            name="response_time",
+            status="INCOMPLETE",
+            evidence_mode="live_official",
+            numerator=None,
+            denominator=None,
+            measured_value=None,
+            unit=unit,
+            target=target,
+            evidence_complete=False,
+            reason="LINEAGE_MISMATCH:" + ",".join(evidence.lineage_reasons),
+            extra={
+                "timing_window": timing_window,
+                "pins": _live_agent_pins(),
+                "evidence_ids": evidence.evidence_ids,
+                "lineage_reasons": list(evidence.lineage_reasons),
+            },
+        )
     return _official_metric(
         kpi_id="KPI-01",
         name="response_time",
@@ -616,14 +636,7 @@ def measure_official_kpi_01(*, mode: str) -> dict[str, Any]:
         extra={
             "timing_window": timing_window,
             "pins": _live_agent_pins(),
-            "evidence_ids": {
-                "agent_request_id": str(evidence.agent_request_id),
-                "tool_selection_run_id": str(evidence.tool_selection_run_id),
-                "agent_version_id": str(evidence.agent_version_id),
-                "t_start": evidence.t_start.isoformat(),
-                "t_end": evidence.t_end.isoformat(),
-                "decision": evidence.decision,
-            },
+            "evidence_ids": evidence.evidence_ids,
         },
     )
 
@@ -634,13 +647,19 @@ def measure_official_kpi_02(*, mode: str) -> dict[str, Any]:
 
     from tests.evaluation.harness.live_evidence import (
         evaluate_kpi_02_cases,
-        load_kpi_02_evidence_map,
+        load_canonical_kpi_02_cases,
+        load_json_path,
+        parse_kpi_02_selector_map,
         with_session,
     )
 
     targets = _targets()["targets"]["KPI-02"]
     unit = targets.get("measured_value_unit", "percent")
     target = targets.get("target")
+    dataset = load_json(eval_root() / "tool-mapping" / "dataset.v1.json")
+    dataset_cases = load_canonical_kpi_02_cases(dataset)
+    denominator = len(dataset_cases)
+
     if mode != "live":
         return _not_measured(
             kpi_id="KPI-02",
@@ -653,7 +672,11 @@ def measure_official_kpi_02(*, mode: str) -> dict[str, Any]:
                 "AgentRequest/ToolSelectionRun evidence per case. "
                 "Frozen rerank/_decide is offline diagnostic only."
             ),
-            extra={"counting_rule": targets.get("counting_rule")},
+            extra={
+                "counting_rule": targets.get("counting_rule"),
+                "denominator_declared": denominator,
+                "dataset_version": dataset.get("dataset_version"),
+            },
         )
     missing = _live_prereq_missing()
     if missing:
@@ -667,6 +690,7 @@ def measure_official_kpi_02(*, mode: str) -> dict[str, Any]:
             extra={
                 "counting_rule": targets.get("counting_rule"),
                 "pins": _live_agent_pins(),
+                "denominator_declared": denominator,
             },
         )
     map_path = os.environ.get("MCPFLOW_KPI_02_EVIDENCE_MAP", "").strip()
@@ -679,12 +703,14 @@ def measure_official_kpi_02(*, mode: str) -> dict[str, Any]:
             target=target,
             reason=(
                 "DURABLE_EVIDENCE_SELECTOR_MISSING: set MCPFLOW_KPI_02_EVIDENCE_MAP "
-                "to a JSON file of {case_id, agent_request_id, expected_tool_version_id}. "
+                "to a selector-only JSON map {cases:[{case_id, agent_request_id}]}. "
+                "Expected labels come only from tool-mapping/dataset.v1.json. "
                 "Naked MCPFLOW_KPI_02_LIVE_NUMERATOR/DENOMINATOR are ignored."
             ),
             extra={
                 "counting_rule": targets.get("counting_rule"),
                 "pins": _live_agent_pins(),
+                "denominator_declared": denominator,
             },
         )
     path = Path(map_path)
@@ -696,10 +722,65 @@ def measure_official_kpi_02(*, mode: str) -> dict[str, Any]:
             unit=unit,
             target=target,
             reason=f"EVIDENCE_MAP_NOT_FOUND: {map_path}",
-            extra={"pins": _live_agent_pins()},
+            extra={
+                "pins": _live_agent_pins(),
+                "denominator_declared": denominator,
+            },
         )
-    cases = load_kpi_02_evidence_map(path)
-    denominator = len(cases)
+    try:
+        payload = load_json_path(path)
+    except Exception as exc:  # noqa: BLE001
+        return _not_measured(
+            kpi_id="KPI-02",
+            name="nl_to_tool_mapping_top1_accuracy",
+            evidence_mode="live_official",
+            unit=unit,
+            target=target,
+            reason=f"EVIDENCE_MAP_PARSE_ERROR: {type(exc).__name__}",
+            extra={"pins": _live_agent_pins(), "denominator_declared": denominator},
+        )
+    if not isinstance(payload, dict):
+        return _official_metric(
+            kpi_id="KPI-02",
+            name="nl_to_tool_mapping_top1_accuracy",
+            status="INCOMPLETE",
+            evidence_mode="live_official",
+            numerator=0,
+            denominator=denominator,
+            measured_value=None,
+            unit=unit,
+            target=target,
+            evidence_complete=False,
+            reason="EVIDENCE_MAP_MUST_BE_OBJECT",
+            extra={"pins": _live_agent_pins(), "denominator_declared": denominator},
+        )
+    selectors, map_errors = parse_kpi_02_selector_map(payload)
+    eligible_ids = {str(case["id"]) for case in dataset_cases}
+    unknown = sorted(set(selectors) - eligible_ids)
+    if unknown:
+        map_errors.append("UNKNOWN_CASE_ID:" + ",".join(unknown))
+    if map_errors:
+        return _official_metric(
+            kpi_id="KPI-02",
+            name="nl_to_tool_mapping_top1_accuracy",
+            status="INCOMPLETE",
+            evidence_mode="live_official",
+            numerator=0,
+            denominator=denominator,
+            measured_value=None,
+            unit=unit,
+            target=target,
+            evidence_complete=False,
+            reason="EVIDENCE_MAP_REJECTED:" + ";".join(map_errors),
+            extra={
+                "counting_rule": targets.get("counting_rule"),
+                "pins": _live_agent_pins(),
+                "denominator_declared": denominator,
+                "dataset_version": dataset.get("dataset_version"),
+                "evidence_map": map_path,
+                "map_errors": map_errors,
+            },
+        )
     if denominator == 0:
         return _official_metric(
             kpi_id="KPI-02",
@@ -717,7 +798,13 @@ def measure_official_kpi_02(*, mode: str) -> dict[str, Any]:
         )
     try:
         evaluated = asyncio.run(
-            with_session(lambda session: evaluate_kpi_02_cases(session, cases))
+            with_session(
+                lambda session: evaluate_kpi_02_cases(
+                    session,
+                    dataset_cases=dataset_cases,
+                    selectors=selectors,
+                )
+            )
         )
     except Exception as exc:  # noqa: BLE001
         return _not_measured(
@@ -727,7 +814,7 @@ def measure_official_kpi_02(*, mode: str) -> dict[str, Any]:
             unit=unit,
             target=target,
             reason=f"DURABLE_EVIDENCE_READ_ERROR: {type(exc).__name__}",
-            extra={"pins": _live_agent_pins()},
+            extra={"pins": _live_agent_pins(), "denominator_declared": denominator},
         )
     not_run = sum(1 for item in evaluated if item.status == "NOT_RUN")
     numerator = sum(1 for item in evaluated if item.status == "PASS")
@@ -737,26 +824,10 @@ def measure_official_kpi_02(*, mode: str) -> dict[str, Any]:
             "status": item.status,
             "correct": item.correct,
             "decision": item.decision,
-            "evidence_ids": {
-                "agent_request_id": (
-                    str(item.agent_request_id) if item.agent_request_id else None
-                ),
-                "tool_selection_run_id": (
-                    str(item.tool_selection_run_id)
-                    if item.tool_selection_run_id
-                    else None
-                ),
-                "selected_tool_version_id": (
-                    str(item.selected_tool_version_id)
-                    if item.selected_tool_version_id
-                    else None
-                ),
-                "expected_tool_version_id": (
-                    str(item.expected_tool_version_id)
-                    if item.expected_tool_version_id
-                    else None
-                ),
-            },
+            "expected_tool_name": item.expected_tool_name,
+            "expected_decision": item.expected_decision,
+            "selected_tool_name": item.selected_tool_name,
+            "evidence_ids": item.evidence_ids,
             "reason": item.reason,
         }
         for item in evaluated
@@ -779,6 +850,7 @@ def measure_official_kpi_02(*, mode: str) -> dict[str, Any]:
                 "pins": _live_agent_pins(),
                 "cases": case_details,
                 "evidence_map": map_path,
+                "dataset_version": dataset.get("dataset_version"),
             },
         )
     return _official_metric(
@@ -798,6 +870,7 @@ def measure_official_kpi_02(*, mode: str) -> dict[str, Any]:
             "pins": _live_agent_pins(),
             "cases": case_details,
             "evidence_map": map_path,
+            "dataset_version": dataset.get("dataset_version"),
         },
     )
 
@@ -1208,10 +1281,16 @@ def measure_official_kpi_05(*, mode: str) -> dict[str, Any]:
         unit=unit,
         target=target,
         evidence_complete=True,
-        reason="DURABLE_EXECUTION_TERMINAL_EVIDENCE",
+        reason="DURABLE_EXECUTION_PLAN_SHAPE_AND_TERMINAL_EVIDENCE",
         extra={
             "scenarios_version": exec_doc.get("scenarios_version"),
             "scenarios": details,
+            "pins": {
+                "agent_version_id": os.environ.get("MCPFLOW_KPI_AGENT_VERSION_ID"),
+                "workflow_version_id": os.environ.get(
+                    "MCPFLOW_KPI_WORKFLOW_VERSION_ID"
+                ),
+            },
         },
     )
 
