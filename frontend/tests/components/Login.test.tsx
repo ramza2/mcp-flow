@@ -101,6 +101,6 @@ describe('Login screen', () => {
     await waitFor(() => expect(loginCalls).toBe(1));
     resolveLogin(jsonResponse(mockAuthSession));
     await waitFor(() => expect(router.state.location.pathname).toBe('/mcp/tools'));
-    expect(screen.getByText('Tools Page')).toBeInTheDocument();
+    expect(await screen.findByText('Tools Page')).toBeInTheDocument();
   });
 });

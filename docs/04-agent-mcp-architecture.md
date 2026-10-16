@@ -942,10 +942,10 @@ A TOOL → C CONDITION → PASS TOOL (when C.condition_result==true)
 
 - one Celery/Execution task; not one task per Step
 - duplicate orchestrator delivery seeing RUNNING TOOL under lease → `WAVE_IN_PROGRESS` NOOP
-- Multi-Step expired RUNNING / parallel-wave recovery remains fail-closed: never
-  re-invoke terminal Attempt/ToolCall; complex parallel RUNNING recovery unsupported.
-  Expired CANCEL_REQUESTED multi-step recovery is cancellation-only terminalization
-  (MCP 0) and does not resume orchestration waves.
+- Non-LOOP Workflow/Schedule expired RUNNING recovery classifies the whole DAG
+  before any MCP; unsafe/UNKNOWN sibling evidence fail-closes with MCP 0.
+  LOOP Plan RUNNING recovery remains out of scope. Expired CANCEL_REQUESTED
+  multi-step recovery is cancellation-only terminalization (MCP 0).
 - runtime Binding resolve unchanged for TOOL args; STEP_OUTPUT still requires
   SUCCEEDED source + exact Plan↔Step lineage; CONDITION `result_inline` is a
   valid STEP_OUTPUT source

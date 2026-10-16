@@ -727,11 +727,20 @@ Public API에서 inactive session은 Cookie Session 검증이 먼저 `401 AUTH_S
 
 Worker lease, MCP task handle, persisted state를 사용해 재시작 후 복구한다. 동일 non-idempotent Tool을 무조건 재호출하지 않는다.
 
-이번 vertical slice의 **expired RUNNING** 경로는 **AgentRequest + single TOOL Step + synchronous Current MCP `tools/call` persisted evidence**를 대상으로 한다. MRTR durable WAITING_INPUT foundation(PR #40: OPEN `mcp_input_requests` + lease clear)은 포함하되, 사용자 response/resume(PR #41)·일반 Workflow multi-step RUNNING recovery는 후속이다. Approval wait foundation(`WAITING_APPROVAL` + PENDING ApprovalRequest)과 MRTR wait(`WAITING_INPUT` + OPEN MCPInputRequest)는 모두 lease 없는 non-terminal 상태이므로 expired RUNNING / CANCEL_REQUESTED recovery candidate에 포함되지 않는다.
+**expired RUNNING** recovery covers AgentRequest single-TOOL evidence and non-LOOP
+`WORKFLOW_VERSION` / `SCHEDULE_OCCURRENCE` DAGs (TOOL/CONDITION/JOIN/APPROVAL).
+Whole-DAG classification must complete before any new MCP call; parallel siblings
+with any unsafe/UNKNOWN/corrupt evidence fail closed with MCP 0. LOOP Plans are
+filtered from discovery (dedicated follow-up). Approval `WAITING_APPROVAL` and MRTR
+`WAITING_INPUT` remain lease-free and are not RUNNING recovery candidates.
 
-PostgreSQL이 source of truth다. outbox process가 expired `RUNNING` AgentRequest candidate와 expired `CANCEL_REQUESTED` candidate를 bounded scan하여 Celery `mcpflow.execution.recover`(payload: `execution_id` only)를 publish하고, worker는 DB evidence로 decision 후 필요 시 기존 `McpToolRunner`를 호출한다. Redis/Celery는 delivery/coordination만 담당한다.
+PostgreSQL이 source of truth다. outbox process가 expired `RUNNING` AgentRequest /
+supported Workflow·Schedule candidate와 expired `CANCEL_REQUESTED` candidate를
+bounded scan하여 Celery `mcpflow.execution.recover`(payload: `execution_id` only)를
+publish하고, worker는 DB evidence로 decision 후 필요 시 기존 `McpToolRunner` /
+`ExecutionOrchestrator`를 호출한다. Redis/Celery는 delivery/coordination만 담당한다.
 
-Recovery candidate (RUNNING):
+Recovery candidate (RUNNING AgentRequest):
 
 ```text
 Execution.status == RUNNING
@@ -739,6 +748,16 @@ lease_expires_at IS NOT NULL
 lease_expires_at <= now
 source_type == AGENT_REQUEST
 exactly one foundation TOOL Step
+```
+
+Recovery candidate (RUNNING Workflow/Schedule — Issue #115):
+
+```text
+Execution.status == RUNNING
+lease_expires_at IS NOT NULL
+lease_expires_at <= now
+source_type ∈ {WORKFLOW_VERSION, SCHEDULE_OCCURRENCE}
+pinned Plan has no LOOP Step
 ```
 
 Recovery candidate (CANCEL_REQUESTED — cancellation-only):
@@ -765,7 +784,7 @@ Persisted evidence decision (Current MCP Runner: ToolCall `STARTED`를 durable c
 | C-1 exhausted | 위 + attempts 소진 | FAILED terminal, MCP 재호출 0 |
 | C-2 | STARTED ToolCall + pinned snapshot `NON_IDEMPOTENT_WRITE`/`DESTRUCTIVE`/`UNKNOWN` | ToolCall/Attempt/Step `UNKNOWN_OUTCOME`, Execution `FAILED`, MCP 재호출 0 |
 
-Recovery retry/safety classification은 mutable `MCPToolPolicy`가 아니라 생성 시점 `Execution.policy_snapshot.tool_policy`(`risk_class` / `max_attempts`)를 authority로 사용한다. 실제 remote 재호출 직전 권한/현행 Policy 재검증은 기존 `assert_current_tool_executable` / Attempt start / `McpToolRunner` preflight가 담당한다.
+AgentRequest recovery retry/safety classification은 mutable `MCPToolPolicy`가 아니라 생성 시점 `Execution.policy_snapshot.tool_policy`(`risk_class` / `max_attempts`)를 authority로 사용한다. Workflow/Schedule Tool recovery는 `get_expected_tool_policy_snapshot(..., plan_step_id=lineage.plan_step.id)`(immutable Plan TOOL template id)를 사용한다. 실제 remote 재호출 직전 권한/현행 Policy 재검증은 기존 Attempt start / `McpToolRunner` preflight가 담당한다. retry exhausted는 Plan Step `on_error`(FAIL_EXECUTION/CONTINUE/MARK_PARTIAL)를 ordinary wave settlement와 동일하게 적용한다.
 
 SAFE_RETRY commit 직후 runner 시작 전 crash로 Step이 READY + historical terminal Attempt인 상태는 정상 recovery checkpoint다. STARTED Attempt/ToolCall이 없고 `attempt_count < max_attempts`이면 다시 TAKEOVER_READY한다.
 
