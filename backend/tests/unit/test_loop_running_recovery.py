@@ -21,12 +21,14 @@ from app.execution.loop_reconcile import (
     pin_collection_evidence,
     pin_while_control_evidence,  # used by empty-history fail-closed plant
     resolve_foreach_collection,
+    succeed_loop,
     succeed_while_loop,
 )
 from app.execution.loop_runtime import (
     append_or_replay_while_history,
     hash_while_predicate_evidence,
     iteration_step_key,
+    parse_foreach_collection_pin,
     parse_while_predicate_history,
     tool_version_for_template,
 )
@@ -1639,6 +1641,159 @@ async def test_while_max_iterations_and_timeout_started_at(
 # ---------------------------------------------------------------------------
 # Lineage / parallel / races (35–46)
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_terminal_foreach_missing_children_fail_closed(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A: SUCCEEDED FOR_EACH collection_size>0 with zero children fail-closes."""
+    _install_no_side_effects(monkeypatch)
+    async with db_session_factory() as session:
+        eid, _c, now, _w, _tok = await _seed_workflow_execution(
+            session,
+            plan_builder=_loop_plus_top_tool_plan,
+            inputs={"items": [{"id": 1}, {"id": 2}]},
+        )
+        await _start_foreach_running_pinned(session, execution_id=eid, now=now)
+        parent = _loop_parent(await ExecutionRepository(session).list_steps(eid))
+        pin = parse_foreach_collection_pin(parent.resolved_input)
+        assert pin["collection_size"] == 2
+        succeed_loop(
+            parent,
+            collection_size=2,
+            iterations_completed=2,
+            now=now,
+        )
+        top = next(
+            s
+            for s in await ExecutionRepository(session).list_steps(eid)
+            if s.step_key == "top"
+        )
+        top.status = StepStatus.READY.value
+        top.ready_at = now
+        top.lock_version += 1
+        await session.commit()
+        await _expire_lease(session, execution_id=eid, claim_now=now)
+
+    async with db_session_factory() as session:
+        outcome = await _recover(session, execution_id=eid)
+        await session.commit()
+    assert outcome.decision == RecoveryDecision.FAIL_INCONSISTENT
+    assert outcome.taken_over is False
+    assert outcome.invoke_runner is False
+    async with db_session_factory() as session:
+        execution = await ExecutionRepository(session).get(eid)
+        assert execution is not None
+        assert execution.status == ExecutionStatus.FAILED.value
+        assert execution.lease_token is None
+
+
+@pytest.mark.asyncio
+async def test_terminal_foreach_result_inline_tamper_fail_closed(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """B: completed FOR_EACH children + tampered result_inline fail-closes."""
+    _install_no_side_effects(monkeypatch)
+    async with db_session_factory() as session:
+        eid, _c, now, _w, _tok = await _seed_workflow_execution(
+            session,
+            plan_builder=_loop_plus_top_tool_plan,
+            inputs={"items": [{"id": 1}, {"id": 2}]},
+        )
+        await _start_foreach_running_pinned(session, execution_id=eid, now=now)
+        await _materialize_foreach_iters(
+            session, execution_id=eid, through=2, terminal_through=2, now=now
+        )
+        parent = _loop_parent(await ExecutionRepository(session).list_steps(eid))
+        succeed_loop(
+            parent,
+            collection_size=2,
+            iterations_completed=2,
+            now=now,
+        )
+        parent.result_inline = {
+            "mode": "FOR_EACH",
+            "iterations_completed": 1,
+            "collection_size": 2,
+        }
+        parent.lock_version += 1
+        top = next(
+            s
+            for s in await ExecutionRepository(session).list_steps(eid)
+            if s.step_key == "top"
+        )
+        top.status = StepStatus.READY.value
+        top.ready_at = now
+        top.lock_version += 1
+        await session.commit()
+        await _expire_lease(session, execution_id=eid, claim_now=now)
+
+    async with db_session_factory() as session:
+        outcome = await _recover(session, execution_id=eid)
+        await session.commit()
+    assert outcome.decision == RecoveryDecision.FAIL_INCONSISTENT
+    assert outcome.taken_over is False
+    assert outcome.invoke_runner is False
+
+
+@pytest.mark.asyncio
+async def test_terminal_foreach_zero_iteration_valid_checkpoint(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """C: collection_size=0 + children=0 + exact result_inline remains valid."""
+    _install_no_side_effects(monkeypatch)
+    async with db_session_factory() as session:
+        eid, _c, now, _w, _tok = await _seed_workflow_execution(
+            session,
+            plan_builder=_loop_plus_top_tool_plan,
+            inputs={"items": []},
+        )
+        await _start_foreach_running_pinned(session, execution_id=eid, now=now)
+        parent = _loop_parent(await ExecutionRepository(session).list_steps(eid))
+        pin = parse_foreach_collection_pin(parent.resolved_input)
+        assert pin["collection_size"] == 0
+        succeed_loop(
+            parent,
+            collection_size=0,
+            iterations_completed=0,
+            now=now,
+        )
+        top = next(
+            s
+            for s in await ExecutionRepository(session).list_steps(eid)
+            if s.step_key == "top"
+        )
+        top.status = StepStatus.READY.value
+        top.ready_at = now
+        top.lock_version += 1
+        await session.commit()
+        await _expire_lease(session, execution_id=eid, claim_now=now)
+
+    client = _OkClient()
+    outcome, _run = await _recover_and_run(
+        db_session_factory, execution_id=eid, client=client
+    )
+    assert outcome.taken_over is True
+    assert outcome.invoke_runner is True
+    assert len(client.calls) == 1
+    async with db_session_factory() as session:
+        parent = _loop_parent(await ExecutionRepository(session).list_steps(eid))
+        assert parent.status == StepStatus.SUCCEEDED.value
+        assert parent.result_inline == {
+            "mode": "FOR_EACH",
+            "iterations_completed": 0,
+            "collection_size": 0,
+        }
+        children = [
+            s
+            for s in await ExecutionRepository(session).list_steps(eid)
+            if s.parent_step_id == parent.id
+        ]
+        assert children == []
 
 
 async def _plant_terminal_succeeded_while_with_child(

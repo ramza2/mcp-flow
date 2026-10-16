@@ -468,6 +468,115 @@ def _assert_iteration_topology(
     return max_n
 
 
+def _assert_succeeded_foreach_completion(
+    *,
+    execution: Execution,
+    plan: ExecutionPlanV1,
+    steps: Sequence[ExecutionStep],
+    parent: ExecutionStep,
+    cfg: LoopStepConfigV1,
+) -> None:
+    """Prove durable SUCCEEDED FOR_EACH pin + exact completion evidence."""
+    if parent.resolved_input is None:
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message=(
+                f"SUCCEEDED FOR_EACH {parent.step_key!r} missing collection pin."
+            ),
+            status_code=409,
+        )
+    pin = parse_foreach_collection_pin(parent.resolved_input)
+    collection = revalidate_foreach_collection_pin(
+        execution=execution,
+        loop_step=parent,
+        plan=plan,
+        steps=steps,
+    )
+    size = pin["collection_size"]
+    if size != len(collection):
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message=(
+                f"SUCCEEDED FOR_EACH {parent.step_key!r} collection_size "
+                "drifted from re-resolved collection."
+            ),
+            status_code=409,
+        )
+    if size > cfg.max_iterations:
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message=(
+                f"SUCCEEDED FOR_EACH {parent.step_key!r} pinned "
+                f"collection_size={size} exceeds max_iterations="
+                f"{cfg.max_iterations}."
+            ),
+            status_code=409,
+        )
+    if parent.error_code is not None:
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message=(
+                f"SUCCEEDED FOR_EACH {parent.step_key!r} must have "
+                "error_code null."
+            ),
+            status_code=409,
+        )
+    expected_result = {
+        "mode": "FOR_EACH",
+        "iterations_completed": size,
+        "collection_size": size,
+    }
+    if parent.result_inline != expected_result:
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message=(
+                f"SUCCEEDED FOR_EACH {parent.step_key!r} result_inline must "
+                f"be exactly {expected_result!r}."
+            ),
+            status_code=409,
+        )
+
+    children = [s for s in steps if s.parent_step_id == parent.id]
+    if size == 0:
+        if children:
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message=(
+                    f"SUCCEEDED FOR_EACH {parent.step_key!r} zero-iteration "
+                    "completion must have no children."
+                ),
+                status_code=409,
+            )
+        return
+
+    # size > 0: exact iterations 1..size, complete terminal sets, no repair.
+    max_n = _assert_iteration_topology(
+        parent=parent,
+        steps=steps,
+        cfg=cfg,
+        plan=plan,
+        max_bound=size,
+    )
+    if max_n != size:
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message=(
+                f"SUCCEEDED FOR_EACH {parent.step_key!r} requires exactly "
+                f"{size} materialized iterations (got {max_n})."
+            ),
+            status_code=409,
+        )
+    for n in range(1, size + 1):
+        _assert_iteration_child_set(
+            parent=parent,
+            steps=steps,
+            cfg=cfg,
+            plan=plan,
+            iteration_no=n,
+            require_terminal=True,
+        )
+
+
 def _assert_foreach_recovery_checkpoint(
     *,
     execution: Execution,
@@ -479,7 +588,16 @@ def _assert_foreach_recovery_checkpoint(
 ) -> None:
     _assert_parent_plan_projection(parent=parent, plan_step=plan_step)
     if parent.status != StepStatus.RUNNING.value:
-        # Terminal / PENDING parents: still validate children if present.
+        if parent.status == StepStatus.SUCCEEDED.value:
+            _assert_succeeded_foreach_completion(
+                execution=execution,
+                plan=plan,
+                steps=steps,
+                parent=parent,
+                cfg=cfg,
+            )
+            return
+        # Other terminal statuses: still prove pin/topology when children exist.
         if parent.status in _STEP_TERMINAL:
             children = [s for s in steps if s.parent_step_id == parent.id]
             if children:
