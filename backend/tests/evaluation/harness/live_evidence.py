@@ -122,9 +122,8 @@ async def evaluate_kpi_02_cases(
     for case in cases:
         case_id = str(case.get("case_id") or case.get("id") or "")
         req_id = parse_uuid(str(case.get("agent_request_id") or ""))
-        expected_tool = parse_uuid(
-            str(case.get("expected_tool_version_id") or "") or None
-        )
+        raw_expected = case.get("expected_tool_version_id")
+        expected_tool = parse_uuid(str(raw_expected) if raw_expected else None)
         expected_decision = case.get("expected_decision")
         if req_id is None:
             out.append(
