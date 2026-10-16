@@ -885,9 +885,9 @@ def assert_while_parent_control_state(
 
     if status == StepStatus.RUNNING.value:
         if max_n < 1:
-            # Same-lease brief empty history, or expired-lease crash after
-            # gate 1=true persistence before iteration 1 materialization
-            # (Issue #117 checkpoint A — orchestrator replays then materializes).
+            # Same-lease brief empty history after control pin, or durable
+            # crash after candidate-1 gate persistence before materialize /
+            # parent terminalize (Issue #117 A/B — orchestrator replays).
             if not history:
                 return
             if len(history) != 1:
@@ -896,17 +896,18 @@ def assert_while_parent_control_state(
                     message=(
                         f"WHILE {parent.step_key!r} RUNNING with no children "
                         "must have empty predicate_history or exactly "
-                        "gate 1=true."
+                        "gate 1=true/false."
                     ),
                     status_code=409,
                 )
             entry = history_entry_for(history, next_iteration_no=1)
-            if entry is None or entry["result"] is not True:
+            if entry is None or not isinstance(entry.get("result"), bool):
                 raise AppError(
                     code="RESOURCE_CONFLICT",
                     message=(
                         f"WHILE {parent.step_key!r} RUNNING with no children "
-                        "requires history gate 1=true (or empty history)."
+                        "requires history gate 1=true or 1=false "
+                        "(or empty history)."
                     ),
                     status_code=409,
                 )

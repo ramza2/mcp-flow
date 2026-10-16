@@ -614,9 +614,19 @@ def _assert_while_recovery_checkpoint(
     max_n = max_materialized_iteration(steps=children, parent_step_id=parent.id)
 
     if max_n < 1:
-        # Checkpoints: empty history, or history [1=true] before materialize.
+        # Expired durable RUNNING + zero children requires candidate-1 gate
+        # evidence already persisted (orchestrator pin→evaluate→append is one
+        # TX). Empty predicate_history is same-lease-only and fail-closed here.
         if not history:
-            return
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message=(
+                    f"WHILE {parent.step_key!r} RUNNING with no children and "
+                    "empty predicate_history is not a durable recovery "
+                    "checkpoint."
+                ),
+                status_code=409,
+            )
         if len(history) != 1:
             raise AppError(
                 code="RESOURCE_CONFLICT",
@@ -627,12 +637,12 @@ def _assert_while_recovery_checkpoint(
                 status_code=409,
             )
         entry = history_entry_for(history, next_iteration_no=1)
-        if entry is None or entry["result"] is not True:
+        if entry is None or not isinstance(entry.get("result"), bool):
             raise AppError(
                 code="RESOURCE_CONFLICT",
                 message=(
                     f"WHILE {parent.step_key!r} RUNNING with no children "
-                    "requires history gate 1=true (or empty history)."
+                    "requires history gate 1=true or 1=false."
                 ),
                 status_code=409,
             )

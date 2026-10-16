@@ -19,7 +19,7 @@ from app.execution.loop_reconcile import (
     build_while_evidence_object,
     materialize_iteration,
     pin_collection_evidence,
-    pin_while_control_evidence,
+    pin_while_control_evidence,  # used by empty-history fail-closed plant
     resolve_foreach_collection,
 )
 from app.execution.loop_runtime import (
@@ -1097,13 +1097,52 @@ async def test_foreach_partial_gap_two_active_fail_closed(
 
 
 @pytest.mark.asyncio
+async def test_while_empty_history_zero_children_fail_closed(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Expired RUNNING WHILE + empty predicate_history + 0 children is corrupt."""
+    _install_no_side_effects(monkeypatch)
+    async with db_session_factory() as session:
+        eid, _c, now, _w, _tok = await _seed_while(session)
+        parent = _loop_parent(await ExecutionRepository(session).list_steps(eid))
+        pin_while_control_evidence(loop_step=parent)
+        parent.status = StepStatus.RUNNING.value
+        parent.started_at = now
+        parent.lock_version += 1
+        await session.commit()
+        assert parent.resolved_input == {
+            "mode": "WHILE",
+            "predicate_history": [],
+        }
+        await _expire_lease(session, execution_id=eid, claim_now=now)
+
+    async with db_session_factory() as session:
+        outcome = await _recover(session, execution_id=eid)
+        await session.commit()
+    assert outcome.decision == RecoveryDecision.FAIL_INCONSISTENT
+    assert outcome.invoke_runner is False
+    assert outcome.taken_over is False
+    async with db_session_factory() as session:
+        execution = await ExecutionRepository(session).get(eid)
+        assert execution is not None
+        assert execution.status == ExecutionStatus.FAILED.value
+        assert execution.error_code == "RECOVERY_INCONSISTENT_EVIDENCE"
+        children = [
+            s
+            for s in await ExecutionRepository(session).list_steps(eid)
+            if s.parent_step_id is not None
+        ]
+        assert children == []
+
+
+@pytest.mark.asyncio
 async def test_while_true_gate_zero_children_materializes_once(
     db_session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _install_no_side_effects(monkeypatch)
-    # Predicate true once then false via max — use always-true with max_iterations=1
-    # For checkpoint A we only need gate1=true + 0 children → materialize once.
+    # Checkpoint A: gate1=true + 0 children → materialize once.
     async with db_session_factory() as session:
         eid, _c, now, _w, _tok = await _seed_while(
             session,
@@ -1129,6 +1168,49 @@ async def test_while_true_gate_zero_children_materializes_once(
         parent = _loop_parent(steps)
         assert any(s.parent_step_id == parent.id and s.iteration_no == 1 for s in steps)
     assert len(client.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_while_false_gate_zero_children_parent_succeeds_mcp0(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Checkpoint B: history 1=false + 0 children → parent SUCCEEDED, MCP 0."""
+    _install_no_side_effects(monkeypatch)
+    async with db_session_factory() as session:
+        eid, _c, now, _w, _tok = await _seed_while(
+            session,
+            predicate={
+                "op": "eq",
+                "left": {"kind": BindingKind.LITERAL.value, "value": False},
+                "right": {"kind": BindingKind.LITERAL.value, "value": True},
+            },
+            max_iterations=5,
+        )
+        await _append_while_gate(
+            session, execution_id=eid, candidate=1, result=False
+        )
+        await _expire_lease(session, execution_id=eid, claim_now=now)
+
+    client = _NeverClient()
+    outcome, _run = await _recover_and_run(
+        db_session_factory, execution_id=eid, client=client
+    )
+    assert outcome.taken_over is True
+    async with db_session_factory() as session:
+        parent = _loop_parent(await ExecutionRepository(session).list_steps(eid))
+        assert parent.status == StepStatus.SUCCEEDED.value
+        assert parent.result_inline == {
+            "mode": "WHILE",
+            "iterations_completed": 0,
+        }
+        children = [
+            s
+            for s in await ExecutionRepository(session).list_steps(eid)
+            if s.parent_step_id == parent.id
+        ]
+        assert children == []
+    assert len(getattr(client, "calls", [])) == 0
 
 
 @pytest.mark.asyncio
