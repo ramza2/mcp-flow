@@ -278,16 +278,35 @@ name description tags capability Server status risk_class validation_status
 특정 ToolVersion의 검증 증적을 생성한다.
 
 > FNC-TOOL-005 Test Call 성공만으로 `VERIFIED` Verification row / evidence blob을
-> 자동 생성하지 않는다. Verification 증적 연결은 본 기능(FNC-TOOL-006) 후속 작업이다.
+> 자동 생성하지 않는다. `VERIFIED`는 본 기능이 durable evidence를 서버에서 판정한
+> 뒤에만 생성된다. Client가 `result_summary` boolean / `evidence_blob_id`를
+> 임의로 선언해 `VERIFIED`를 만들 수 없다.
 
-검증 완료 조건 예:
+구현 상태 (vertical slice):
 
-- Server 연결 성공
-- protocol/capability 확인
-- Discovery 및 schema VALID
-- 최소 1회 정상 Test Execution
-- timeout/error 처리 확인
-- 검증자와 기준 version 기록
+- `POST /mcp/tools/{tool_id}/versions/{version_id}/verifications`
+- `status=VERIFIED` 요청 최소 입력: `test_execution_id`, `error_test_execution_id`,
+  `criteria_version`, optional `expires_at`
+- 서버 파생: `result_summary`, `evidence_blob_id`, `verified_by`, `verified_at`
+- 권한: `mcp.tool.execute` + exact `MCP_TOOL` ResourceGrant (별도 verify permission 없음)
+- Object Storage evidence report: `verification-reports/{evidence_blob_id}.json`
+- `PENDING` / `FAILED` 기록은 기존처럼 유지 (`verified_by` null, evidence blob 없음)
+
+`VERIFIED` durable evidence (fail-closed):
+
+1. Server SUCCEEDED connection check
+2. protocol / discovery metadata on Server
+3. successful Discovery history
+4. ToolVersion `validation_status=VALID`
+5. Normal Execution: `source_type=MANUAL_TOOL_TEST`, terminal `SUCCEEDED`,
+   plan/source + TOOL Step/Attempt(+ToolCall) lineage matches target ToolVersion
+6. Distinct error/timeout Execution: same Manual lineage, terminal `FAILED` or
+   `TIMED_OUT`, with durable Attempt/ToolCall error evidence
+   (`UNKNOWN_OUTCOME` 불인정)
+7. verifier (`verified_by`) / timestamp / criteria version
+8. stored evidence report (secrets / raw payloads 제외)
+
+새 ToolVersion은 과거 `VERIFIED`를 자동 승계하지 않는다.
 
 Verification 상태:
 

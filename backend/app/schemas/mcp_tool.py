@@ -175,11 +175,19 @@ class ManualToolTestCreateResult(BaseModel):
 
 
 class ToolVerificationCreate(BaseModel):
+    """Create ToolVersion Verification (docs/06 §9.2, FNC-TOOL-006).
+
+    For ``status=VERIFIED`` the server derives ``result_summary``,
+    ``evidence_blob_id``, and ``verified_by`` from durable evidence.
+    Client-supplied ``result_summary`` / ``evidence_blob_id`` are rejected.
+    """
+
     model_config = ConfigDict(extra="forbid")
 
     status: ToolVerificationStatus
     criteria_version: str = Field(..., min_length=1, max_length=128)
     test_execution_id: uuid.UUID | None = None
+    error_test_execution_id: uuid.UUID | None = None
     result_summary: dict[str, Any] | None = None
     evidence_blob_id: uuid.UUID | None = None
     expires_at: datetime | None = None
