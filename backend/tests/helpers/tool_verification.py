@@ -29,7 +29,6 @@ from app.schemas.execution_plan import (
     default_plan_limits,
 )
 from sqlalchemy.ext.asyncio import AsyncSession
-
 from tests.unit.test_plan_validator import _authorize_requester
 
 
