@@ -399,6 +399,21 @@ class ToolStepAttemptService:
                     ),
                     status_code=409,
                 )
+        elif execution.source_type == ExecutionSourceType.MANUAL_TOOL_TEST.value:
+            # FNC-TOOL-005: Test Call has no Agent/Workflow/Schedule lineage FKs.
+            if (
+                execution.agent_version_id is not None
+                or execution.agent_request_id is not None
+                or execution.workflow_version_id is not None
+                or execution.schedule_occurrence_id is not None
+            ):
+                raise AppError(
+                    code="RESOURCE_CONFLICT",
+                    message=(
+                        "MANUAL_TOOL_TEST Attempt source lineage is inconsistent."
+                    ),
+                    status_code=409,
+                )
         elif execution.agent_version_id is None:
             raise AppError(
                 code="RESOURCE_CONFLICT",

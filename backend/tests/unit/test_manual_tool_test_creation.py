@@ -182,3 +182,52 @@ async def test_manual_tool_test_rejects_invalid_validation(
             ),
         )
     assert exc.value.code == "EXECUTION_PRECONDITION_FAILED"
+
+
+@pytest.mark.asyncio
+async def test_manual_tool_test_claim_starts_attempt_without_agent_version(
+    db_session: AsyncSession,
+) -> None:
+    """Attempt lease must not require agent_version_id for MANUAL_TOOL_TEST."""
+    from app.domain.enums import StepAttemptStatus, StepStatus
+    from app.execution.claim import ExecutionClaimService
+    from app.execution.queue import ExecutionQueueService
+    from app.execution.tool_step_attempt import ToolStepAttemptService
+
+    seeded = await _seed_manual_tool(db_session)
+    outcome = await ManualToolTestCreationService(db_session).create(
+        tool_id=seeded["tool_id"],
+        requester_id=seeded["user_id"],
+        idempotency_key=str(uuid.uuid4()),
+        body=ManualToolTestCreateRequest(
+            mcp_tool_version_id=seeded["version_id"],
+            arguments={"text": "attempt"},
+        ),
+    )
+    execution_id = outcome.result.id
+    staged = await ExecutionQueueService(db_session).stage_created_batch(limit=10)
+    assert staged == 1
+    claim = await ExecutionClaimService(db_session, lease_seconds=60).claim(
+        execution_id=execution_id,
+        worker_id="mtt-attempt-worker",
+    )
+    assert claim.claimed is True
+    assert claim.lease_token is not None
+    assert len(claim.ready_step_ids) == 1
+    await db_session.commit()
+
+    execution = await ExecutionRepository(db_session).get(execution_id)
+    assert execution is not None
+    assert execution.agent_version_id is None
+
+    started = await ToolStepAttemptService(db_session).start(
+        execution_id=execution_id,
+        step_execution_id=claim.ready_step_ids[0],
+        worker_id="mtt-attempt-worker",
+        lease_token=claim.lease_token,
+    )
+    await db_session.commit()
+    assert started.replayed is False
+    assert started.attempt_no == 1
+    assert started.step_status == StepStatus.RUNNING.value
+    assert started.attempt_status == StepAttemptStatus.STARTED.value
