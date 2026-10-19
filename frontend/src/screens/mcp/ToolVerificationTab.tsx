@@ -1,6 +1,7 @@
-/** MCP Tool Verification tab — version-scoped list/create/detail. */
+/** MCP Tool Verification tab — version-scoped list/create/detail (FNC-TOOL-006). */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { useNavigate } from 'react-router';
 import {
   createToolVerification,
   getToolVerification,
@@ -24,11 +25,19 @@ import { toFeedbackError, type FeedbackError } from './toolLifecycle';
 
 const PAGE_SIZE = 20;
 
+type CreateStatus = 'PENDING' | 'FAILED' | 'VERIFIED';
+
 interface Props {
   toolId: string;
   selectedVersion: MCPToolVersionDto | null;
   currentVersionId: string | null;
   active: boolean;
+}
+
+function checklistFlag(summary: Record<string, JsonValue> | null, key: string): boolean | null {
+  if (!summary || !(key in summary)) return null;
+  const value = summary[key];
+  return typeof value === 'boolean' ? value : null;
 }
 
 export default function ToolVerificationTab({
@@ -37,6 +46,7 @@ export default function ToolVerificationTab({
   currentVersionId,
   active,
 }: Props) {
+  const navigate = useNavigate();
   const mountedRef = useRef(true);
   const listRequestRef = useRef<AbortController | null>(null);
   const detailRequestRef = useRef<AbortController | null>(null);
@@ -49,8 +59,11 @@ export default function ToolVerificationTab({
   const [createOpen, setCreateOpen] = useState(false);
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
-  const [createStatus, setCreateStatus] = useState<'PENDING' | 'FAILED'>('PENDING');
+  const [createStatus, setCreateStatus] = useState<CreateStatus>('PENDING');
   const [criteriaVersion, setCriteriaVersion] = useState('tool-verification-v1');
+  const [testExecutionId, setTestExecutionId] = useState('');
+  const [errorTestExecutionId, setErrorTestExecutionId] = useState('');
+  const [expiresAt, setExpiresAt] = useState('');
   const [resultSummaryText, setResultSummaryText] = useState('');
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [detail, setDetail] = useState<ToolVerificationDto | null>(null);
@@ -157,6 +170,16 @@ export default function ToolVerificationTab({
     [toolId, versionId],
   );
 
+  const resetCreateForm = () => {
+    setCreateStatus('PENDING');
+    setCriteriaVersion('tool-verification-v1');
+    setTestExecutionId('');
+    setErrorTestExecutionId('');
+    setExpiresAt('');
+    setResultSummaryText('');
+    setCreateError(null);
+  };
+
   const handleCreate = async () => {
     if (!versionId) return;
     setCreateError(null);
@@ -166,8 +189,29 @@ export default function ToolVerificationTab({
       return;
     }
 
-    let resultSummary: Record<string, JsonValue> | null = null;
-    if (createStatus === 'FAILED') {
+    const body: ToolVerificationCreateRequest = {
+      status: createStatus,
+      criteria_version: criteria,
+    };
+
+    if (createStatus === 'VERIFIED') {
+      const normalId = testExecutionId.trim();
+      const errorId = errorTestExecutionId.trim();
+      if (!normalId) {
+        setCreateError('Normal Manual Test Execution ID is required.');
+        return;
+      }
+      if (!errorId) {
+        setCreateError('Error/Timeout Manual Test Execution ID is required.');
+        return;
+      }
+      body.test_execution_id = normalId;
+      body.error_test_execution_id = errorId;
+      const expires = expiresAt.trim();
+      if (expires) {
+        body.expires_at = new Date(expires).toISOString();
+      }
+    } else if (createStatus === 'FAILED') {
       const trimmed = resultSummaryText.trim();
       if (!trimmed) {
         setCreateError('FAILED requires result_summary JSON object.');
@@ -179,28 +223,22 @@ export default function ToolVerificationTab({
           setCreateError('result_summary must be a JSON object.');
           return;
         }
-        resultSummary = parsed as Record<string, JsonValue>;
+        body.result_summary = parsed as Record<string, JsonValue>;
       } catch {
         setCreateError('result_summary is not valid JSON.');
         return;
       }
     }
 
-    const body: ToolVerificationCreateRequest = {
-      status: createStatus,
-      criteria_version: criteria,
-      result_summary: resultSummary,
-    };
-
     setCreating(true);
     try {
-      await createToolVerification(toolId, versionId, body);
+      const created = await createToolVerification(toolId, versionId, body);
       if (!mountedRef.current) return;
       setCreateOpen(false);
-      setResultSummaryText('');
-      setCreateStatus('PENDING');
+      resetCreateForm();
       setPage(1);
       loadList();
+      loadDetail(created.id);
     } catch (err) {
       if (!mountedRef.current) return;
       setCreateError(toFeedbackError(err, 'Verification 생성에 실패했습니다.').message);
@@ -220,6 +258,13 @@ export default function ToolVerificationTab({
     detail?.status === 'VERIFIED' &&
     detail.expires_at &&
     new Date(detail.expires_at).getTime() < Date.now();
+  const schemaValid = checklistFlag(detail?.result_summary ?? null, 'schema_valid');
+  const normalPassed = checklistFlag(detail?.result_summary ?? null, 'normal_call_passed');
+  const errorChecked = checklistFlag(detail?.result_summary ?? null, 'error_handling_checked');
+  const errorExecId =
+    detail?.result_summary && typeof detail.result_summary.error_test_execution_id === 'string'
+      ? detail.result_summary.error_test_execution_id
+      : null;
 
   return (
     <div className="space-y-4">
@@ -229,18 +274,26 @@ export default function ToolVerificationTab({
             v{selectedVersion.version_no} · {isCurrent ? 'Current' : 'Historical'}
           </p>
           <p className="text-xs text-slate-400">
-            Verification은 선택한 ToolVersion에만 귀속됩니다. Tool 전역 Verified badge는 표시하지
-            않습니다.
+            Verification은 선택한 ToolVersion에만 귀속됩니다. VERIFIED는 Manual Tool Test
+            durable evidence와 Object Storage report로 서버가 판정합니다.
           </p>
         </div>
-        <Button variant="primary" size="sm" onClick={() => setCreateOpen(true)}>
-          Record Verification
+        <Button
+          variant="primary"
+          size="sm"
+          onClick={() => {
+            resetCreateForm();
+            setCreateOpen(true);
+          }}
+        >
+          Generate Verification
         </Button>
       </div>
 
       <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600">
-        VERIFIED evidence 생성은 Manual Tool Test와 증빙 업로드 연동 후 지원됩니다. 이번 화면에서는
-        PENDING / FAILED 기록만 생성할 수 있습니다.
+        VERIFIED 생성에는 동일 ToolVersion의 정상 SUCCEEDED Manual Test Execution과 별도
+        FAILED/TIMED_OUT error evidence Execution이 필요합니다. result_summary와 evidence
+        blob은 서버가 파생합니다.
       </div>
 
       {error && (
@@ -258,7 +311,10 @@ export default function ToolVerificationTab({
       {loading ? (
         <LoadingSkeleton rows={4} />
       ) : !error && items.length === 0 ? (
-        <EmptyState title="Verification 이력이 없습니다" description="PENDING 또는 FAILED 증적을 기록할 수 있습니다." />
+        <EmptyState
+          title="Verification 이력이 없습니다"
+          description="PENDING / FAILED 기록 또는 durable evidence 기반 VERIFIED 생성이 가능합니다."
+        />
       ) : (
         <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
           {items.map(item => (
@@ -324,11 +380,34 @@ export default function ToolVerificationTab({
               <Row label="Criteria">{detail.criteria_version}</Row>
               <Row label="Verified at">{formatTimestamp(detail.verified_at)}</Row>
               <Row label="Verified by">
-                {detail.verified_by ? shortenId(detail.verified_by) : 'Not recorded'}
+                {detail.verified_by ? (
+                  <span className="font-mono text-xs">{detail.verified_by}</span>
+                ) : (
+                  'Not recorded'
+                )}
               </Row>
-              <Row label="Test execution">
+              <Row label="Normal test">
                 {detail.test_execution_id ? (
-                  <span className="font-mono text-xs">{detail.test_execution_id}</span>
+                  <button
+                    type="button"
+                    className="font-mono text-xs text-indigo-600 hover:underline"
+                    onClick={() => navigate(`/executions/${detail.test_execution_id}`)}
+                  >
+                    {detail.test_execution_id}
+                  </button>
+                ) : (
+                  '—'
+                )}
+              </Row>
+              <Row label="Error test">
+                {errorExecId ? (
+                  <button
+                    type="button"
+                    className="font-mono text-xs text-indigo-600 hover:underline"
+                    onClick={() => navigate(`/executions/${errorExecId}`)}
+                  >
+                    {errorExecId}
+                  </button>
                 ) : (
                   '—'
                 )}
@@ -343,6 +422,17 @@ export default function ToolVerificationTab({
               <Row label="Expires at">
                 {detail.expires_at ? formatTimestamp(detail.expires_at) : '—'}
               </Row>
+              {detail.status === 'VERIFIED' && (
+                <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-700 space-y-1">
+                  <p className="font-semibold text-slate-800">Derived checklist</p>
+                  <p>schema_valid: {schemaValid == null ? '—' : String(schemaValid)}</p>
+                  <p>normal_call_passed: {normalPassed == null ? '—' : String(normalPassed)}</p>
+                  <p>
+                    error_handling_checked:{' '}
+                    {errorChecked == null ? '—' : String(errorChecked)}
+                  </p>
+                </div>
+              )}
               {detail.result_summary && (
                 <div>
                   <p className="text-xs text-slate-400 mb-1">result_summary</p>
@@ -357,15 +447,15 @@ export default function ToolVerificationTab({
       <Dialog
         open={createOpen}
         onClose={() => !creating && setCreateOpen(false)}
-        title="Record Verification"
-        description="PENDING / FAILED only. VERIFIED create is deferred."
+        title="Generate Verification"
+        description="VERIFIED는 Manual Tool Test evidence를 서버가 검증합니다. result_summary / evidence blob은 직접 입력하지 않습니다."
         footer={
           <>
             <Button variant="outline" onClick={() => setCreateOpen(false)} disabled={creating}>
               취소
             </Button>
             <Button variant="primary" loading={creating} onClick={() => void handleCreate()}>
-              Create
+              {createStatus === 'VERIFIED' ? 'Generate Verification' : 'Create'}
             </Button>
           </>
         }
@@ -377,10 +467,11 @@ export default function ToolVerificationTab({
             <select
               className="w-full border border-slate-300 rounded-md px-2 py-1.5"
               value={createStatus}
-              onChange={e => setCreateStatus(e.target.value as 'PENDING' | 'FAILED')}
+              onChange={e => setCreateStatus(e.target.value as CreateStatus)}
             >
               <option value="PENDING">PENDING</option>
               <option value="FAILED">FAILED</option>
+              <option value="VERIFIED">VERIFIED</option>
             </select>
           </label>
           <label className="block space-y-1">
@@ -391,6 +482,41 @@ export default function ToolVerificationTab({
               onChange={e => setCriteriaVersion(e.target.value)}
             />
           </label>
+          {createStatus === 'VERIFIED' && (
+            <>
+              <label className="block space-y-1">
+                <span className="text-xs text-slate-500">
+                  Normal Manual Test Execution ID (SUCCEEDED)
+                </span>
+                <input
+                  className="w-full border border-slate-300 rounded-md px-2 py-1.5 font-mono text-xs"
+                  value={testExecutionId}
+                  onChange={e => setTestExecutionId(e.target.value)}
+                  placeholder="uuid of SUCCEEDED MANUAL_TOOL_TEST"
+                />
+              </label>
+              <label className="block space-y-1">
+                <span className="text-xs text-slate-500">
+                  Error/Timeout Manual Test Execution ID
+                </span>
+                <input
+                  className="w-full border border-slate-300 rounded-md px-2 py-1.5 font-mono text-xs"
+                  value={errorTestExecutionId}
+                  onChange={e => setErrorTestExecutionId(e.target.value)}
+                  placeholder="uuid of FAILED or TIMED_OUT MANUAL_TOOL_TEST"
+                />
+              </label>
+              <label className="block space-y-1">
+                <span className="text-xs text-slate-500">expires_at (optional)</span>
+                <input
+                  type="datetime-local"
+                  className="w-full border border-slate-300 rounded-md px-2 py-1.5"
+                  value={expiresAt}
+                  onChange={e => setExpiresAt(e.target.value)}
+                />
+              </label>
+            </>
+          )}
           {createStatus === 'FAILED' && (
             <label className="block space-y-1">
               <span className="text-xs text-slate-500">result_summary (JSON object)</span>

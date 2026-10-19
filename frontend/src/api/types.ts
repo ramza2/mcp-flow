@@ -233,12 +233,15 @@ export interface ManualToolTestCreateResult {
   step_count: number;
 }
 
-/** Frontend create form supports PENDING / FAILED only (VERIFIED deferred). */
+/** FNC-TOOL-006: VERIFIED derives result_summary / evidence_blob_id server-side. */
 export interface ToolVerificationCreateRequest {
   status: ToolVerificationStatus;
   criteria_version: string;
   test_execution_id?: string | null;
+  error_test_execution_id?: string | null;
+  /** PENDING / FAILED only — rejected for VERIFIED. */
   result_summary?: Record<string, JsonValue> | null;
+  /** Client-supplied evidence_blob_id is rejected for VERIFIED. */
   evidence_blob_id?: string | null;
   expires_at?: string | null;
 }

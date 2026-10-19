@@ -165,6 +165,25 @@ class MCPDiscoveryRepository:
         )
         return int((await self._session.execute(stmt)).scalar_one()) > 0
 
+    async def get_latest_succeeded_check(
+        self, mcp_server_id: uuid.UUID
+    ) -> MCPServerCheck | None:
+        """Latest SUCCEEDED connection check (safe evidence for Verification)."""
+
+        stmt = (
+            select(MCPServerCheck)
+            .where(
+                MCPServerCheck.mcp_server_id == mcp_server_id,
+                MCPServerCheck.status == "SUCCEEDED",
+            )
+            .order_by(
+                MCPServerCheck.checked_at.desc(),
+                MCPServerCheck.id.desc(),
+            )
+            .limit(1)
+        )
+        return (await self._session.execute(stmt)).scalar_one_or_none()
+
     async def has_successful_discovery(self, mcp_server_id: uuid.UUID) -> bool:
         stmt = (
             select(func.count())
@@ -175,3 +194,22 @@ class MCPDiscoveryRepository:
             )
         )
         return int((await self._session.execute(stmt)).scalar_one()) > 0
+
+    async def get_latest_successful_discovery(
+        self, mcp_server_id: uuid.UUID
+    ) -> MCPServerDiscovery | None:
+        """Latest successful Discovery (safe evidence for Verification)."""
+
+        stmt = (
+            select(MCPServerDiscovery)
+            .where(
+                MCPServerDiscovery.mcp_server_id == mcp_server_id,
+                MCPServerDiscovery.success.is_(True),
+            )
+            .order_by(
+                MCPServerDiscovery.started_at.desc(),
+                MCPServerDiscovery.id.desc(),
+            )
+            .limit(1)
+        )
+        return (await self._session.execute(stmt)).scalar_one_or_none()

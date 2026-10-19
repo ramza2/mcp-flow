@@ -601,19 +601,82 @@ async def test_verification_pending_failed_list_detail(
     assert wrong_version.status_code == 404
 
 
+async def _session_user_id(client: AsyncClient) -> uuid.UUID:
+    session_info = await client.get("/api/v1/auth/session")
+    assert session_info.status_code == 200
+    return uuid.UUID(session_info.json()["user"]["id"])
+
+
+async def _grant_tool_execute(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    *,
+    user_id: uuid.UUID,
+    tool_id: uuid.UUID,
+) -> None:
+    from tests.unit.test_plan_validator import _authorize_requester
+
+    async with db_session_factory() as session:
+        await _authorize_requester(session, user_id=user_id, tool_id=tool_id)
+        await session.commit()
+
+
+async def _seed_verified_pair(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    *,
+    user_id: uuid.UUID,
+    tool_id: uuid.UUID,
+    version_id: uuid.UUID,
+    server_id: uuid.UUID,
+) -> tuple[uuid.UUID, uuid.UUID]:
+    from app.domain.enums import ExecutionStatus, ToolCallNormalizedStatus
+
+    from tests.helpers.tool_verification import seed_manual_evidence_execution
+
+    async with db_session_factory() as session:
+        normal = await seed_manual_evidence_execution(
+            session,
+            requester_id=user_id,
+            tool_id=tool_id,
+            version_id=version_id,
+            server_id=server_id,
+            execution_status=ExecutionStatus.SUCCEEDED.value,
+        )
+        error = await seed_manual_evidence_execution(
+            session,
+            requester_id=user_id,
+            tool_id=tool_id,
+            version_id=version_id,
+            server_id=server_id,
+            execution_status=ExecutionStatus.FAILED.value,
+            attempt_error_code="MCP_NETWORK_ERROR",
+            attempt_error_layer="NETWORK",
+            tool_call_status=ToolCallNormalizedStatus.FAILED.value,
+        )
+        await session.commit()
+        return normal.id, error.id
+
+
 @pytest.mark.asyncio
 async def test_verified_preconditions_and_success(
     db_client: AsyncClient,
     override_mcp_client,
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
+    from app.core.config import get_settings
+    from app.infrastructure.object_storage import get_object_storage, reset_memory_object_storage
+    from app.services.mcp_tool_verification import verification_evidence_object_key
+
+    reset_memory_object_storage()
     server, tool = await _discover_tools(db_client, override_mcp_client)
-    tool_id = tool["id"]
-    version_id = tool["current_version_id"]
+    tool_id = uuid.UUID(tool["id"])
+    version_id = uuid.UUID(tool["current_version_id"])
+    server_id = uuid.UUID(server["id"])
+    user_id = await _session_user_id(db_client)
+    await _grant_tool_execute(db_session_factory, user_id=user_id, tool_id=tool_id)
 
     # INVALID version reject
     async with db_session_factory() as session:
-        version = await MCPToolRepository(session).get_version(uuid.UUID(version_id))
+        version = await MCPToolRepository(session).get_version(version_id)
         assert version is not None
         version.validation_status = ToolVersionValidationStatus.INVALID
         await session.commit()
@@ -624,28 +687,25 @@ async def test_verified_preconditions_and_success(
             "status": "VERIFIED",
             "criteria_version": "tool-verification-v1",
             "test_execution_id": str(uuid.uuid4()),
-            "evidence_blob_id": str(uuid.uuid4()),
-            "result_summary": {
-                "schema_valid": True,
-                "normal_call_passed": True,
-                "error_handling_checked": True,
-            },
+            "error_test_execution_id": str(uuid.uuid4()),
         },
     )
     assert invalid.status_code == 409
 
     async with db_session_factory() as session:
-        version = await MCPToolRepository(session).get_version(uuid.UUID(version_id))
+        version = await MCPToolRepository(session).get_version(version_id)
         assert version is not None
         version.validation_status = ToolVersionValidationStatus.VALID
         await session.commit()
 
-    # Missing evidence fields
-    missing_exec = await db_client.post(
+    # Client-supplied evidence fields rejected
+    client_blob = await db_client.post(
         f"{API_TOOLS}/{tool_id}/versions/{version_id}/verifications",
         json={
             "status": "VERIFIED",
             "criteria_version": "tool-verification-v1",
+            "test_execution_id": str(uuid.uuid4()),
+            "error_test_execution_id": str(uuid.uuid4()),
             "evidence_blob_id": str(uuid.uuid4()),
             "result_summary": {
                 "schema_valid": True,
@@ -654,29 +714,50 @@ async def test_verified_preconditions_and_success(
             },
         },
     )
+    assert client_blob.status_code == 422
+
+    missing_exec = await db_client.post(
+        f"{API_TOOLS}/{tool_id}/versions/{version_id}/verifications",
+        json={
+            "status": "VERIFIED",
+            "criteria_version": "tool-verification-v1",
+        },
+    )
     assert missing_exec.status_code == 422
 
-    # Happy path — connection check + successful discovery already exist from helper
+    normal_id, error_id = await _seed_verified_pair(
+        db_session_factory,
+        user_id=user_id,
+        tool_id=tool_id,
+        version_id=version_id,
+        server_id=server_id,
+    )
+
     expires = (datetime.now(UTC) + timedelta(days=30)).isoformat()
     verified = await db_client.post(
         f"{API_TOOLS}/{tool_id}/versions/{version_id}/verifications",
         json={
             "status": "VERIFIED",
             "criteria_version": "tool-verification-v1",
-            "test_execution_id": str(uuid.uuid4()),
-            "evidence_blob_id": str(uuid.uuid4()),
+            "test_execution_id": str(normal_id),
+            "error_test_execution_id": str(error_id),
             "expires_at": expires,
-            "result_summary": {
-                "schema_valid": True,
-                "normal_call_passed": True,
-                "error_handling_checked": True,
-                "extra_note": "allowed",
-            },
         },
     )
     assert verified.status_code == 201, verified.text
-    assert verified.json()["status"] == "VERIFIED"
-    assert verified.json()["verified_by"] is None
+    body = verified.json()
+    assert body["status"] == "VERIFIED"
+    assert body["verified_by"] == str(user_id)
+    assert body["evidence_blob_id"] is not None
+    assert body["result_summary"]["schema_valid"] is True
+    assert body["result_summary"]["normal_call_passed"] is True
+    assert body["result_summary"]["error_handling_checked"] is True
+    store = get_object_storage()
+    bucket = get_settings().object_storage_bucket
+    assert store.has_object(  # type: ignore[attr-defined]
+        bucket=bucket,
+        object_key=verification_evidence_object_key(uuid.UUID(body["evidence_blob_id"])),
+    )
 
     # Past expires_at rejected
     past = await db_client.post(
@@ -684,40 +765,26 @@ async def test_verified_preconditions_and_success(
         json={
             "status": "VERIFIED",
             "criteria_version": "tool-verification-v1",
-            "test_execution_id": str(uuid.uuid4()),
-            "evidence_blob_id": str(uuid.uuid4()),
+            "test_execution_id": str(normal_id),
+            "error_test_execution_id": str(error_id),
             "expires_at": (datetime.now(UTC) - timedelta(hours=1)).isoformat(),
-            "result_summary": {
-                "schema_valid": True,
-                "normal_call_passed": True,
-                "error_handling_checked": True,
-            },
         },
     )
     assert past.status_code == 422
 
-    # No successful check path
-    async with db_session_factory() as session:
-        # Create a fresh tool version on same server but wipe checks by using a new server tool
-        # Simpler: mark that has_succeeded_check is required — create tool without checks via repo
-        tools = MCPToolRepository(session)
-        fresh = await tools.create_tool(
-            mcp_server_id=uuid.UUID(server["id"]),
-            remote_name=f"orphan-{uuid.uuid4().hex[:6]}",
-        )
-        version = await tools.create_version(
-            mcp_tool_id=fresh.id,
-            version_no=1,
-            content_hash=uuid.uuid4().hex,
-            validation_status=ToolVersionValidationStatus.VALID,
-        )
-        fresh.current_version_id = version.id
-        await session.commit()
-        orphan_tool_id = fresh.id
-        orphan_version_id = version.id
+    # Random execution id rejected
+    random_exec = await db_client.post(
+        f"{API_TOOLS}/{tool_id}/versions/{version_id}/verifications",
+        json={
+            "status": "VERIFIED",
+            "criteria_version": "tool-verification-v1",
+            "test_execution_id": str(uuid.uuid4()),
+            "error_test_execution_id": str(error_id),
+        },
+    )
+    assert random_exec.status_code == 422
 
-    # Server still has succeeded checks from earlier CT, so VERIFIED can still pass check
-    # precondition. To force failure, use a brand-new server without checks.
+    # No successful check on a brand-new server
     new_server = await _create_server(db_client)
     async with db_session_factory() as session:
         tools = MCPToolRepository(session)
@@ -736,51 +803,54 @@ async def test_verified_preconditions_and_success(
         lonely_tool = fresh.id
         lonely_version = version.id
 
+    await _grant_tool_execute(db_session_factory, user_id=user_id, tool_id=lonely_tool)
     no_check = await db_client.post(
         f"{API_TOOLS}/{lonely_tool}/versions/{lonely_version}/verifications",
         json={
             "status": "VERIFIED",
             "criteria_version": "tool-verification-v1",
             "test_execution_id": str(uuid.uuid4()),
-            "evidence_blob_id": str(uuid.uuid4()),
-            "result_summary": {
-                "schema_valid": True,
-                "normal_call_passed": True,
-                "error_handling_checked": True,
-            },
+            "error_test_execution_id": str(uuid.uuid4()),
         },
     )
     assert no_check.status_code == 409
-
-    # unused vars silence
-    assert orphan_tool_id and orphan_version_id
 
 
 @pytest.mark.asyncio
 async def test_verification_not_inherited_across_versions(
     db_client: AsyncClient,
     override_mcp_client,
+    db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
+    from app.infrastructure.object_storage import reset_memory_object_storage
+
+    reset_memory_object_storage()
     server, tool = await _discover_tools(db_client, override_mcp_client)
-    tool_id = tool["id"]
-    v1_id = tool["current_version_id"]
+    tool_id = uuid.UUID(tool["id"])
+    v1_id = uuid.UUID(tool["current_version_id"])
+    server_id = uuid.UUID(server["id"])
+    user_id = await _session_user_id(db_client)
+    await _grant_tool_execute(db_session_factory, user_id=user_id, tool_id=tool_id)
+    normal_id, error_id = await _seed_verified_pair(
+        db_session_factory,
+        user_id=user_id,
+        tool_id=tool_id,
+        version_id=v1_id,
+        server_id=server_id,
+    )
 
     verified = await db_client.post(
         f"{API_TOOLS}/{tool_id}/versions/{v1_id}/verifications",
         json={
             "status": "VERIFIED",
             "criteria_version": "tool-verification-v1",
-            "test_execution_id": str(uuid.uuid4()),
-            "evidence_blob_id": str(uuid.uuid4()),
-            "result_summary": {
-                "schema_valid": True,
-                "normal_call_passed": True,
-                "error_handling_checked": True,
-            },
+            "test_execution_id": str(normal_id),
+            "error_test_execution_id": str(error_id),
         },
     )
     assert verified.status_code == 201, verified.text
     v1_verification_id = verified.json()["id"]
+    assert verified.json()["verified_by"] == str(user_id)
 
     # Force schema change via tools_override (independent of SCHEMA_CHANGE call counting).
     changed = TestMCPScenario(TestMCPScenario.HEALTHY)
@@ -817,7 +887,7 @@ async def test_verification_not_inherited_across_versions(
 
     refreshed = await db_client.get(f"{API_TOOLS}/{tool_id}")
     v2_id = refreshed.json()["current_version_id"]
-    assert v2_id != v1_id
+    assert v2_id != str(v1_id)
 
     v2_list = await db_client.get(f"{API_TOOLS}/{tool_id}/versions/{v2_id}/verifications")
     assert v2_list.status_code == 200

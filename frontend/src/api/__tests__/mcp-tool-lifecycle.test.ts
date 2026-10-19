@@ -111,6 +111,7 @@ describe('mcp tool lifecycle API helpers', () => {
       .fn()
       .mockResolvedValueOnce(jsonResponse(verificationList))
       .mockResolvedValueOnce(jsonResponse(pendingVerification))
+      .mockResolvedValueOnce(jsonResponse(pendingVerification))
       .mockResolvedValueOnce(jsonResponse(pendingVerification));
     vi.stubGlobal('fetch', fetchMock);
 
@@ -132,8 +133,21 @@ describe('mcp tool lifecycle API helpers', () => {
       criteria_version: 'tool-verification-v1',
     });
 
+    await createToolVerification(discoveredTool.id, 'ver-valid-001', {
+      status: 'VERIFIED',
+      criteria_version: 'tool-verification-v1',
+      test_execution_id: '11111111-1111-4111-8111-111111111111',
+      error_test_execution_id: '22222222-2222-4222-8222-222222222222',
+    });
+    expect(JSON.parse(String((fetchMock.mock.calls[2][1] as RequestInit).body))).toEqual({
+      status: 'VERIFIED',
+      criteria_version: 'tool-verification-v1',
+      test_execution_id: '11111111-1111-4111-8111-111111111111',
+      error_test_execution_id: '22222222-2222-4222-8222-222222222222',
+    });
+
     await getToolVerification(discoveredTool.id, 'ver-valid-001', pendingVerification.id);
-    expect(fetchMock.mock.calls[2][0]).toBe(
+    expect(fetchMock.mock.calls[3][0]).toBe(
       `/api/v1/mcp/tools/${discoveredTool.id}/versions/ver-valid-001/verifications/${pendingVerification.id}`,
     );
   });

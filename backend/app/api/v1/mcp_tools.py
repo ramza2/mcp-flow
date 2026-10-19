@@ -310,9 +310,15 @@ async def create_verification(
     version_id: uuid.UUID,
     body: ToolVerificationCreate,
     session: DbSessionDep,
+    principal: CurrentPrincipalDep,
 ) -> ToolVerificationResponse:
     service = MCPToolVerificationService(session)
-    row = await service.create(tool_id, version_id, body)
+    row = await service.create(
+        tool_id,
+        version_id,
+        body,
+        verified_by=principal.user_id,
+    )
     return ToolVerificationResponse.model_validate(row)
 
 

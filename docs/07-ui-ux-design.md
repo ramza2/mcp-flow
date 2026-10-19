@@ -575,14 +575,23 @@ Policy UI는 Canonical `risk_class`만 사용한다.
 
 Verification Tab은 ToolVersion별 검증일, 검증자, Test Execution, criteria version, evidence를 표시한다.
 
+### Verification Tab (FNC-TOOL-006)
+
+- 선택 ToolVersion 기준 PENDING / FAILED 기록 및 VERIFIED 생성
+- VERIFIED 입력: normal Manual Test Execution ID, error/timeout Execution ID,
+  criteria version, optional expires_at
+- VERIFIED에서 `result_summary` / `evidence_blob_id` 직접 입력 UI 없음 (서버 파생)
+- 성공 후 VERIFIED badge, verified_at/by, normal/error Execution deep-link,
+  derived checklist, evidence blob id 표시
+
 ### Test Call Tab (FNC-TOOL-005)
 
 - 선택 ToolVersion + input_schema 기반 JSON arguments 입력
 - `Run Test` → `POST /mcp/tools/{tool_id}/test-calls`
 - 생성된 `execution_id` 표시 및 Execution 상세로 이동
 - Loading / Error / Permission(FORBIDDEN) 상태 표시
-- **Verification VERIFIED 자동 생성 UI는 이 슬라이스에서 제공하지 않는다**
-  (FNC-TOOL-006 후속)
+- Test Call 성공만으로 Verification VERIFIED를 자동 생성하지 않는다
+  (FNC-TOOL-006 Generate Verification 사용)
 
 ---
 

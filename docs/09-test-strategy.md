@@ -843,18 +843,28 @@ PR #41 검증(후속):
 
 Tool logical status와 ToolVersion validation을 혼동하지 않는다.
 
-### Tool Verification
+### Tool Verification (FNC-TOOL-006)
 
-`VERIFIED` 판정은 최소 다음 evidence와 연결한다.
+`VERIFIED` 판정은 client boolean이 아니라 durable evidence 기반이다.
 
-1. Server 연결 성공
-2. protocol/capability 확인
-3. Tool Discovery
-4. input schema VALID
-5. 정상 Test Execution
-6. 오류/timeout 처리 확인
-7. 검증자/시각/criteria version
-8. evidence report
+1. Server SUCCEEDED connection check (id/timestamp)
+2. protocol/capability / discovery metadata on Server
+3. successful Discovery history
+4. ToolVersion `validation_status=VALID`
+5. Normal `MANUAL_TOOL_TEST` Execution `SUCCEEDED` + Step/Attempt(+ToolCall) lineage
+6. Distinct error/timeout `MANUAL_TOOL_TEST` Execution `FAILED`/`TIMED_OUT` with
+   Attempt/ToolCall error evidence (`UNKNOWN_OUTCOME` 불인정)
+7. verifier (`verified_by`) / timestamp / criteria version
+8. Object Storage evidence report (`verification-reports/{uuid}.json`)
+
+Coverage:
+
+| Layer | Focus |
+|---|---|
+| Unit | server-derived VERIFIED; reject fake blob/summary; lineage/auth/storage failure |
+| API | Session principal → `verified_by`; client evidence fields 422; no-check 409 |
+| Integration | PostgreSQL + InMemory Object Storage end-to-end report + KPI helper count |
+| Frontend | Verification tab VERIFIED inputs (normal/error exec ids); no client summary/blob |
 
 검증한 ToolVersion이 변경되면 새 Version에 과거 Verification을 자동 승계하지 않는다.
 

@@ -518,21 +518,51 @@ POST /mcp/tools/{tool_id}/versions/{version_id}/verifications
 GET  /mcp/tools/{tool_id}/versions/{version_id}/verifications/{verification_id}
 ```
 
-생성 예:
+`POST` requires authenticated Session. For `status=VERIFIED`, authorization reuses
+`mcp.tool.execute` + exact `MCP_TOOL` ResourceGrant.
+
+`VERIFIED` create request (client-supplied evidence fields rejected):
 
 ```json
 {
+  "status": "VERIFIED",
+  "criteria_version": "tool-verification-v1",
+  "test_execution_id": "...",
+  "error_test_execution_id": "...",
+  "expires_at": "2026-12-31T00:00:00Z"
+}
+```
+
+Server response derives:
+
+```json
+{
+  "status": "VERIFIED",
+  "verified_by": "...",
+  "verified_at": "...",
   "test_execution_id": "...",
   "criteria_version": "tool-verification-v1",
-  "status": "VERIFIED",
   "result_summary": {
     "schema_valid": true,
     "normal_call_passed": true,
-    "error_handling_checked": true
+    "error_handling_checked": true,
+    "error_test_execution_id": "...",
+    "connection_check_id": "...",
+    "discovery_id": "..."
   },
   "evidence_blob_id": "..."
 }
 ```
+
+Rules:
+
+- Client-supplied `result_summary` / `evidence_blob_id` on `VERIFIED` → `422`
+- Normal/error Execution must be durable `MANUAL_TOOL_TEST` rows for the target
+  ToolVersion; random UUIDs / AGENT / WORKFLOW / wrong version → reject
+- Evidence report is stored in Object Storage under
+  `verification-reports/{evidence_blob_id}.json`; PUT failure → no VERIFIED row
+- `PENDING` / `FAILED` may still record optional client `result_summary`;
+  they do not create evidence blobs and keep `verified_by=null`
 
 Canonical verification status:
 
