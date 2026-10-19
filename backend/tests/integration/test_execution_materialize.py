@@ -70,7 +70,11 @@ async def _seed(session: AsyncSession) -> dict[str, Any]:
         },
     )
     await session.flush()
-    return {"requester_id": user.id, "tool_version_id": version.id}
+    return {
+        "requester_id": user.id,
+        "tool_id": tool.id,
+        "tool_version_id": version.id,
+    }
 
 
 def _plan(tool_version_id: uuid.UUID, steps: list[dict[str, Any]]) -> dict[str, Any]:
@@ -146,12 +150,16 @@ async def test_pg_multistep_atomic_persist(
                 _tool("final", depends_on=["join1"]),
             ],
         )
+        plan["source"] = {
+            "type": "MANUAL_TOOL_TEST",
+            "mcp_tool_id": str(seeded["tool_id"]),
+            "mcp_tool_version_id": str(seeded["tool_version_id"]),
+        }
         result = await ExecutionPlanMaterializer(session).materialize(
             ExecutionMaterializeParams(
-                source_type=ExecutionSourceType.AGENT_REQUEST.value,
-                trigger_type="USER",
+                source_type=ExecutionSourceType.MANUAL_TOOL_TEST.value,
+                trigger_type="TEST",
                 requester_id=seeded["requester_id"],
-                agent_version_id=uuid.uuid4(),
                 plan_snapshot=plan,
                 plan_hash=compute_plan_hash(plan),
                 input_snapshot={},
@@ -200,12 +208,16 @@ async def test_pg_hash_mismatch_zero_rows(
             await session.execute(select(func.count()).select_from(ExecutionStep))
         ).scalar_one()
         with pytest.raises(AppError) as exc:
+            plan["source"] = {
+                "type": "MANUAL_TOOL_TEST",
+                "mcp_tool_id": str(seeded["tool_id"]),
+                "mcp_tool_version_id": str(seeded["tool_version_id"]),
+            }
             await ExecutionPlanMaterializer(session).materialize(
                 ExecutionMaterializeParams(
-                    source_type=ExecutionSourceType.AGENT_REQUEST.value,
-                    trigger_type="USER",
+                    source_type=ExecutionSourceType.MANUAL_TOOL_TEST.value,
+                    trigger_type="TEST",
                     requester_id=seeded["requester_id"],
-                    agent_version_id=uuid.uuid4(),
                     plan_snapshot=plan,
                     plan_hash="f" * 64,
                     input_snapshot={},
@@ -255,12 +267,16 @@ async def test_pg_mid_step_failure_rolls_back(
 
         monkeypatch.setattr(ExecutionRepository, "create_step", _boom)
         with pytest.raises(RuntimeError, match="pg mid-fail"):
+            plan["source"] = {
+                "type": "MANUAL_TOOL_TEST",
+                "mcp_tool_id": str(seeded["tool_id"]),
+                "mcp_tool_version_id": str(seeded["tool_version_id"]),
+            }
             await ExecutionPlanMaterializer(session).materialize(
                 ExecutionMaterializeParams(
-                    source_type=ExecutionSourceType.AGENT_REQUEST.value,
-                    trigger_type="USER",
+                    source_type=ExecutionSourceType.MANUAL_TOOL_TEST.value,
+                    trigger_type="TEST",
                     requester_id=seeded["requester_id"],
-                    agent_version_id=uuid.uuid4(),
                     plan_snapshot=plan,
                     plan_hash=compute_plan_hash(plan),
                     input_snapshot={},

@@ -30,8 +30,19 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 
 def _minimal_plan() -> dict[str, Any]:
+    # Ops/query helper only — plan snapshot is not engine-executed.
+    # Use canonical MANUAL_TOOL_TEST source shape (IDs are snapshot-local).
+    tool_id = uuid.uuid4()
+    version_id = uuid.uuid4()
     return {
         "schema_version": EXECUTION_PLAN_SCHEMA_VERSION,
+        "goal": "ops fixture",
+        "source": {
+            "type": "MANUAL_TOOL_TEST",
+            "mcp_tool_id": str(tool_id),
+            "mcp_tool_version_id": str(version_id),
+        },
+        "inputs": {},
         "steps": [],
         "edges": [],
         "limits": default_plan_limits().model_dump(),
@@ -80,8 +91,8 @@ async def seed_execution(
     *,
     requester_id: uuid.UUID,
     status: str = ExecutionStatus.SUCCEEDED.value,
-    source_type: str = ExecutionSourceType.AGENT_REQUEST.value,
-    trigger_type: str = ExecutionTriggerType.USER.value,
+    source_type: str = ExecutionSourceType.MANUAL_TOOL_TEST.value,
+    trigger_type: str = ExecutionTriggerType.TEST.value,
     requested_at: datetime | None = None,
     started_at: datetime | None = None,
     finished_at: datetime | None = None,

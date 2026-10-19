@@ -202,12 +202,16 @@ async def _materialize_claim(
         approval = await ApprovalPolicyRepository(session).get(policy.approval_policy_id)
     policy_snapshot = build_safe_tool_policy_snapshot(policy, approval)
     plan = _plan(seeded["tool_version_id"], step_specs)
+    plan["source"] = {
+        "type": "MANUAL_TOOL_TEST",
+        "mcp_tool_id": str(seeded["tool_id"]),
+        "mcp_tool_version_id": str(seeded["tool_version_id"]),
+    }
     outcome = await ExecutionPlanMaterializer(session).materialize(
         ExecutionMaterializeParams(
-            source_type=ExecutionSourceType.AGENT_REQUEST.value,
-            trigger_type="USER",
+            source_type=ExecutionSourceType.MANUAL_TOOL_TEST.value,
+            trigger_type="TEST",
             requester_id=seeded["requester_id"],
-            agent_version_id=seeded["agent_version_id"],
             plan_snapshot=plan,
             plan_hash=compute_plan_hash(plan),
             input_snapshot={},
