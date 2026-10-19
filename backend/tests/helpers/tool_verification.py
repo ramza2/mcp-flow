@@ -188,6 +188,7 @@ async def seed_manual_evidence_execution(
     attempt_error_code: str | None = None,
     attempt_error_layer: str | None = None,
     tool_call_status: str | None = None,
+    include_tool_call: bool = True,
     source_type: str = ExecutionSourceType.MANUAL_TOOL_TEST.value,
     plan_tool_id: uuid.UUID | None = None,
     plan_version_id: uuid.UUID | None = None,
@@ -280,23 +281,27 @@ async def seed_manual_evidence_execution(
         if attempt_error_layer is not None:
             attempt.error_layer = attempt_error_layer
 
-        resolved_call_status = tool_call_status
-        if resolved_call_status is None and execution_status == ExecutionStatus.SUCCEEDED.value:
-            resolved_call_status = ToolCallNormalizedStatus.SUCCEEDED.value
-        if resolved_call_status is not None:
-            call = await repo.create_tool_call(
-                step_attempt_id=attempt.id,
-                mcp_server_id=server_id,
-                mcp_tool_version_id=version_id,
-                protocol_era="CURRENT",
-                protocol_version="2026-07-28",
-                transport_type="STREAMABLE_HTTP",
-                remote_request_id=str(uuid.uuid4()),
-                request_meta={},
-                normalized_status=resolved_call_status,
-                started_at=ts,
-            )
-            call.finished_at = ts + timedelta(seconds=1)
+        if include_tool_call:
+            resolved_call_status = tool_call_status
+            if (
+                resolved_call_status is None
+                and execution_status == ExecutionStatus.SUCCEEDED.value
+            ):
+                resolved_call_status = ToolCallNormalizedStatus.SUCCEEDED.value
+            if resolved_call_status is not None:
+                call = await repo.create_tool_call(
+                    step_attempt_id=attempt.id,
+                    mcp_server_id=server_id,
+                    mcp_tool_version_id=version_id,
+                    protocol_era="CURRENT",
+                    protocol_version="2026-07-28",
+                    transport_type="STREAMABLE_HTTP",
+                    remote_request_id=str(uuid.uuid4()),
+                    request_meta={},
+                    normalized_status=resolved_call_status,
+                    started_at=ts,
+                )
+                call.finished_at = ts + timedelta(seconds=1)
 
     await session.flush()
     return execution

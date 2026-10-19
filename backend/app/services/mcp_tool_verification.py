@@ -272,6 +272,22 @@ class MCPToolVerificationService:
                 ),
                 status_code=status.HTTP_409_CONFLICT,
             )
+        # Canonical FNC-TOOL-005 Manual Tool Test: exactly one TOOL Step.
+        all_steps = await self._executions.list_steps(execution.id)
+        all_tool_steps = [
+            step
+            for step in all_steps
+            if step.step_type == AuthorableStepType.TOOL.value
+        ]
+        if len(all_tool_steps) != 1 or len(tool_steps) != 1:
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message=(
+                    "Normal test requires exactly one TOOL Step matching the "
+                    "target ToolVersion (canonical MANUAL_TOOL_TEST shape)."
+                ),
+                status_code=status.HTTP_409_CONFLICT,
+            )
         step = tool_steps[0]
         if step.status != StepStatus.SUCCEEDED.value:
             raise AppError(
@@ -308,6 +324,15 @@ class MCPToolVerificationService:
                     status_code=status.HTTP_409_CONFLICT,
                 )
             call_ids.append(str(call.id))
+        if not call_ids:
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message=(
+                    "Normal test requires at least one SUCCEEDED ToolCall for "
+                    "the target Server/ToolVersion."
+                ),
+                status_code=status.HTTP_409_CONFLICT,
+            )
         return {
             "execution_id": str(execution.id),
             "execution_status": execution.status,
@@ -607,11 +632,13 @@ class MCPToolVerificationService:
         settings = get_settings()
         bucket = settings.object_storage_bucket
         object_key = verification_evidence_object_key(evidence_blob_id)
-        storage = self._storage()
         payload = json.dumps(report, separators=(",", ":"), sort_keys=True).encode(
             "utf-8"
         )
         try:
+            # Resolve + PUT are both bounded: credentials/backend/config failures
+            # from get_object_storage() must not surface as unhandled 500s.
+            storage = self._storage()
             await storage.ensure_bucket(bucket)
             await storage.put_bytes(
                 bucket=bucket,

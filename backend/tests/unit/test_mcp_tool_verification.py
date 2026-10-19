@@ -506,6 +506,143 @@ async def test_object_storage_failure_creates_no_verified_row(
 
 
 @pytest.mark.asyncio
+async def test_object_storage_resolver_failure_creates_no_verified_row(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ctx = await seed_verification_context(db_session)
+    normal_id, error_id = await _pair(db_session, ctx)
+
+    def _raise_resolve() -> InMemoryObjectStorage:
+        raise ObjectStorageError(
+            "FACTORY_SOURCE_OBJECT_STORE_FAILED",
+            "Object Storage credentials are not configured.",
+        )
+
+    monkeypatch.setattr(
+        "app.services.mcp_tool_verification.get_object_storage",
+        _raise_resolve,
+    )
+    # No injected store — create path must resolve via get_object_storage().
+    svc = MCPToolVerificationService(db_session)
+    with pytest.raises(AppError) as exc:
+        await svc.create(
+            ctx["tool_id"],
+            ctx["version_id"],
+            ToolVerificationCreate(
+                status=ToolVerificationStatus.VERIFIED,
+                criteria_version="tool-verification-v1",
+                test_execution_id=normal_id,
+                error_test_execution_id=error_id,
+            ),
+            verified_by=ctx["user_id"],
+        )
+    assert exc.value.status_code == 409
+    assert exc.value.code == "RESOURCE_CONFLICT"
+    assert "credentials" not in (exc.value.message or "").lower()
+    items, total = await MCPToolVerificationRepository(db_session).list_for_version(
+        mcp_tool_version_id=ctx["version_id"], page=1, page_size=20
+    )
+    assert total == 0
+    assert items == []
+
+
+@pytest.mark.asyncio
+async def test_verified_rejects_normal_without_tool_call_or_extra_tool_step(
+    db_session: AsyncSession,
+) -> None:
+    from app.domain.enums import AuthorableStepType
+    from app.repositories.execution import ExecutionRepository
+
+    ctx = await seed_verification_context(db_session)
+    error = await seed_manual_evidence_execution(
+        db_session,
+        requester_id=ctx["user_id"],
+        tool_id=ctx["tool_id"],
+        version_id=ctx["version_id"],
+        server_id=ctx["server_id"],
+        execution_status=ExecutionStatus.FAILED.value,
+        attempt_error_code="MCP_NETWORK_ERROR",
+        attempt_error_layer="NETWORK",
+        tool_call_status=ToolCallNormalizedStatus.FAILED.value,
+    )
+    no_call = await seed_manual_evidence_execution(
+        db_session,
+        requester_id=ctx["user_id"],
+        tool_id=ctx["tool_id"],
+        version_id=ctx["version_id"],
+        server_id=ctx["server_id"],
+        execution_status=ExecutionStatus.SUCCEEDED.value,
+        include_tool_call=False,
+    )
+    await db_session.commit()
+
+    svc = MCPToolVerificationService(db_session, object_storage=InMemoryObjectStorage())
+    with pytest.raises(AppError) as no_call_exc:
+        await svc.create(
+            ctx["tool_id"],
+            ctx["version_id"],
+            ToolVerificationCreate(
+                status=ToolVerificationStatus.VERIFIED,
+                criteria_version="tool-verification-v1",
+                test_execution_id=no_call.id,
+                error_test_execution_id=error.id,
+            ),
+            verified_by=ctx["user_id"],
+        )
+    assert no_call_exc.value.status_code == 409
+
+    multi = await seed_manual_evidence_execution(
+        db_session,
+        requester_id=ctx["user_id"],
+        tool_id=ctx["tool_id"],
+        version_id=ctx["version_id"],
+        server_id=ctx["server_id"],
+        execution_status=ExecutionStatus.SUCCEEDED.value,
+    )
+    await ExecutionRepository(db_session).create_step(
+        execution_id=multi.id,
+        step_key="tool_2",
+        step_type=AuthorableStepType.TOOL.value,
+        mcp_tool_version_id=ctx["version_id"],
+        parent_step_id=None,
+        sequence_hint=2,
+        status=StepStatus.SUCCEEDED.value,
+        step_snapshot={"id": "tool_2", "type": "TOOL"},
+    )
+    await db_session.commit()
+
+    with pytest.raises(AppError) as multi_exc:
+        await svc.create(
+            ctx["tool_id"],
+            ctx["version_id"],
+            ToolVerificationCreate(
+                status=ToolVerificationStatus.VERIFIED,
+                criteria_version="tool-verification-v1",
+                test_execution_id=multi.id,
+                error_test_execution_id=error.id,
+            ),
+            verified_by=ctx["user_id"],
+        )
+    assert multi_exc.value.status_code == 409
+
+    # Canonical single-TOOL + ToolCall evidence still succeeds.
+    normal_id, error_id = await _pair(db_session, ctx)
+    row = await svc.create(
+        ctx["tool_id"],
+        ctx["version_id"],
+        ToolVerificationCreate(
+            status=ToolVerificationStatus.VERIFIED,
+            criteria_version="tool-verification-v1",
+            test_execution_id=normal_id,
+            error_test_execution_id=error_id,
+        ),
+        verified_by=ctx["user_id"],
+    )
+    assert row.status == ToolVerificationStatus.VERIFIED.value
+
+
+@pytest.mark.asyncio
 async def test_verified_requires_auth_grant(db_session: AsyncSession) -> None:
     ctx = await seed_verification_context(db_session, setup_auth=False)
     normal_id, error_id = await _pair(db_session, ctx)
