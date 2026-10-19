@@ -144,8 +144,8 @@ async def _materialize_queued(
     digest = compute_plan_hash(plan_snapshot)
     outcome = await ExecutionPlanMaterializer(session).materialize(
         ExecutionMaterializeParams(
-            source_type=ExecutionSourceType.MANUAL_TOOL_TEST.value,
-            trigger_type="TEST",
+            source_type=ExecutionSourceType.AGENT_REQUEST.value,
+            trigger_type="USER",
             requester_id=seeded["requester_id"],
             agent_version_id=seeded["agent_version_id"],
             plan_snapshot=plan_snapshot,
@@ -159,8 +159,7 @@ async def _materialize_queued(
     execution = await ExecutionRepository(session).get(outcome.execution.id)
     assert execution is not None
     assert execution.status == ExecutionStatus.CREATED.value
-    # Queue stager currently stages AGENT_REQUEST only — unit tests stage
-    # MANUAL_TOOL_TEST directly for claim/orchestrator coverage.
+    # Unit tests mark CREATED → QUEUED directly for claim/orchestrator coverage.
     execution.status = ExecutionStatus.QUEUED.value
     execution.queued_at = datetime.now(UTC)
     execution.lock_version += 1

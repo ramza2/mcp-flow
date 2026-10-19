@@ -145,3 +145,40 @@ def test_secret_ref_with_extra_material_fail_closed() -> None:
             },
         )
     assert exc.value.code == "EXECUTION_PRECONDITION_FAILED"
+
+
+def test_manual_tool_test_approval_context_allows_null_agent_version() -> None:
+    """FNC-TOOL-005: Manual Test Call approval must not require agent_version_id."""
+    tool_policy = _tool_policy()
+    approval = _approval_policy(id=tool_policy.approval_policy_id)
+    snap = build_approval_context_snapshot(
+        execution=_execution(  # type: ignore[arg-type]
+            agent_version_id=None,
+            source_type="MANUAL_TOOL_TEST",
+            workflow_version_id=None,
+        ),
+        step=_step(),  # type: ignore[arg-type]
+        tool_policy=tool_policy,  # type: ignore[arg-type]
+        approval_policy=approval,  # type: ignore[arg-type]
+        resolved_input={"query": "manual"},
+    )
+    assert snap["agent_version_id"] is None
+    assert snap["source_type"] == "MANUAL_TOOL_TEST"
+    assert "workflow_version_id" not in snap
+
+
+def test_manual_tool_test_approval_context_rejects_agent_lineage() -> None:
+    tool_policy = _tool_policy()
+    with pytest.raises(AppError) as exc:
+        build_approval_context_snapshot(
+            execution=_execution(  # type: ignore[arg-type]
+                agent_version_id=uuid.uuid4(),
+                source_type="MANUAL_TOOL_TEST",
+            ),
+            step=_step(),  # type: ignore[arg-type]
+            tool_policy=tool_policy,  # type: ignore[arg-type]
+            approval_policy=_approval_policy(id=tool_policy.approval_policy_id),  # type: ignore[arg-type]
+            resolved_input={},
+        )
+    assert exc.value.code == "EXECUTION_PRECONDITION_FAILED"
+    assert "MANUAL_TOOL_TEST" in exc.value.message

@@ -157,20 +157,24 @@ async def assert_source_tool_executable(
             policy_snapshot=core.policy_snapshot,
         )
     if execution.source_type == ExecutionSourceType.MANUAL_TOOL_TEST.value:
-        # Manual tool tests historically reuse Agent preflight with agent_version_id.
-        if execution.agent_version_id is None:
-            raise AppError(
-                code="EXECUTION_PRECONDITION_FAILED",
-                message="Execution.agent_version_id is required.",
-                status_code=409,
-            )
-        return await assert_current_agent_tool_executable(
+        # FNC-TOOL-005: admin Test Call uses mcp.tool.execute + MCP_TOOL grant
+        # (no AgentToolGrant). Same Tool/Server/policy gates as Workflow tools.
+        core = await _assert_common_tool_executable(
             session,
             requester_id=execution.requester_id,
-            agent_version_id=execution.agent_version_id,
             tool_version_id=tool_version_id,
             expected_policy_snapshot=expected_policy_snapshot,
             plan_timeout_seconds=plan_timeout_seconds,
+        )
+        return RuntimeToolAuthorization(
+            tool_version=core.tool_version,
+            logical_tool=core.logical_tool,
+            server=core.server,
+            tool_policy=core.tool_policy,
+            approval_policy=core.approval_policy,
+            agent_grant=None,
+            confirmation_required=bool(core.tool_policy.requires_confirmation),
+            policy_snapshot=core.policy_snapshot,
         )
     raise AppError(
         code="RESOURCE_CONFLICT",

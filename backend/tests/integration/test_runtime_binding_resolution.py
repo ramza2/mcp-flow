@@ -110,7 +110,11 @@ async def _prepare(
     plan = {
         "schema_version": EXECUTION_PLAN_SCHEMA_VERSION,
         "goal": "pg binding",
-        "source": {"type": "AGENT", "agent_version_id": str(uuid.uuid4())},
+        "source": {
+            "type": "MANUAL_TOOL_TEST",
+            "mcp_tool_id": str(seeded["tool_id"]),
+            "mcp_tool_version_id": str(seeded["tool_version_id"]),
+        },
         "inputs": inputs or {},
         "limits": default_plan_limits().model_dump(mode="json"),
         "steps": rewritten,
@@ -124,7 +128,6 @@ async def _prepare(
             source_type=ExecutionSourceType.MANUAL_TOOL_TEST.value,
             trigger_type="TEST",
             requester_id=seeded["requester_id"],
-            agent_version_id=seeded["agent_version_id"],
             plan_snapshot=plan,
             plan_hash=compute_plan_hash(plan),
             input_snapshot=input_snapshot or {},

@@ -575,6 +575,15 @@ Policy UI는 Canonical `risk_class`만 사용한다.
 
 Verification Tab은 ToolVersion별 검증일, 검증자, Test Execution, criteria version, evidence를 표시한다.
 
+### Test Call Tab (FNC-TOOL-005)
+
+- 선택 ToolVersion + input_schema 기반 JSON arguments 입력
+- `Run Test` → `POST /mcp/tools/{tool_id}/test-calls`
+- 생성된 `execution_id` 표시 및 Execution 상세로 이동
+- Loading / Error / Permission(FORBIDDEN) 상태 표시
+- **Verification VERIFIED 자동 생성 UI는 이 슬라이스에서 제공하지 않는다**
+  (FNC-TOOL-006 후속)
+
 ---
 
 # 17. Agent 관리 UX

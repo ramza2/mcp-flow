@@ -149,6 +149,31 @@ class MCPToolPolicyResponse(BaseModel):
     lock_version: int
 
 
+class ManualToolTestCreateRequest(BaseModel):
+    """POST /mcp/tools/{tool_id}/test-calls (FNC-TOOL-005)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    mcp_tool_version_id: uuid.UUID
+    arguments: dict[str, Any] = Field(default_factory=dict)
+
+
+class ManualToolTestCreateResult(BaseModel):
+    """Manual Tool Test Execution create response (execution_id = id)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: uuid.UUID
+    status: str
+    source_type: str
+    trigger_type: str
+    mcp_tool_id: uuid.UUID
+    mcp_tool_version_id: uuid.UUID
+    plan_hash: str = Field(min_length=64, max_length=64)
+    requested_at: datetime
+    step_count: int = Field(ge=1)
+
+
 class ToolVerificationCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

@@ -1,4 +1,4 @@
-"""Execution Plan source discriminated union (AGENT / WORKFLOW)."""
+"""Execution Plan source discriminated union (AGENT / WORKFLOW / MANUAL_TOOL_TEST)."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ from app.schemas.execution_plan import (
     EXECUTION_PLAN_SCHEMA_VERSION,
     ExecutionPlanV1,
     PlanSourceAgent,
+    PlanSourceManualToolTest,
     PlanSourceWorkflow,
     compute_plan_hash,
     default_plan_limits,
@@ -152,3 +153,51 @@ def test_workflow_plan_source_round_trip() -> None:
     dumped = plan.model_dump(mode="json")
     assert dumped["source"] == {"type": "WORKFLOW", "workflow_id": str(wf)}
     assert "agent_version_id" not in dumped["source"]
+
+
+def test_plan_source_manual_tool_test_parses() -> None:
+    tool_id = uuid.uuid4()
+    version_id = uuid.uuid4()
+    source = PlanSourceManualToolTest.model_validate(
+        {
+            "type": "MANUAL_TOOL_TEST",
+            "mcp_tool_id": str(tool_id),
+            "mcp_tool_version_id": str(version_id),
+        }
+    )
+    assert source.type == "MANUAL_TOOL_TEST"
+    assert source.mcp_tool_id == tool_id
+    assert source.mcp_tool_version_id == version_id
+
+
+def test_manual_tool_test_plan_source_round_trip() -> None:
+    tool_id = uuid.uuid4()
+    version_id = uuid.uuid4()
+    body = _agent_plan_dict()
+    body["source"] = {
+        "type": "MANUAL_TOOL_TEST",
+        "mcp_tool_id": str(tool_id),
+        "mcp_tool_version_id": str(version_id),
+    }
+    plan = ExecutionPlanV1.model_validate(body)
+    assert isinstance(plan.source, PlanSourceManualToolTest)
+    dumped = plan.model_dump(mode="json")
+    assert dumped["source"] == {
+        "type": "MANUAL_TOOL_TEST",
+        "mcp_tool_id": str(tool_id),
+        "mcp_tool_version_id": str(version_id),
+    }
+    assert "agent_version_id" not in dumped["source"]
+    assert "workflow_id" not in dumped["source"]
+
+
+def test_manual_tool_test_mixed_fields_rejected() -> None:
+    with pytest.raises(ValidationError):
+        PlanSourceManualToolTest.model_validate(
+            {
+                "type": "MANUAL_TOOL_TEST",
+                "mcp_tool_id": str(uuid.uuid4()),
+                "mcp_tool_version_id": str(uuid.uuid4()),
+                "agent_version_id": str(uuid.uuid4()),
+            }
+        )

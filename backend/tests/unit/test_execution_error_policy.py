@@ -188,12 +188,20 @@ async def _materialize_queued(
     plan_snapshot: dict[str, Any],
     seeded: dict[str, Any],
 ) -> uuid.UUID:
+    # STEP_OUTPUT binding precondition paths need MANUAL ComplexTool lineage.
+    plan_snapshot = {
+        **plan_snapshot,
+        "source": {
+            "type": "MANUAL_TOOL_TEST",
+            "mcp_tool_id": str(seeded["tool_id"]),
+            "mcp_tool_version_id": str(seeded["tool_version_id"]),
+        },
+    }
     outcome = await ExecutionPlanMaterializer(session).materialize(
         ExecutionMaterializeParams(
             source_type=ExecutionSourceType.MANUAL_TOOL_TEST.value,
             trigger_type="TEST",
             requester_id=seeded["requester_id"],
-            agent_version_id=seeded["agent_version_id"],
             plan_snapshot=plan_snapshot,
             plan_hash=compute_plan_hash(plan_snapshot),
             input_snapshot={},

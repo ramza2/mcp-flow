@@ -7,6 +7,7 @@ from typing import Any
 
 from app.core.canonical_hash import compute_canonical_json_hash
 from app.core.errors import AppError
+from app.domain.enums import ExecutionSourceType
 from app.models.approval import ApprovalPolicy
 from app.models.execution import Execution, ExecutionStep
 from app.models.mcp import MCPToolPolicy
@@ -24,8 +25,11 @@ def build_approval_context_snapshot(
 ) -> dict[str, Any]:
     """Build the smallest reproducible, secret-safe approval context.
 
-    AgentRequest / MANUAL_TOOL_TEST keep the historical field set (agent_version_id
-    required, no workflow_version_id key) so in-flight hashes stay stable.
+    AGENT_REQUEST keeps the historical field set (agent_version_id required,
+    no workflow_version_id / source_type keys) so in-flight hashes stay stable.
+
+    MANUAL_TOOL_TEST (FNC-TOOL-005) has null Agent/Workflow/Schedule FKs and
+    pins source_type + nullable agent_version_id (no workflow_version_id key).
 
     WORKFLOW_VERSION / SCHEDULE_OCCURRENCE use the same schema_version with
     nullable agent_version_id plus workflow_version_id + source_type.
@@ -70,10 +74,38 @@ def build_approval_context_snapshot(
         },
     }
 
-    # Optional on minimal AgentRequest fixtures / older in-memory doubles.
+    source_type = getattr(execution, "source_type", None)
     workflow_version_id = getattr(execution, "workflow_version_id", None)
+    agent_version_id = getattr(execution, "agent_version_id", None)
+
+    if source_type == ExecutionSourceType.MANUAL_TOOL_TEST.value:
+        if agent_version_id is not None or workflow_version_id is not None:
+            raise AppError(
+                code="EXECUTION_PRECONDITION_FAILED",
+                message=(
+                    "MANUAL_TOOL_TEST approval context must not include "
+                    "agent_version_id or workflow_version_id."
+                ),
+                status_code=409,
+            )
+        if getattr(execution, "schedule_occurrence_id", None) is not None:
+            raise AppError(
+                code="EXECUTION_PRECONDITION_FAILED",
+                message=(
+                    "MANUAL_TOOL_TEST approval context must not include "
+                    "schedule_occurrence_id."
+                ),
+                status_code=409,
+            )
+        return {
+            **base,
+            "agent_version_id": None,
+            "source_type": ExecutionSourceType.MANUAL_TOOL_TEST.value,
+        }
+
+    # Optional on minimal AgentRequest fixtures / older in-memory doubles.
     if workflow_version_id is not None:
-        if getattr(execution, "agent_version_id", None) is not None:
+        if agent_version_id is not None:
             raise AppError(
                 code="EXECUTION_PRECONDITION_FAILED",
                 message=(
@@ -82,7 +114,6 @@ def build_approval_context_snapshot(
                 ),
                 status_code=409,
             )
-        source_type = getattr(execution, "source_type", None)
         if not isinstance(source_type, str) or not source_type:
             raise AppError(
                 code="EXECUTION_PRECONDITION_FAILED",
@@ -98,14 +129,13 @@ def build_approval_context_snapshot(
             "source_type": source_type,
         }
 
-    agent_version_id = getattr(execution, "agent_version_id", None)
     if agent_version_id is None:
         raise AppError(
             code="EXECUTION_PRECONDITION_FAILED",
             message="Approval context requires agent_version_id.",
             status_code=409,
         )
-    # Historical AgentRequest / MANUAL_TOOL_TEST shape — do not add keys.
+    # Historical AgentRequest shape — do not add keys.
     return {
         **base,
         "agent_version_id": str(agent_version_id),

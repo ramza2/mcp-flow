@@ -433,8 +433,8 @@ async def _materialize_queued(
 ) -> uuid.UUID:
     outcome = await ExecutionPlanMaterializer(session).materialize(
         ExecutionMaterializeParams(
-            source_type=ExecutionSourceType.MANUAL_TOOL_TEST.value,
-            trigger_type="TEST",
+            source_type=ExecutionSourceType.AGENT_REQUEST.value,
+            trigger_type="USER",
             requester_id=seeded["requester_id"],
             agent_version_id=seeded["agent_version_id"],
             plan_snapshot=plan_snapshot,
@@ -523,8 +523,8 @@ async def test_materialize_excludes_body_templates(
         plan = _simple_foreach_plan(seeded["tool_version_id"])
         outcome = await ExecutionPlanMaterializer(session).materialize(
             ExecutionMaterializeParams(
-                source_type=ExecutionSourceType.MANUAL_TOOL_TEST.value,
-                trigger_type="TEST",
+                source_type=ExecutionSourceType.AGENT_REQUEST.value,
+                trigger_type="USER",
                 requester_id=seeded["requester_id"],
                 agent_version_id=seeded["agent_version_id"],
                 plan_snapshot=plan,
@@ -579,8 +579,8 @@ async def test_materialize_non_loop_unchanged(
         )
         outcome = await ExecutionPlanMaterializer(session).materialize(
             ExecutionMaterializeParams(
-                source_type=ExecutionSourceType.MANUAL_TOOL_TEST.value,
-                trigger_type="TEST",
+                source_type=ExecutionSourceType.AGENT_REQUEST.value,
+                trigger_type="USER",
                 requester_id=seeded["requester_id"],
                 agent_version_id=seeded["agent_version_id"],
                 plan_snapshot=plan,
@@ -874,8 +874,8 @@ def _foreach_binding_plan(tv: uuid.UUID) -> ExecutionPlanV1:
 def _ns_exec(**kwargs: Any) -> Any:
     base = {
         "id": uuid.uuid4(),
-        "source_type": ExecutionSourceType.MANUAL_TOOL_TEST.value,
-        "trigger_type": "TEST",
+        "source_type": ExecutionSourceType.AGENT_REQUEST.value,
+        "trigger_type": "USER",
         "trace_id": "t",
         "input_snapshot": {"items": [{"id": 1}, {"id": 2}]},
         "status": ExecutionStatus.RUNNING.value,

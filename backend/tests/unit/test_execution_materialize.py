@@ -236,9 +236,10 @@ async def _materialize(
     digest = plan_hash if plan_hash is not None else compute_plan_hash(plan_snapshot)
     return await ExecutionPlanMaterializer(session).materialize(
         ExecutionMaterializeParams(
-            source_type=ExecutionSourceType.MANUAL_TOOL_TEST.value,
-            trigger_type="TEST",
+            source_type=ExecutionSourceType.AGENT_REQUEST.value,
+            trigger_type="USER",
             requester_id=requester_id,
+            agent_version_id=_AV,
             plan_snapshot=plan_snapshot,
             plan_hash=digest,
             input_snapshot={},

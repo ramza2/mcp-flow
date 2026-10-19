@@ -535,6 +535,10 @@ Exact field sets only — no mixed fields:
 {"type":"WORKFLOW","workflow_id":"<uuid>"}
 ```
 
+```json
+{"type":"MANUAL_TOOL_TEST","mcp_tool_id":"<uuid>","mcp_tool_version_id":"<uuid>"}
+```
+
 Rules:
 
 ```text
@@ -547,6 +551,12 @@ source.type = WORKFLOW
 → WorkflowVersion.plan_definition must use this shape
 → do not put workflow_version_id inside Plan source
   (Execution.workflow_version_id pins the exact version)
+
+source.type = MANUAL_TOOL_TEST
+→ mcp_tool_id + mcp_tool_version_id required (immutable Test Call lineage)
+→ single TOOL Plan emitted by Manual Tool Test create (FNC-TOOL-005)
+→ Execution.source_type = MANUAL_TOOL_TEST / trigger_type = TEST
+→ do not invent additional Plan source types for Test Call
 ```
 
 ### 9.1 Step 공통 구조

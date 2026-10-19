@@ -320,12 +320,16 @@ async def _materialize_claim(
         max_steps=max_steps,
         response_step_ids=response_step_ids,
     )
+    plan["source"] = {
+        "type": "MANUAL_TOOL_TEST",
+        "mcp_tool_id": str(seeded["tool_id"]),
+        "mcp_tool_version_id": str(seeded["tool_version_id"]),
+    }
     outcome = await ExecutionPlanMaterializer(session).materialize(
         ExecutionMaterializeParams(
             source_type=ExecutionSourceType.MANUAL_TOOL_TEST.value,
             trigger_type="TEST",
             requester_id=seeded["requester_id"],
-            agent_version_id=seeded["agent_version_id"],
             plan_snapshot=plan,
             plan_hash=compute_plan_hash(plan),
             input_snapshot=input_snapshot if input_snapshot is not None else {},

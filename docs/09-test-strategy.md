@@ -858,6 +858,19 @@ Tool logical status와 ToolVersion validation을 혼동하지 않는다.
 
 검증한 ToolVersion이 변경되면 새 Version에 과거 Verification을 자동 승계하지 않는다.
 
+### Manual Tool Test (FNC-TOOL-005)
+
+Coverage (does **not** auto-create Verification VERIFIED — FNC-TOOL-006 follow-up):
+
+| Layer | Focus |
+|---|---|
+| Unit | Plan source `MANUAL_TOOL_TEST` parse; create materialization / auth / current VALID version fail-closed; queue CREATED→QUEUED |
+| API | Cookie Session/CSRF, Idempotency-Key, `mcp.tool.execute` + MCP_TOOL ResourceGrant, invalid version |
+| Integration | PostgreSQL MANUAL_TOOL_TEST → claim → mocked CurrentMCPClient → ToolCall 1 → Execution SUCCEEDED |
+| Frontend | Test Call tab JSON input, Run Test → execution_id, Execution detail navigation |
+
+Regression: existing AGENT_REQUEST / WORKFLOW_VERSION / SCHEDULE_OCCURRENCE queue+claim paths remain green; FACTORY_TEST stays unstaged.
+
 ---
 
 ## 14. Agent/Workflow Version 시험
