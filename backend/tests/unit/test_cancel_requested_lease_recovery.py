@@ -1304,10 +1304,10 @@ async def _materialize_multistep(
     }
     outcome = await ExecutionPlanMaterializer(session).materialize(
         ExecutionMaterializeParams(
-            # Claim validates WORKFLOW_VERSION lineage; materialize as
-            # MANUAL_TOOL_TEST then retarget source for cancel-recovery coverage.
-            source_type=ExecutionSourceType.MANUAL_TOOL_TEST.value,
-            trigger_type="TEST",
+            # Claim with AGENT_REQUEST lineage, then retarget source_type for
+            # WORKFLOW cancel-recovery coverage (plan remains AGENT-shaped).
+            source_type=ExecutionSourceType.AGENT_REQUEST.value,
+            trigger_type="USER",
             requester_id=seeded["requester_id"],
             agent_version_id=seeded["agent_version_id"],
             plan_snapshot=plan,

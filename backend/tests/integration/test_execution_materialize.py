@@ -148,9 +148,10 @@ async def test_pg_multistep_atomic_persist(
         )
         result = await ExecutionPlanMaterializer(session).materialize(
             ExecutionMaterializeParams(
-                source_type=ExecutionSourceType.MANUAL_TOOL_TEST.value,
-                trigger_type="TEST",
+                source_type=ExecutionSourceType.AGENT_REQUEST.value,
+                trigger_type="USER",
                 requester_id=seeded["requester_id"],
+                agent_version_id=uuid.uuid4(),
                 plan_snapshot=plan,
                 plan_hash=compute_plan_hash(plan),
                 input_snapshot={},
@@ -201,9 +202,10 @@ async def test_pg_hash_mismatch_zero_rows(
         with pytest.raises(AppError) as exc:
             await ExecutionPlanMaterializer(session).materialize(
                 ExecutionMaterializeParams(
-                    source_type=ExecutionSourceType.MANUAL_TOOL_TEST.value,
-                    trigger_type="TEST",
+                    source_type=ExecutionSourceType.AGENT_REQUEST.value,
+                    trigger_type="USER",
                     requester_id=seeded["requester_id"],
+                    agent_version_id=uuid.uuid4(),
                     plan_snapshot=plan,
                     plan_hash="f" * 64,
                     input_snapshot={},
@@ -255,9 +257,10 @@ async def test_pg_mid_step_failure_rolls_back(
         with pytest.raises(RuntimeError, match="pg mid-fail"):
             await ExecutionPlanMaterializer(session).materialize(
                 ExecutionMaterializeParams(
-                    source_type=ExecutionSourceType.MANUAL_TOOL_TEST.value,
-                    trigger_type="TEST",
+                    source_type=ExecutionSourceType.AGENT_REQUEST.value,
+                    trigger_type="USER",
                     requester_id=seeded["requester_id"],
+                    agent_version_id=uuid.uuid4(),
                     plan_snapshot=plan,
                     plan_hash=compute_plan_hash(plan),
                     input_snapshot={},

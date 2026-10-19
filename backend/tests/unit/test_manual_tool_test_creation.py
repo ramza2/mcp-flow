@@ -184,18 +184,16 @@ async def test_manual_tool_test_rejects_invalid_validation(
     assert exc.value.code == "EXECUTION_PRECONDITION_FAILED"
 
 
-@pytest.mark.asyncio
-async def test_manual_tool_test_claim_starts_attempt_without_agent_version(
-    db_session: AsyncSession,
-) -> None:
-    """Attempt lease must not require agent_version_id for MANUAL_TOOL_TEST."""
-    from app.domain.enums import StepAttemptStatus, StepStatus
+async def _create_claim_manual(
+    session: AsyncSession,
+    *,
+    worker_id: str = "mtt-attempt-worker",
+) -> dict:
     from app.execution.claim import ExecutionClaimService
     from app.execution.queue import ExecutionQueueService
-    from app.execution.tool_step_attempt import ToolStepAttemptService
 
-    seeded = await _seed_manual_tool(db_session)
-    outcome = await ManualToolTestCreationService(db_session).create(
+    seeded = await _seed_manual_tool(session)
+    outcome = await ManualToolTestCreationService(session).create(
         tool_id=seeded["tool_id"],
         requester_id=seeded["user_id"],
         idempotency_key=str(uuid.uuid4()),
@@ -205,29 +203,114 @@ async def test_manual_tool_test_claim_starts_attempt_without_agent_version(
         ),
     )
     execution_id = outcome.result.id
-    staged = await ExecutionQueueService(db_session).stage_created_batch(limit=10)
+    staged = await ExecutionQueueService(session).stage_created_batch(limit=10)
     assert staged == 1
-    claim = await ExecutionClaimService(db_session, lease_seconds=60).claim(
+    claim = await ExecutionClaimService(session, lease_seconds=60).claim(
         execution_id=execution_id,
-        worker_id="mtt-attempt-worker",
+        worker_id=worker_id,
     )
     assert claim.claimed is True
     assert claim.lease_token is not None
     assert len(claim.ready_step_ids) == 1
-    await db_session.commit()
+    await session.commit()
+    return {
+        "execution_id": execution_id,
+        "step_id": claim.ready_step_ids[0],
+        "worker_id": worker_id,
+        "lease_token": claim.lease_token,
+    }
 
-    execution = await ExecutionRepository(db_session).get(execution_id)
+
+@pytest.mark.asyncio
+async def test_manual_tool_test_claim_starts_attempt_without_agent_version(
+    db_session: AsyncSession,
+) -> None:
+    """Attempt lease must not require agent_version_id for MANUAL_TOOL_TEST."""
+    from app.domain.enums import StepAttemptStatus, StepStatus
+    from app.execution.tool_step_attempt import ToolStepAttemptService
+
+    claimed = await _create_claim_manual(db_session)
+    execution = await ExecutionRepository(db_session).get(claimed["execution_id"])
     assert execution is not None
     assert execution.agent_version_id is None
 
     started = await ToolStepAttemptService(db_session).start(
-        execution_id=execution_id,
-        step_execution_id=claim.ready_step_ids[0],
-        worker_id="mtt-attempt-worker",
-        lease_token=claim.lease_token,
+        execution_id=claimed["execution_id"],
+        step_execution_id=claimed["step_id"],
+        worker_id=claimed["worker_id"],
+        lease_token=claimed["lease_token"],
     )
     await db_session.commit()
     assert started.replayed is False
     assert started.attempt_no == 1
     assert started.step_status == StepStatus.RUNNING.value
     assert started.attempt_status == StepAttemptStatus.STARTED.value
+
+
+@pytest.mark.asyncio
+async def test_manual_tool_test_attempt_rejects_agent_version_lineage(
+    db_session: AsyncSession,
+) -> None:
+    from app.execution.tool_step_attempt import ToolStepAttemptService
+
+    claimed = await _create_claim_manual(db_session, worker_id="mtt-bad-agent")
+    execution = await ExecutionRepository(db_session).get(claimed["execution_id"])
+    assert execution is not None
+    execution.agent_version_id = uuid.uuid4()
+    await db_session.flush()
+
+    with pytest.raises(AppError) as exc:
+        await ToolStepAttemptService(db_session).start(
+            execution_id=claimed["execution_id"],
+            step_execution_id=claimed["step_id"],
+            worker_id=claimed["worker_id"],
+            lease_token=claimed["lease_token"],
+        )
+    assert exc.value.status_code == 409
+    assert "MANUAL_TOOL_TEST" in exc.value.message
+
+
+@pytest.mark.asyncio
+async def test_manual_tool_test_attempt_rejects_workflow_lineage(
+    db_session: AsyncSession,
+) -> None:
+    from app.execution.tool_step_attempt import ToolStepAttemptService
+
+    claimed = await _create_claim_manual(db_session, worker_id="mtt-bad-wf")
+    execution = await ExecutionRepository(db_session).get(claimed["execution_id"])
+    assert execution is not None
+    execution.workflow_version_id = uuid.uuid4()
+    await db_session.flush()
+
+    with pytest.raises(AppError) as exc:
+        await ToolStepAttemptService(db_session).start(
+            execution_id=claimed["execution_id"],
+            step_execution_id=claimed["step_id"],
+            worker_id=claimed["worker_id"],
+            lease_token=claimed["lease_token"],
+        )
+    assert exc.value.status_code == 409
+    assert "MANUAL_TOOL_TEST" in exc.value.message
+
+
+@pytest.mark.asyncio
+async def test_manual_tool_test_attempt_rejects_schedule_occurrence_lineage(
+    db_session: AsyncSession,
+) -> None:
+    from app.execution.tool_step_attempt import ToolStepAttemptService
+
+    claimed = await _create_claim_manual(db_session, worker_id="mtt-bad-sched")
+    execution = await ExecutionRepository(db_session).get(claimed["execution_id"])
+    assert execution is not None
+    execution.schedule_occurrence_id = uuid.uuid4()
+    await db_session.flush()
+
+    with pytest.raises(AppError) as exc:
+        await ToolStepAttemptService(db_session).start(
+            execution_id=claimed["execution_id"],
+            step_execution_id=claimed["step_id"],
+            worker_id=claimed["worker_id"],
+            lease_token=claimed["lease_token"],
+        )
+    assert exc.value.status_code == 409
+    assert "MANUAL_TOOL_TEST" in exc.value.message

@@ -137,12 +137,16 @@ async def _materialize_claim(
     plan = _plan(
         seeded["tool_version_id"], step_specs, max_parallelism=max_parallelism
     )
+    plan["source"] = {
+        "type": "MANUAL_TOOL_TEST",
+        "mcp_tool_id": str(seeded["tool_id"]),
+        "mcp_tool_version_id": str(seeded["tool_version_id"]),
+    }
     outcome = await ExecutionPlanMaterializer(session).materialize(
         ExecutionMaterializeParams(
             source_type=ExecutionSourceType.MANUAL_TOOL_TEST.value,
             trigger_type="TEST",
             requester_id=seeded["requester_id"],
-            agent_version_id=seeded["agent_version_id"],
             plan_snapshot=plan,
             plan_hash=compute_plan_hash(plan),
             input_snapshot={},
@@ -598,12 +602,16 @@ async def test_pg_fatal_sibling_wave(
             [_tool("a"), _tool("b"), _tool("d", depends_on=["a"])],
             max_parallelism=2,
         )
+        plan["source"] = {
+            "type": "MANUAL_TOOL_TEST",
+            "mcp_tool_id": str(seeded_pack["tool_id"]),
+            "mcp_tool_version_id": str(seeded_pack["tool_version_id"]),
+        }
         outcome = await ExecutionPlanMaterializer(session).materialize(
             ExecutionMaterializeParams(
                 source_type=ExecutionSourceType.MANUAL_TOOL_TEST.value,
                 trigger_type="TEST",
                 requester_id=seeded_pack["requester_id"],
-                agent_version_id=seeded_pack["agent_version_id"],
                 plan_snapshot=plan,
                 plan_hash=compute_plan_hash(plan),
                 input_snapshot={},

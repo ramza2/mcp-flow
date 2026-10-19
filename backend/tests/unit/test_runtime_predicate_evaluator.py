@@ -87,8 +87,8 @@ def _plan(
 def _exec(**kwargs: Any) -> Any:
     base = {
         "id": uuid.uuid4(),
-        "source_type": "MANUAL_TOOL_TEST",
-        "trigger_type": "TEST",
+        "source_type": "AGENT_REQUEST",
+        "trigger_type": "USER",
         "trace_id": "trace-pred",
         "input_snapshot": {},
         "status": "RUNNING",

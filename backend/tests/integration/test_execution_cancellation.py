@@ -170,8 +170,8 @@ async def _materialize_claim(
     plan["limits"] = limits
     outcome = await ExecutionPlanMaterializer(session).materialize(
         ExecutionMaterializeParams(
-            source_type=ExecutionSourceType.MANUAL_TOOL_TEST.value,
-            trigger_type="TEST",
+            source_type=ExecutionSourceType.AGENT_REQUEST.value,
+            trigger_type="USER",
             requester_id=seeded["requester_id"],
             agent_version_id=seeded["agent_version_id"],
             plan_snapshot=plan,
@@ -1302,8 +1302,8 @@ async def test_pg_parallel_unknown_outcome_under_cancel(
         plan["limits"] = limits
         outcome = await ExecutionPlanMaterializer(session).materialize(
             ExecutionMaterializeParams(
-                source_type=ExecutionSourceType.MANUAL_TOOL_TEST.value,
-                trigger_type="TEST",
+                source_type=ExecutionSourceType.AGENT_REQUEST.value,
+                trigger_type="USER",
                 requester_id=seeded["requester_id"],
                 agent_version_id=seeded["agent_version_id"],
                 plan_snapshot=plan,
