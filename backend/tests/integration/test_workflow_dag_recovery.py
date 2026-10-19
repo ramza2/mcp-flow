@@ -171,17 +171,18 @@ async def test_pg_discovery_workflow_includes_flat_loop_excludes_nested(
         await session.commit()
         nested_id = nested.id
 
+    discovery_now = max(now, now3)
     async with integration_session_factory() as session:
         first = await ExecutionRecoveryService(
             session, lease_seconds=60
-        ).list_expired_running_ids(limit=50, now=now)
+        ).list_expired_running_ids(limit=50, now=discovery_now)
         assert wf_id in first
         assert loop_id in first
         assert nested_id not in first
         # Outbox restart: rediscovery remains durable in PostgreSQL.
         second = await ExecutionRecoveryService(
             session, lease_seconds=60
-        ).list_expired_running_ids(limit=50, now=now)
+        ).list_expired_running_ids(limit=50, now=discovery_now)
         assert wf_id in second
         assert loop_id in second
         assert nested_id not in second

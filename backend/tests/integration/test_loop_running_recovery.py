@@ -6,13 +6,14 @@ import asyncio
 from datetime import timedelta
 
 import pytest
-from app.domain.enums import ExecutionStatus, RiskClass, StepStatus
+from app.domain.enums import BindingKind, ExecutionStatus, RiskClass, StepStatus
 from app.execution.recovery import ExecutionRecoveryService, RecoveryDecision
 from app.repositories.execution import ExecutionRepository
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from tests.unit.test_execution_creation import _install_no_side_effects
 from tests.unit.test_loop_running_recovery import (
+    _append_while_gate,
     _child_key,
     _loop_parent,
     _materialize_foreach_iters,
@@ -20,6 +21,7 @@ from tests.unit.test_loop_running_recovery import (
     _recover,
     _recover_and_run,
     _seed_foreach,
+    _seed_while,
     _start_foreach_running_pinned,
 )
 from tests.unit.test_workflow_dag_recovery import (
@@ -122,3 +124,41 @@ async def test_pg_unsafe_loop_child_mcp_zero_race(
             if s.parent_step_id is not None
         )
         assert child.status == StepStatus.UNKNOWN_OUTCOME.value
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_pg_while_true_gate_zero_children_materializes_once(
+    integration_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PG: true gate + 0 children → recovery takeover → iter1 child + MCP 1."""
+    _install_no_side_effects(monkeypatch)
+    async with integration_session_factory() as session:
+        eid, _c, now, _w, _tok = await _seed_while(
+            session,
+            predicate={
+                "op": "eq",
+                "left": {"kind": BindingKind.LITERAL.value, "value": True},
+                "right": {"kind": BindingKind.LITERAL.value, "value": True},
+            },
+            max_iterations=1,
+        )
+        await _append_while_gate(
+            session, execution_id=eid, candidate=1, result=True
+        )
+        await _expire_lease(session, execution_id=eid, claim_now=now)
+
+    client = _OkClient()
+    outcome, _run = await _recover_and_run(
+        integration_session_factory, execution_id=eid, client=client
+    )
+    assert outcome.taken_over is True
+    async with integration_session_factory() as session:
+        steps = await ExecutionRepository(session).list_steps(eid)
+        parent = _loop_parent(steps)
+        iter1 = [
+            s for s in steps if s.parent_step_id == parent.id and s.iteration_no == 1
+        ]
+        assert len(iter1) == 1
+    assert len(client.calls) == 1
