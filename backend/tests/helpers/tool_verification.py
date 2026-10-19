@@ -47,21 +47,27 @@ def manual_plan(
             "mcp_tool_version_id": str(version_id),
         },
         "inputs": {},
+        "limits": default_plan_limits().model_dump(mode="json"),
         "steps": [
             {
                 "id": "tool_1",
                 "name": "Tool Step 1",
                 "type": "TOOL",
+                "required": True,
                 "depends_on": [],
+                "when": None,
+                "timeout_seconds": 30,
+                "on_error": "FAIL_EXECUTION",
                 "config": {
                     "tool_version_id": str(version_id),
                     "bindings": {},
                 },
             }
         ],
-        "edges": [],
-        "limits": default_plan_limits().model_dump(),
-        "completion": {"policy": "ALL_REQUIRED", "response_step_ids": ["tool_1"]},
+        "completion": {
+            "success_policy": "ALL_REQUIRED",
+            "response_step_ids": ["tool_1"],
+        },
     }
 
 
@@ -205,10 +211,12 @@ async def seed_manual_evidence_execution(
                 "agent_version_id": str(uuid.uuid4()),
             },
             "inputs": {},
+            "limits": default_plan_limits().model_dump(mode="json"),
             "steps": [],
-            "edges": [],
-            "limits": default_plan_limits().model_dump(),
-            "completion": {"policy": "ALL_REQUIRED", "response_step_ids": []},
+            "completion": {
+                "success_policy": "ALL_REQUIRED",
+                "response_step_ids": [],
+            },
         }
 
     repo = ExecutionRepository(session)
