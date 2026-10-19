@@ -19,6 +19,7 @@ import { isAbortError, isApiError } from '../../api/client';
 import type { MCPToolDto, MCPToolVersionDto } from '../../api/types';
 import { formatTimestamp, shortenId } from '../../domain';
 import ToolPolicyTab from './ToolPolicyTab';
+import ToolTestCallTab from './ToolTestCallTab';
 import ToolVerificationTab from './ToolVerificationTab';
 import {
   isLifecycleActionDisabled,
@@ -444,10 +445,12 @@ export default function MCPToolDetail() {
           />
         )}
 
-        {tab === 'test' && (
-          <EmptyState
-            title="Test Call deferred"
-            description="Manual Tool Test API는 아직 제공되지 않습니다."
+        {tab === 'test' && toolId && (
+          <ToolTestCallTab
+            toolId={toolId}
+            selectedVersion={selectedVersion}
+            currentVersionId={tool?.current_version_id ?? null}
+            active={tab === 'test'}
           />
         )}
 

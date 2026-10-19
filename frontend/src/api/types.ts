@@ -215,6 +215,24 @@ export interface MCPToolPolicyDto {
   lock_version: number;
 }
 
+/** FNC-TOOL-005 Manual Tool Test create (no Verification VERIFIED). */
+export interface ManualToolTestCreateRequest {
+  mcp_tool_version_id: string;
+  arguments: Record<string, JsonValue>;
+}
+
+export interface ManualToolTestCreateResult {
+  id: string;
+  status: string;
+  source_type: string;
+  trigger_type: string;
+  mcp_tool_id: string;
+  mcp_tool_version_id: string;
+  plan_hash: string;
+  requested_at: string;
+  step_count: number;
+}
+
 /** Frontend create form supports PENDING / FAILED only (VERIFIED deferred). */
 export interface ToolVerificationCreateRequest {
   status: ToolVerificationStatus;

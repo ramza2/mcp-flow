@@ -262,9 +262,23 @@ name description tags capability Server status risk_class validation_status
 
 관리자 Tool 시험도 일반 Execution 보안경로를 사용하며 `source_type=MANUAL_TOOL_TEST`로 구분한다.
 
+구현 상태 (vertical slice):
+
+- `POST /mcp/tools/{tool_id}/test-calls`로 Manual Tool Test Execution 생성
+- Plan `source.type=MANUAL_TOOL_TEST` + `mcp_tool_id` / `mcp_tool_version_id` lineage
+- 권한: `mcp.tool.execute` + exact `MCP_TOOL` ResourceGrant (별도 `tool.test` 없음)
+- 현재 ToolVersion(`validation_status=VALID`)만 허용 — fail-closed
+- Queue stager → claim → orchestrator → `McpToolRunner` 재사용
+- ToolPolicy approval/confirmation 및 Server/Tool ACTIVE 검증을 우회하지 않음
+- **이 슬라이스는 Tool Verification `VERIFIED` 자동 생성을 하지 않는다**
+  (`FNC-TOOL-006` 후속)
+
 ## FNC-TOOL-006. Tool Verification
 
 특정 ToolVersion의 검증 증적을 생성한다.
+
+> FNC-TOOL-005 Test Call 성공만으로 `VERIFIED` Verification row / evidence blob을
+> 자동 생성하지 않는다. Verification 증적 연결은 본 기능(FNC-TOOL-006) 후속 작업이다.
 
 검증 완료 조건 예:
 

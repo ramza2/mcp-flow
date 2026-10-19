@@ -5,11 +5,13 @@ from __future__ import annotations
 import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, Header, Query, status
+from fastapi import APIRouter, Header, Query, Response, status
 
-from app.api.dependencies import DbSessionDep
+from app.api.dependencies import CurrentPrincipalDep, DbSessionDep
 from app.core.errors import AppError
 from app.schemas.mcp_tool import (
+    ManualToolTestCreateRequest,
+    ManualToolTestCreateResult,
     MCPToolListResponse,
     MCPToolPolicyPut,
     MCPToolPolicyResponse,
@@ -21,6 +23,7 @@ from app.schemas.mcp_tool import (
     ToolVerificationListResponse,
     ToolVerificationResponse,
 )
+from app.services.manual_tool_test_creation import ManualToolTestCreationService
 from app.services.mcp_tool import MCPToolService
 from app.services.mcp_tool_policy import MCPToolPolicyService
 from app.services.mcp_tool_query import MCPToolQueryService
@@ -205,6 +208,42 @@ async def get_tool_version(
     service = MCPToolQueryService(session)
     version = await service.get_version(tool_id, version_id)
     return MCPToolVersionResponse.model_validate(version)
+
+
+@router.post(
+    "/{tool_id}/test-calls",
+    response_model=ManualToolTestCreateResult,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_manual_tool_test(
+    tool_id: uuid.UUID,
+    body: ManualToolTestCreateRequest,
+    session: DbSessionDep,
+    principal: CurrentPrincipalDep,
+    response: Response,
+    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
+) -> ManualToolTestCreateResult:
+    if idempotency_key is None or not idempotency_key.strip():
+        raise AppError(
+            code="VALIDATION_ERROR",
+            message="Idempotency-Key header is required.",
+            status_code=400,
+        )
+    key = idempotency_key.strip()
+    if len(key) > 128:
+        raise AppError(
+            code="VALIDATION_ERROR",
+            message="Idempotency-Key must be at most 128 characters.",
+            status_code=400,
+        )
+    outcome = await ManualToolTestCreationService(session).create(
+        tool_id=tool_id,
+        requester_id=principal.user_id,
+        idempotency_key=key,
+        body=body,
+    )
+    response.status_code = outcome.http_status
+    return outcome.result
 
 
 @router.get("/{tool_id}/policy", response_model=MCPToolPolicyResponse)

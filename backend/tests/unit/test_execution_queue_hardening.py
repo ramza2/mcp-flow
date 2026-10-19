@@ -128,6 +128,29 @@ async def test_stager_ignores_factory_created_execution(
 
 
 @pytest.mark.asyncio
+async def test_stager_accepts_manual_tool_test_created_execution(
+    db_session: AsyncSession,
+) -> None:
+    execution_id, _ = await _created_execution(db_session)
+    execution = await ExecutionRepository(db_session).get(execution_id)
+    assert execution is not None
+    execution.source_type = ExecutionSourceType.MANUAL_TOOL_TEST.value
+    execution.agent_request_id = None
+    execution.agent_version_id = None
+    execution.plan_validation_run_id = None
+    await db_session.commit()
+
+    staged = await ExecutionQueueService(db_session).stage_created_batch(limit=10)
+    await db_session.commit()
+
+    assert staged == 1
+    execution = await ExecutionRepository(db_session).get(execution_id)
+    assert execution is not None
+    assert execution.status == ExecutionStatus.QUEUED.value
+    assert execution.queued_at is not None
+
+
+@pytest.mark.asyncio
 async def test_stager_accepts_schedule_occurrence_created_execution(
     db_session: AsyncSession,
 ) -> None:

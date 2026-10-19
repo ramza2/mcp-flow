@@ -219,7 +219,67 @@ describe('MCPToolDetail — API detail', () => {
     expect(screen.getByText('DISCOVERED')).toBeInTheDocument();
   });
 
-  it('shows deferred Test Call / Used By / Audit as empty state', async () => {
+  it('shows Test Call tab with Run Test (no Verification auto-create)', async () => {
+    const user = userEvent.setup();
+    const activeTool = {
+      ...discoveredTool,
+      status: 'ACTIVE' as const,
+      current_version_id: validVersion.id,
+    };
+    const fetchMock = vi.fn((input: RequestInfo, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input.url;
+      if (url.includes('/test-calls') && init?.method === 'POST') {
+        return Promise.resolve(
+          jsonResponse({
+            id: '11111111-1111-4111-8111-111111111111',
+            status: 'CREATED',
+            source_type: 'MANUAL_TOOL_TEST',
+            trigger_type: 'TEST',
+            mcp_tool_id: activeTool.id,
+            mcp_tool_version_id: validVersion.id,
+            plan_hash: 'a'.repeat(64),
+            requested_at: '2026-10-16T00:00:00Z',
+            step_count: 1,
+          }),
+        );
+      }
+      if (url.match(/\/mcp\/tools\/[^/]+$/) && !url.includes('/versions')) {
+        return Promise.resolve(jsonResponse(activeTool));
+      }
+      if (url.includes('/versions') && url.endsWith(validVersion.id)) {
+        return Promise.resolve(jsonResponse(validVersion));
+      }
+      if (url.includes('/versions')) {
+        return Promise.resolve(jsonResponse(versionList));
+      }
+      return Promise.resolve(new Response('Not found', { status: 404 }));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    renderWithRouter(<MCPToolDetail />, {
+      path: '/mcp/tools/:toolId',
+      route: `/mcp/tools/${activeTool.id}`,
+    });
+
+    await screen.findByRole('heading', { name: 'Search Docs' });
+    await user.click(screen.getByRole('button', { name: /^Test Call$/i }));
+    expect(await screen.findByRole('button', { name: /^Run Test$/i })).toBeInTheDocument();
+    expect(screen.queryByText(/Test Call deferred/i)).not.toBeInTheDocument();
+    expect(screen.getByText(/VERIFIED/i)).toBeInTheDocument();
+    expect(screen.getByText(/자동 생성되지 않습니다/i)).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: /^Run Test$/i }));
+    expect(await screen.findByText(/Execution 생성됨/i)).toBeInTheDocument();
+    expect(
+      fetchMock.mock.calls.some(
+        ([input, init]) =>
+          String(typeof input === 'string' ? input : input.url).includes('/test-calls') &&
+          init?.method === 'POST',
+      ),
+    ).toBe(true);
+  });
+
+  it('shows deferred Used By / Audit as empty state', async () => {
     const user = userEvent.setup();
     vi.stubGlobal('fetch', stubToolFetch());
 
@@ -229,8 +289,8 @@ describe('MCPToolDetail — API detail', () => {
     });
 
     await screen.findByRole('heading', { name: 'Search Docs' });
-    await user.click(screen.getByRole('button', { name: /^Test Call$/i }));
-    expect(await screen.findByText(/Test Call deferred/i)).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: /^Used By$/i }));
+    expect(await screen.findByText(/Used By deferred/i)).toBeInTheDocument();
   });
 
   it('header Activate uses If-Match and updates status + lock_version', async () => {

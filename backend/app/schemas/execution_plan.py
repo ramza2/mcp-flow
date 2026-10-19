@@ -77,8 +77,22 @@ class PlanSourceWorkflow(BaseModel):
     workflow_id: uuid.UUID
 
 
+class PlanSourceManualToolTest(BaseModel):
+    """Admin Manual Tool Test plan source (docs/04 §9 / FNC-TOOL-005).
+
+    Immutable lineage for a single-TOOL test Execution. Exact ToolVersion is
+    also pinned on the TOOL Step config and ExecutionStep.mcp_tool_version_id.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["MANUAL_TOOL_TEST"] = "MANUAL_TOOL_TEST"
+    mcp_tool_id: uuid.UUID
+    mcp_tool_version_id: uuid.UUID
+
+
 PlanSource = Annotated[
-    PlanSourceAgent | PlanSourceWorkflow,
+    PlanSourceAgent | PlanSourceWorkflow | PlanSourceManualToolTest,
     Field(discriminator="type"),
 ]
 

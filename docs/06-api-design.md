@@ -430,6 +430,46 @@ POST  /mcp/tools/{tool_id}/test-calls
 GET   /mcp/tools/{tool_id}/impact
 ```
 
+### 9.0 Manual Tool Test Call (FNC-TOOL-005)
+
+```text
+POST /mcp/tools/{tool_id}/test-calls
+```
+
+- Cookie Session + CSRF required (unsafe)
+- Header `Idempotency-Key` required (≤128)
+- Authz: User ACTIVE + `mcp.tool.execute` + exact `MCP_TOOL` ResourceGrant
+- Creates `Execution` with `source_type=MANUAL_TOOL_TEST`, `trigger_type=TEST`
+- Does **not** create ToolVerification / evidence blobs
+
+Request:
+
+```json
+{
+  "mcp_tool_version_id": "<uuid>",
+  "arguments": { "location": "Seoul" }
+}
+```
+
+Response `201`:
+
+```json
+{
+  "id": "<execution_id>",
+  "status": "CREATED",
+  "source_type": "MANUAL_TOOL_TEST",
+  "trigger_type": "TEST",
+  "mcp_tool_id": "<uuid>",
+  "mcp_tool_version_id": "<uuid>",
+  "plan_hash": "<64-hex>",
+  "requested_at": "...",
+  "step_count": 1
+}
+```
+
+Results/Step/ToolCall evidence are read via existing Execution query APIs
+(`GET /executions/{id}`, steps, events). No duplicate result store.
+
 Canonical Tool status:
 
 ```text
