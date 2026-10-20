@@ -291,3 +291,86 @@ async def test_pg_provider_timeout_failed(
         assert row.status == AgentRequestStatus.FAILED.value
         assert row.completed_at is not None
         assert row.structured_request is None
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_pg_rocket_and_calendar_clear_to_retrieving(
+    integration_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from app.domain.enums import ParameterProvenance, RiskClass
+
+    # a) destructive but clear intent — Analyzer must not invent prerequisites
+    async with integration_session_factory() as session:
+        rocket_id = await _seed_received(session, raw_text="Launch the rocket now")
+    rocket_provider = _MockProvider(
+        {
+            "schema_version": "1.0",
+            "request_text": "ignored",
+            "intent": "launch rocket",
+            "entities": [],
+            "constraints": [],
+            "expected_outputs": ["launch confirmation"],
+            "required_capabilities": ["rocket.launch"],
+            "risk_hints": [RiskClass.DESTRUCTIVE.value],
+            "missing_inputs": [],
+            "ambiguities": [],
+            "needs_clarification": False,
+        }
+    )
+    async with integration_session_factory() as session:
+        await RequestAnalyzerService(
+            session, model_provider=rocket_provider  # type: ignore[arg-type]
+        ).analyze(agent_request_id=rocket_id)
+    async with integration_session_factory() as session:
+        row = await AgentRequestRepository(session).get(rocket_id)
+        assert row is not None
+        assert row.status == AgentRequestStatus.RETRIEVING.value
+        assert row.missing_fields == []
+        assert row.structured_request is not None
+        assert row.structured_request["needs_clarification"] is False
+        assert row.structured_request["risk_hints"] == [RiskClass.DESTRUCTIVE.value]
+
+    # b) calendar with explicit title/when — no invented missing attendees
+    async with integration_session_factory() as session:
+        cal_id = await _seed_received(
+            session, raw_text="내일 오후 3시에 팀 미팅 일정 잡아줘"
+        )
+    cal_provider = _MockProvider(
+        {
+            "schema_version": "1.0",
+            "request_text": "ignored",
+            "intent": "schedule team meeting",
+            "entities": [
+                {
+                    "name": "title",
+                    "value": "팀 미팅",
+                    "source": ParameterProvenance.USER_EXPLICIT.value,
+                },
+                {
+                    "name": "when",
+                    "value": "내일 오후 3시",
+                    "source": ParameterProvenance.USER_EXPLICIT.value,
+                },
+            ],
+            "constraints": [],
+            "expected_outputs": ["scheduled meeting"],
+            "required_capabilities": ["calendar.schedule"],
+            "risk_hints": [RiskClass.IDEMPOTENT_WRITE.value],
+            "missing_inputs": [],
+            "ambiguities": [],
+            "needs_clarification": False,
+        }
+    )
+    async with integration_session_factory() as session:
+        result = await RequestAnalyzerService(
+            session, model_provider=cal_provider  # type: ignore[arg-type]
+        ).analyze(agent_request_id=cal_id)
+        by_name = {e.name: e.value for e in result.entities}
+        assert by_name["title"] == "팀 미팅"
+        assert by_name["when"] == "내일 오후 3시"
+    async with integration_session_factory() as session:
+        row = await AgentRequestRepository(session).get(cal_id)
+        assert row is not None
+        assert row.status == AgentRequestStatus.RETRIEVING.value
+        assert row.missing_fields == []
