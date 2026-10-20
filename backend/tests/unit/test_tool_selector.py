@@ -129,12 +129,15 @@ def _rerank_payload(candidates: list[RetrievedToolCandidate]) -> dict[str, Any]:
 class _MockLLM:
     def __init__(
         self,
-        payload: dict[str, Any] | Exception,
+        payload: dict[str, Any] | Exception | list[dict[str, Any] | Exception],
         *,
         delay: asyncio.Event | None = None,
         release: asyncio.Event | None = None,
     ) -> None:
-        self.payload = payload
+        self.payloads: list[dict[str, Any] | Exception] = (
+            list(payload) if isinstance(payload, list) else [payload]
+        )
+        self.payload = self.payloads[0]
         self.calls = 0
         self.messages: list[list[dict[str, Any]]] = []
         self.delay = delay
@@ -148,9 +151,14 @@ class _MockLLM:
             self.delay.set()
         if self.release is not None:
             await self.release.wait()
-        if isinstance(self.payload, Exception):
-            raise self.payload
-        return dict(self.payload)
+        index = self.calls - 1
+        if index >= len(self.payloads):
+            # Unexpected extra call (e.g. alignment) — fail-closed empty remap.
+            return {"mappings": []}
+        item = self.payloads[index]
+        if isinstance(item, Exception):
+            raise item
+        return dict(item)
 
 
 class _MockRetrieval:
@@ -1013,3 +1021,351 @@ async def test_provider_ownership_internal_error_path(
             tool_retrieval=_MockRetrieval(candidates),  # type: ignore[arg-type]
         ).select(agent_request_id=request_id)
     owned.aclose.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_entity_name_mismatch_recovers_to_auto_select(
+    db_session: AsyncSession,
+) -> None:
+    """Mismatch like seoul→location recovers via one alignment LLM call."""
+
+    request_id, _, _ = await _seed_retrieving(
+        db_session,
+        request_text="서울 날씨 알려줘",
+        entities=[
+            {
+                "name": "seoul",
+                "value": "서울",
+                "source": ParameterProvenance.USER_EXPLICIT.value,
+            }
+        ],
+    )
+    desc = _descriptor(name="lookup_weather", required_inputs=("location",), retrieval_score=0.95)
+    candidates = [_candidate(desc, allow_auto_select=True)]
+    rerank = _rerank_payload(candidates)
+    alignment = {
+        "mappings": [
+            {
+                "from_entity_name": "seoul",
+                "to_required_input": "location",
+                "rationale": "place name fills location",
+            }
+        ]
+    }
+    llm = _MockLLM([rerank, alignment])
+    outcome = await ToolSelectorService(
+        db_session,
+        model_provider=llm,  # type: ignore[arg-type]
+        tool_retrieval=_MockRetrieval(candidates),  # type: ignore[arg-type]
+    ).select(agent_request_id=request_id)
+
+    assert outcome.decision == "AUTO_SELECT"
+    assert outcome.confidence is not None
+    assert outcome.confidence.required_input_coverage == 1.0
+    assert llm.calls == 2
+
+    row = await AgentRequestRepository(db_session).get(request_id)
+    assert row is not None
+    assert row.status == AgentRequestStatus.BUILDING_PARAMETERS.value
+    assert row.structured_request is not None
+    names = {e["name"] for e in row.structured_request["entities"]}
+    assert "location" in names
+    assert "seoul" not in names
+    entity = row.structured_request["entities"][0]
+    assert entity["value"] == "서울"
+    assert entity["source"] == ParameterProvenance.USER_EXPLICIT.value
+
+    from app.repositories.tool_selection import ToolSelectionRepository
+
+    run = await ToolSelectionRepository(db_session).get_latest_for_agent_request(
+        request_id
+    )
+    assert run is not None
+    assert run.registry_snapshot.get("entity_alignments")
+    assert run.registry_snapshot["entity_alignments"][0]["from_entity_name"] == "seoul"
+    assert run.registry_snapshot["entity_alignments"][0]["to_required_input"] == "location"
+
+
+@pytest.mark.asyncio
+async def test_entity_alignment_insufficient_evidence_stays_clarify(
+    db_session: AsyncSession,
+) -> None:
+    request_id, _, _ = await _seed_retrieving(
+        db_session,
+        entities=[
+            {
+                "name": "seoul",
+                "value": "서울",
+                "source": ParameterProvenance.USER_EXPLICIT.value,
+            }
+        ],
+    )
+    desc = _descriptor(required_inputs=("location",), retrieval_score=0.95)
+    candidates = [_candidate(desc)]
+    llm = _MockLLM([_rerank_payload(candidates), {"mappings": []}])
+    outcome = await ToolSelectorService(
+        db_session,
+        model_provider=llm,  # type: ignore[arg-type]
+        tool_retrieval=_MockRetrieval(candidates),  # type: ignore[arg-type]
+    ).select(agent_request_id=request_id)
+
+    assert outcome.decision == "CLARIFY"
+    assert "location" in outcome.missing_fields
+    assert llm.calls == 2
+    row = await AgentRequestRepository(db_session).get(request_id)
+    assert row is not None
+    assert row.status == AgentRequestStatus.WAITING_INPUT.value
+    # Original mismatched name preserved — no speculative rename.
+    assert row.structured_request["entities"][0]["name"] == "seoul"
+
+
+@pytest.mark.asyncio
+async def test_entity_alignment_rejects_duplicate_source_names(
+    db_session: AsyncSession,
+) -> None:
+    """Same casefold entity name twice → reject mapping; keep original StructuredRequest."""
+
+    request_id, _, _ = await _seed_retrieving(
+        db_session,
+        request_text="서울 부산 날씨",
+        entities=[
+            {
+                "name": "seoul",
+                "value": "서울",
+                "source": ParameterProvenance.USER_EXPLICIT.value,
+            },
+            {
+                "name": "Seoul",
+                "value": "부산",
+                "source": ParameterProvenance.USER_EXPLICIT.value,
+            },
+        ],
+    )
+    desc = _descriptor(
+        name="lookup_weather", required_inputs=("location",), retrieval_score=0.95
+    )
+    candidates = [_candidate(desc, allow_auto_select=True)]
+    rerank = _rerank_payload(candidates)
+    alignment = {
+        "mappings": [
+            {
+                "from_entity_name": "seoul",
+                "to_required_input": "location",
+                "rationale": "place name fills location",
+            }
+        ]
+    }
+    llm = _MockLLM([rerank, alignment])
+    outcome = await ToolSelectorService(
+        db_session,
+        model_provider=llm,  # type: ignore[arg-type]
+        tool_retrieval=_MockRetrieval(candidates),  # type: ignore[arg-type]
+    ).select(agent_request_id=request_id)
+
+    assert outcome.decision == "CLARIFY"
+    assert "location" in outcome.missing_fields
+    assert llm.calls == 2
+
+    row = await AgentRequestRepository(db_session).get(request_id)
+    assert row is not None
+    assert row.status == AgentRequestStatus.WAITING_INPUT.value
+    assert row.structured_request is not None
+    names = [e["name"] for e in row.structured_request["entities"]]
+    assert names == ["seoul", "Seoul"]
+    assert {e["value"] for e in row.structured_request["entities"]} == {"서울", "부산"}
+
+    from app.repositories.tool_selection import ToolSelectionRepository
+
+    run = await ToolSelectionRepository(db_session).get_latest_for_agent_request(
+        request_id
+    )
+    assert run is not None
+    assert not run.registry_snapshot.get("entity_alignments")
+
+
+@pytest.mark.asyncio
+async def test_unsupported_capability_empty_retrieval_no_match(
+    db_session: AsyncSession,
+) -> None:
+    request_id, _, _ = await _seed_retrieving(
+        db_session,
+        request_text="Launch the rocket now",
+        entities=[],
+    )
+    # Patch structured capabilities to rocket.launch for evidence realism.
+    row = await AgentRequestRepository(db_session).get(request_id)
+    assert row is not None and row.structured_request is not None
+    row.structured_request = {
+        **row.structured_request,
+        "intent": "launch_rocket",
+        "required_capabilities": ["rocket.launch"],
+        "risk_hints": [RiskClass.DESTRUCTIVE.value],
+    }
+    await db_session.commit()
+
+    llm = _MockLLM({"candidates": [], "ambiguities": []})
+    outcome = await ToolSelectorService(
+        db_session,
+        model_provider=llm,  # type: ignore[arg-type]
+        tool_retrieval=_MockRetrieval([]),  # type: ignore[arg-type]
+    ).select(agent_request_id=request_id)
+
+    assert outcome.decision == "NO_MATCH"
+    assert outcome.agent_request_status == AgentRequestStatus.REJECTED.value
+    assert llm.calls == 0  # no rerank when retrieval empty
+    row = await AgentRequestRepository(db_session).get(request_id)
+    assert row is not None
+    assert row.status == AgentRequestStatus.REJECTED.value
+
+
+@pytest.mark.asyncio
+async def test_tool_present_unmet_required_input_clarify_not_auto_select(
+    db_session: AsyncSession,
+) -> None:
+    """Tool exists but required input uncovered → CLARIFY; never AUTO_SELECT."""
+
+    request_id, _, _ = await _seed_retrieving(
+        db_session,
+        request_text="그 도시 날씨 알려줘",
+        entities=[],
+    )
+    desc = _descriptor(
+        name="lookup_weather",
+        required_inputs=("location",),
+        retrieval_score=0.99,
+    )
+    # High fit + allow_auto_select must not override unmet required inputs.
+    candidates = [_candidate(desc, allow_auto_select=True)]
+    llm = _MockLLM(_rerank_payload(candidates))
+    outcome = await ToolSelectorService(
+        db_session,
+        model_provider=llm,  # type: ignore[arg-type]
+        tool_retrieval=_MockRetrieval(candidates),  # type: ignore[arg-type]
+    ).select(agent_request_id=request_id)
+
+    assert outcome.decision == "CLARIFY"
+    assert outcome.decision != "AUTO_SELECT"
+    assert "location" in outcome.missing_fields
+    assert outcome.confidence is not None
+    assert outcome.confidence.required_input_coverage < 1.0
+
+    row = await AgentRequestRepository(db_session).get(request_id)
+    assert row is not None
+    assert row.status == AgentRequestStatus.WAITING_INPUT.value
+    assert "location" in row.missing_fields
+
+
+@pytest.mark.asyncio
+async def test_echo_and_calendar_entity_match_still_auto_select(
+    db_session: AsyncSession,
+) -> None:
+    # Echo
+    echo_id, _, _ = await _seed_retrieving(
+        db_session,
+        request_text="echo hello world",
+        entities=[
+            {
+                "name": "text",
+                "value": "hello world",
+                "source": ParameterProvenance.USER_EXPLICIT.value,
+            }
+        ],
+    )
+    echo_desc = _descriptor(
+        name="echo", required_inputs=("text",), retrieval_score=0.95
+    )
+    echo_candidates = [_candidate(echo_desc)]
+    echo_outcome = await ToolSelectorService(
+        db_session,
+        model_provider=_MockLLM(_rerank_payload(echo_candidates)),  # type: ignore[arg-type]
+        tool_retrieval=_MockRetrieval(echo_candidates),  # type: ignore[arg-type]
+    ).select(agent_request_id=echo_id)
+    assert echo_outcome.decision == "AUTO_SELECT"
+    assert echo_outcome.confidence is not None
+    assert echo_outcome.confidence.required_input_coverage == 1.0
+
+    # Calendar
+    cal_id, _, _ = await _seed_retrieving(
+        db_session,
+        request_text="내일 오후 3시에 팀 미팅 일정 잡아줘",
+        entities=[
+            {
+                "name": "title",
+                "value": "팀 미팅",
+                "source": ParameterProvenance.USER_EXPLICIT.value,
+            },
+            {
+                "name": "when",
+                "value": "내일 오후 3시",
+                "source": ParameterProvenance.USER_EXPLICIT.value,
+            },
+        ],
+    )
+    cal_desc = _descriptor(
+        name="create_event",
+        required_inputs=("title", "when"),
+        retrieval_score=0.95,
+    )
+    cal_candidates = [_candidate(cal_desc)]
+    cal_outcome = await ToolSelectorService(
+        db_session,
+        model_provider=_MockLLM(_rerank_payload(cal_candidates)),  # type: ignore[arg-type]
+        tool_retrieval=_MockRetrieval(cal_candidates),  # type: ignore[arg-type]
+    ).select(agent_request_id=cal_id)
+    assert cal_outcome.decision == "AUTO_SELECT"
+    assert cal_outcome.confidence is not None
+    assert cal_outcome.confidence.required_input_coverage == 1.0
+
+
+@pytest.mark.asyncio
+async def test_destructive_confirmation_gate_not_bypassed_by_alignment(
+    db_session: AsyncSession,
+) -> None:
+    request_id, _, _ = await _seed_retrieving(
+        db_session,
+        request_text="Launch the rocket now",
+        entities=[
+            {
+                "name": "rocket_id",
+                "value": "R-1",
+                "source": ParameterProvenance.USER_EXPLICIT.value,
+            }
+        ],
+    )
+    desc = _descriptor(
+        name="launch_rocket",
+        required_inputs=("target",),
+        retrieval_score=0.95,
+    )
+    # Mismatched entity name + confirmation gate must not AUTO_SELECT even if aligned.
+    candidates = [
+        _candidate(
+            desc,
+            allow_auto_select=True,
+            policy_requires_confirmation=True,
+        )
+    ]
+    llm = _MockLLM(
+        [
+            _rerank_payload(candidates),
+            {
+                "mappings": [
+                    {
+                        "from_entity_name": "rocket_id",
+                        "to_required_input": "target",
+                        "rationale": "identifier fills target",
+                    }
+                ]
+            },
+        ]
+    )
+    outcome = await ToolSelectorService(
+        db_session,
+        model_provider=llm,  # type: ignore[arg-type]
+        tool_retrieval=_MockRetrieval(candidates),  # type: ignore[arg-type]
+    ).select(agent_request_id=request_id)
+
+    assert outcome.decision == "CONFIRM"
+    assert outcome.agent_request_status == AgentRequestStatus.WAITING_CONFIRMATION.value
+    assert outcome.confidence is not None
+    assert outcome.confidence.required_input_coverage == 1.0

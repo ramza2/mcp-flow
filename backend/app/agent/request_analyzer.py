@@ -56,6 +56,10 @@ understand or route to Tool retrieval/selection.
 missing_inputs=[], ambiguities=[], needs_clarification=false and let the Selector \
 proceed. Analyzer must NOT decide whether a usable Tool exists; unsupported \
 capability is Selector NO_MATCH, not Analyzer WAITING_INPUT.
+- When required_capabilities is non-empty and ambiguities is empty, do not block \
+on speculative execution details (identifiers, clearance, attendees, duration). \
+Those belong to Selector CLARIFY after a Tool is chosen — or NO_MATCH when no \
+authorized Tool exists.
 - Dangerous requests still proceed when intent/capability/risk can be structured. \
 Put danger in risk_hints (for example DESTRUCTIVE). Do not add hypothetical \
 prerequisites to missing_inputs only because the request is risky. Example: \
@@ -268,6 +272,8 @@ class RequestAnalyzerService:
                 ],
             ) from exc
 
+        structured = self._sanitize_request_level_clarification(structured)
+
         analyzed_at = datetime.now(UTC)
         snapshot = structured.model_dump(mode="json")
         missing_fields = list(structured.missing_inputs)
@@ -307,6 +313,39 @@ class RequestAnalyzerService:
             new_status.value,
         )
         return structured
+
+    @staticmethod
+    def _sanitize_request_level_clarification(
+        structured: StructuredRequestV1,
+    ) -> StructuredRequestV1:
+        """Defer Tool-input sufficiency to Selector when the request is routable.
+
+        docs/04 separates Analyzer meaning/routing from Selector Tool existence
+        and required-input coverage:
+
+        - True meaning ambiguity (`ambiguities` non-empty) → keep WAITING_INPUT.
+        - Unroutable incompleteness (empty `required_capabilities`) → keep
+          Analyzer clarification unchanged.
+        - Routable request (`required_capabilities` non-empty, `ambiguities`
+          empty) → clear Analyzer-level `missing_inputs` / `needs_clarification`
+          so Authorized Retrieval / Selector can run. Tool absence → NO_MATCH;
+          selected Tool with unmet required inputs → CLARIFY. RiskClass is
+          never used as a routing bypass (docs/04: no RiskClass→confirmation
+          mapping at selection either).
+
+        Analyzer cannot classify missing_inputs names against Tool schemas;
+        clearing on the routable path is deferral, not a claim that inputs are
+        satisfied. AUTO_SELECT remains gated by Selector coverage / policy.
+        """
+
+        if not structured.required_capabilities or structured.ambiguities:
+            return structured
+        if not structured.missing_inputs and not structured.needs_clarification:
+            return structured
+        data = structured.model_dump(mode="json")
+        data["missing_inputs"] = []
+        data["needs_clarification"] = False
+        return StructuredRequestV1.model_validate(data)
 
     def _build_messages(
         self,

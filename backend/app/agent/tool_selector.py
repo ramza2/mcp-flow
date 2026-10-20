@@ -17,6 +17,14 @@ from fastapi import status
 from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agent.entity_alignment import (
+    EntityAlignmentResponse,
+    alignment_candidates_available,
+    alignment_evidence,
+    apply_entity_alignments,
+    build_alignment_messages,
+    unused_user_explicit_entities,
+)
 from app.agent.selection_confidence import (
     candidate_by_tool_version_id,
     compute_candidate_margin,
@@ -388,8 +396,31 @@ class ToolSelectorService:
                 ],
             ) from exc
 
+        structured_for_decision = structured
+        entity_alignment_audit: list[dict[str, str]] = []
+        try:
+            structured_for_decision, entity_alignment_audit = (
+                await self._maybe_align_entities(
+                    structured=structured,
+                    prompt_candidates=prompt_candidates,
+                    rerank=rerank,
+                    provider=provider,
+                    llm_target=llm_target,
+                    profile_parameters=profile_parameters,
+                    agent_request_id=agent_request_id,
+                )
+            )
+        except ModelProviderError as exc:
+            # Alignment is best-effort; provider failure must not invent remaps.
+            logger.info(
+                "tool_selector entity_alignment_provider_error "
+                "agent_request_id=%s code=%s",
+                agent_request_id,
+                exc.error_code,
+            )
+
         outcome = self._decide(
-            structured=structured,
+            structured=structured_for_decision,
             prompt_candidates=prompt_candidates,
             rerank=rerank,
             selection_settings=selection_settings,
@@ -485,6 +516,7 @@ class ToolSelectorService:
             selection_result=outcome.selection_result,
             confidence_breakdown=outcome.confidence,
             clarification=clarification,
+            entity_alignments=entity_alignment_audit,
         )
 
     def _load_structured_request(self, request: AgentRequest) -> StructuredRequestV1:
@@ -615,6 +647,112 @@ class ToolSelectorService:
                     status_code=status.HTTP_400_BAD_REQUEST,
                 )
         return rerank
+
+    async def _maybe_align_entities(
+        self,
+        *,
+        structured: StructuredRequestV1,
+        prompt_candidates: list[RetrievedToolCandidate],
+        rerank: LLMRerankResponse,
+        provider: ModelProviderClient,
+        llm_target: LLMConnectionTarget,
+        profile_parameters: dict[str, Any] | None,
+        agent_request_id: uuid.UUID,
+    ) -> tuple[StructuredRequestV1, list[dict[str, str]]]:
+        """At most one LLM alignment call against top-1 authorized candidate inputs.
+
+        Fail-closed: invalid/empty mappings leave StructuredRequest unchanged and
+        never invent AUTO_SELECT coverage.
+        """
+
+        retrieval_by_id = {
+            item.descriptor.tool_version_id: float(item.descriptor.retrieval_score)
+            for item in prompt_candidates
+        }
+        scored = [
+            (item.tool_version_id, float(item.llm_fit_score))
+            for item in rerank.candidates
+        ]
+        ordered = sort_reranked_candidates(
+            scored=scored, retrieval_by_id=retrieval_by_id
+        )
+        if not ordered:
+            return structured, []
+        top1 = candidate_by_tool_version_id(prompt_candidates, ordered[0][0])
+        if top1 is None:
+            return structured, []
+
+        required = list(top1.descriptor.required_inputs)
+        optional = list(top1.descriptor.optional_inputs)
+        if not alignment_candidates_available(
+            structured, required_inputs=required, optional_inputs=optional
+        ):
+            return structured, []
+
+        missing = missing_required_inputs(
+            required_inputs=required, structured=structured
+        )
+        unused = unused_user_explicit_entities(
+            structured, required_inputs=required, optional_inputs=optional
+        )
+        messages = build_alignment_messages(
+            structured=structured,
+            required_inputs=required,
+            optional_inputs=optional,
+            missing_required=missing,
+            unused_entities=unused,
+        )
+        logger.info(
+            "tool_selector entity_alignment_start agent_request_id=%s "
+            "tool_version_id=%s missing_count=%s unused_count=%s",
+            agent_request_id,
+            top1.descriptor.tool_version_id,
+            len(missing),
+            len(unused),
+        )
+        # Max one recovery call — ModelProviderError propagates to caller.
+        payload = await provider.generate_json(
+            llm_target,
+            messages=messages,
+            parameters=profile_parameters,
+        )
+        try:
+            if not isinstance(payload, dict):
+                return structured, []
+            response = EntityAlignmentResponse.model_validate(payload)
+        except ValidationError:
+            logger.info(
+                "tool_selector entity_alignment_invalid agent_request_id=%s",
+                agent_request_id,
+            )
+            return structured, []
+
+        aligned = apply_entity_alignments(
+            structured,
+            response.mappings,
+            required_inputs=required,
+            optional_inputs=optional,
+        )
+        if aligned is None:
+            return structured, []
+
+        # Persist remapped names for Parameter Builder; values/provenance unchanged.
+        request = await self._requests.get(agent_request_id)
+        if request is not None and request.status == AgentRequestStatus.SELECTING.value:
+            request.structured_request = aligned.model_dump(mode="json")
+            await self._session.flush()
+
+        evidence = alignment_evidence(
+            mappings=response.mappings,
+            tool_version_id=str(top1.descriptor.tool_version_id),
+        )
+        logger.info(
+            "tool_selector entity_alignment_applied agent_request_id=%s "
+            "mapping_count=%s",
+            agent_request_id,
+            len(evidence),
+        )
+        return aligned, evidence
 
     def _decide(
         self,
@@ -849,6 +987,7 @@ class ToolSelectorService:
         selection_result: ToolSelectionResult | None,
         confidence_breakdown: ConfidenceBreakdown | None,
         clarification: str | None,
+        entity_alignments: list[dict[str, str]] | None = None,
     ) -> ToolSelectionOutcome:
         set_completed_at = new_status in {
             AgentRequestStatus.REJECTED,
@@ -875,6 +1014,7 @@ class ToolSelectorService:
                 ambiguities=ambiguities,
                 prompt_candidates=prompt_candidates,
                 llm_scores=llm_scores,
+                entity_alignments=entity_alignments or [],
             )
             if clarification == "MISSING_PARAMETER":
                 await self._create_missing_parameter_clarification(
@@ -945,13 +1085,16 @@ class ToolSelectorService:
         ambiguities: list[str],
         prompt_candidates: list[RetrievedToolCandidate],
         llm_scores: dict[uuid.UUID, tuple[float, str]],
+        entity_alignments: list[dict[str, str]] | None = None,
     ) -> None:
-        registry_snapshot = {
+        registry_snapshot: dict[str, Any] = {
             "embedding_profile_id": str(embedding_profile_id),
             "authorized_candidate_tool_version_ids": [
                 str(item.descriptor.tool_version_id) for item in prompt_candidates
             ],
         }
+        if entity_alignments:
+            registry_snapshot["entity_alignments"] = list(entity_alignments)
         run = await self._selections.create_run(
             agent_request_id=agent_request_id,
             agent_version_id=agent_version_id,
