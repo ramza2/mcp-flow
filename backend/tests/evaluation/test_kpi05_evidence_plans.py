@@ -261,7 +261,7 @@ async def test_poll_sees_external_worker_status_via_fresh_sessions(
             self._session = session
 
         async def get(self, _execution_id: uuid.UUID) -> _Row:
-            tick = getattr(self._session, "tick")
+            tick = self._session.tick
             return _Row(statuses[tick])
 
     class _SessionCM:
