@@ -481,3 +481,152 @@ async def test_provider_ownership_internal_success_and_error(
             agent_request_id=request_id2
         )
     owned2.aclose.assert_awaited_once()
+
+
+def test_security_contract_covers_missing_inputs_and_entity_rules() -> None:
+    from app.agent.request_analyzer import _SECURITY_SYSTEM_CONTRACT
+
+    contract = _SECURITY_SYSTEM_CONTRACT
+    assert "missing_inputs is NOT for Tool-specific required parameters" in contract
+    assert "Selector NO_MATCH" in contract
+    assert "Launch the rocket now" in contract
+    assert "lower_snake_case" in contract
+    assert 'title="팀 미팅"' in contract
+    assert 'when="내일 오후 3시"' in contract
+    assert "needs_clarification must equal bool(missing_inputs or ambiguities)" in contract
+    assert "Do not use Korean keys" in contract
+
+
+@pytest.mark.asyncio
+async def test_security_contract_included_in_provider_messages(
+    db_session: AsyncSession,
+) -> None:
+    from app.agent.request_analyzer import _SECURITY_SYSTEM_CONTRACT
+
+    request_id, _, _ = await _seed_received(db_session, raw_text="서울 날씨 알려줘")
+    provider = _MockProvider(_structured(request_text="ignored"))
+    await RequestAnalyzerService(
+        db_session, model_provider=provider  # type: ignore[arg-type]
+    ).analyze(agent_request_id=request_id)
+
+    assert provider.messages
+    assert provider.messages[0][0]["role"] == "system"
+    assert provider.messages[0][0]["content"] == _SECURITY_SYSTEM_CONTRACT
+
+
+@pytest.mark.asyncio
+async def test_rocket_request_clears_clarification_to_retrieving(
+    db_session: AsyncSession,
+) -> None:
+    """KPI-02 style: clear destructive intent → RETRIEVING (Selector NO_MATCH later)."""
+
+    raw = "Launch the rocket now"
+    request_id, _, _ = await _seed_received(db_session, raw_text=raw)
+    payload = {
+        "schema_version": "1.0",
+        "request_text": "MODEL SHOULD NOT WIN",
+        "intent": "launch rocket",
+        "entities": [],
+        "constraints": [],
+        "expected_outputs": ["launch confirmation"],
+        "required_capabilities": ["rocket.launch"],
+        "risk_hints": [RiskClass.DESTRUCTIVE.value],
+        "missing_inputs": [],
+        "ambiguities": [],
+        "needs_clarification": False,
+    }
+    provider = _MockProvider(payload)
+    result = await RequestAnalyzerService(
+        db_session, model_provider=provider  # type: ignore[arg-type]
+    ).analyze(agent_request_id=request_id)
+
+    assert result.missing_inputs == []
+    assert result.ambiguities == []
+    assert result.needs_clarification is False
+    assert result.required_capabilities == ["rocket.launch"]
+    assert result.risk_hints == [RiskClass.DESTRUCTIVE]
+
+    row = await AgentRequestRepository(db_session).get(request_id)
+    assert row is not None
+    assert row.status == AgentRequestStatus.RETRIEVING.value
+    assert row.missing_fields == []
+    assert row.structured_request is not None
+    assert row.structured_request["needs_clarification"] is False
+
+
+@pytest.mark.asyncio
+async def test_calendar_request_extracts_title_when_to_retrieving(
+    db_session: AsyncSession,
+) -> None:
+    raw = "내일 오후 3시에 팀 미팅 일정 잡아줘"
+    request_id, _, _ = await _seed_received(db_session, raw_text=raw)
+    payload = {
+        "schema_version": "1.0",
+        "request_text": "MODEL SHOULD NOT WIN",
+        "intent": "schedule team meeting",
+        "entities": [
+            {
+                "name": "title",
+                "value": "팀 미팅",
+                "source": ParameterProvenance.USER_EXPLICIT.value,
+            },
+            {
+                "name": "when",
+                "value": "내일 오후 3시",
+                "source": ParameterProvenance.USER_EXPLICIT.value,
+            },
+        ],
+        "constraints": [],
+        "expected_outputs": ["scheduled meeting"],
+        "required_capabilities": ["calendar.schedule"],
+        "risk_hints": [RiskClass.IDEMPOTENT_WRITE.value],
+        "missing_inputs": [],
+        "ambiguities": [],
+        "needs_clarification": False,
+    }
+    provider = _MockProvider(payload)
+    result = await RequestAnalyzerService(
+        db_session, model_provider=provider  # type: ignore[arg-type]
+    ).analyze(agent_request_id=request_id)
+
+    assert result.needs_clarification is False
+    assert result.missing_inputs == []
+    assert result.ambiguities == []
+    by_name = {e.name: e for e in result.entities}
+    assert by_name["title"].value == "팀 미팅"
+    assert by_name["title"].source == ParameterProvenance.USER_EXPLICIT
+    assert by_name["when"].value == "내일 오후 3시"
+    assert by_name["when"].source == ParameterProvenance.USER_EXPLICIT
+
+    row = await AgentRequestRepository(db_session).get(request_id)
+    assert row is not None
+    assert row.status == AgentRequestStatus.RETRIEVING.value
+    assert row.missing_fields == []
+
+
+@pytest.mark.asyncio
+async def test_needs_clarification_mismatch_fails_validation(
+    db_session: AsyncSession,
+) -> None:
+    """Contract invariant: needs_clarification must match missing/ambiguities."""
+
+    request_id, _, _ = await _seed_received(
+        db_session, raw_text="내일 오후 3시에 팀 미팅 일정 잡아줘"
+    )
+    provider = _MockProvider(
+        _structured(
+            request_text="x",
+            missing_inputs=["회의 참석자", "회의 주제"],
+            extra={"needs_clarification": False},
+        )
+    )
+    with pytest.raises(AppError) as exc:
+        await RequestAnalyzerService(
+            db_session, model_provider=provider  # type: ignore[arg-type]
+        ).analyze(agent_request_id=request_id)
+    assert exc.value.code == "VALIDATION_ERROR"
+
+    row = await AgentRequestRepository(db_session).get(request_id)
+    assert row is not None
+    assert row.status == AgentRequestStatus.FAILED.value
+    assert row.structured_request is None
