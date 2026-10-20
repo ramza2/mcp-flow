@@ -495,6 +495,7 @@ def test_security_contract_covers_missing_inputs_and_entity_rules() -> None:
     assert 'when="내일 오후 3시"' in contract
     assert "needs_clarification must equal bool(missing_inputs or ambiguities)" in contract
     assert "Do not use Korean keys" in contract
+    assert "speculative execution details" in contract
 
 
 @pytest.mark.asyncio
@@ -552,6 +553,65 @@ async def test_rocket_request_clears_clarification_to_retrieving(
     assert row.missing_fields == []
     assert row.structured_request is not None
     assert row.structured_request["needs_clarification"] is False
+
+
+@pytest.mark.asyncio
+async def test_rocket_speculative_missing_inputs_sanitized_to_retrieving(
+    db_session: AsyncSession,
+) -> None:
+    """Model invents rocket_identifier — sanitize when capabilities are routable."""
+
+    request_id, _, _ = await _seed_received(
+        db_session, raw_text="Launch the rocket now"
+    )
+    payload = {
+        "schema_version": "1.0",
+        "request_text": "MODEL SHOULD NOT WIN",
+        "intent": "launch_rocket",
+        "entities": [],
+        "constraints": [],
+        "expected_outputs": ["launch confirmation"],
+        "required_capabilities": ["rocket.launch"],
+        "risk_hints": [RiskClass.DESTRUCTIVE.value],
+        "missing_inputs": ["rocket_identifier"],
+        "ambiguities": [],
+        "needs_clarification": True,
+    }
+    provider = _MockProvider(payload)
+    result = await RequestAnalyzerService(
+        db_session, model_provider=provider  # type: ignore[arg-type]
+    ).analyze(agent_request_id=request_id)
+
+    assert result.missing_inputs == []
+    assert result.needs_clarification is False
+    assert result.risk_hints == [RiskClass.DESTRUCTIVE]
+    row = await AgentRequestRepository(db_session).get(request_id)
+    assert row is not None
+    assert row.status == AgentRequestStatus.RETRIEVING.value
+    assert row.missing_fields == []
+
+
+@pytest.mark.asyncio
+async def test_true_ambiguity_keeps_waiting_input(db_session: AsyncSession) -> None:
+    request_id, _, _ = await _seed_received(
+        db_session, raw_text="그 도시 날씨 알려줘"
+    )
+    provider = _MockProvider(
+        _structured(
+            request_text="x",
+            ambiguities=["어느 도시를 의미하는지 불명확"],
+        )
+    )
+    await RequestAnalyzerService(
+        db_session, model_provider=provider  # type: ignore[arg-type]
+    ).analyze(agent_request_id=request_id)
+
+    row = await AgentRequestRepository(db_session).get(request_id)
+    assert row is not None
+    assert row.status == AgentRequestStatus.WAITING_INPUT.value
+    assert row.structured_request is not None
+    assert row.structured_request["needs_clarification"] is True
+    assert row.structured_request["ambiguities"]
 
 
 @pytest.mark.asyncio

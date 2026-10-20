@@ -56,6 +56,10 @@ understand or route to Tool retrieval/selection.
 missing_inputs=[], ambiguities=[], needs_clarification=false and let the Selector \
 proceed. Analyzer must NOT decide whether a usable Tool exists; unsupported \
 capability is Selector NO_MATCH, not Analyzer WAITING_INPUT.
+- When required_capabilities is non-empty and ambiguities is empty, do not block \
+on speculative execution details (identifiers, clearance, attendees, duration). \
+Those belong to Selector CLARIFY after a Tool is chosen — or NO_MATCH when no \
+authorized Tool exists.
 - Dangerous requests still proceed when intent/capability/risk can be structured. \
 Put danger in risk_hints (for example DESTRUCTIVE). Do not add hypothetical \
 prerequisites to missing_inputs only because the request is risky. Example: \
@@ -268,6 +272,8 @@ class RequestAnalyzerService:
                 ],
             ) from exc
 
+        structured = self._sanitize_request_level_clarification(structured)
+
         analyzed_at = datetime.now(UTC)
         snapshot = structured.model_dump(mode="json")
         missing_fields = list(structured.missing_inputs)
@@ -307,6 +313,28 @@ class RequestAnalyzerService:
             new_status.value,
         )
         return structured
+
+    @staticmethod
+    def _sanitize_request_level_clarification(
+        structured: StructuredRequestV1,
+    ) -> StructuredRequestV1:
+        """Drop speculative execution missing_inputs when routing is already possible.
+
+        If required_capabilities is non-empty and ambiguities is empty, the request
+        is routable to Authorized Retrieval / Selector. Tool-specific prerequisites
+        must not force WAITING_INPUT before Tool existence is evaluated.
+        True meaning ambiguity (non-empty ambiguities) is preserved.
+        Unroutable requests (empty capabilities + missing_inputs) stay WAITING_INPUT.
+        """
+
+        if not structured.required_capabilities or structured.ambiguities:
+            return structured
+        if not structured.missing_inputs and not structured.needs_clarification:
+            return structured
+        data = structured.model_dump(mode="json")
+        data["missing_inputs"] = []
+        data["needs_clarification"] = False
+        return StructuredRequestV1.model_validate(data)
 
     def _build_messages(
         self,
