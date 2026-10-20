@@ -76,6 +76,19 @@ _COMPOSE_SERVER = (
     "docker compose --env-file .env.server -f compose.yaml -f compose.server.yaml"
 )
 
+# api image USER mcpflow (infra/docker/backend.Dockerfile)
+_ARTIFACT_CONTAINER_UID = 10001
+_OPS_ENV_LABEL = "server-live-kpi05-pr127"
+
+_PRE_DB_FAIL_REASONS = frozenset(
+    {
+        "ARTIFACT_EXISTS",
+        "DUPLICATE_RUN_STAMP",
+        "GIT_SHA_UNKNOWN",
+        "ARTIFACT_DIR_NOT_WRITABLE",
+    }
+)
+
 
 def _tool_version_id() -> uuid.UUID:
     raw = os.environ.get("MCPFLOW_KPI05_TOOL_VERSION_ID", "").strip()
@@ -196,6 +209,11 @@ def compose_commands(
         "  -e PYTHONPATH=/opt/kpi-src \\",
         "  -e MCPFLOW_ARTIFACT_DIR=/opt/kpi-artifacts \\",
     ]
+    # Ops --run / official measure: pin git SHA + env label into evidence.
+    ops_env = [
+        '  -e MCPFLOW_GIT_SHA="$(git rev-parse HEAD)" \\',
+        f"  -e MCPFLOW_ENV_LABEL={_OPS_ENV_LABEL} \\",
+    ]
     py_wrap = (
         '  api sh -c \'export DATABASE_URL="$MCPFLOW_DATABASE_URL"; '
         'export TEST_DATABASE_URL="$MCPFLOW_DATABASE_URL"; '
@@ -204,6 +222,9 @@ def compose_commands(
     lines = [
         "# Server prerequisites (repo root): .env.server + compose.yaml + compose.server.yaml",
         "# Backend image has no tests/ — mount backend read-only; persist artifacts/kpi05/",
+        "# api image USER mcpflow is uid/gid 10001; host dir must be writable",
+        "mkdir -p artifacts/kpi05",
+        "sudo chown -R 10001:10001 artifacts/kpi05",
         f"{_COMPOSE_SERVER} ps -a",
         "",
         "# Dry-run plan preflight (no Workflow/Execution writes)",
@@ -216,6 +237,7 @@ def compose_commands(
         "",
         "# Explicit run (NEW evaluation Workflows only; workers/outbox stage CREATED)",
         *run_prefix,
+        *ops_env,
         "  -e MCPFLOW_KPI05_REQUESTER_USER_ID=<ACTIVE_USER_UUID> \\",
         f"{py_wrap}exec python -m tests.evaluation.kpi05_evidence.runner "
         "--run --wait-seconds 180 --write-artifact'",
@@ -223,6 +245,7 @@ def compose_commands(
         "# Official KPI-05 (six Execution IDs; no shared WorkflowVersion pin)",
         *env_exports,
         *run_prefix,
+        *ops_env,
         "  -e MCPFLOW_KPI_EXECUTION_ID_SEQUENTIAL_TOOL_CHAIN \\",
         "  -e MCPFLOW_KPI_EXECUTION_ID_PARALLEL_JOIN_WAVE \\",
         "  -e MCPFLOW_KPI_EXECUTION_ID_CONDITION_BRANCH \\",
@@ -246,6 +269,67 @@ def check_artifact_guard(stamp: str) -> dict[str, Any]:
             "artifact_path": str(path),
         }
     return {"ok": True, "artifact_path": str(path)}
+
+
+def check_git_sha_for_run() -> dict[str, Any]:
+    """Fail-closed when --run cannot resolve a real Git SHA for evidence."""
+
+    sha = git_sha()
+    if not sha or sha == "unknown":
+        return {
+            "ok": False,
+            "reason": "GIT_SHA_UNKNOWN",
+            "git_sha": sha or "unknown",
+            "hint": (
+                "Pass -e MCPFLOW_GIT_SHA=\"$(git rev-parse HEAD)\" "
+                "(see compose_commands) or run from a git checkout."
+            ),
+        }
+    return {"ok": True, "git_sha": sha}
+
+
+def check_artifact_dir_writable() -> dict[str, Any]:
+    """Fail-closed if artifacts/kpi05 cannot be written (ops uid 10001)."""
+
+    try:
+        path = artifact_dir("kpi05")
+    except OSError as exc:
+        return {
+            "ok": False,
+            "reason": "ARTIFACT_DIR_NOT_WRITABLE",
+            "error": str(exc),
+            "expected_uid": _ARTIFACT_CONTAINER_UID,
+            "euid": os.geteuid(),
+            "hint": (
+                f"On the host: mkdir -p artifacts/kpi05 && "
+                f"sudo chown -R {_ARTIFACT_CONTAINER_UID}:{_ARTIFACT_CONTAINER_UID} "
+                "artifacts/kpi05"
+            ),
+        }
+    probe = path / f".write_probe_{uuid.uuid4().hex}"
+    try:
+        probe.write_text("ok\n", encoding="utf-8")
+        probe.unlink(missing_ok=True)
+    except OSError as exc:
+        return {
+            "ok": False,
+            "reason": "ARTIFACT_DIR_NOT_WRITABLE",
+            "artifact_dir": str(path),
+            "error": str(exc),
+            "expected_uid": _ARTIFACT_CONTAINER_UID,
+            "euid": os.geteuid(),
+            "hint": (
+                f"On the host: mkdir -p artifacts/kpi05 && "
+                f"sudo chown -R {_ARTIFACT_CONTAINER_UID}:{_ARTIFACT_CONTAINER_UID} "
+                "artifacts/kpi05"
+            ),
+        }
+    return {
+        "ok": True,
+        "artifact_dir": str(path),
+        "euid": os.geteuid(),
+        "expected_uid": _ARTIFACT_CONTAINER_UID,
+    }
 
 
 async def check_db_duplicate_guards(
@@ -392,6 +476,15 @@ async def _publish_and_activate(
     )
 
 
+async def _lookup_execution_status(
+    session_factory: async_sessionmaker[AsyncSession],
+    execution_id: uuid.UUID,
+) -> str | None:
+    async with session_factory() as session:
+        row = await ExecutionRepository(session).get(execution_id)
+        return None if row is None else row.status
+
+
 async def _register_and_execute(
     session: AsyncSession,
     session_factory: async_sessionmaker[AsyncSession],
@@ -404,103 +497,181 @@ async def _register_and_execute(
     run_stamp: str,
     wait_seconds: int,
 ) -> dict[str, Any]:
-    tools = MCPToolRepository(session)
-    tv = await tools.get_version(tool_version_id)
-    if tv is None:
-        return {
-            "scenario_id": scenario_id,
-            "ok": False,
-            "reason": "TOOL_VERSION_NOT_FOUND",
-        }
-    logical = await tools.get(tv.mcp_tool_id)
-    if logical is None:
-        return {
-            "scenario_id": scenario_id,
-            "ok": False,
-            "reason": "MCP_TOOL_NOT_FOUND",
-        }
+    """Create one evaluation Workflow/Execution. Preserves IDs on mid-run errors."""
 
-    authz = await assert_requester_tool_authorized(
-        session, requester_id=requester_id, tool_id=logical.id
-    )
-    if not authz.get("ok"):
-        return {"scenario_id": scenario_id, **authz}
+    checkpoint: dict[str, Any] = {
+        "scenario_id": scenario_id,
+        "ok": False,
+        "queued_by_runner": False,
+    }
+    try:
+        tools = MCPToolRepository(session)
+        tv = await tools.get_version(tool_version_id)
+        if tv is None:
+            return {
+                "scenario_id": scenario_id,
+                "ok": False,
+                "reason": "TOOL_VERSION_NOT_FOUND",
+            }
+        logical = await tools.get(tv.mcp_tool_id)
+        if logical is None:
+            return {
+                "scenario_id": scenario_id,
+                "ok": False,
+                "reason": "MCP_TOOL_NOT_FOUND",
+            }
 
-    name = workflow_name_for(scenario_id, run_stamp)
-    workflow = await WorkflowService(session).create(
-        WorkflowCreate(
-            name=name,
-            description=f"KPI-05 evaluation-only workflow ({scenario_id})",
-            visibility=WorkflowVisibility.PRIVATE,
+        authz = await assert_requester_tool_authorized(
+            session, requester_id=requester_id, tool_id=logical.id
         )
-    )
-    plan = plan_builder(workflow_id=workflow.id, tool_version_id=tool_version_id)
-    plan["source"] = {"type": "WORKFLOW", "workflow_id": str(workflow.id)}
-    ExecutionPlanV1.model_validate(plan)
+        if not authz.get("ok"):
+            return {"scenario_id": scenario_id, **authz}
 
-    version = await WorkflowVersionService(session).create_version(
-        workflow.id,
-        WorkflowVersionCreate(
-            plan_definition=plan,
-            change_summary=f"KPI-05 {scenario_id} evidence",
-        ),
-    )
-    await _publish_and_activate(
-        session, workflow_id=workflow.id, version_id=version.id
-    )
-
-    # Evaluation Workflow grant only — never invent Tool grants.
-    await ResourceGrantService(session).create_for_user(
-        requester_id,
-        ResourceGrantCreate(
-            resource_type=ResourceGrantResourceType.WORKFLOW,
-            resource_id=workflow.id,
-        ),
-    )
-
-    idem = idempotency_key_for(scenario_id, run_stamp)
-    outcome = await WorkflowExecutionCreationService(
-        session
-    ).create_from_workflow_version(
-        workflow_id=workflow.id,
-        version_id=version.id,
-        requester_id=requester_id,
-        idempotency_key=idem,
-        body=WorkflowExecutionCreateRequest(inputs={}),
-    )
-    execution_id = outcome.result.id
-    # Do NOT call ExecutionQueueService.stage_created_batch — workers/outbox stage.
-    await session.commit()
-
-    poll = await poll_execution_until_terminal(
-        session_factory,
-        execution_id,
-        wait_seconds=wait_seconds,
-    )
-    async with session_factory() as evidence_session:
-        evidence = await collect_execution_evidence(
-            evidence_session,
-            execution_id=execution_id,
-            scenario_id=scenario_id,
-            kind=kind,
+        name = workflow_name_for(scenario_id, run_stamp)
+        workflow = await WorkflowService(session).create(
+            WorkflowCreate(
+                name=name,
+                description=f"KPI-05 evaluation-only workflow ({scenario_id})",
+                visibility=WorkflowVisibility.PRIVATE,
+            )
         )
-    evidence.update(
-        {
-            "workflow_id": str(workflow.id),
-            "workflow_version_id": str(version.id),
-            "workflow_name": name,
-            "idempotency_key": idem,
-            "last_polled_status": poll.get("status"),
-            "wait_seconds": wait_seconds,
-            "poll_timed_out": bool(poll.get("timed_out")),
-            "poll_reason": poll.get("reason"),
-            "queued_by_runner": False,
-        }
-    )
-    if poll.get("timed_out") or poll.get("reason") == "EXECUTION_DISAPPEARED":
-        evidence["ok"] = False
-        evidence["reason"] = poll.get("reason") or "WAIT_TIMEOUT"
-    return evidence
+        checkpoint["workflow_id"] = str(workflow.id)
+        checkpoint["workflow_name"] = name
+
+        plan = plan_builder(workflow_id=workflow.id, tool_version_id=tool_version_id)
+        plan["source"] = {"type": "WORKFLOW", "workflow_id": str(workflow.id)}
+        ExecutionPlanV1.model_validate(plan)
+
+        version = await WorkflowVersionService(session).create_version(
+            workflow.id,
+            WorkflowVersionCreate(
+                plan_definition=plan,
+                change_summary=f"KPI-05 {scenario_id} evidence",
+            ),
+        )
+        checkpoint["workflow_version_id"] = str(version.id)
+        await _publish_and_activate(
+            session, workflow_id=workflow.id, version_id=version.id
+        )
+
+        # Evaluation Workflow grant only — never invent Tool grants.
+        await ResourceGrantService(session).create_for_user(
+            requester_id,
+            ResourceGrantCreate(
+                resource_type=ResourceGrantResourceType.WORKFLOW,
+                resource_id=workflow.id,
+            ),
+        )
+
+        idem = idempotency_key_for(scenario_id, run_stamp)
+        checkpoint["idempotency_key"] = idem
+        outcome = await WorkflowExecutionCreationService(
+            session
+        ).create_from_workflow_version(
+            workflow_id=workflow.id,
+            version_id=version.id,
+            requester_id=requester_id,
+            idempotency_key=idem,
+            body=WorkflowExecutionCreateRequest(inputs={}),
+        )
+        execution_id = outcome.result.id
+        checkpoint["execution_id"] = str(execution_id)
+        checkpoint["last_polled_status"] = outcome.result.status
+        # Do NOT call ExecutionQueueService.stage_created_batch — workers/outbox stage.
+        await session.commit()
+
+        poll = await poll_execution_until_terminal(
+            session_factory,
+            execution_id,
+            wait_seconds=wait_seconds,
+        )
+        async with session_factory() as evidence_session:
+            evidence = await collect_execution_evidence(
+                evidence_session,
+                execution_id=execution_id,
+                scenario_id=scenario_id,
+                kind=kind,
+            )
+        evidence.update(
+            {
+                "workflow_id": str(workflow.id),
+                "workflow_version_id": str(version.id),
+                "workflow_name": name,
+                "idempotency_key": idem,
+                "last_polled_status": poll.get("status"),
+                "wait_seconds": wait_seconds,
+                "poll_timed_out": bool(poll.get("timed_out")),
+                "poll_reason": poll.get("reason"),
+                "queued_by_runner": False,
+            }
+        )
+        if poll.get("timed_out") or poll.get("reason") == "EXECUTION_DISAPPEARED":
+            evidence["ok"] = False
+            evidence["reason"] = poll.get("reason") or "WAIT_TIMEOUT"
+        return evidence
+    except Exception as exc:
+        try:
+            await session.rollback()
+        except Exception:
+            pass
+        checkpoint["reason"] = "RUNNER_EXCEPTION"
+        checkpoint["error_type"] = type(exc).__name__
+        checkpoint["error"] = str(exc)
+        exec_raw = checkpoint.get("execution_id")
+        if isinstance(exec_raw, str) and exec_raw:
+            try:
+                status = await _lookup_execution_status(
+                    session_factory, uuid.UUID(exec_raw)
+                )
+                if status is not None:
+                    checkpoint["last_polled_status"] = status
+                    checkpoint["status"] = status
+            except Exception as status_exc:
+                checkpoint["status_lookup_error"] = (
+                    f"{type(status_exc).__name__}: {status_exc}"
+                )
+        return checkpoint
+
+
+async def run_evaluation_scenarios(
+    session: AsyncSession,
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    tool_version_id: uuid.UUID,
+    requester_id: uuid.UUID,
+    run_stamp: str,
+    wait_seconds: int,
+) -> dict[str, Any]:
+    """Run parallel then condition; keep first evidence if the second fails."""
+
+    results: dict[str, Any] = {}
+    for scenario_id, kind, plan_builder in (
+        (SCENARIO_PARALLEL, "parallel", build_parallel_join_wave_plan),
+        (SCENARIO_CONDITION, "condition", build_condition_branch_plan),
+    ):
+        try:
+            results[scenario_id] = await _register_and_execute(
+                session,
+                session_factory,
+                scenario_id=scenario_id,
+                kind=kind,
+                plan_builder=plan_builder,
+                tool_version_id=tool_version_id,
+                requester_id=requester_id,
+                run_stamp=run_stamp,
+                wait_seconds=wait_seconds,
+            )
+        except Exception as exc:
+            # Outer guard: preserve already-recorded scenarios in ``results``.
+            results[scenario_id] = {
+                "scenario_id": scenario_id,
+                "ok": False,
+                "reason": "RUNNER_EXCEPTION",
+                "error_type": type(exc).__name__,
+                "error": str(exc),
+                "queued_by_runner": False,
+            }
+    return results
 
 
 async def _run_async(args: argparse.Namespace) -> dict[str, Any]:
@@ -553,6 +724,26 @@ async def _run_async(args: argparse.Namespace) -> dict[str, Any]:
             report["artifact_path"] = artifact_guard.get("artifact_path")
             return report
 
+        sha_guard = check_git_sha_for_run()
+        report["git_sha"] = sha_guard.get("git_sha") or report.get("git_sha")
+        if not sha_guard["ok"]:
+            report["ok"] = False
+            report["reason"] = sha_guard["reason"]
+            report["hint"] = sha_guard.get("hint")
+            return report
+
+        writable = check_artifact_dir_writable()
+        report["artifact_dir_check"] = {
+            k: writable.get(k)
+            for k in ("artifact_dir", "euid", "expected_uid", "hint", "error")
+            if k in writable
+        }
+        if not writable["ok"]:
+            report["ok"] = False
+            report["reason"] = writable["reason"]
+            report["hint"] = writable.get("hint")
+            return report
+
     engine, factory = await _session_factory()
     try:
         async with factory() as session:
@@ -598,32 +789,17 @@ async def _run_async(args: argparse.Namespace) -> dict[str, Any]:
                     report["conflicts"] = dup.get("conflicts")
                     return report
 
-                parallel = await _register_and_execute(
+                new_executions = await run_evaluation_scenarios(
                     session,
                     factory,
-                    scenario_id=SCENARIO_PARALLEL,
-                    kind="parallel",
-                    plan_builder=build_parallel_join_wave_plan,
                     tool_version_id=tool_version_id,
                     requester_id=requester,
                     run_stamp=stamp,
                     wait_seconds=args.wait_seconds,
                 )
-                condition = await _register_and_execute(
-                    session,
-                    factory,
-                    scenario_id=SCENARIO_CONDITION,
-                    kind="condition",
-                    plan_builder=build_condition_branch_plan,
-                    tool_version_id=tool_version_id,
-                    requester_id=requester,
-                    run_stamp=stamp,
-                    wait_seconds=args.wait_seconds,
-                )
-                report["new_executions"] = {
-                    SCENARIO_PARALLEL: parallel,
-                    SCENARIO_CONDITION: condition,
-                }
+                report["new_executions"] = new_executions
+                parallel = new_executions.get(SCENARIO_PARALLEL) or {}
+                condition = new_executions.get(SCENARIO_CONDITION) or {}
                 parallel_id = parallel.get("execution_id")
                 condition_id = condition.get("execution_id")
                 report["compose_commands"] = compose_commands(
@@ -632,7 +808,13 @@ async def _run_async(args: argparse.Namespace) -> dict[str, Any]:
                 )
                 report["ok"] = bool(parallel.get("ok") and condition.get("ok"))
                 if not report["ok"]:
-                    report["reason"] = "NEW_EXECUTION_NOT_FULLY_SUCCEEDED"
+                    if any(
+                        (row or {}).get("reason") == "RUNNER_EXCEPTION"
+                        for row in (parallel, condition)
+                    ):
+                        report["reason"] = "RUNNER_EXCEPTION_PARTIAL"
+                    else:
+                        report["reason"] = "NEW_EXECUTION_NOT_FULLY_SUCCEEDED"
             else:
                 report["ok"] = all(
                     row.get("ok") for row in report.get("reused_verification") or []
@@ -695,8 +877,8 @@ def main(argv: list[str] | None = None) -> int:
     report = asyncio.run(_run_async(args))
     stamp = str(report.get("run_stamp") or _run_stamp())
     if args.write_artifact or args.run:
-        # Skip write when duplicate/artifact guard already failed before DB work.
-        if report.get("reason") in {"ARTIFACT_EXISTS", "DUPLICATE_RUN_STAMP"}:
+        # Skip write when pre-DB guards failed (no new evidence file).
+        if report.get("reason") in _PRE_DB_FAIL_REASONS:
             print(json.dumps(report, indent=2, ensure_ascii=False))
             return 2
         try:

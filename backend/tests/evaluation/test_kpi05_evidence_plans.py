@@ -19,6 +19,7 @@ from tests.evaluation.kpi05_evidence import runner as kpi05_runner
 from tests.evaluation.kpi05_evidence.constants import (
     DEFAULT_SUGGEST_QUESTIONS_TOOL_VERSION_ID,
     REUSED_EXECUTION_IDS,
+    SCENARIO_CONDITION,
     SCENARIO_PARALLEL,
 )
 from tests.evaluation.kpi05_evidence.plans import (
@@ -27,11 +28,14 @@ from tests.evaluation.kpi05_evidence.plans import (
     validate_plan_dict,
 )
 from tests.evaluation.kpi05_evidence.runner import (
+    check_artifact_dir_writable,
     check_artifact_guard,
     check_db_duplicate_guards,
+    check_git_sha_for_run,
     compose_commands,
     poll_execution_until_terminal,
     preflight_plans,
+    run_evaluation_scenarios,
     runner_db_url,
     workflow_name_for,
 )
@@ -178,6 +182,24 @@ def test_compose_commands_include_scenario_env_keys_and_no_version_pin() -> None
     assert 'export DATABASE_URL="$MCPFLOW_DATABASE_URL"' in text
     assert 'export TEST_DATABASE_URL="$MCPFLOW_DATABASE_URL"' in text
     assert "compose.local.yaml" not in text
+    # Ops --run / official measure pin SHA + env label; host prep for uid 10001.
+    assert 'MCPFLOW_GIT_SHA="$(git rev-parse HEAD)"' in text
+    assert "MCPFLOW_ENV_LABEL=server-live-kpi05-pr127" in text
+    assert "mkdir -p artifacts/kpi05" in text
+    assert "sudo chown -R 10001:10001 artifacts/kpi05" in text
+    # Ops env pins appear on --run and official measure (not only dry-run).
+    run_idx = text.index("--run --wait-seconds 180 --write-artifact'")
+    measure_idx = text.index("kpi_measure --mode live --only KPI-05'")
+    assert run_idx < measure_idx
+    run_block = text[text.index("# Explicit run") : run_idx]
+    measure_block = text[text.index("# Official KPI-05") : measure_idx]
+    assert 'MCPFLOW_GIT_SHA="$(git rev-parse HEAD)"' in run_block
+    assert "MCPFLOW_ENV_LABEL=server-live-kpi05-pr127" in run_block
+    assert 'MCPFLOW_GIT_SHA="$(git rev-parse HEAD)"' in measure_block
+    assert "MCPFLOW_ENV_LABEL=server-live-kpi05-pr127" in measure_block
+    dry_block = text[text.index("# Dry-run plan preflight") : text.index("# Optional: read-only")]
+    assert "MCPFLOW_GIT_SHA=" not in dry_block
+    assert "MCPFLOW_ENV_LABEL=" not in dry_block
 
 
 def test_condition_expected_branch_statuses() -> None:
@@ -373,3 +395,119 @@ async def test_duplicate_run_stamp_workflow_name_fail_closed(
     assert guard["ok"] is False
     assert guard["reason"] == "DUPLICATE_RUN_STAMP"
     assert any(c["kind"] == "workflow_name" for c in guard["conflicts"])
+
+
+def test_git_sha_unknown_fail_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(kpi05_runner, "git_sha", lambda: "unknown")
+    guard = check_git_sha_for_run()
+    assert guard["ok"] is False
+    assert guard["reason"] == "GIT_SHA_UNKNOWN"
+
+
+def test_run_with_unknown_git_sha_does_not_open_db(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("MCPFLOW_ARTIFACT_DIR", str(tmp_path))
+    monkeypatch.setattr(kpi05_runner, "git_sha", lambda: "unknown")
+
+    async def _boom() -> None:
+        raise AssertionError("DB must not open when git SHA is unknown")
+
+    monkeypatch.setattr(kpi05_runner, "_session_factory", _boom)
+    code = kpi05_runner.main(
+        ["--run", "--run-stamp", "20260103T000000Z", "--write-artifact"]
+    )
+    assert code == 2
+
+
+def test_artifact_dir_writable_probe(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("MCPFLOW_ARTIFACT_DIR", str(tmp_path))
+    ok = check_artifact_dir_writable()
+    assert ok["ok"] is True
+    assert ok["expected_uid"] == 10001
+
+    blocked_root = tmp_path / "ro-base"
+    blocked_root.mkdir()
+    kpi_dir = blocked_root / "kpi05"
+    kpi_dir.mkdir()
+    kpi_dir.chmod(0o555)
+    blocked_root.chmod(0o555)
+    monkeypatch.setenv("MCPFLOW_ARTIFACT_DIR", str(blocked_root))
+    try:
+        bad = check_artifact_dir_writable()
+        assert bad["ok"] is False
+        assert bad["reason"] == "ARTIFACT_DIR_NOT_WRITABLE"
+        assert "10001" in str(bad.get("hint"))
+    finally:
+        blocked_root.chmod(0o755)
+        kpi_dir.chmod(0o755)
+
+
+def test_run_with_unwritable_artifact_dir_does_not_open_db(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("MCPFLOW_ARTIFACT_DIR", str(tmp_path))
+    monkeypatch.setattr(kpi05_runner, "git_sha", lambda: "abc123deadbeef")
+    monkeypatch.setattr(
+        kpi05_runner,
+        "check_artifact_dir_writable",
+        lambda: {
+            "ok": False,
+            "reason": "ARTIFACT_DIR_NOT_WRITABLE",
+            "hint": "sudo chown -R 10001:10001 artifacts/kpi05",
+        },
+    )
+
+    async def _boom() -> None:
+        raise AssertionError("DB must not open when artifact dir is not writable")
+
+    monkeypatch.setattr(kpi05_runner, "_session_factory", _boom)
+    code = kpi05_runner.main(
+        ["--run", "--run-stamp", "20260104T000000Z", "--write-artifact"]
+    )
+    assert code == 2
+
+
+@pytest.mark.asyncio
+async def test_second_scenario_exception_preserves_first_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first = {
+        "scenario_id": SCENARIO_PARALLEL,
+        "ok": True,
+        "execution_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "workflow_version_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        "last_polled_status": "SUCCEEDED",
+    }
+
+    async def _fake_register(
+        _session: object,
+        _factory: object,
+        *,
+        scenario_id: str,
+        **_kwargs: object,
+    ) -> dict:
+        if scenario_id == SCENARIO_PARALLEL:
+            return first
+        raise RuntimeError("condition boom")
+
+    monkeypatch.setattr(kpi05_runner, "_register_and_execute", _fake_register)
+    results = await run_evaluation_scenarios(
+        session=object(),  # type: ignore[arg-type]
+        session_factory=object(),  # type: ignore[arg-type]
+        tool_version_id=DEFAULT_SUGGEST_QUESTIONS_TOOL_VERSION_ID,
+        requester_id=uuid.uuid4(),
+        run_stamp="checkpoint1",
+        wait_seconds=1,
+    )
+    assert results[SCENARIO_PARALLEL]["execution_id"] == first["execution_id"]
+    assert (
+        results[SCENARIO_PARALLEL]["workflow_version_id"]
+        == first["workflow_version_id"]
+    )
+    assert results[SCENARIO_PARALLEL]["last_polled_status"] == "SUCCEEDED"
+    assert results[SCENARIO_CONDITION]["ok"] is False
+    assert results[SCENARIO_CONDITION]["reason"] == "RUNNER_EXCEPTION"
+    assert "condition boom" in results[SCENARIO_CONDITION]["error"]
