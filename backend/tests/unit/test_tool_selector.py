@@ -1222,12 +1222,23 @@ async def test_unsupported_capability_empty_retrieval_no_match(
 async def test_all_rerank_fit_zero_no_match_despite_missing_required_inputs(
     db_session: AsyncSession,
 ) -> None:
-    """KPI-02 rocket style: all llm_fit_score==0 → NO_MATCH, not coverage CLARIFY."""
+    """All llm_fit_score==0 → NO_MATCH even when unused USER_EXPLICIT would align.
 
+    Top-1 weather requires location (unmet) while an unused USER_EXPLICIT entity
+    exists — without the fit==0 short-circuit, Entity Alignment would be called.
+    """
+
+    original_entities = [
+        {
+            "name": "rocket",
+            "value": "rocket",
+            "source": ParameterProvenance.USER_EXPLICIT.value,
+        }
+    ]
     request_id, _, _ = await _seed_retrieving(
         db_session,
         request_text="Launch the rocket now",
-        entities=[],
+        entities=original_entities,
     )
     weather = _candidate(
         _descriptor(
@@ -1263,14 +1274,14 @@ async def test_all_rerank_fit_zero_no_match_despite_missing_required_inputs(
         ],
         "ambiguities": [],
     }
-    # Would trigger alignment+CLARIFY if fit==0 short-circuit were missing.
+    # Alignment payload must never be consumed when all fit scores are 0.
     llm = _MockLLM(
         [
             payload,
             {
                 "mappings": [
                     {
-                        "from_entity_name": "x",
+                        "from_entity_name": "rocket",
                         "to_required_input": "location",
                         "rationale": "should not be called",
                     }
@@ -1292,6 +1303,8 @@ async def test_all_rerank_fit_zero_no_match_despite_missing_required_inputs(
     row = await AgentRequestRepository(db_session).get(request_id)
     assert row is not None
     assert row.status == AgentRequestStatus.REJECTED.value
+    assert row.structured_request is not None
+    assert row.structured_request["entities"] == original_entities
 
     from app.repositories.clarification_request import ClarificationRequestRepository
     from app.repositories.tool_selection import ToolSelectionRepository
