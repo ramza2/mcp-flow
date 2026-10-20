@@ -27,6 +27,7 @@ from app.models.workflow import Workflow
 from app.repositories.execution import ExecutionRepository
 from app.repositories.idempotency import IdempotencyRepository
 from app.repositories.mcp_tool import MCPToolRepository
+from app.repositories.mcp_tool_policy import MCPToolPolicyRepository
 from app.schemas.auth import ResourceGrantCreate
 from app.schemas.execution_plan import ExecutionPlanV1
 from app.schemas.workflow import (
@@ -54,6 +55,8 @@ from tests.evaluation.kpi05_evidence.constants import (
 from tests.evaluation.kpi05_evidence.plans import (
     build_condition_branch_plan,
     build_parallel_join_wave_plan,
+    resolve_tool_timeout_seconds,
+    tool_step_timeouts,
     validate_plan_dict,
 )
 from tests.evaluation.kpi05_evidence.verify import (
@@ -131,15 +134,30 @@ def idempotency_key_for(scenario_id: str, run_stamp: str) -> str:
     return f"kpi05-{scenario_id}-{run_stamp}"
 
 
-def preflight_plans(*, tool_version_id: uuid.UUID) -> dict[str, Any]:
-    """Validate plan shapes offline (no DB)."""
+def preflight_plans(
+    *,
+    tool_version_id: uuid.UUID,
+    tool_timeout_seconds: int | None = None,
+) -> dict[str, Any]:
+    """Validate plan shapes offline (no DB).
+
+    When ``tool_timeout_seconds`` is set (ops ``--run``), every TOOL step uses
+    that ToolPolicy-derived value; otherwise offline default applies.
+    """
 
     placeholder_wf = uuid.uuid4()
+    timeout_kwargs: dict[str, Any] = {}
+    if tool_timeout_seconds is not None:
+        timeout_kwargs["tool_timeout_seconds"] = tool_timeout_seconds
     parallel = build_parallel_join_wave_plan(
-        workflow_id=placeholder_wf, tool_version_id=tool_version_id
+        workflow_id=placeholder_wf,
+        tool_version_id=tool_version_id,
+        **timeout_kwargs,
     )
     condition = build_condition_branch_plan(
-        workflow_id=placeholder_wf, tool_version_id=tool_version_id
+        workflow_id=placeholder_wf,
+        tool_version_id=tool_version_id,
+        **timeout_kwargs,
     )
     results: dict[str, Any] = {}
     for scenario_id, kind, plan in (
@@ -154,6 +172,14 @@ def preflight_plans(*, tool_version_id: uuid.UUID) -> dict[str, Any]:
             if step["type"] == "CONDITION":
                 predicate = step["config"]["predicate"]
         pred_json = json.dumps(predicate or {}, sort_keys=True)
+        tool_timeouts = tool_step_timeouts(plan)
+        timeout_aligned = (
+            tool_timeout_seconds is None
+            or (
+                bool(tool_timeouts)
+                and all(t == tool_timeout_seconds for t in tool_timeouts)
+            )
+        )
         results[scenario_id] = {
             "schema_ok": True,
             "static_ok": static.ok,
@@ -165,9 +191,94 @@ def preflight_plans(*, tool_version_id: uuid.UUID) -> dict[str, Any]:
             "uses_structured_content_path": "structured_content" in pred_json,
             "max_parallelism": plan["limits"]["max_parallelism"],
             "step_ids": [s["id"] for s in plan["steps"]],
+            "tool_timeout_seconds": tool_timeouts,
+            "tool_timeout_aligned": timeout_aligned,
             "plan": plan,
         }
     return results
+
+
+async def load_tool_policy_timeout(
+    session: AsyncSession,
+    *,
+    tool_version_id: uuid.UUID,
+) -> dict[str, Any]:
+    """Read MCPToolPolicy for the ToolVersion and resolve plan timeout seconds."""
+
+    tools = MCPToolRepository(session)
+    tv = await tools.get_version(tool_version_id)
+    if tv is None:
+        return {"ok": False, "reason": "TOOL_VERSION_NOT_FOUND"}
+    logical = await tools.get(tv.mcp_tool_id)
+    if logical is None:
+        return {"ok": False, "reason": "MCP_TOOL_NOT_FOUND"}
+    policy = await MCPToolPolicyRepository(session).get_by_tool_id(logical.id)
+    if policy is None:
+        return {
+            "ok": False,
+            "reason": "TOOL_POLICY_MISSING",
+            "mcp_tool_id": str(logical.id),
+            "tool_version_id": str(tool_version_id),
+        }
+    timeout_ms = policy.timeout_ms
+    if not isinstance(timeout_ms, int) or isinstance(timeout_ms, bool) or timeout_ms <= 0:
+        return {
+            "ok": False,
+            "reason": "TOOL_POLICY_TIMEOUT_INVALID",
+            "mcp_tool_id": str(logical.id),
+            "tool_version_id": str(tool_version_id),
+            "tool_policy_timeout_ms": timeout_ms,
+        }
+    try:
+        resolved = resolve_tool_timeout_seconds(timeout_ms)
+    except ValueError:
+        return {
+            "ok": False,
+            "reason": "TOOL_POLICY_TIMEOUT_INVALID",
+            "mcp_tool_id": str(logical.id),
+            "tool_version_id": str(tool_version_id),
+            "tool_policy_timeout_ms": timeout_ms,
+        }
+    return {
+        "ok": True,
+        "mcp_tool_id": str(logical.id),
+        "tool_version_id": str(tool_version_id),
+        "tool_policy_timeout_ms": timeout_ms,
+        "resolved_tool_timeout_seconds": resolved,
+        "policy_lock_version": int(policy.lock_version),
+    }
+
+
+def validate_run_plans_for_timeout(
+    *,
+    tool_version_id: uuid.UUID,
+    tool_timeout_seconds: int,
+) -> dict[str, Any]:
+    """Static + KPI-05 shape + TOOL timeout alignment before Workflow create."""
+
+    preflight = preflight_plans(
+        tool_version_id=tool_version_id,
+        tool_timeout_seconds=tool_timeout_seconds,
+    )
+    for scenario_id, detail in preflight.items():
+        if detail.get("uses_structured_content_path"):
+            return {
+                "ok": False,
+                "reason": f"STRUCTURED_CONTENT_FORBIDDEN:{scenario_id}",
+                "preflight": preflight,
+            }
+        if (
+            not detail.get("schema_ok")
+            or not detail.get("static_ok")
+            or not detail.get("kpi05_shape_ok")
+            or not detail.get("tool_timeout_aligned")
+        ):
+            return {
+                "ok": False,
+                "reason": f"PREFLIGHT_FAILED:{scenario_id}",
+                "preflight": preflight,
+            }
+    return {"ok": True, "preflight": preflight}
 
 
 def compose_commands(
@@ -509,6 +620,8 @@ async def _register_and_execute(
     requester_id: uuid.UUID,
     run_stamp: str,
     wait_seconds: int,
+    expected_timeout_ms: int,
+    expected_timeout_seconds: int,
 ) -> dict[str, Any]:
     """Create one evaluation Workflow/Execution. Preserves IDs on mid-run errors."""
 
@@ -516,8 +629,39 @@ async def _register_and_execute(
         "scenario_id": scenario_id,
         "ok": False,
         "queued_by_runner": False,
+        "tool_policy_timeout_ms": expected_timeout_ms,
+        "resolved_tool_timeout_seconds": expected_timeout_seconds,
     }
     try:
+        # Fail-closed if ToolPolicy changed since pre-run validation.
+        live_policy = await load_tool_policy_timeout(
+            session, tool_version_id=tool_version_id
+        )
+        if not live_policy.get("ok"):
+            return {"scenario_id": scenario_id, **live_policy}
+        if live_policy.get("tool_policy_timeout_ms") != expected_timeout_ms:
+            return {
+                "scenario_id": scenario_id,
+                "ok": False,
+                "reason": "TOOL_POLICY_CHANGED",
+                "tool_policy_timeout_ms": live_policy.get("tool_policy_timeout_ms"),
+                "expected_timeout_ms": expected_timeout_ms,
+                "resolved_tool_timeout_seconds": live_policy.get(
+                    "resolved_tool_timeout_seconds"
+                ),
+            }
+        if live_policy.get("resolved_tool_timeout_seconds") != expected_timeout_seconds:
+            return {
+                "scenario_id": scenario_id,
+                "ok": False,
+                "reason": "TOOL_POLICY_TIMEOUT_MISMATCH",
+                "tool_policy_timeout_ms": live_policy.get("tool_policy_timeout_ms"),
+                "resolved_tool_timeout_seconds": live_policy.get(
+                    "resolved_tool_timeout_seconds"
+                ),
+                "expected_timeout_seconds": expected_timeout_seconds,
+            }
+
         tools = MCPToolRepository(session)
         tv = await tools.get_version(tool_version_id)
         if tv is None:
@@ -551,9 +695,21 @@ async def _register_and_execute(
         checkpoint["workflow_id"] = str(workflow.id)
         checkpoint["workflow_name"] = name
 
-        plan = plan_builder(workflow_id=workflow.id, tool_version_id=tool_version_id)
+        plan = plan_builder(
+            workflow_id=workflow.id,
+            tool_version_id=tool_version_id,
+            tool_timeout_seconds=expected_timeout_seconds,
+        )
         plan["source"] = {"type": "WORKFLOW", "workflow_id": str(workflow.id)}
         ExecutionPlanV1.model_validate(plan)
+        if any(t != expected_timeout_seconds for t in tool_step_timeouts(plan)):
+            return {
+                "scenario_id": scenario_id,
+                "ok": False,
+                "reason": "PLAN_TOOL_TIMEOUT_MISALIGNED",
+                "tool_timeout_seconds": tool_step_timeouts(plan),
+                "resolved_tool_timeout_seconds": expected_timeout_seconds,
+            }
 
         version = await WorkflowVersionService(session).create_version(
             workflow.id,
@@ -654,6 +810,8 @@ async def run_evaluation_scenarios(
     requester_id: uuid.UUID,
     run_stamp: str,
     wait_seconds: int,
+    expected_timeout_ms: int,
+    expected_timeout_seconds: int,
 ) -> dict[str, Any]:
     """Run parallel then condition; keep first evidence if the second fails."""
 
@@ -673,6 +831,8 @@ async def run_evaluation_scenarios(
                 requester_id=requester_id,
                 run_stamp=run_stamp,
                 wait_seconds=wait_seconds,
+                expected_timeout_ms=expected_timeout_ms,
+                expected_timeout_seconds=expected_timeout_seconds,
             )
         except Exception as exc:
             # Outer guard: preserve already-recorded scenarios in ``results``.
@@ -802,6 +962,38 @@ async def _run_async(args: argparse.Namespace) -> dict[str, Any]:
                     report["conflicts"] = dup.get("conflicts")
                     return report
 
+                # Before any Workflow create: ToolPolicy timeout + plan alignment.
+                policy = await load_tool_policy_timeout(
+                    session, tool_version_id=tool_version_id
+                )
+                report["tool_policy_timeout_ms"] = policy.get("tool_policy_timeout_ms")
+                report["resolved_tool_timeout_seconds"] = policy.get(
+                    "resolved_tool_timeout_seconds"
+                )
+                if not policy.get("ok"):
+                    report["ok"] = False
+                    report["reason"] = policy.get("reason")
+                    report["tool_policy"] = policy
+                    return report
+
+                resolved_seconds = int(policy["resolved_tool_timeout_seconds"])
+                resolved_ms = int(policy["tool_policy_timeout_ms"])
+                plan_check = validate_run_plans_for_timeout(
+                    tool_version_id=tool_version_id,
+                    tool_timeout_seconds=resolved_seconds,
+                )
+                # Replace offline default preflight with policy-aligned plans.
+                aligned_preflight = plan_check["preflight"]
+                for detail in aligned_preflight.values():
+                    detail.pop("plan", None)
+                report["preflight"] = aligned_preflight
+                report["tool_policy_timeout_ms"] = resolved_ms
+                report["resolved_tool_timeout_seconds"] = resolved_seconds
+                if not plan_check.get("ok"):
+                    report["ok"] = False
+                    report["reason"] = plan_check.get("reason")
+                    return report
+
                 new_executions = await run_evaluation_scenarios(
                     session,
                     factory,
@@ -809,6 +1001,8 @@ async def _run_async(args: argparse.Namespace) -> dict[str, Any]:
                     requester_id=requester,
                     run_stamp=stamp,
                     wait_seconds=args.wait_seconds,
+                    expected_timeout_ms=resolved_ms,
+                    expected_timeout_seconds=resolved_seconds,
                 )
                 report["new_executions"] = new_executions
                 parallel = new_executions.get(SCENARIO_PARALLEL) or {}

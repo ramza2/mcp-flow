@@ -25,6 +25,8 @@ from tests.evaluation.kpi05_evidence.constants import (
 from tests.evaluation.kpi05_evidence.plans import (
     build_condition_branch_plan,
     build_parallel_join_wave_plan,
+    resolve_tool_timeout_seconds,
+    tool_step_timeouts,
     validate_plan_dict,
 )
 from tests.evaluation.kpi05_evidence.runner import (
@@ -33,10 +35,12 @@ from tests.evaluation.kpi05_evidence.runner import (
     check_db_duplicate_guards,
     check_git_sha_for_run,
     compose_commands,
+    load_tool_policy_timeout,
     poll_execution_until_terminal,
     preflight_plans,
     run_evaluation_scenarios,
     runner_db_url,
+    validate_run_plans_for_timeout,
     workflow_name_for,
 )
 from tests.evaluation.kpi05_evidence.verify import diagnose_parallel_overlap
@@ -542,6 +546,8 @@ async def test_second_scenario_exception_preserves_first_evidence(
         requester_id=uuid.uuid4(),
         run_stamp="checkpoint1",
         wait_seconds=1,
+        expected_timeout_ms=30_000,
+        expected_timeout_seconds=30,
     )
     assert results[SCENARIO_PARALLEL]["execution_id"] == first["execution_id"]
     assert (
@@ -552,3 +558,256 @@ async def test_second_scenario_exception_preserves_first_evidence(
     assert results[SCENARIO_CONDITION]["ok"] is False
     assert results[SCENARIO_CONDITION]["reason"] == "RUNNER_EXCEPTION"
     assert "condition boom" in results[SCENARIO_CONDITION]["error"]
+
+
+def test_resolve_tool_timeout_seconds_ceil_rules() -> None:
+    assert resolve_tool_timeout_seconds(30_000) == 30
+    assert resolve_tool_timeout_seconds(45_001) == 46
+    assert resolve_tool_timeout_seconds(1) == 1
+    assert resolve_tool_timeout_seconds(999) == 1
+    assert resolve_tool_timeout_seconds(1000) == 1
+    assert resolve_tool_timeout_seconds(1001) == 2
+    with pytest.raises(ValueError):
+        resolve_tool_timeout_seconds(0)
+    with pytest.raises(ValueError):
+        resolve_tool_timeout_seconds(-1)
+
+
+def test_plans_apply_policy_timeout_to_all_tool_steps() -> None:
+    wf = uuid.uuid4()
+    tv = DEFAULT_SUGGEST_QUESTIONS_TOOL_VERSION_ID
+    for seconds in (30, 46):
+        parallel = build_parallel_join_wave_plan(
+            workflow_id=wf, tool_version_id=tv, tool_timeout_seconds=seconds
+        )
+        condition = build_condition_branch_plan(
+            workflow_id=wf, tool_version_id=tv, tool_timeout_seconds=seconds
+        )
+        assert tool_step_timeouts(parallel) == [seconds, seconds]
+        assert tool_step_timeouts(condition) == [seconds, seconds, seconds]
+        assert all(
+            step["timeout_seconds"] == seconds
+            for step in parallel["steps"]
+            if step["type"] == "TOOL"
+        )
+        assert all(
+            step["timeout_seconds"] == seconds
+            for step in condition["steps"]
+            if step["type"] == "TOOL"
+        )
+        validate_plan_dict(parallel)
+        validate_plan_dict(condition)
+
+
+def test_validate_run_plans_for_timeout_records_alignment() -> None:
+    ok = validate_run_plans_for_timeout(
+        tool_version_id=DEFAULT_SUGGEST_QUESTIONS_TOOL_VERSION_ID,
+        tool_timeout_seconds=30,
+    )
+    assert ok["ok"] is True
+    for scenario_id in (SCENARIO_PARALLEL, SCENARIO_CONDITION):
+        detail = ok["preflight"][scenario_id]
+        assert detail["tool_timeout_aligned"] is True
+        assert set(detail["tool_timeout_seconds"]) == {30}
+
+
+@pytest.mark.asyncio
+async def test_missing_tool_policy_blocks_before_workflow_create(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("MCPFLOW_ARTIFACT_DIR", str(tmp_path))
+    monkeypatch.setenv("MCPFLOW_KPI05_REQUESTER_USER_ID", str(uuid.uuid4()))
+    monkeypatch.setattr(kpi05_runner, "git_sha", lambda: "deadbeef")
+    monkeypatch.setattr(
+        kpi05_runner,
+        "check_artifact_dir_writable",
+        lambda: {"ok": True, "artifact_dir": str(tmp_path / "kpi05"), "euid": 10001},
+    )
+
+    created: list[str] = []
+
+    class _BoomWorkflow:
+        async def create(self, *_a: object, **_k: object) -> None:
+            created.append("workflow")
+            raise AssertionError("Workflow must not be created")
+
+    async def _fake_session_factory() -> tuple[object, object]:
+        class _Engine:
+            async def dispose(self) -> None:
+                return None
+
+        class _Session:
+            async def __aenter__(self) -> _Session:
+                return self
+
+            async def __aexit__(self, *_a: object) -> bool:
+                return False
+
+        class _Factory:
+            def __call__(self) -> _Session:
+                return _Session()
+
+        return _Engine(), _Factory()
+
+    async def _inspect(*_a: object, **_k: object) -> dict:
+        return {
+            "found": True,
+            "mcp_tool_id": str(uuid.uuid4()),
+        }
+
+    async def _authz(*_a: object, **_k: object) -> dict:
+        return {"ok": True}
+
+    async def _dup(*_a: object, **_k: object) -> dict:
+        return {"ok": True, "conflicts": []}
+
+    async def _missing_policy(*_a: object, **_k: object) -> dict:
+        return {"ok": False, "reason": "TOOL_POLICY_MISSING"}
+
+    monkeypatch.setattr(kpi05_runner, "_session_factory", _fake_session_factory)
+    monkeypatch.setattr(kpi05_runner, "inspect_tool_version", _inspect)
+    monkeypatch.setattr(kpi05_runner, "assert_requester_tool_authorized", _authz)
+    monkeypatch.setattr(kpi05_runner, "check_db_duplicate_guards", _dup)
+    monkeypatch.setattr(kpi05_runner, "load_tool_policy_timeout", _missing_policy)
+    monkeypatch.setattr(kpi05_runner, "WorkflowService", lambda _s: _BoomWorkflow())
+
+    report = await kpi05_runner._run_async(
+        kpi05_runner.build_parser().parse_args(
+            ["--run", "--run-stamp", "20260105T000000Z"]
+        )
+    )
+    assert report["ok"] is False
+    assert report["reason"] == "TOOL_POLICY_MISSING"
+    assert created == []
+
+
+@pytest.mark.asyncio
+async def test_invalid_tool_policy_timeout_blocks_before_workflow(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("MCPFLOW_ARTIFACT_DIR", str(tmp_path))
+    monkeypatch.setenv("MCPFLOW_KPI05_REQUESTER_USER_ID", str(uuid.uuid4()))
+    monkeypatch.setattr(kpi05_runner, "git_sha", lambda: "cafebabe")
+    monkeypatch.setattr(
+        kpi05_runner,
+        "check_artifact_dir_writable",
+        lambda: {"ok": True, "artifact_dir": str(tmp_path / "kpi05"), "euid": 10001},
+    )
+
+    created: list[str] = []
+
+    class _BoomWorkflow:
+        async def create(self, *_a: object, **_k: object) -> None:
+            created.append("workflow")
+            raise AssertionError("Workflow must not be created")
+
+    async def _fake_session_factory() -> tuple[object, object]:
+        class _Engine:
+            async def dispose(self) -> None:
+                return None
+
+        class _Session:
+            async def __aenter__(self) -> _Session:
+                return self
+
+            async def __aexit__(self, *_a: object) -> bool:
+                return False
+
+        class _Factory:
+            def __call__(self) -> _Session:
+                return _Session()
+
+        return _Engine(), _Factory()
+
+    async def _inspect(*_a: object, **_k: object) -> dict:
+        return {"found": True, "mcp_tool_id": str(uuid.uuid4())}
+
+    async def _authz(*_a: object, **_k: object) -> dict:
+        return {"ok": True}
+
+    async def _dup(*_a: object, **_k: object) -> dict:
+        return {"ok": True, "conflicts": []}
+
+    async def _bad_policy(*_a: object, **_k: object) -> dict:
+        return {
+            "ok": False,
+            "reason": "TOOL_POLICY_TIMEOUT_INVALID",
+            "tool_policy_timeout_ms": 0,
+        }
+
+    monkeypatch.setattr(kpi05_runner, "_session_factory", _fake_session_factory)
+    monkeypatch.setattr(kpi05_runner, "inspect_tool_version", _inspect)
+    monkeypatch.setattr(kpi05_runner, "assert_requester_tool_authorized", _authz)
+    monkeypatch.setattr(kpi05_runner, "check_db_duplicate_guards", _dup)
+    monkeypatch.setattr(kpi05_runner, "load_tool_policy_timeout", _bad_policy)
+    monkeypatch.setattr(kpi05_runner, "WorkflowService", lambda _s: _BoomWorkflow())
+
+    report = await kpi05_runner._run_async(
+        kpi05_runner.build_parser().parse_args(
+            ["--run", "--run-stamp", "20260106T000000Z"]
+        )
+    )
+    assert report["ok"] is False
+    assert report["reason"] == "TOOL_POLICY_TIMEOUT_INVALID"
+    assert report.get("tool_policy_timeout_ms") == 0
+    assert created == []
+
+
+@pytest.mark.asyncio
+async def test_load_tool_policy_timeout_resolves_from_repository(
+    db_session,
+) -> None:
+    from app.domain.enums import RiskClass
+    from app.repositories.mcp_server import MCPServerRepository
+    from app.repositories.mcp_tool import MCPToolRepository
+    from app.repositories.mcp_tool_policy import MCPToolPolicyRepository
+
+    server = await MCPServerRepository(db_session).create(
+        code=f"kpi05-{uuid.uuid4().hex[:8]}",
+        name="kpi05 policy server",
+        transport_type="STREAMABLE_HTTP",
+        endpoint_url="https://mcp.test/mcp",
+        status="ACTIVE",
+    )
+    tools = MCPToolRepository(db_session)
+    tool = await tools.create_tool(
+        mcp_server_id=server.id,
+        remote_name="suggest_questions",
+        display_name="suggest_questions",
+        tags=[],
+        status="ACTIVE",
+    )
+    version = await tools.create_version(
+        mcp_tool_id=tool.id,
+        version_no=1,
+        content_hash=uuid.uuid4().hex,
+        validation_status="VALID",
+        remote_description="kpi05",
+        input_schema={"type": "object", "properties": {}},
+    )
+    await MCPToolPolicyRepository(db_session).create(
+        mcp_tool_id=tool.id,
+        risk_class=RiskClass.READ_ONLY.value,
+        requires_confirmation=False,
+        requires_approval=False,
+        approval_policy_id=None,
+        timeout_ms=45_001,
+        max_attempts=1,
+        backoff_policy=None,
+        max_result_bytes=1_000_000,
+        allow_auto_select=True,
+        data_classification=None,
+        policy_metadata=None,
+    )
+    await db_session.commit()
+
+    loaded = await load_tool_policy_timeout(db_session, tool_version_id=version.id)
+    assert loaded["ok"] is True
+    assert loaded["tool_policy_timeout_ms"] == 45_001
+    assert loaded["resolved_tool_timeout_seconds"] == 46
+
+    missing = await load_tool_policy_timeout(
+        db_session, tool_version_id=uuid.uuid4()
+    )
+    assert missing["ok"] is False
+    assert missing["reason"] == "TOOL_VERSION_NOT_FOUND"
