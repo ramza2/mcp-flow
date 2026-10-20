@@ -243,9 +243,21 @@ def compose_commands(
         "--run --wait-seconds 180 --write-artifact'",
         "",
         "# Official KPI-05 (six Execution IDs; no shared WorkflowVersion pin)",
+        "# Write under artifacts/kpi05 only (uid 10001); never artifacts/kpi/latest.json",
+        'KPI05_GIT_SHA="$(git rev-parse HEAD)"',
+        'KPI05_TS="$(date -u +%Y%m%dT%H%M%SZ)"',
+        'KPI05_OUT_NAME="kpi05_official_${KPI05_GIT_SHA}_${KPI05_TS}.json"',
+        'KPI05_OUT_HOST="artifacts/kpi05/${KPI05_OUT_NAME}"',
+        'KPI05_OUT_CONTAINER="/opt/kpi-artifacts/kpi05/${KPI05_OUT_NAME}"',
+        "export KPI05_OUT_CONTAINER",
+        'if [ -e "$KPI05_OUT_HOST" ]; then',
+        '  echo "Refuse overwrite: $KPI05_OUT_HOST already exists" >&2',
+        "  exit 1",
+        "fi",
         *env_exports,
         *run_prefix,
         *ops_env,
+        "  -e KPI05_OUT_CONTAINER \\",
         "  -e MCPFLOW_KPI_EXECUTION_ID_SEQUENTIAL_TOOL_CHAIN \\",
         "  -e MCPFLOW_KPI_EXECUTION_ID_PARALLEL_JOIN_WAVE \\",
         "  -e MCPFLOW_KPI_EXECUTION_ID_CONDITION_BRANCH \\",
@@ -253,7 +265,8 @@ def compose_commands(
         "  -e MCPFLOW_KPI_EXECUTION_ID_WHILE_LOOP \\",
         "  -e MCPFLOW_KPI_EXECUTION_ID_APPROVAL_WAIT_RESUME \\",
         f"{py_wrap}exec python -m tests.evaluation.harness.kpi_measure "
-        "--mode live --only KPI-05'",
+        "--mode live --only KPI-05 --no-diagnostics "
+        '--out "$KPI05_OUT_CONTAINER"\'',
     ]
     return lines
 

@@ -168,7 +168,7 @@ def test_compose_commands_include_scenario_env_keys_and_no_version_pin() -> None
     assert "MCPFLOW_KPI_EXECUTION_ID_CONDITION_BRANCH=" in text
     assert "MCPFLOW_KPI_EXECUTION_ID_SEQUENTIAL_TOOL_CHAIN=" in text
     assert "unset MCPFLOW_KPI_WORKFLOW_VERSION_ID" in text
-    assert "kpi_measure --mode live --only KPI-05" in text
+    assert "kpi_measure --mode live --only KPI-05 --no-diagnostics" in text
     # Ops server: image has no tests/ — mount backend + artifacts, pass DB via entrypoint.
     assert (
         "docker compose --env-file .env.server -f compose.yaml -f compose.server.yaml"
@@ -189,7 +189,9 @@ def test_compose_commands_include_scenario_env_keys_and_no_version_pin() -> None
     assert "sudo chown -R 10001:10001 artifacts/kpi05" in text
     # Ops env pins appear on --run and official measure (not only dry-run).
     run_idx = text.index("--run --wait-seconds 180 --write-artifact'")
-    measure_idx = text.index("kpi_measure --mode live --only KPI-05'")
+    measure_idx = text.index(
+        "kpi_measure --mode live --only KPI-05 --no-diagnostics"
+    )
     assert run_idx < measure_idx
     run_block = text[text.index("# Explicit run") : run_idx]
     measure_block = text[text.index("# Official KPI-05") : measure_idx]
@@ -200,6 +202,45 @@ def test_compose_commands_include_scenario_env_keys_and_no_version_pin() -> None
     dry_block = text[text.index("# Dry-run plan preflight") : text.index("# Optional: read-only")]
     assert "MCPFLOW_GIT_SHA=" not in dry_block
     assert "MCPFLOW_ENV_LABEL=" not in dry_block
+
+
+def test_compose_official_kpi05_out_path_avoids_latest_overwrite() -> None:
+    """Official measure must write a unique file under /opt/kpi-artifacts/kpi05/."""
+
+    text = "\n".join(
+        compose_commands(
+            parallel_id="11111111-1111-4111-8111-111111111111",
+            condition_id="22222222-2222-4222-8222-222222222222",
+        )
+    )
+    measure_block = text[text.index("# Official KPI-05") :]
+    assert 'KPI05_OUT_HOST="artifacts/kpi05/${KPI05_OUT_NAME}"' in measure_block
+    assert (
+        'KPI05_OUT_CONTAINER="/opt/kpi-artifacts/kpi05/${KPI05_OUT_NAME}"'
+        in measure_block
+    )
+    assert (
+        'KPI05_OUT_NAME="kpi05_official_${KPI05_GIT_SHA}_${KPI05_TS}.json"'
+        in measure_block
+    )
+    assert 'KPI05_GIT_SHA="$(git rev-parse HEAD)"' in measure_block
+    assert 'KPI05_TS="$(date -u +%Y%m%dT%H%M%SZ)"' in measure_block
+    assert 'if [ -e "$KPI05_OUT_HOST" ]; then' in measure_block
+    assert "Refuse overwrite:" in measure_block
+    assert "exit 1" in measure_block
+    assert "export KPI05_OUT_CONTAINER" in measure_block
+    assert "-e KPI05_OUT_CONTAINER" in measure_block
+    assert '--out "$KPI05_OUT_CONTAINER"' in measure_block
+    assert "--no-diagnostics" in measure_block
+    # --out must not target the shared latest.json / artifacts/kpi/ tree.
+    assert "--out " in measure_block
+    out_line = next(
+        line for line in measure_block.splitlines() if "--out " in line
+    )
+    assert "/opt/kpi-artifacts/kpi05/" in out_line or "$KPI05_OUT_CONTAINER" in out_line
+    assert "latest.json" not in out_line
+    assert "/opt/kpi-artifacts/kpi/" not in out_line
+    assert "--out artifacts/kpi/" not in measure_block
 
 
 def test_condition_expected_branch_statuses() -> None:
