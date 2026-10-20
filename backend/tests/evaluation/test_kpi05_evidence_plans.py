@@ -2,23 +2,39 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
+from pathlib import Path
+from unittest.mock import AsyncMock
 
+import pytest
 from app.domain.enums import JoinPolicy, PredicateOperator, StepStatus
 from app.schemas.execution_plan import ExecutionPlanV1
+from app.schemas.workflow import WorkflowCreate
+from app.services.workflow import WorkflowService
 
 from tests.evaluation.harness.live_evidence import plan_matches_scenario_kind
+from tests.evaluation.kpi05_evidence import runner as kpi05_runner
 from tests.evaluation.kpi05_evidence.constants import (
     DEFAULT_SUGGEST_QUESTIONS_TOOL_VERSION_ID,
     REUSED_EXECUTION_IDS,
+    SCENARIO_PARALLEL,
 )
 from tests.evaluation.kpi05_evidence.plans import (
     build_condition_branch_plan,
     build_parallel_join_wave_plan,
     validate_plan_dict,
 )
-from tests.evaluation.kpi05_evidence.runner import compose_commands, preflight_plans
+from tests.evaluation.kpi05_evidence.runner import (
+    check_artifact_guard,
+    check_db_duplicate_guards,
+    compose_commands,
+    poll_execution_until_terminal,
+    preflight_plans,
+    runner_db_url,
+    workflow_name_for,
+)
 from tests.evaluation.kpi05_evidence.verify import diagnose_parallel_overlap
 
 
@@ -149,9 +165,211 @@ def test_compose_commands_include_scenario_env_keys_and_no_version_pin() -> None
     assert "MCPFLOW_KPI_EXECUTION_ID_SEQUENTIAL_TOOL_CHAIN=" in text
     assert "unset MCPFLOW_KPI_WORKFLOW_VERSION_ID" in text
     assert "kpi_measure --mode live --only KPI-05" in text
+    # Ops server: image has no tests/ — mount backend + artifacts, pass DB via entrypoint.
+    assert (
+        "docker compose --env-file .env.server -f compose.yaml -f compose.server.yaml"
+        in text
+    )
+    assert "run --rm --no-deps -T" in text
+    assert "$(pwd)/backend:/opt/kpi-src:ro" in text
+    assert "$(pwd)/artifacts:/opt/kpi-artifacts" in text
+    assert "PYTHONPATH=/opt/kpi-src" in text
+    assert "MCPFLOW_ARTIFACT_DIR=/opt/kpi-artifacts" in text
+    assert 'export DATABASE_URL="$MCPFLOW_DATABASE_URL"' in text
+    assert 'export TEST_DATABASE_URL="$MCPFLOW_DATABASE_URL"' in text
+    assert "compose.local.yaml" not in text
 
 
 def test_condition_expected_branch_statuses() -> None:
     # Document expected postconditions used by collect_execution_evidence.
     assert StepStatus.SUCCEEDED.value == "SUCCEEDED"
     assert StepStatus.SKIPPED.value == "SKIPPED"
+
+
+def test_runner_does_not_stage_execution_queue() -> None:
+    """Runner must not call stage_created_batch (workers/outbox own staging)."""
+
+    src_path = Path(kpi05_runner.__file__).resolve()
+    src = src_path.read_text(encoding="utf-8")
+    assert "from app.execution.queue import" not in src
+    assert "ExecutionQueueService(" not in src
+    assert "stage_created_batch(" not in src
+
+
+def test_runner_db_url_prefers_harness_then_compose_entrypoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("TEST_DATABASE_URL", raising=False)
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.delenv("MCPFLOW_DATABASE_URL", raising=False)
+    assert runner_db_url() == ""
+    monkeypatch.setenv("MCPFLOW_DATABASE_URL", "postgresql+asyncpg://compose/db")
+    assert runner_db_url() == "postgresql+asyncpg://compose/db"
+    monkeypatch.setenv("DATABASE_URL", "postgresql+asyncpg://alias/db")
+    assert runner_db_url() == "postgresql+asyncpg://alias/db"
+    monkeypatch.setenv("TEST_DATABASE_URL", "postgresql+asyncpg://test/db")
+    assert runner_db_url() == "postgresql+asyncpg://test/db"
+
+
+def test_artifact_guard_fail_closed(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("MCPFLOW_ARTIFACT_DIR", str(tmp_path))
+    stamp = "20260101T000000Z"
+    ok = check_artifact_guard(stamp)
+    assert ok["ok"] is True
+    path = Path(ok["artifact_path"])
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("{}\n", encoding="utf-8")
+    blocked = check_artifact_guard(stamp)
+    assert blocked["ok"] is False
+    assert blocked["reason"] == "ARTIFACT_EXISTS"
+
+
+def test_run_with_existing_artifact_does_not_open_db(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("MCPFLOW_ARTIFACT_DIR", str(tmp_path))
+    stamp = "20260102T120000Z"
+    path = tmp_path / "kpi05" / f"parallel_condition_evidence_{stamp}.json"
+    path.parent.mkdir(parents=True)
+    path.write_text("{}\n", encoding="utf-8")
+
+    async def _boom() -> None:
+        raise AssertionError("DB must not open after artifact guard")
+
+    monkeypatch.setattr(kpi05_runner, "_session_factory", _boom)
+    code = kpi05_runner.main(
+        ["--run", "--run-stamp", stamp, "--write-artifact"]
+    )
+    assert code == 2
+
+
+@pytest.mark.asyncio
+async def test_poll_sees_external_worker_status_via_fresh_sessions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Each poll tick must open a new session so Worker commits are visible."""
+
+    statuses = ["CREATED", "RUNNING", "SUCCEEDED"]
+    opened: list[int] = []
+
+    class _Row:
+        def __init__(self, status: str) -> None:
+            self.status = status
+
+    class _FakeRepo:
+        def __init__(self, session: object) -> None:
+            self._session = session
+
+        async def get(self, _execution_id: uuid.UUID) -> _Row:
+            tick = getattr(self._session, "tick")
+            return _Row(statuses[tick])
+
+    class _SessionCM:
+        def __init__(self, tick: int) -> None:
+            self.tick = tick
+
+        async def __aenter__(self) -> _SessionCM:
+            opened.append(self.tick)
+            return self
+
+        async def __aexit__(self, *_args: object) -> bool:
+            return False
+
+    class _Factory:
+        def __init__(self) -> None:
+            self._n = 0
+
+        def __call__(self) -> _SessionCM:
+            cm = _SessionCM(self._n)
+            self._n += 1
+            return cm
+
+    monkeypatch.setattr(kpi05_runner, "ExecutionRepository", _FakeRepo)
+    monkeypatch.setattr(asyncio, "sleep", AsyncMock())
+
+    result = await poll_execution_until_terminal(
+        _Factory(),  # type: ignore[arg-type]
+        uuid.uuid4(),
+        wait_seconds=30,
+        poll_interval=0.01,
+    )
+    assert result["status"] == "SUCCEEDED"
+    assert result["timed_out"] is False
+    assert opened == [0, 1, 2]
+
+
+@pytest.mark.asyncio
+async def test_poll_timeout_keeps_actual_status_not_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Row:
+        status = "RUNNING"
+
+    class _FakeRepo:
+        def __init__(self, _session: object) -> None:
+            pass
+
+        async def get(self, _execution_id: uuid.UUID) -> _Row:
+            return _Row()
+
+    class _SessionCM:
+        async def __aenter__(self) -> _SessionCM:
+            return self
+
+        async def __aexit__(self, *_args: object) -> bool:
+            return False
+
+    class _Factory:
+        def __call__(self) -> _SessionCM:
+            return _SessionCM()
+
+    # deadline = first now + wait; subsequent now values exceed deadline after one poll.
+    timestamps = iter([1_000.0, 1_000.5, 1_002.0, 1_002.0])
+
+    class _FakeDateTime:
+        UTC = kpi05_runner.UTC
+
+        @classmethod
+        def now(cls, _tz: object = None) -> object:
+            value = next(timestamps)
+
+            class _TS:
+                @staticmethod
+                def timestamp() -> float:
+                    return value
+
+            return _TS()
+
+    monkeypatch.setattr(kpi05_runner, "datetime", _FakeDateTime)
+    monkeypatch.setattr(kpi05_runner, "ExecutionRepository", _FakeRepo)
+    monkeypatch.setattr(asyncio, "sleep", AsyncMock())
+
+    result = await poll_execution_until_terminal(
+        _Factory(),  # type: ignore[arg-type]
+        uuid.uuid4(),
+        wait_seconds=1,
+        poll_interval=0.01,
+    )
+    assert result["timed_out"] is True
+    assert result["status"] == "RUNNING"
+    assert result["reason"] == "WAIT_TIMEOUT"
+    assert result["status"] != "SUCCEEDED"
+
+
+@pytest.mark.asyncio
+async def test_duplicate_run_stamp_workflow_name_fail_closed(
+    db_session,
+) -> None:
+    stamp = "dupstamp2026"
+    name = workflow_name_for(SCENARIO_PARALLEL, stamp)
+    await WorkflowService(db_session).create(
+        WorkflowCreate(name=name, description="conflict probe")
+    )
+    await db_session.commit()
+    requester = uuid.uuid4()
+    guard = await check_db_duplicate_guards(
+        db_session, run_stamp=stamp, requester_id=requester
+    )
+    assert guard["ok"] is False
+    assert guard["reason"] == "DUPLICATE_RUN_STAMP"
+    assert any(c["kind"] == "workflow_name" for c in guard["conflicts"])
