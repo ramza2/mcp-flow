@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import uuid
 from typing import Any
 
@@ -17,6 +18,19 @@ from app.schemas.execution_plan import (
     default_plan_limits,
 )
 
+# Offline dry-run default only — ops --run must pass ToolPolicy-derived seconds.
+_DEFAULT_TOOL_TIMEOUT_SECONDS = 60
+
+
+def resolve_tool_timeout_seconds(timeout_ms: int) -> int:
+    """Match runtime_preflight: max(1, ceil(timeout_ms / 1000))."""
+
+    if not isinstance(timeout_ms, int) or isinstance(timeout_ms, bool):
+        raise ValueError("timeout_ms must be a positive int")
+    if timeout_ms <= 0:
+        raise ValueError("timeout_ms must be > 0")
+    return max(1, math.ceil(timeout_ms / 1000))
+
 
 def _literal_topic(topic: str) -> dict[str, Any]:
     return {
@@ -30,6 +44,7 @@ def _tool_step(
     *,
     tool_version_id: uuid.UUID,
     topic: str,
+    tool_timeout_seconds: int,
     depends_on: list[str] | None = None,
     when: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -40,7 +55,7 @@ def _tool_step(
         "required": True,
         "depends_on": depends_on or [],
         "when": when,
-        "timeout_seconds": 60,
+        "timeout_seconds": tool_timeout_seconds,
         "on_error": "FAIL_EXECUTION",
         "config": {
             "tool_version_id": str(tool_version_id),
@@ -127,11 +142,15 @@ def build_parallel_join_wave_plan(
     *,
     workflow_id: uuid.UUID,
     tool_version_id: uuid.UUID,
+    tool_timeout_seconds: int = _DEFAULT_TOOL_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
     """Two independent TOOL roots (finance/science) + JOIN ALL_SUCCESS.
 
     ``max_parallelism=2``. Does not claim wall-clock overlap — that is diagnosed
     from durable Step timestamps after Execution completes.
+
+    Ops ``--run`` must pass ``tool_timeout_seconds`` from MCPToolPolicy
+    (``resolve_tool_timeout_seconds(timeout_ms)``).
     """
 
     steps = [
@@ -139,11 +158,13 @@ def build_parallel_join_wave_plan(
             "tool_finance",
             tool_version_id=tool_version_id,
             topic="finance",
+            tool_timeout_seconds=tool_timeout_seconds,
         ),
         _tool_step(
             "tool_science",
             tool_version_id=tool_version_id,
             topic="science",
+            tool_timeout_seconds=tool_timeout_seconds,
         ),
         _join_step(
             "join_wave",
@@ -164,11 +185,14 @@ def build_condition_branch_plan(
     *,
     workflow_id: uuid.UUID,
     tool_version_id: uuid.UUID,
+    tool_timeout_seconds: int = _DEFAULT_TOOL_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
     """Prior TOOL → CONDITION(exists /result_type) → when branches → JOIN.
 
     Uses ``result_inline.result_type`` (not structured_content). JOIN uses
     ``ALL_COMPLETE`` so the SKIPPED opposite branch does not fail the barrier.
+
+    Ops ``--run`` must pass ``tool_timeout_seconds`` from MCPToolPolicy.
     """
 
     steps = [
@@ -176,6 +200,7 @@ def build_condition_branch_plan(
             "tool_probe",
             tool_version_id=tool_version_id,
             topic="science",
+            tool_timeout_seconds=tool_timeout_seconds,
         ),
         _condition_step(
             "cond_result_type",
@@ -193,6 +218,7 @@ def build_condition_branch_plan(
             "branch_true",
             tool_version_id=tool_version_id,
             topic="finance",
+            tool_timeout_seconds=tool_timeout_seconds,
             depends_on=["cond_result_type"],
             when=_when_condition_result("cond_result_type", expected=True),
         ),
@@ -200,6 +226,7 @@ def build_condition_branch_plan(
             "branch_false",
             tool_version_id=tool_version_id,
             topic="finance",
+            tool_timeout_seconds=tool_timeout_seconds,
             depends_on=["cond_result_type"],
             when=_when_condition_result("cond_result_type", expected=False),
         ),
@@ -216,6 +243,16 @@ def build_condition_branch_plan(
         max_parallelism=2,
         response_step_ids=["join_branches"],
     )
+
+
+def tool_step_timeouts(plan: dict[str, Any]) -> list[int]:
+    """Return timeout_seconds for every TOOL step (plan integrity helpers)."""
+
+    return [
+        int(step["timeout_seconds"])
+        for step in plan.get("steps") or []
+        if step.get("type") == AuthorableStepType.TOOL.value
+    ]
 
 
 def validate_plan_dict(plan: dict[str, Any]) -> ExecutionPlanV1:
