@@ -1120,6 +1120,70 @@ async def test_entity_alignment_insufficient_evidence_stays_clarify(
 
 
 @pytest.mark.asyncio
+async def test_entity_alignment_rejects_duplicate_source_names(
+    db_session: AsyncSession,
+) -> None:
+    """Same casefold entity name twice → reject mapping; keep original StructuredRequest."""
+
+    request_id, _, _ = await _seed_retrieving(
+        db_session,
+        request_text="서울 부산 날씨",
+        entities=[
+            {
+                "name": "seoul",
+                "value": "서울",
+                "source": ParameterProvenance.USER_EXPLICIT.value,
+            },
+            {
+                "name": "Seoul",
+                "value": "부산",
+                "source": ParameterProvenance.USER_EXPLICIT.value,
+            },
+        ],
+    )
+    desc = _descriptor(
+        name="lookup_weather", required_inputs=("location",), retrieval_score=0.95
+    )
+    candidates = [_candidate(desc, allow_auto_select=True)]
+    rerank = _rerank_payload(candidates)
+    alignment = {
+        "mappings": [
+            {
+                "from_entity_name": "seoul",
+                "to_required_input": "location",
+                "rationale": "place name fills location",
+            }
+        ]
+    }
+    llm = _MockLLM([rerank, alignment])
+    outcome = await ToolSelectorService(
+        db_session,
+        model_provider=llm,  # type: ignore[arg-type]
+        tool_retrieval=_MockRetrieval(candidates),  # type: ignore[arg-type]
+    ).select(agent_request_id=request_id)
+
+    assert outcome.decision == "CLARIFY"
+    assert "location" in outcome.missing_fields
+    assert llm.calls == 2
+
+    row = await AgentRequestRepository(db_session).get(request_id)
+    assert row is not None
+    assert row.status == AgentRequestStatus.WAITING_INPUT.value
+    assert row.structured_request is not None
+    names = [e["name"] for e in row.structured_request["entities"]]
+    assert names == ["seoul", "Seoul"]
+    assert {e["value"] for e in row.structured_request["entities"]} == {"서울", "부산"}
+
+    from app.repositories.tool_selection import ToolSelectionRepository
+
+    run = await ToolSelectionRepository(db_session).get_latest_for_agent_request(
+        request_id
+    )
+    assert run is not None
+    assert not run.registry_snapshot.get("entity_alignments")
+
+
+@pytest.mark.asyncio
 async def test_unsupported_capability_empty_retrieval_no_match(
     db_session: AsyncSession,
 ) -> None:

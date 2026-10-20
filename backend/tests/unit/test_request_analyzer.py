@@ -615,6 +615,50 @@ async def test_true_ambiguity_keeps_waiting_input(db_session: AsyncSession) -> N
 
 
 @pytest.mark.asyncio
+async def test_ungrounded_target_in_missing_inputs_keeps_waiting_input(
+    db_session: AsyncSession,
+) -> None:
+    """Target incompleteness in missing_inputs must not be stripped when ambiguities=[].
+
+    Capabilities may be routable (weather.lookup) while the concrete target is
+    still unknown — fail-closed WAITING_INPUT (not DESTRUCTIVE sanitize path).
+    """
+
+    raw = "그 도시 날씨 알려줘"
+    request_id, _, _ = await _seed_received(db_session, raw_text=raw)
+    payload = {
+        "schema_version": "1.0",
+        "request_text": "MODEL SHOULD NOT WIN",
+        "intent": "lookup weather",
+        "entities": [],
+        "constraints": [],
+        "expected_outputs": ["weather"],
+        "required_capabilities": ["weather.lookup"],
+        "risk_hints": [RiskClass.READ_ONLY.value],
+        "missing_inputs": ["location"],
+        "ambiguities": [],
+        "needs_clarification": True,
+    }
+    provider = _MockProvider(payload)
+    result = await RequestAnalyzerService(
+        db_session, model_provider=provider  # type: ignore[arg-type]
+    ).analyze(agent_request_id=request_id)
+
+    assert result.missing_inputs == ["location"]
+    assert result.ambiguities == []
+    assert result.needs_clarification is True
+    assert result.required_capabilities == ["weather.lookup"]
+
+    row = await AgentRequestRepository(db_session).get(request_id)
+    assert row is not None
+    assert row.status == AgentRequestStatus.WAITING_INPUT.value
+    assert row.missing_fields == ["location"]
+    assert row.structured_request is not None
+    assert row.structured_request["needs_clarification"] is True
+    assert row.structured_request["missing_inputs"] == ["location"]
+
+
+@pytest.mark.asyncio
 async def test_calendar_request_extracts_title_when_to_retrieving(
     db_session: AsyncSession,
 ) -> None:

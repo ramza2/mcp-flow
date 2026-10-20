@@ -63,6 +63,27 @@ def _casefold_set(names: Sequence[str]) -> set[str]:
     return {name.strip().casefold() for name in names if name and name.strip()}
 
 
+def _entity_name_casefold_counts(
+    entities: Sequence[StructuredRequestEntity],
+) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for entity in entities:
+        name = entity.name.strip() if entity.name else ""
+        if not name:
+            continue
+        cf = name.casefold()
+        counts[cf] = counts.get(cf, 0) + 1
+    return counts
+
+
+def duplicate_entity_name_casefolds(
+    entities: Sequence[StructuredRequestEntity],
+) -> set[str]:
+    """Casefolded entity names that appear more than once (ambiguous sources)."""
+
+    return {cf for cf, count in _entity_name_casefold_counts(entities).items() if count > 1}
+
+
 def unused_user_explicit_entities(
     structured: StructuredRequestV1,
     *,
@@ -161,6 +182,8 @@ def apply_entity_alignments(
     if not mappings:
         return None
 
+    duplicate_sources = duplicate_entity_name_casefolds(structured.entities)
+
     missing = missing_required_inputs(
         required_inputs=required_inputs, structured=structured
     )
@@ -170,7 +193,15 @@ def apply_entity_alignments(
         required_inputs=required_inputs,
         optional_inputs=optional_inputs,
     )
-    unused_by_cf = {e.name.strip().casefold(): e for e in unused}
+    # Unique unused names only — duplicate casefolds are never mappable.
+    unused_by_cf: dict[str, StructuredRequestEntity] = {}
+    for entity in unused:
+        cf = entity.name.strip().casefold()
+        if cf in duplicate_sources:
+            continue
+        if cf in unused_by_cf:
+            return None
+        unused_by_cf[cf] = entity
 
     used_from: set[str] = set()
     used_to: set[str] = set()
@@ -181,6 +212,9 @@ def apply_entity_alignments(
         to_cf = item.to_required_input.casefold()
         if from_cf in used_from or to_cf in used_to:
             return None
+        # Duplicate source names are ambiguous — reject that mapping set.
+        if from_cf in duplicate_sources:
+            return None
         if from_cf not in unused_by_cf:
             return None
         if to_cf not in missing_cf:
@@ -189,21 +223,45 @@ def apply_entity_alignments(
         used_to.add(to_cf)
         rename[from_cf] = missing_cf[to_cf]
 
+    # Target must not collide with any entity name that remains after rename.
+    remaining_name_cfs: set[str] = set()
+    for entity in structured.entities:
+        name = entity.name.strip() if entity.name else ""
+        if not name:
+            continue
+        name_cf = name.casefold()
+        if name_cf in rename:
+            continue
+        remaining_name_cfs.add(name_cf)
+    for to_cf in used_to:
+        if to_cf in remaining_name_cfs:
+            return None
+
     new_entities: list[dict[str, Any]] = []
+    seen_result_names: set[str] = set()
     for entity in structured.entities:
         name = entity.name.strip() if entity.name else ""
         name_cf = name.casefold()
         if name_cf in rename:
             if entity.source != ParameterProvenance.USER_EXPLICIT:
                 return None
+            new_name = rename[name_cf]
+            new_cf = new_name.casefold()
+            if new_cf in seen_result_names:
+                return None
+            seen_result_names.add(new_cf)
             new_entities.append(
                 {
-                    "name": rename[name_cf],
+                    "name": new_name,
                     "value": entity.value,
                     "source": ParameterProvenance.USER_EXPLICIT.value,
                 }
             )
         else:
+            if name_cf and name_cf in seen_result_names:
+                return None
+            if name_cf:
+                seen_result_names.add(name_cf)
             new_entities.append(
                 {
                     "name": entity.name,
