@@ -1219,6 +1219,104 @@ async def test_unsupported_capability_empty_retrieval_no_match(
 
 
 @pytest.mark.asyncio
+async def test_all_rerank_fit_zero_no_match_despite_missing_required_inputs(
+    db_session: AsyncSession,
+) -> None:
+    """KPI-02 rocket style: all llm_fit_score==0 → NO_MATCH, not coverage CLARIFY."""
+
+    request_id, _, _ = await _seed_retrieving(
+        db_session,
+        request_text="Launch the rocket now",
+        entities=[],
+    )
+    weather = _candidate(
+        _descriptor(
+            name="lookup_weather",
+            required_inputs=("location",),
+            retrieval_score=0.5,
+        )
+    )
+    calendar = _candidate(
+        _descriptor(
+            name="create_calendar_event",
+            required_inputs=("title", "when"),
+            retrieval_score=0.4919,
+        )
+    )
+    echo = _candidate(
+        _descriptor(
+            name="echo",
+            required_inputs=("text",),
+            retrieval_score=0.4841,
+        )
+    )
+    candidates = [weather, calendar, echo]
+    reason = "none of the authorized candidates support rocket.launch"
+    payload = {
+        "candidates": [
+            {
+                "tool_version_id": str(c.descriptor.tool_version_id),
+                "llm_fit_score": 0.0,
+                "reason_summary": reason,
+            }
+            for c in candidates
+        ],
+        "ambiguities": [],
+    }
+    # Would trigger alignment+CLARIFY if fit==0 short-circuit were missing.
+    llm = _MockLLM(
+        [
+            payload,
+            {
+                "mappings": [
+                    {
+                        "from_entity_name": "x",
+                        "to_required_input": "location",
+                        "rationale": "should not be called",
+                    }
+                ]
+            },
+        ]
+    )
+    outcome = await ToolSelectorService(
+        db_session,
+        model_provider=llm,  # type: ignore[arg-type]
+        tool_retrieval=_MockRetrieval(candidates),  # type: ignore[arg-type]
+    ).select(agent_request_id=request_id)
+
+    assert outcome.decision == "NO_MATCH"
+    assert outcome.selected_candidate is None
+    assert outcome.selection_result is None
+    assert llm.calls == 1  # rerank only — no Entity Alignment
+
+    row = await AgentRequestRepository(db_session).get(request_id)
+    assert row is not None
+    assert row.status == AgentRequestStatus.REJECTED.value
+
+    from app.repositories.clarification_request import ClarificationRequestRepository
+    from app.repositories.tool_selection import ToolSelectionRepository
+
+    run = await ToolSelectionRepository(db_session).get_latest_for_agent_request(
+        request_id
+    )
+    assert run is not None
+    assert run.decision == "NO_MATCH"
+    assert run.selected_tool_version_id is None
+    assert run.reason_summary == reason
+    assert not run.registry_snapshot.get("entity_alignments")
+    candidate_rows = await ToolSelectionRepository(db_session).list_candidates_for_run(
+        run.id
+    )
+    assert len(candidate_rows) == 3
+    assert all(row.llm_fit_score == 0.0 for row in candidate_rows)
+    assert all(row.reason_summary == reason for row in candidate_rows)
+    clarification = await ClarificationRequestRepository(
+        db_session
+    ).get_open_for_agent_request(request_id)
+    assert clarification is None
+
+
+@pytest.mark.asyncio
 async def test_tool_present_unmet_required_input_clarify_not_auto_select(
     db_session: AsyncSession,
 ) -> None:
