@@ -17,7 +17,7 @@ from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import AppError
-from app.domain.enums import AgentRequestStatus, RiskClass
+from app.domain.enums import AgentRequestStatus
 from app.model_provider.client import LLMConnectionTarget, ModelProviderClient
 from app.model_provider.errors import ModelProviderError
 from app.models.conversation import AgentRequest
@@ -318,27 +318,29 @@ class RequestAnalyzerService:
     def _sanitize_request_level_clarification(
         structured: StructuredRequestV1,
     ) -> StructuredRequestV1:
-        """Drop only clearly speculative execution missing_inputs — fail-closed otherwise.
+        """Defer Tool-input sufficiency to Selector when the request is routable.
 
-        Analyzer cannot see Tool required params yet, so missing_inputs that may
-        encode real request-target incompleteness (even with ambiguities=[]) must
-        not be stripped. Safe auto-clear is limited to routable DESTRUCTIVE
-        requests: intent/capability/risk are already structured for Selector
-        policy / NO_MATCH, and invented execution prerequisites must not block
-        that path (docs/04; security contract rocket example).
+        docs/04 separates Analyzer meaning/routing from Selector Tool existence
+        and required-input coverage:
 
-        Preserved (WAITING_INPUT): non-empty ambiguities; empty capabilities;
-        non-DESTRUCTIVE missing_inputs that may mean ungrounded target.
+        - True meaning ambiguity (`ambiguities` non-empty) → keep WAITING_INPUT.
+        - Unroutable incompleteness (empty `required_capabilities`) → keep
+          Analyzer clarification unchanged.
+        - Routable request (`required_capabilities` non-empty, `ambiguities`
+          empty) → clear Analyzer-level `missing_inputs` / `needs_clarification`
+          so Authorized Retrieval / Selector can run. Tool absence → NO_MATCH;
+          selected Tool with unmet required inputs → CLARIFY. RiskClass is
+          never used as a routing bypass (docs/04: no RiskClass→confirmation
+          mapping at selection either).
+
+        Analyzer cannot classify missing_inputs names against Tool schemas;
+        clearing on the routable path is deferral, not a claim that inputs are
+        satisfied. AUTO_SELECT remains gated by Selector coverage / policy.
         """
 
         if not structured.required_capabilities or structured.ambiguities:
             return structured
         if not structured.missing_inputs and not structured.needs_clarification:
-            return structured
-        # Fail-closed: without Tool schema, speculative vs target-ambiguity
-        # missing_inputs cannot be classified by name. Only DESTRUCTIVE
-        # risk_hints authorize stripping invented execution prerequisites.
-        if RiskClass.DESTRUCTIVE not in structured.risk_hints:
             return structured
         data = structured.model_dump(mode="json")
         data["missing_inputs"] = []

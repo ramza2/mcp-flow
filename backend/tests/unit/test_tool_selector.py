@@ -1219,6 +1219,43 @@ async def test_unsupported_capability_empty_retrieval_no_match(
 
 
 @pytest.mark.asyncio
+async def test_tool_present_unmet_required_input_clarify_not_auto_select(
+    db_session: AsyncSession,
+) -> None:
+    """Tool exists but required input uncovered → CLARIFY; never AUTO_SELECT."""
+
+    request_id, _, _ = await _seed_retrieving(
+        db_session,
+        request_text="그 도시 날씨 알려줘",
+        entities=[],
+    )
+    desc = _descriptor(
+        name="lookup_weather",
+        required_inputs=("location",),
+        retrieval_score=0.99,
+    )
+    # High fit + allow_auto_select must not override unmet required inputs.
+    candidates = [_candidate(desc, allow_auto_select=True)]
+    llm = _MockLLM(_rerank_payload(candidates))
+    outcome = await ToolSelectorService(
+        db_session,
+        model_provider=llm,  # type: ignore[arg-type]
+        tool_retrieval=_MockRetrieval(candidates),  # type: ignore[arg-type]
+    ).select(agent_request_id=request_id)
+
+    assert outcome.decision == "CLARIFY"
+    assert outcome.decision != "AUTO_SELECT"
+    assert "location" in outcome.missing_fields
+    assert outcome.confidence is not None
+    assert outcome.confidence.required_input_coverage < 1.0
+
+    row = await AgentRequestRepository(db_session).get(request_id)
+    assert row is not None
+    assert row.status == AgentRequestStatus.WAITING_INPUT.value
+    assert "location" in row.missing_fields
+
+
+@pytest.mark.asyncio
 async def test_echo_and_calendar_entity_match_still_auto_select(
     db_session: AsyncSession,
 ) -> None:

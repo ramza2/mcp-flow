@@ -615,13 +615,13 @@ async def test_true_ambiguity_keeps_waiting_input(db_session: AsyncSession) -> N
 
 
 @pytest.mark.asyncio
-async def test_ungrounded_target_in_missing_inputs_keeps_waiting_input(
+async def test_routable_missing_inputs_deferred_to_retrieving_not_risk_gated(
     db_session: AsyncSession,
 ) -> None:
-    """Target incompleteness in missing_inputs must not be stripped when ambiguities=[].
+    """Routable READ_ONLY request defers Tool-input checks to Selector (not risk).
 
-    Capabilities may be routable (weather.lookup) while the concrete target is
-    still unknown — fail-closed WAITING_INPUT (not DESTRUCTIVE sanitize path).
+    Analyzer clears request-level missing_inputs only to allow RETRIEVING.
+    Unmet Tool required inputs become Selector CLARIFY; risk_hints unused.
     """
 
     raw = "그 도시 날씨 알려줘"
@@ -644,18 +644,19 @@ async def test_ungrounded_target_in_missing_inputs_keeps_waiting_input(
         db_session, model_provider=provider  # type: ignore[arg-type]
     ).analyze(agent_request_id=request_id)
 
-    assert result.missing_inputs == ["location"]
+    assert result.missing_inputs == []
     assert result.ambiguities == []
-    assert result.needs_clarification is True
+    assert result.needs_clarification is False
     assert result.required_capabilities == ["weather.lookup"]
+    assert result.risk_hints == [RiskClass.READ_ONLY]
 
     row = await AgentRequestRepository(db_session).get(request_id)
     assert row is not None
-    assert row.status == AgentRequestStatus.WAITING_INPUT.value
-    assert row.missing_fields == ["location"]
+    assert row.status == AgentRequestStatus.RETRIEVING.value
+    assert row.missing_fields == []
     assert row.structured_request is not None
-    assert row.structured_request["needs_clarification"] is True
-    assert row.structured_request["missing_inputs"] == ["location"]
+    assert row.structured_request["needs_clarification"] is False
+    assert row.structured_request["missing_inputs"] == []
 
 
 @pytest.mark.asyncio
