@@ -486,6 +486,9 @@ def test_v2_gold_semantic_fields_and_temporal_bounds() -> None:
             assert all(value for value in capability.values())
 
         temporal = gold.get("temporal")
+        if row["id"] == "C02":
+            assert temporal is not None
+            assert temporal.get("role") == "deadline"
         if temporal:
             assert temporal["kind"] in {"date", "range", "month", "datetime"}
             for value in temporal.get("dates", []):
