@@ -89,7 +89,7 @@ cases:
     review_note: "업무 작업 신규 생성, 일정 회의 생성 아님"
   - id: C02
     family: create
-    request_text: "2026년 12월 3일 오전 10시에 '고객 피드백 검토' 작업을 만들어줘"
+    request_text: "'고객 피드백 검토' 작업을 새로 만들고 마감 시각을 2026년 12월 3일 오전 10시로 지정해줘"
     gold:
       intent: {"domain":"task","action":"create","object":"task"}
       capability: {"domain":"task","action":"create"}
@@ -97,7 +97,7 @@ cases:
       risk: ["IDEMPOTENT_WRITE","NON_IDEMPOTENT_WRITE"]
       needs_clarification: false
       temporal: {"kind":"datetime","dates":["2026-12-03"],"time_24h":"10:00"}
-    review_note: "생성 작업과 명시 시점 모두 보존"
+    review_note: "신규 작업 생성 및 명시된 마감 시각을 각각 보존; 예약 생성으로 오인하지 않음"
   - id: C03
     family: create
     request_text: "김민준을 담당자로 지정해서 '대시보드 점검' 할 일을 생성해줘"
