@@ -79,10 +79,11 @@ _DATE_RE = re.compile(
     r"\\s*(?:월|[-./])\\s*(\\d{1,2})(?:일)?(?!\\d)"
 )
 _MONTH_RE = re.compile(
-    r"(?<!\\d)(20\\d{2})\\s*(?:년|[-./])\\s*(\\d{1,2})(?:월)?"
-    r"(?!(?:\\s*\\d{1,2}\\s*일)|[-./]\\d|\\d)"
+    r"(?<!\\d)(20\\d{2})\\s*(?:년\\s*(\\d{1,2})월(?!\\s*\\d{1,2}\\s*일)"
+    r"|[-./]\\s*(\\d{1,2})(?![-./]\\d))"
 )
-_HHMM_RE = re.compile(r"(?<!\\d)([01]?\\d|2[0-3]):([0-5]\\d)(?!\\d)")
+# Ignore explicit timezone offsets (e.g. +09:00), which are not local clock times.
+_HHMM_RE = re.compile(r"(?<![+\\d-])([01]?\\d|2[0-3]):([0-5]\\d)(?!\\d)")
 _KO_CLOCK_RE = re.compile(r"(오전|오후)?\\s*(\\d{1,2})\\s*시(?:\\s*(\\d{1,2})\\s*분)?")
 
 
@@ -105,7 +106,8 @@ def _observed_dates(text: str) -> set[str]:
 def _observed_months(text: str) -> set[str]:
     return {
         f"{int(y):04d}-{int(m):02d}"
-        for y, m in _MONTH_RE.findall(text)
+        for y, month_ko, month_iso in _MONTH_RE.findall(text)
+        for m in [month_ko or month_iso]
         if 1 <= int(m) <= 12
     }
 
