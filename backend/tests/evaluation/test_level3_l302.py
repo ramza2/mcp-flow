@@ -218,6 +218,12 @@ async def test_invalid_model_payload_is_failed_not_dropped() -> None:
     assert row["passed"] is False
     assert row["schema_valid"] is False
     assert row["error_code"] == "VALIDATION_ERROR"
+    assert row["validation_issue_count"] > 0
+    assert any(issue["field"] == "entities" for issue in row["validation_issues"])
+    assert all(
+        set(issue) == {"field", "type"}
+        for issue in row["validation_issues"]
+    )
 
 
 def _calendar_structured(
@@ -349,3 +355,55 @@ async def test_pending_gold_blocks_run(monkeypatch: pytest.MonkeyPatch) -> None:
     assert report["ok"] is False
     assert report["reason"] == "GOLD_SET_NOT_APPROVED"
     assert not invoked
+
+
+@pytest.mark.asyncio
+async def test_validation_diagnostics_do_not_expose_model_values() -> None:
+    sensitive = "CANARY_PRIVATE_VALUE_4567"
+    provider = SimpleNamespace(
+        generate_json=AsyncMock(return_value={
+            "intent": "note lookup",
+            "entities": [{
+                "name": "note_id",
+                "value": sensitive,
+                "source": "NON_CANONICAL_SOURCE",
+            }],
+            "constraints": [],
+            "expected_outputs": [],
+            "required_capabilities": ["notes.lookup"],
+            "risk_hints": ["READ_ONLY"],
+            "missing_inputs": [],
+            "ambiguities": [],
+            "needs_clarification": False,
+        }),
+        aclose=AsyncMock(),
+    )
+    version = SimpleNamespace(system_instruction="")
+    profile = SimpleNamespace(
+        provider="OPENAI_COMPATIBLE",
+        model="test",
+        base_url="https://models.test/v1",
+        credential_secret_id=None,
+        request_timeout_ms=None,
+        parameters=None,
+    )
+    rows = await evaluate_cases(
+        session=AsyncMock(), version=version, profile=profile,
+        cases=[{
+            "id": "CANARY", "family": "weather_lookup",
+            "request_text": "show the note",
+            "expected_entities": {"location": "Seoul"},
+        }],
+        provider=provider,  # type: ignore[arg-type]
+    )
+    row = rows[0]
+    assert row["passed"] is False
+    assert row["error_code"] == "VALIDATION_ERROR"
+    assert row["validation_issue_count"] >= 1
+    assert any(issue["field"] == "entities" for issue in row["validation_issues"])
+    assert sensitive not in str(row)
+    assert "NON_CANONICAL_SOURCE" not in str(row)
+    assert all(
+        set(issue) == {"field", "type"}
+        for issue in row["validation_issues"]
+    )

@@ -496,6 +496,13 @@ def test_security_contract_covers_missing_inputs_and_entity_rules() -> None:
     assert "needs_clarification must equal bool(missing_inputs or ambiguities)" in contract
     assert "Do not use Korean keys" in contract
     assert "speculative execution details" in contract
+    assert "Action and capability completeness" in contract
+    assert "Do not leave required_capabilities empty" in contract
+    assert "Distinguish reading/listing from creating" in contract
+    assert "use request-level clarification" in contract
+    assert "USER_EXPLICIT entity named text" in contract
+    assert "USER_EXPLICIT entity named title" in contract
+    assert "USER_EXPLICIT entities under stable semantic names" in contract
 
 
 @pytest.mark.asyncio
