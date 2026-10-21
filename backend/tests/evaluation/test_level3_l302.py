@@ -6,8 +6,8 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-
 from app.schemas.structured_request import StructuredRequestV1
+
 from tests.evaluation.level3.measure_l3_02 import (
     DATASET_VERSION,
     evaluate_cases,
