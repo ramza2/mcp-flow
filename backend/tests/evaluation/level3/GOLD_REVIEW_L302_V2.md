@@ -20,7 +20,7 @@
 | R05 | 조회 | 거래처 해솔테크의 미결제 청구서 목록을 찾아줘 | invoice/list | customer=해솔테크 (USER_EXPLICIT); risk=READ_ONLY |
 | R06 | 조회 | 2026년 8월의 서비스 장애 기록을 조회해줘 | incident/list | 시점={"kind":"month","months":["2026-08"]}; risk=READ_ONLY |
 | C01 | 등록 | 프로젝트 오로라에 '데이터 검증' 작업을 새로 등록해줘 | task/create | project=오로라 (USER_EXPLICIT); title=데이터 검증 (USER_EXPLICIT); risk=IDEMPOTENT_WRITE/NON_IDEMPOTENT_WRITE |
-| C02 | 등록 | '고객 피드백 검토' 작업을 새로 만들고 마감 시각을 2026년 12월 3일 오전 10시로 지정해줘 | task/create | title=고객 피드백 검토 (USER_EXPLICIT); 시점={"kind":"datetime","dates":["2026-12-03"],"time_24h":"10:00"}; risk=IDEMPOTENT_WRITE/NON_IDEMPOTENT_WRITE |
+| C02 | 등록 | '고객 피드백 검토' 작업을 새로 만들고 마감 시각을 2026년 12월 3일 오전 10시로 지정해줘 | task/create | title=고객 피드백 검토 (USER_EXPLICIT); 시점={"kind":"datetime","dates":["2026-12-03"],"time_24h":"10:00","role":"deadline"}; risk=IDEMPOTENT_WRITE/NON_IDEMPOTENT_WRITE |
 | C03 | 등록 | 김민준을 담당자로 지정해서 '대시보드 점검' 할 일을 생성해줘 | task/create | assignee=김민준 (USER_EXPLICIT); title=대시보드 점검 (USER_EXPLICIT); risk=IDEMPOTENT_WRITE/NON_IDEMPOTENT_WRITE |
 | C04 | 등록 | 거래처 솔빛상사에 대한 '후속 연락' 작업을 새로 추가해줘 | task/create | customer=솔빛상사 (USER_EXPLICIT); title=후속 연락 (USER_EXPLICIT); risk=IDEMPOTENT_WRITE/NON_IDEMPOTENT_WRITE |
 | U01 | 수정 | 작업 TK-918의 상태를 완료로 변경해줘 | task/update | task_id=TK-918 (USER_EXPLICIT); status=완료 (USER_EXPLICIT); risk=IDEMPOTENT_WRITE/NON_IDEMPOTENT_WRITE |
@@ -39,7 +39,7 @@
 1. **의도:** 단순 키워드가 아니라 업무 대상과 동작 일치 여부. 동등한 자연어·영어 의도 허용하되 생성/조회/수정 혼동 금지.
 2. **업무 기능:** 요구하는 비즈니스 도메인·동작의 의미 동등성 확인. 실제 MCP Tool ID로 강제 매핑하거나 Tool 존재 여부를 추정하지 않음.
 3. **엔터티·출처:** 표의 핵심값과 `USER_EXPLICIT` 출처 일치. 엔터티의 역할은 의미에 따라 판단하되 누락·가공·발명 허용 금지.
-4. **날짜·시간:** R01 문서 날짜, R04 기간의 양쪽 경계, R06 월 전체, C02 시각까지 확인. E03의 `14:30`은 인용문 내부 문자열이지 작업 예약 시각이 아님.
+4. **날짜·시간:** R01 문서 날짜, R04 기간의 양쪽 경계, R06 월 전체, C02 마감 일시(등록 실행 예약 시각이 아님)까지 확인. E03의 `14:30`은 인용문 내부 문자열이지 작업 예약 시각이 아님.
 5. **위험:** 조회·원문 반복은 READ_ONLY, 등록·수정은 적절한 쓰기 위험도. 위험도를 낮춰서 통과시키지 않음.
 6. **모호성:** A01/A02는 외부 맥락 부재로 대상 식별 불가. capability를 임의로 발명하지 않고 `needs_clarification=true`; intent는 비어 있으면 안 됨.
 7. **구조:** StructuredRequestV1 유효. 필수 필드 누락이나 출력 오류는 실패이며 20개 전체 분모 유지.
