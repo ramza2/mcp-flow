@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -11,6 +12,7 @@ from app.schemas.structured_request import StructuredRequestV1
 from tests.evaluation.level3.measure_l3_02 import (
     DATASET_VERSION,
     evaluate_cases,
+    execute,
     load_dataset,
     validate_dataset,
 )
@@ -214,3 +216,132 @@ async def test_invalid_model_payload_is_failed_not_dropped() -> None:
     assert row["passed"] is False
     assert row["schema_valid"] is False
     assert row["error_code"] == "VALIDATION_ERROR"
+
+
+def _calendar_structured(
+    entities: list[dict[str, str]], *, mode: str = "create"
+) -> StructuredRequestV1:
+    return StructuredRequestV1.model_validate({
+        "schema_version": "1.0",
+        "request_text": "2026년 11월 일정을 처리해줘",
+        "intent": "일정 등록" if mode == "create" else "일정 조회",
+        "entities": [
+            {"name": name, "value": value, "source": "USER_EXPLICIT"}
+            for item in entities
+            for name, value in item.items()
+        ],
+        "constraints": [],
+        "expected_outputs": [],
+        "required_capabilities": [
+            "calendar.create" if mode == "create" else "calendar.list"
+        ],
+        "risk_hints": [
+            "NON_IDEMPOTENT_WRITE" if mode == "create" else "READ_ONLY"
+        ],
+        "missing_inputs": [],
+        "ambiguities": [],
+        "needs_clarification": False,
+    })
+
+
+def test_calendar_create_datetime_normalizations_and_missing_time() -> None:
+    case = next(x for x in load_dataset()["cases"] if x["id"] == "C01")
+    normalized = _calendar_structured([
+        {"title": "팀 회의"},
+        {"when": "2026-11-02T15:00:00+09:00"},
+    ])
+    assert score_case(case, normalized)["passed"] is True
+    assert score_case(case, normalized)["temporal_checks"] == {
+        "date:2026-11-02": True,
+        "time_24h": True,
+    }
+
+    korean = _calendar_structured([
+        {"title": "팀 회의"},
+        {"when": "2026년 11월 2일 오후 3시"},
+    ])
+    assert score_case(case, korean)["passed"] is True
+
+    missing_time = _calendar_structured([
+        {"title": "팀 회의"},
+        {"date": "2026-11-02"},
+    ])
+    scored = score_case(case, missing_time)
+    assert scored["passed"] is False
+    assert scored["temporal_checks"]["time_24h"] is False
+
+    wrong_date = _calendar_structured([
+        {"title": "팀 회의"},
+        {"when": "2026-11-03T15:00:00"},
+    ])
+    assert score_case(case, wrong_date)["temporal_checks"]["date:2026-11-02"] is False
+
+
+def test_calendar_list_entire_period_and_month_must_be_extracted() -> None:
+    rows = {x["id"]: x for x in load_dataset()["cases"]}
+    period = _calendar_structured([
+        {"period": "2026년 11월 2일부터 2026년 11월 6일까지"}
+    ], mode="list")
+    assert score_case(rows["L01"], period)["passed"] is True
+
+    truncated = _calendar_structured([
+        {"start_date": "2026-11-02"}
+    ], mode="list")
+    assert score_case(rows["L01"], truncated)["passed"] is False
+    assert score_case(rows["L01"], truncated)["temporal_checks"]["date:2026-11-06"] is False
+
+    month = _calendar_structured([
+        {"period": "2026년 11월"}
+    ], mode="list")
+    assert score_case(rows["L04"], month)["passed"] is True
+    single_day_only = _calendar_structured([
+        {"date": "2026-11-02"}
+    ], mode="list")
+    assert score_case(rows["L04"], single_day_only)["checks"]["temporal"] is False
+    korean_single_day = _calendar_structured([
+        {"date": "2026년 11월 2일"}
+    ], mode="list")
+    assert score_case(rows["L04"], korean_single_day)["checks"]["temporal"] is False
+
+    iso_month = _calendar_structured([
+        {"period": "2026-11"}
+    ], mode="list")
+    assert score_case(rows["L04"], iso_month)["passed"] is True
+
+
+def test_gold_reviewer_and_temporal_expectations_fail_closed() -> None:
+    original = load_dataset()
+    missing = {**original, "cases": [dict(x) for x in original["cases"]]}
+    missing["cases"][5].pop("expected_temporal")
+    assert validate_dataset(missing)["reason"] == "TEMPORAL_GOLD_MISSING"
+
+    invalid_day = {**original, "cases": [dict(x) for x in original["cases"]]}
+    invalid_day["cases"][5]["expected_temporal"] = {
+        "dates": ["2026-02-31"], "time_24h": "15:00"
+    }
+    assert validate_dataset(invalid_day)["reason"] == "TEMPORAL_DATE_INVALID"
+
+    approved = {**original, "review_status": "APPROVED"}
+    assert validate_dataset(approved)["reason"] == "GOLD_REVIEWER_MISSING"
+    approved["reviewed_by"] = "Evaluation reviewer"
+    assert validate_dataset(approved)["reason"] == "GOLD_REVIEW_DATE_MISSING"
+    approved["reviewed_at"] = "2026-10-21"
+    assert validate_dataset(approved)["ok"] is True
+
+
+@pytest.mark.asyncio
+async def test_pending_gold_blocks_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    from tests.evaluation.level3 import measure_l3_02 as mod
+
+    invoked = []
+    monkeypatch.setattr(
+        mod, "create_async_engine",
+        lambda *args, **kwargs: invoked.append(True),
+    )
+    report = await execute(argparse.Namespace(
+        preflight=False, run=True, ack_gold_reviewed=True,
+        agent_version_id="45e06703-7af8-4e1b-9da9-518cea072759",
+    ))
+    assert report["ok"] is False
+    assert report["reason"] == "GOLD_SET_NOT_APPROVED"
+    assert not invoked

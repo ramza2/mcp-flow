@@ -1,6 +1,7 @@
 # L3-02 operator-review draft gold set. Freeze and review BEFORE official runs.
+# Gold temporal values use explicit absolute 2026 dates to avoid run-date drift.
 # Tool names are NOT expected output here: this evaluates natural-language
-# intent/capability/entity/risk extraction by the production Analyzer contract.
+# intent/capability/entity/risk/time extraction by the production Analyzer contract.
 schema_version: mcpflow.level3_analyzer_dataset.v1
 dataset_version: level3-natural-language-analysis.v1
 review_status: PENDING_REVIEW
@@ -26,41 +27,50 @@ cases:
     family: weather_lookup
     expected_entities: {location: "도쿄"}
   - id: C01
-    request_text: "내일 오후 3시에 팀 회의 일정을 생성해줘"
+    request_text: "2026년 11월 2일 오후 3시에 팀 회의 일정을 생성해줘"
     family: calendar_create
     expected_entities: {title: "회의"}
+    expected_temporal: {dates: ["2026-11-02"], time_24h: "15:00"}
   - id: C02
-    request_text: "다음 주 월요일 오전 10시에 프로젝트 점검 회의를 등록해줘"
+    request_text: "2026년 11월 9일 오전 10시에 프로젝트 점검 회의를 등록해줘"
     family: calendar_create
     expected_entities: {title: "점검"}
+    expected_temporal: {dates: ["2026-11-09"], time_24h: "10:00"}
   - id: C03
-    request_text: "금요일 2시에 고객사 미팅 일정 추가해줘"
+    request_text: "2026년 11월 13일 오후 2시에 고객사 미팅 일정 추가해줘"
     family: calendar_create
     expected_entities: {title: "미팅"}
+    expected_temporal: {dates: ["2026-11-13"], time_24h: "14:00"}
   - id: C04
-    request_text: "10월 30일 오전 9시에 분기 보고 회의 일정을 잡아줘"
+    request_text: "2026년 10월 30일 오전 9시에 분기 보고 회의 일정을 잡아줘"
     family: calendar_create
     expected_entities: {title: "보고"}
+    expected_temporal: {dates: ["2026-10-30"], time_24h: "09:00"}
   - id: C05
-    request_text: "내일 오전 11시에 정기회의를 캘린더에 등록해줘"
+    request_text: "2026년 11월 6일 오전 11시에 정기회의를 캘린더에 등록해줘"
     family: calendar_create
     expected_entities: {title: "정기회의"}
+    expected_temporal: {dates: ["2026-11-06"], time_24h: "11:00"}
   - id: L01
-    request_text: "이번 주 등록된 일정 목록을 조회해줘"
+    request_text: "2026년 11월 2일부터 2026년 11월 6일까지 등록된 일정 목록을 조회해줘"
     family: calendar_list
     expected_entities: {}
+    expected_temporal: {dates: ["2026-11-02", "2026-11-06"]}
   - id: L02
-    request_text: "내일 캘린더에 어떤 일정들이 있는지 보여줘"
+    request_text: "2026년 11월 9일 캘린더에 어떤 일정들이 있는지 보여줘"
     family: calendar_list
     expected_entities: {}
+    expected_temporal: {dates: ["2026-11-09"]}
   - id: L03
-    request_text: "다음 주 예정된 회의 목록을 확인해줘"
+    request_text: "2026년 12월 1일부터 2026년 12월 7일까지 예정된 회의 목록을 확인해줘"
     family: calendar_list
     expected_entities: {}
+    expected_temporal: {dates: ["2026-12-01", "2026-12-07"]}
   - id: L04
-    request_text: "이번 달 캘린더 이벤트를 찾아줘"
+    request_text: "2026년 11월 캘린더 이벤트를 찾아줘"
     family: calendar_list
     expected_entities: {}
+    expected_temporal: {months: ["2026-11"]}
   - id: E01
     request_text: "MCP 테스트라는 문장을 그대로 반환해줘"
     family: echo_text
