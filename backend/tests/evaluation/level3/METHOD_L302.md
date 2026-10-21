@@ -80,6 +80,19 @@ docker compose --env-file .env.server \
 고정 분모 20, 항목별 성공/실패 및 체크, 목표/성공률/판정, 검토 확인 여부.
 모델 출력 전체, Credential, ModelOps URL, 토큰과 비밀번호는 기록하지 않는다.
 
+### 후속 진단 정보 (최초 평가 이후 추가)
+
+- 2026-10-21 최초 측정 8/20, **NOT_MET 40%**. 원본 증적과 당시
+  `git_sha=50aaed503218...`는 변경·덮어쓰기 금지.
+- 추후 Pydantic `ValidationError`가 발생한 경우 `validation_issue_count` 및
+  `validation_issues=[{field, type}, ...]`를 부가 기록할 수 있다.
+  필드명은 `StructuredRequestV1` 공개 계약 필드로 제한하고,
+  사용자 입력, 모델 출력, 에러 메시지와 비표준 필드명은 **저장하지 않는다**.
+- 이 기능은 실패 원인 관측만 돕고, 채점식·목표값·승인된 20개 사례를
+  변경하지 않는다. 같은 데이터셋의 반복 결과는 회귀 검증으로 구분한다.
+- 일반 Analyzer 프롬프트의 엔터티·업무 기능 명시성 개선은 운영 동작
+  변경이므로 별도 CI·회귀 검증 후 반영해야 한다.
+
 ## 사전 확인
 
 - AgentVersion `PUBLISHED` / Agent `ACTIVE` / 요청 스키마 v1
