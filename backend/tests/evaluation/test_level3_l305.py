@@ -33,6 +33,17 @@ def test_targets_declare_six_metrics_and_l305_gate() -> None:
     assert targets["targets_version"] == "level3.targets.v1"
     ids = set(targets["targets"])
     assert ids == {"L3-01", "L3-02", "L3-03", "L3-04", "L3-05", "L3-06"}
+    approved = {
+        "L3-01": ("MCP 서버 연동 성공률", "target_min_percent", 90.0),
+        "L3-02": ("자연어 업무지시 분석 성공률", "target_min_percent", 85.0),
+        "L3-03": ("예약작업 정상 수행률", "target_min_percent", 90.0),
+        "L3-04": ("복합 실행 시나리오 완료율", "target_min_percent", 85.0),
+        "L3-05": ("Tool 검색 평균 응답시간", "target_max_seconds", 3.0),
+        "L3-06": ("연계·검증 완료 MCP Tool 수", "target_min_count", 10),
+    }
+    for metric_id, (name, threshold_key, threshold) in approved.items():
+        assert targets["targets"][metric_id]["name"] == name
+        assert targets["targets"][metric_id][threshold_key] == threshold
     l305 = targets["targets"][L3_05_METRIC_ID]
     assert l305["target_max_seconds"] == 3.0
     assert l305["status"] == "MEASURED_BY_TOOLING"
