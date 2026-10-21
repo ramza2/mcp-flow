@@ -503,6 +503,14 @@ def test_security_contract_covers_missing_inputs_and_entity_rules() -> None:
     assert "USER_EXPLICIT entity named text" in contract
     assert "USER_EXPLICIT entity named title" in contract
     assert "USER_EXPLICIT entities under stable semantic names" in contract
+    assert "domain.action" in contract
+    assert "invoice.list is different from invoice.create" in contract
+    assert "Keep the business domain expressed by the" in contract
+    assert "not only rendering a message" in contract
+    assert "retain the user's original spelling" in contract
+    assert "never" in contract
+    assert "intent MUST be a non-empty" in contract
+    assert "required_capabilities=[], specify the missing meaning" in contract
 
 
 @pytest.mark.asyncio

@@ -58,6 +58,19 @@ Action and capability completeness:
 - If a request is too vague to identify an action or target, do not guess
   capabilities; use request-level clarification.
 
+Capability terminology (semantic stability, not Tool IDs):
+- Represent each distinct business operation in a stable domain.action form,
+  using lowercase English terms. Keep the business domain expressed by the
+  request; do not replace it with generic presentation, output or event terms.
+- Prefer conventional verbs such as lookup, list, create, update, delete or
+  echo where they accurately convey the requested operation. For example,
+  invoice.list is different from invoice.create; document.delete is not a
+  read-only lookup. Never invent a capability merely to fit a naming pattern.
+- For verbatim text repetition, the capability must express repeating the
+  text, not only rendering a message. Keep its explicit content in entities.
+- required_capabilities communicates intent for downstream reasoning, not
+  existence or authorization of a specific MCP Tool.
+
 missing_inputs rules (request-level only):
 - missing_inputs is NOT for Tool-specific required parameters or operational \
 prerequisites you guess before Tool selection.
@@ -88,6 +101,12 @@ localized display label.
 
 - Choose entity names by their semantic role, not by the literal words appearing
   in their values; use stable English lower_snake_case keys consistently.
+- A person's name, place name or text content belongs in entity.value, never
+  inside entity.name. Use a reusable name like location for place references,
+  not an invented name derived from the specific place.
+- For explicitly supplied names and text, retain the user's original spelling
+  and script in entity.value rather than translating or transliterating them.
+  Mark USER_EXPLICIT only when the user actually supplied the value.
 
 Entity completeness:
 - Extract explicitly stated request information as USER_EXPLICIT entities.
@@ -103,6 +122,13 @@ not mentioned.
   named when. Do not invent absent titles or dates.
 - Preserve explicitly supplied locations, dates and identifiers as
   USER_EXPLICIT entities under stable semantic names.
+
+Unclear requests:
+- Even when the request is too vague to route, intent MUST be a non-empty
+  neutral description of that uncertainty, not an empty string or null.
+- For such a request do not fabricate actions, resources or capabilities;
+  required_capabilities=[], specify the missing meaning in missing_inputs
+  or ambiguities, and set needs_clarification=true.
 
 Consistency (mandatory):
 needs_clarification must equal bool(missing_inputs or ambiguities).

@@ -47,7 +47,45 @@
 
 **범용적 개선 후보**: (1) 한국어 지시의 intent 및 필수 업무 기능 추출 일관성, (2) 실체 엔터티 이름의 영문 표준화와 명시적 텍스트 보존, (3) JSON 검증 실패의 비민감 진단 정보 제공, (4) 구조 검증/수정 재시도 시 안전성·지연·실패 건수 정책 검토.
 
-## 4. 향후 개선·재평가 절차
+## 4. 2026-10-21 개선 후 회귀 측정 및 동일 환경 비교
+
+최초 미달 이후 보강한 운영 Analyzer 프롬프트(merge `b8dc1c4`)를 서버에
+배포했고 HTTPS readiness 및 DB 상태가 정상임을 확인하였다.
+같은 20건으로 실행한 회귀 결과는 **6/20 = 30.0%, NOT_MET**이다.
+이는 최초 8/20보다 2건(10%p) 낮은 *단일 반복 관측치*이며,
+LLM 출력 변동성 때문에 프롬프트 효과의 인과 추정으로 간주하지 않는다.
+
+- 회귀 Git SHA: `b8dc1c4dc465e6b017db5017b9af8da827021abe`
+- 회귀 증적: `artifacts/level3/l3_02_natural_language_analysis_b8dc1c4dc465_20261021T072126805526Z.json`
+- 회귀 SHA-256: `b37c99308d390508108624f1625f17cf3b8568871218e892c9db2ec0cd8cecdb`
+- 양측 모델: `qwen3-14b` / LLM 프로파일 ID `245c5c4a-31bd-49df-a990-aa7280c5bd16` / 프로파일 `lock_version=1`
+- 양측 정답셋 SHA-256: `5756b8b262c28d7c535b28d009a77595ebe023e82e16185230ed82b396ae4433`
+
+**성공 상태 변화:** 실패→성공 `W01,L04`; 성공→실패 `A01,L02,W03,W05`.
+
+**회귀 실측 실패 특징:** 일정 생성 `C01-C05`는 intent, 제목,
+날짜·시각과 리스크 판정이 모두 성공했고 capability 표현만 기존 승인
+rubric에 매칭되지 않았다(`event.create`, `scheduling.create`,
+`schedule_meeting`, `calendar.create_event`). `L02,L03`도 capability
+불일치였다. `E01,E02`는 텍스트 엔터티와 capability는 통과했으나
+intent 영어 표현에 사전 등록된 부분문자열이 없어 실패했다.
+`E03,E04`는 intent/capability와 일부 엔터티 판정 불일치가 존재했다.
+`W03,W05`는 location 판정 실패였으며 값·출처의 상세 원인은
+비민감 증적만으로 단정할 수 없다. `A01`은
+`ValidationError`에서 `intent` 필드의 `value_error`가 기록되었다.
+
+**아키텍처 확인:** `ToolSelectorService`는 Tool 검색 시
+`structured.request_text`를 `ToolRetrievalService.retrieve(query_text=...)`
+에 전달한다. 현재 구조에서는 `required_capabilities` 문자열이 그대로
+벡터 검색어가 되는 것이 **아니므로**, capability 문자열 불일치를 곧바로
+Tool 검색 실패로 보고하지 않는다. 본 측정은 Tool 검색·선택 자체를 실행하지 않는다.
+
+이 데이터셋은 개선 후에도 **진단·회귀용**으로 관리하며,
+승인된 최초 40%를 소급 대체하거나 회귀 30%를 외부 제출 성능 달성으로
+표기하지 않는다. 재평가 근거를 만들려면 일반화 테스트와 독립 블라인드
+성능검증의 분리가 필요하다.
+
+## 5. 향후 개선·재평가 절차
 
 1. **기준선 보존:** 최초 `NOT_MET 40.0%`와 원본 SHA-256을 별도 보관. 작업 중 원본 JSON 수정 금지.
 2. **원인별 개발 티켓 또는 PR:** 승인 gold/scoring 변경과 운영 Analyzer 변경을 **분리**하고, 수정 이유를 업무 품질 기준으로 작성. 관측 사례의 문자열을 외워서 맞추는 고정 규칙 금지.
