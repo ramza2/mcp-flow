@@ -55,7 +55,9 @@ def test_dataset_is_fixed_and_reviewable() -> None:
     assert result["ok"] is True
     assert result["dataset_version"] == DATASET_VERSION
     assert result["case_count"] == 20
-    assert result["review_status"] == "PENDING_REVIEW"
+    assert result["review_status"] == "APPROVED"
+    assert dataset["reviewed_at"] == "2026-10-21"
+    assert dataset["reviewed_by"]
     assert len(result["sha256"]) == 64
     assert result["family_counts"] == {
         "ambiguous": 2,
@@ -321,7 +323,7 @@ def test_gold_reviewer_and_temporal_expectations_fail_closed() -> None:
     }
     assert validate_dataset(invalid_day)["reason"] == "TEMPORAL_DATE_INVALID"
 
-    approved = {**original, "review_status": "APPROVED"}
+    approved = {k: v for k, v in original.items() if k not in {"reviewed_by", "reviewed_at"}}
     assert validate_dataset(approved)["reason"] == "GOLD_REVIEWER_MISSING"
     approved["reviewed_by"] = "Evaluation reviewer"
     assert validate_dataset(approved)["reason"] == "GOLD_REVIEW_DATE_MISSING"
@@ -333,6 +335,8 @@ def test_gold_reviewer_and_temporal_expectations_fail_closed() -> None:
 async def test_pending_gold_blocks_run(monkeypatch: pytest.MonkeyPatch) -> None:
     from tests.evaluation.level3 import measure_l3_02 as mod
 
+    pending = {**load_dataset(), "review_status": "PENDING_REVIEW"}
+    monkeypatch.setattr(mod, "load_dataset", lambda: pending)
     invoked = []
     monkeypatch.setattr(
         mod, "create_async_engine",
