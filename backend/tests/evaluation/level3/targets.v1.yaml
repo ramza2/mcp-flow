@@ -1,5 +1,5 @@
 # Level 3 approval performance targets (separate from KPI-01..06 / targets.yaml).
-# Official approved six indicators. Only L3-05 evaluator is implemented in this PR.
+# Official approved six indicators. L3-02 (pending gold review) and L3-05 evaluators are available.
 # Thresholds are approval goals; NOT_IMPLEMENTED does not imply failure or achievement.
 schema_version: mcpflow.level3_targets.v1
 targets_version: level3.targets.v1
@@ -14,10 +14,19 @@ targets:
 
   L3-02:
     name: "자연어 업무지시 분석 성공률"
-    status: NOT_IMPLEMENTED
+    status: MEASURED_BY_TOOLING
     measured_value_unit: percent
     target_min_percent: 85.0
-    notes: Compare actual StructuredRequest analysis with fixed expected results; Tool mapping alone is insufficient.
+    dataset: dataset_l302.v1.yaml
+    counting_rule: >
+      Percentage of all 20 frozen cases whose real Analyzer-core
+      StructuredRequest matches intent, business capability, risk,
+      explicit entities and clarification. Errors count as failed cases,
+      never removed from the denominator.
+    notes: >
+      Dataset gold set PENDING_REVIEW; explicit operator review acknowledgment
+      required before official run. Does not measure Tool selection, runtime
+      AgentRequest persistence transitions, or end-to-end execution.
 
   L3-03:
     name: "예약작업 정상 수행률"
