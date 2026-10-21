@@ -869,7 +869,7 @@ async def test_verification_not_inherited_across_versions(
         },
         {
             "name": "lookup_weather",
-            "description": "Lookup weather for a city",
+            "description": "Lookup weather for a city (v2)",
             "inputSchema": {
                 "type": "object",
                 "properties": {"city": {"type": "string"}},

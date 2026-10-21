@@ -46,7 +46,7 @@ targets:
       Wall time of ToolRetrievalService.retrieve() only: query embedding +
       authorized hybrid search. Excludes NL analysis, LLM rerank, and Tool
       execution.
-    dataset: dataset.v1.yaml
+    dataset: dataset.v2.yaml
     notes: Approval gate MET when complete average ≤ 3.0s; else NOT_MET.
 
   L3-06:

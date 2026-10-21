@@ -1,0 +1,25 @@
+# L3-05 fixed dataset v2, grounded in the four ACTIVE/VALID/READY tools
+# granted to the published KPI-02 Evaluation Agent in server preflight
+# on 2026-10-21. No MCP tool is actually invoked by this assessment.
+schema_version: mcpflow.level3_tool_retrieval_dataset.v2
+dataset_version: level3-tool-retrieval.v2
+
+warmup_rounds_per_query: 1
+official_repeats_per_query: 3
+
+queries:
+  - id: calendar-create
+    text: "내일 오후 3시에 팀 회의 일정을 생성해줘"
+    expected_tool: create_calendar_event
+
+  - id: calendar-list
+    text: "이번 주 등록된 일정 목록을 조회해줘"
+    expected_tool: list_calendar_events
+
+  - id: weather-lookup
+    text: "서울의 오늘 날씨를 알려줘"
+    expected_tool: lookup_weather
+
+  - id: echo-message
+    text: "MCP 테스트라는 입력 문장을 그대로 돌려줘"
+    expected_tool: echo
