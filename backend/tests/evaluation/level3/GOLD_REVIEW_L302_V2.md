@@ -31,8 +31,8 @@
 | E02 | 문자열 반환 | 괄호 안의 내용까지 포함해서 '(검수 대기)'를 그대로 출력해줘 | text/echo | text=(검수 대기) (USER_EXPLICIT); risk=READ_ONLY |
 | E03 | 문자열 반환 | 다음 문장을 수정 없이 반복해줘: 오늘 점검은 14:30에 시작합니다. | text/echo | text=오늘 점검은 14:30에 시작합니다. (USER_EXPLICIT); risk=READ_ONLY |
 | E04 | 문자열 반환 | 문자열 '문서-A/B-03'을 그대로 반환해줘 | text/echo | text=문서-A/B-03 (USER_EXPLICIT); risk=READ_ONLY |
-| A01 | 불명확 | 지난번에 이야기한 그 항목도 바꿔줘 | unknown/clarify | risk=UNKNOWN; 명확화 필수 |
-| A02 | 불명확 | 이어서 처리해줘 | unknown/clarify | risk=UNKNOWN; 명확화 필수 |
+| A01 | 불명확 | 지난번에 이야기한 그 항목도 바꿔줘 | unknown/update | risk=UNKNOWN; 명확화 필수 |
+| A02 | 불명확 | 이어서 처리해줘 | unknown/continue | risk=UNKNOWN; 명확화 필수 |
 
 ## 검토 시 반드시 확인할 판정 기준
 
