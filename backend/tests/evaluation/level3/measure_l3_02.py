@@ -71,7 +71,7 @@ def load_dataset() -> dict[str, Any]:
 
 
 def _valid_iso_date(raw: Any) -> bool:
-    if not isinstance(raw, str) or not re.fullmatch(r"20\\d{2}-\\d{2}-\\d{2}", raw):
+    if not isinstance(raw, str) or not re.fullmatch(r"20\d{2}-\d{2}-\d{2}", raw):
         return False
     try:
         date.fromisoformat(raw)
@@ -128,14 +128,14 @@ def validate_dataset(data: dict[str, Any]) -> dict[str, Any]:
                 return {"ok": False, "reason": "TEMPORAL_DATE_INVALID", "case_id": row["id"]}
             if any(
                 not isinstance(x, str)
-                or not re.fullmatch(r"20\\d{2}-(0[1-9]|1[0-2])", x)
+                or not re.fullmatch(r"20\d{2}-(0[1-9]|1[0-2])", x)
                 for x in months
             ):
                 return {"ok": False, "reason": "TEMPORAL_MONTH_INVALID", "case_id": row["id"]}
             if family == "calendar_create":
                 valid_clock = (
                     isinstance(clock, str)
-                    and re.fullmatch(r"([01]\\d|2[0-3]):[0-5]\\d", clock)
+                    and re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", clock)
                 )
                 if len(dates) != 1 or months or not valid_clock:
                     return {
