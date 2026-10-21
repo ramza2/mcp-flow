@@ -330,7 +330,7 @@ def test_gold_reviewer_and_temporal_expectations_fail_closed() -> None:
 
 
 @pytest.mark.asyncio
-async def test_pending_gold_blocks_live_run_without_db_or_llm(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_pending_gold_blocks_run(monkeypatch: pytest.MonkeyPatch) -> None:
     from tests.evaluation.level3 import measure_l3_02 as mod
 
     invoked = []
