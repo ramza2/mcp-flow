@@ -1,0 +1,51 @@
+# Level 3 approval performance targets (separate from KPI-01..06 / targets.yaml).
+# Only L3-05 is measured by the tooling in this package for this version.
+schema_version: mcpflow.level3_targets.v1
+targets_version: level3.targets.v1
+
+targets:
+  L3-01:
+    name: "응답시간"
+    status: NOT_IMPLEMENTED
+    target: null
+    notes: Reserved for Level 3 approval suite; not measured in this PR.
+
+  L3-02:
+    name: "Tool 매핑 정확도"
+    status: NOT_IMPLEMENTED
+    target: null
+    notes: Reserved for Level 3 approval suite; not measured in this PR.
+
+  L3-03:
+    name: "연계·검증 완료 MCP Tool 수"
+    status: NOT_IMPLEMENTED
+    target: null
+    notes: Reserved for Level 3 approval suite; not measured in this PR.
+
+  L3-04:
+    name: "등록 성공률"
+    status: NOT_IMPLEMENTED
+    target: null
+    notes: Reserved for Level 3 approval suite; not measured in this PR.
+
+  L3-05:
+    name: "Tool 검색 평균 응답시간"
+    status: MEASURED_BY_TOOLING
+    measured_value_unit: seconds
+    target_max_seconds: 3.0
+    counting_rule: >
+      Mean elapsed seconds of all required official retrieve() calls
+      (fixed queries × official_repeats). Warm-up excluded. Any required
+      failure → INCOMPLETE (no average from successes only).
+    measurement_definition: >
+      Wall time of ToolRetrievalService.retrieve() only: query embedding +
+      authorized hybrid search. Excludes NL analysis, LLM rerank, and Tool
+      execution.
+    dataset: dataset.v1.yaml
+    notes: Approval gate MET when complete average ≤ 3.0s; else NOT_MET.
+
+  L3-06:
+    name: "운영 기능 통과율"
+    status: NOT_IMPLEMENTED
+    target: null
+    notes: Reserved for Level 3 approval suite; not measured in this PR.

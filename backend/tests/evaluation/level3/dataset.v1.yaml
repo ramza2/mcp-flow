@@ -1,0 +1,22 @@
+# Fixed Tool-retrieval latency evaluation queries (Level 3 / L3-05).
+# Versioned before evaluation. Do not invent queries/results at runtime.
+# Ops must ensure these NL queries map to registered, authorized Tools for the
+# pinned User + AgentVersion under test (no fabricated Tool inventory here).
+schema_version: mcpflow.level3_tool_retrieval_dataset.v1
+dataset_version: level3-tool-retrieval.v1
+
+warmup_rounds_per_query: 1
+official_repeats_per_query: 3
+
+queries:
+  - id: suggest-questions-finance
+    text: "금융 관련 추천 질문을 제안해줘"
+    rationale: Grounded on authorized suggest_questions-style Tool usage in ops.
+
+  - id: suggest-questions-science
+    text: "과학 주제 추천 질문을 제안해줘"
+    rationale: Grounded on authorized suggest_questions-style Tool usage in ops.
+
+  - id: suggest-questions-general
+    text: "일반 주제로 추천 질문 목록을 찾아줘"
+    rationale: Grounded on authorized suggest_questions-style Tool usage in ops.
