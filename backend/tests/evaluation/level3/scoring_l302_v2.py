@@ -66,7 +66,9 @@ def gold_gate(gold: dict[str, Any]) -> dict[str, Any]:
     if any(not isinstance(c, dict) or not _nonblank(c.get("id")) for c in cases):
         return {"ok": False, "reason": "GOLD_CASE_INVALID"}
     case_ids = [c["id"] for c in cases]
-    if len(set(case_ids)) != 20 or Counter(c.get("family") for c in cases) != FAMILY_COUNTS:
+    if any(not isinstance(c.get("family"), str) for c in cases):
+        return {"ok": False, "reason": "GOLD_CASE_DISTRIBUTION_INVALID"}
+    if len(set(case_ids)) != 20 or Counter(c["family"] for c in cases) != FAMILY_COUNTS:
         return {"ok": False, "reason": "GOLD_CASE_DISTRIBUTION_INVALID"}
     return {"ok": True, "reason": None, "case_ids": tuple(case_ids)}
 
@@ -163,6 +165,8 @@ def score_reviewed_dataset(
     gate = gold_gate(gold)
     if not gate["ok"]:
         return {"judgment": "INCOMPLETE", "reason": gate["reason"], "ok": False}
+    if type(target_min_percent) not in {float, int} or target_min_percent != 85.0:
+        return {"judgment": "INCOMPLETE", "reason": "APPROVED_TARGET_MISMATCH", "ok": False}
     if not isinstance(gold_sha256, str) or not _SHA256_RE.fullmatch(gold_sha256):
         return {"judgment": "INCOMPLETE", "reason": "GOLD_HASH_INVALID", "ok": False}
     if not isinstance(evidence, dict) or evidence.get("gold_sha256") != gold_sha256:
