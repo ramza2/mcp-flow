@@ -1636,3 +1636,29 @@ Do not bypass docs/04 and docs/05 when adding a new Domain enum.
 ```
 
 If implementation pressure conflicts with one of these rules, stop and resolve the canonical design first.
+
+---
+
+# 53. Level 3 Approved Performance Targets (2026)
+
+The **final approved** Level 3 performance evaluation criteria for the
+"MCP 연계 업무 자동화 AI 에이전트 개발" project are, in order:
+
+| ID | Approved indicator | Pass target |
+|---|---|---|
+| L3-01 | MCP 서버 연동 성공률 | >= 90% |
+| L3-02 | 자연어 업무지시 분석 성공률 | >= 85% |
+| L3-03 | 예약작업 정상 수행률 | >= 90% |
+| L3-04 | 복합 실행 시나리오 완료율 | >= 85% |
+| L3-05 | Tool 검색 평균 응답시간 | <= 3 seconds |
+| L3-06 | 연계·검증 완료 MCP Tool 수 | >= 10 |
+
+The machine-readable reference is
+`backend/tests/evaluation/level3/targets.v1.yaml`.
+Do not substitute the older internal `KPI-01..06`, Tool-mapping scores,
+end-to-end Agent latency, or unit-test pass rates for these approved metrics.
+
+Keep Level 3 assessment separate from internal KPI harness outputs.
+Official achievement claims require actual measurement evidence, fixed
+denominators/counting rules, environment and Git SHA. Preserve failures;
+do not silently cherry-pick successes or invent results.
