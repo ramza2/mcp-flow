@@ -80,7 +80,7 @@ _DATE_RE = re.compile(
 )
 _MONTH_RE = re.compile(
     r"(?<!\\d)(20\\d{2})\\s*(?:년\\s*(\\d{1,2})월(?!\\s*\\d{1,2}\\s*일)"
-    r"|[-./]\\s*(\\d{1,2})(?![-./]\\d))"
+    r"|[-./]\\s*(\\d{1,2})(?!\\d|[-./]\\d))"
 )
 # Ignore explicit timezone offsets (e.g. +09:00), which are not local clock times.
 _HHMM_RE = re.compile(r"(?<![+\\d-])([01]?\\d|2[0-3]):([0-5]\\d)(?!\\d)")
