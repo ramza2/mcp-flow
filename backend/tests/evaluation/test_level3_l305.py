@@ -143,6 +143,16 @@ def test_validate_dataset_fail_closed_on_blank_query() -> None:
     assert validate_dataset(bad_version)["reason"] == "DATASET_VERSION_MISMATCH"
 
 
+def test_evidence_writer_refuses_existing_file(tmp_path: Path) -> None:
+    from tests.evaluation.level3.measure_l3_05 import _write_evidence
+
+    path = tmp_path / "official.json"
+    path.write_text("original\\n", encoding="utf-8")
+    with pytest.raises(FileExistsError):
+        _write_evidence({"judgment": "MET"}, path=path)
+    assert path.read_text(encoding="utf-8") == "original\\n"
+
+
 def test_artifact_collision_refuses_overwrite(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
