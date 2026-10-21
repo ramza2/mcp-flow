@@ -75,16 +75,16 @@ _TEMPORAL_NAMES = frozenset({
     "range", "from", "to",
 })
 _DATE_RE = re.compile(
-    r"(?<!\\d)(20\\d{2})\\s*(?:년|[-./])\\s*(\\d{1,2})"
-    r"\\s*(?:월|[-./])\\s*(\\d{1,2})(?:일)?(?!\\d)"
+    r"(?<!\d)(20\d{2})\s*(?:년|[-./])\s*(\d{1,2})"
+    r"\s*(?:월|[-./])\s*(\d{1,2})(?:일)?(?!\d)"
 )
 _MONTH_RE = re.compile(
-    r"(?<!\\d)(20\\d{2})\\s*(?:년\\s*(\\d{1,2})월(?!\\s*\\d{1,2}\\s*일)"
-    r"|[-./]\\s*(\\d{1,2})(?!\\d|[-./]\\d))"
+    r"(?<!\d)(20\d{2})\s*(?:년\s*(\d{1,2})월(?!\s*\d{1,2}\s*일)"
+    r"|[-./]\s*(\d{1,2})(?!\d|[-./]\d))"
 )
 # Ignore explicit timezone offsets (e.g. +09:00), which are not local clock times.
-_HHMM_RE = re.compile(r"(?<![+\\d-])([01]?\\d|2[0-3]):([0-5]\\d)(?!\\d)")
-_KO_CLOCK_RE = re.compile(r"(오전|오후)?\\s*(\\d{1,2})\\s*시(?:\\s*(\\d{1,2})\\s*분)?")
+_HHMM_RE = re.compile(r"(?<![+\d-])([01]?\d|2[0-3]):([0-5]\d)(?!\d)")
+_KO_CLOCK_RE = re.compile(r"(오전|오후)?\s*(\d{1,2})\s*시(?:\s*(\d{1,2})\s*분)?")
 
 
 def _time_entities(structured: StructuredRequestV1) -> str:
