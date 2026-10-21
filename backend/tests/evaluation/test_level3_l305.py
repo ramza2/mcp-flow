@@ -17,6 +17,7 @@ from tests.evaluation.level3.measure_l3_05 import (
     load_dataset,
     load_targets,
     run_measurements,
+    time_retrieve_once,
     validate_dataset,
 )
 from tests.evaluation.level3.scoring import (
@@ -54,6 +55,13 @@ def test_dataset_version_and_fixed_denominator() -> None:
     check = validate_dataset(dataset)
     assert check["ok"] is True
     assert check["dataset_version"] == DATASET_VERSION
+    assert check["query_count"] == 4
+    assert {q["expected_tool"] for q in dataset["queries"]} == {
+        "create_calendar_event",
+        "list_calendar_events",
+        "lookup_weather",
+        "echo",
+    }
     assert check["official_repeats_per_query"] == 3
     assert check["warmup_rounds_per_query"] == 1
     assert check["required_official_calls"] == required_official_call_count(
@@ -133,14 +141,26 @@ def test_validate_dataset_fail_closed_on_blank_query() -> None:
         "dataset_version": DATASET_VERSION,
         "warmup_rounds_per_query": 0,
         "official_repeats_per_query": 1,
-        "queries": [{"id": "x", "text": "   "}],
+        "queries": [{"id": "x", "text": "   ", "expected_tool": "echo"}],
     }
     assert validate_dataset(bad)["reason"] == "DATASET_QUERY_BLANK"
 
     bad_version = dict(bad)
     bad_version["dataset_version"] = "wrong"
-    bad_version["queries"] = [{"id": "x", "text": "ok"}]
+    bad_version["queries"] = [{"id": "x", "text": "ok", "expected_tool": "echo"}]
     assert validate_dataset(bad_version)["reason"] == "DATASET_VERSION_MISMATCH"
+
+    no_tool = dict(bad_version)
+    no_tool["dataset_version"] = DATASET_VERSION
+    no_tool["queries"] = [{"id": "x", "text": "ok"}]
+    assert validate_dataset(no_tool)["reason"] == "DATASET_EXPECTED_TOOL_MISSING"
+
+    duplicate = dict(no_tool)
+    duplicate["queries"] = [
+        {"id": "x", "text": "one", "expected_tool": "echo"},
+        {"id": "x", "text": "two", "expected_tool": "lookup_weather"},
+    ]
+    assert validate_dataset(duplicate)["reason"] == "DATASET_QUERY_DUPLICATE"
 
 
 def test_evidence_writer_refuses_existing_file(tmp_path: Path) -> None:
@@ -170,7 +190,10 @@ async def test_warmup_excluded_from_official_samples() -> None:
     calls: list[str] = []
 
     class _FakeResult:
-        candidates = (object(), object())
+        candidates = (
+            SimpleNamespace(descriptor=SimpleNamespace(name="echo")),
+            SimpleNamespace(descriptor=SimpleNamespace(name="lookup_weather")),
+        )
         embedding_profile_id = uuid.uuid4()
         profile_retried = False
 
@@ -183,8 +206,8 @@ async def test_warmup_excluded_from_official_samples() -> None:
         "warmup_rounds_per_query": 1,
         "official_repeats_per_query": 2,
         "queries": [
-            {"id": "q1", "text": "query-one"},
-            {"id": "q2", "text": "query-two"},
+            {"id": "q1", "text": "query-one", "expected_tool": "echo"},
+            {"id": "q2", "text": "query-two", "expected_tool": "lookup_weather"},
         ],
     }
     out = await run_measurements(
@@ -209,6 +232,51 @@ async def test_warmup_excluded_from_official_samples() -> None:
     assert verdict["judgment"] == JUDGMENT_MET
     # Warm-up timings must not dilute the official set
     assert verdict["required_calls"] == 4
+
+
+@pytest.mark.asyncio
+async def test_empty_retrieval_is_incomplete_not_fast_success() -> None:
+    result = SimpleNamespace(
+        candidates=(),
+        embedding_profile_id=uuid.uuid4(),
+        profile_retried=False,
+    )
+    service = SimpleNamespace(retrieve=AsyncMock(return_value=result))
+    sample = await time_retrieve_once(
+        service,  # type: ignore[arg-type]
+        user_id=uuid.uuid4(),
+        agent_version_id=uuid.uuid4(),
+        query_text="날씨 알려줘",
+        expected_tool="lookup_weather",
+    )
+    assert sample["ok"] is False
+    assert sample["error_code"] == "EMPTY_CANDIDATES"
+    verdict = judge_l3_05(official_samples=[sample], required_calls=1)
+    assert verdict["judgment"] == JUDGMENT_INCOMPLETE
+    assert verdict["average_seconds"] is None
+
+
+@pytest.mark.asyncio
+async def test_expected_tool_must_be_in_authorized_candidates() -> None:
+    result = SimpleNamespace(
+        candidates=(SimpleNamespace(descriptor=SimpleNamespace(name="echo")),),
+        embedding_profile_id=uuid.uuid4(),
+        profile_retried=False,
+    )
+    service = SimpleNamespace(retrieve=AsyncMock(return_value=result))
+    sample = await time_retrieve_once(
+        service,  # type: ignore[arg-type]
+        user_id=uuid.uuid4(),
+        agent_version_id=uuid.uuid4(),
+        query_text="서울 날씨 알려줘",
+        expected_tool="lookup_weather",
+    )
+    assert sample["ok"] is False
+    assert sample["candidate_count"] == 1
+    assert sample["error_code"] == "EXPECTED_TOOL_NOT_FOUND"
+    assert sample["expected_tool_rank"] is None
+    verdict = judge_l3_05(official_samples=[sample], required_calls=1)
+    assert verdict["judgment"] == JUDGMENT_INCOMPLETE
 
 
 @pytest.mark.asyncio
