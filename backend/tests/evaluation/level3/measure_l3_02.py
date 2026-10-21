@@ -207,6 +207,28 @@ async def preflight_environment(
     }, version, profile
 
 
+def _safe_validation_issue_summary(exc: ValidationError) -> list[dict[str, str]]:
+    """Only field names and canonical error types; no model values or messages."""
+    allowed_fields = set(StructuredRequestV1.model_fields)
+    issues: list[dict[str, str]] = []
+    for error in exc.errors(
+        include_url=False, include_context=False, include_input=False
+    )[:10]:
+        location = error.get("loc", ())
+        field = location[0] if location else None
+        safe_field = (
+            field if isinstance(field, str) and field in allowed_fields
+            else "unknown"
+        )
+        kind = error.get("type")
+        safe_kind = (
+            kind if isinstance(kind, str) and re.fullmatch(r"[a-z][a-z0-9_]{0,63}", kind)
+            else "other"
+        )
+        issues.append({"field": safe_field, "type": safe_kind})
+    return issues
+
+
 async def run_one(
     *,
     provider: ModelProviderClient,
@@ -242,7 +264,14 @@ async def run_one(
         )
         row.update(score_case(case, structured))
         row["schema_valid"] = True
-    except (ModelProviderError, ValidationError, ValueError) as exc:
+    except ValidationError as exc:
+        row["schema_valid"] = False
+        row["error_type"] = "ValidationError"
+        row["error_code"] = "VALIDATION_ERROR"
+        row["validation_issue_count"] = exc.error_count()
+        row["validation_issues"] = _safe_validation_issue_summary(exc)
+        # Never capture raw LLM output, validation messages, or input values.
+    except (ModelProviderError, ValueError) as exc:
         row["schema_valid"] = False
         row["error_type"] = type(exc).__name__
         row["error_code"] = (
