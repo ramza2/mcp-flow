@@ -12,10 +12,11 @@ import asyncio
 import hashlib
 import json
 import os
+import re
 import sys
 import time
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -69,6 +70,16 @@ def load_dataset() -> dict[str, Any]:
     return data
 
 
+def _valid_iso_date(raw: Any) -> bool:
+    if not isinstance(raw, str) or not re.fullmatch(r"20\\d{2}-\\d{2}-\\d{2}", raw):
+        return False
+    try:
+        date.fromisoformat(raw)
+    except ValueError:
+        return False
+    return True
+
+
 def validate_dataset(data: dict[str, Any]) -> dict[str, Any]:
     if data.get("dataset_version") != DATASET_VERSION:
         return {"ok": False, "reason": "DATASET_VERSION_MISMATCH"}
@@ -113,15 +124,24 @@ def validate_dataset(data: dict[str, Any]) -> dict[str, Any]:
             clock = temporal.get("time_24h")
             if not isinstance(dates, list) or not isinstance(months, list):
                 return {"ok": False, "reason": "TEMPORAL_GOLD_INVALID", "case_id": row["id"]}
-            import re
-
-            if any(not isinstance(x, str) or not re.fullmatch(r"20\\d{2}-(0[1-9]|1[0-2])-(0[1-9]|[12]\\d|3[01])", x) for x in dates):
+            if any(not _valid_iso_date(x) for x in dates):
                 return {"ok": False, "reason": "TEMPORAL_DATE_INVALID", "case_id": row["id"]}
-            if any(not isinstance(x, str) or not re.fullmatch(r"20\\d{2}-(0[1-9]|1[0-2])", x) for x in months):
+            if any(
+                not isinstance(x, str)
+                or not re.fullmatch(r"20\\d{2}-(0[1-9]|1[0-2])", x)
+                for x in months
+            ):
                 return {"ok": False, "reason": "TEMPORAL_MONTH_INVALID", "case_id": row["id"]}
             if family == "calendar_create":
-                if len(dates) != 1 or months or not isinstance(clock, str) or not re.fullmatch(r"([01]\\d|2[0-3]):[0-5]\\d", clock):
-                    return {"ok": False, "reason": "CREATE_DATETIME_GOLD_INVALID", "case_id": row["id"]}
+                valid_clock = (
+                    isinstance(clock, str)
+                    and re.fullmatch(r"([01]\\d|2[0-3]):[0-5]\\d", clock)
+                )
+                if len(dates) != 1 or months or not valid_clock:
+                    return {
+                        "ok": False, "reason": "CREATE_DATETIME_GOLD_INVALID",
+                        "case_id": row["id"],
+                    }
             elif not (dates or months) or clock is not None:
                 return {"ok": False, "reason": "LIST_PERIOD_GOLD_INVALID", "case_id": row["id"]}
         elif temporal is not None:
