@@ -46,7 +46,7 @@ from tests.evaluation.level3.scoring import (
 
 _PACKAGE_DIR = Path(__file__).resolve().parent
 _TARGETS_PATH = _PACKAGE_DIR / "targets.v1.yaml"
-_DATASET_PATH = _PACKAGE_DIR / "dataset.v1.yaml"
+_DATASET_PATH = _PACKAGE_DIR / "dataset.v2.yaml"
 
 _COMPOSE_SERVER = (
     "docker compose --env-file .env.server -f compose.yaml -f compose.server.yaml"
@@ -90,16 +90,27 @@ def validate_dataset(dataset: dict[str, Any]) -> dict[str, Any]:
     queries = dataset.get("queries")
     if not isinstance(queries, list) or not queries:
         return {"ok": False, "reason": "DATASET_QUERIES_MISSING"}
+    query_ids: set[str] = set()
     for row in queries:
         if not isinstance(row, dict):
             return {"ok": False, "reason": "DATASET_QUERY_INVALID"}
         qid = str(row.get("id") or "").strip()
         text = str(row.get("text") or "").strip()
+        expected_tool = row.get("expected_tool")
         if not qid or not text:
             return {
                 "ok": False,
                 "reason": "DATASET_QUERY_BLANK",
                 "query_id": qid or None,
+            }
+        if qid in query_ids:
+            return {"ok": False, "reason": "DATASET_QUERY_DUPLICATE", "query_id": qid}
+        query_ids.add(qid)
+        if not isinstance(expected_tool, str) or not expected_tool.strip():
+            return {
+                "ok": False,
+                "reason": "DATASET_EXPECTED_TOOL_MISSING",
+                "query_id": qid,
             }
     warmup = dataset.get("warmup_rounds_per_query", 0)
     repeats = dataset.get("official_repeats_per_query", 0)
@@ -310,8 +321,9 @@ async def time_retrieve_once(
     user_id: uuid.UUID,
     agent_version_id: uuid.UUID,
     query_text: str,
+    expected_tool: str,
 ) -> dict[str, Any]:
-    """Measure a single ``retrieve()`` call with ``perf_counter_ns``."""
+    """Measure only retrieve() wall time; validate search candidates afterwards."""
 
     started = time.perf_counter_ns()
     try:
@@ -321,16 +333,34 @@ async def time_retrieve_once(
             query_text=query_text,
         )
         elapsed_ns = time.perf_counter_ns() - started
+        # Inspect candidate identities outside the measured retrieval interval.
+        candidate_names = [row.descriptor.name for row in result.candidates]
+        candidate_count = len(candidate_names)
+        expected_rank = (
+            candidate_names.index(expected_tool) + 1
+            if expected_tool in candidate_names
+            else None
+        )
+        valid = expected_rank is not None
         return {
-            "ok": True,
+            "ok": valid,
             "elapsed_ns": elapsed_ns,
             "elapsed_ms": elapsed_ms_from_ns(elapsed_ns),
-            "candidate_count": len(result.candidates),
+            "candidate_count": candidate_count,
+            "expected_tool": expected_tool,
+            "expected_tool_rank": expected_rank,
+            "top_candidate_name": candidate_names[0] if candidate_names else None,
             "embedding_profile_id": str(result.embedding_profile_id),
             "profile_retried": bool(result.profile_retried),
-            "error_type": None,
-            "error_code": None,
-            "error_message": None,
+            "error_type": None if valid else "RetrievalValidationError",
+            "error_code": (
+                None
+                if valid
+                else ("EMPTY_CANDIDATES" if candidate_count == 0 else "EXPECTED_TOOL_NOT_FOUND")
+            ),
+            "error_message": (
+                None if valid else f"Expected Tool {expected_tool} not in authorized candidates."
+            ),
         }
     except AppError as exc:
         elapsed_ns = time.perf_counter_ns() - started
@@ -394,12 +424,14 @@ async def run_measurements(
     for query in queries:
         qid = str(query["id"])
         text = str(query["text"]).strip()
+        expected_tool = str(query["expected_tool"]).strip()
         for round_i in range(warmup_rounds):
             sample = await time_retrieve_once(
                 service,
                 user_id=user_id,
                 agent_version_id=agent_version_id,
                 query_text=text,
+                expected_tool=expected_tool,
             )
             sample.update(
                 {
@@ -416,6 +448,7 @@ async def run_measurements(
                 user_id=user_id,
                 agent_version_id=agent_version_id,
                 query_text=text,
+                expected_tool=expected_tool,
             )
             sample.update(
                 {
