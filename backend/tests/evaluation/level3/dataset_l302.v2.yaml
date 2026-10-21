@@ -96,7 +96,7 @@ cases:
       entities: [{"role":"title","value":"고객 피드백 검토","source":"USER_EXPLICIT"}]
       risk: ["IDEMPOTENT_WRITE","NON_IDEMPOTENT_WRITE"]
       needs_clarification: false
-      temporal: {"kind":"datetime","dates":["2026-12-03"],"time_24h":"10:00"}
+      temporal: {"kind":"datetime","dates":["2026-12-03"],"time_24h":"10:00","role":"deadline"}
     review_note: "신규 작업 생성 및 명시된 마감 시각을 각각 보존; 예약 생성으로 오인하지 않음"
   - id: C03
     family: create
