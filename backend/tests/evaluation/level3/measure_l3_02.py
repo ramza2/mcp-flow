@@ -100,6 +100,40 @@ def validate_dataset(data: dict[str, Any]) -> dict[str, Any]:
         families.add(family)
     if families != known_families():
         return {"ok": False, "reason": "MISSING_FAMILY"}
+    for row in cases:
+        family = row["family"]
+        temporal = row.get("expected_temporal")
+        if family in {"calendar_create", "calendar_list"}:
+            if not isinstance(temporal, dict) or not temporal:
+                return {"ok": False, "reason": "TEMPORAL_GOLD_MISSING", "case_id": row["id"]}
+            if set(temporal) - {"dates", "months", "time_24h"}:
+                return {"ok": False, "reason": "TEMPORAL_GOLD_UNKNOWN_KEY", "case_id": row["id"]}
+            dates = temporal.get("dates", [])
+            months = temporal.get("months", [])
+            clock = temporal.get("time_24h")
+            if not isinstance(dates, list) or not isinstance(months, list):
+                return {"ok": False, "reason": "TEMPORAL_GOLD_INVALID", "case_id": row["id"]}
+            import re
+
+            if any(not isinstance(x, str) or not re.fullmatch(r"20\\d{2}-(0[1-9]|1[0-2])-(0[1-9]|[12]\\d|3[01])", x) for x in dates):
+                return {"ok": False, "reason": "TEMPORAL_DATE_INVALID", "case_id": row["id"]}
+            if any(not isinstance(x, str) or not re.fullmatch(r"20\\d{2}-(0[1-9]|1[0-2])", x) for x in months):
+                return {"ok": False, "reason": "TEMPORAL_MONTH_INVALID", "case_id": row["id"]}
+            if family == "calendar_create":
+                if len(dates) != 1 or months or not isinstance(clock, str) or not re.fullmatch(r"([01]\\d|2[0-3]):[0-5]\\d", clock):
+                    return {"ok": False, "reason": "CREATE_DATETIME_GOLD_INVALID", "case_id": row["id"]}
+            elif not (dates or months) or clock is not None:
+                return {"ok": False, "reason": "LIST_PERIOD_GOLD_INVALID", "case_id": row["id"]}
+        elif temporal is not None:
+            return {"ok": False, "reason": "UNEXPECTED_TEMPORAL_GOLD", "case_id": row["id"]}
+    review = data.get("review_status")
+    if review not in {"PENDING_REVIEW", "APPROVED"}:
+        return {"ok": False, "reason": "INVALID_GOLD_REVIEW_STATUS"}
+    if review == "APPROVED":
+        if not isinstance(data.get("reviewed_by"), str) or not data["reviewed_by"].strip():
+            return {"ok": False, "reason": "GOLD_REVIEWER_MISSING"}
+        if not isinstance(data.get("reviewed_at"), str) or not data["reviewed_at"].strip():
+            return {"ok": False, "reason": "GOLD_REVIEW_DATE_MISSING"}
     return {
         "ok": True,
         "dataset_version": DATASET_VERSION,
@@ -277,6 +311,9 @@ async def execute(args: argparse.Namespace) -> dict[str, Any]:
     if not args.preflight and not args.run:
         result.update(ok=False, reason="MODE_REQUIRED")
         return result
+    if args.run and check["review_status"] != "APPROVED":
+        result.update(ok=False, reason="GOLD_SET_NOT_APPROVED")
+        return result
     if args.run and not args.ack_gold_reviewed:
         result.update(ok=False, reason="GOLD_REVIEW_ACK_REQUIRED")
         return result
@@ -309,6 +346,8 @@ async def execute(args: argparse.Namespace) -> dict[str, Any]:
                 result.update(ok=True, note="Read-only preflight; no LLM requests.")
                 return result
             result["gold_review_attested"] = bool(args.ack_gold_reviewed)
+            result["gold_reviewer"] = data["reviewed_by"]
+            result["gold_reviewed_at"] = data["reviewed_at"]
             # Cases are frozen before the run; no dynamic data generation.
             rows = await evaluate_cases(
                 session=session, version=version, profile=profile,
@@ -339,7 +378,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--write-artifact", action="store_true")
     args = parser.parse_args(argv)
     report = asyncio.run(execute(args))
-    if args.run and args.write_artifact:
+    if args.run and args.write_artifact and "case_results" in report:
         path = artifact_path(sha=report["git_sha"])
         # Exclusive create; never modify historical assessment evidence.
         with path.open("x", encoding="utf-8") as f:
