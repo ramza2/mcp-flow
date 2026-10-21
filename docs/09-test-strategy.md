@@ -1464,7 +1464,23 @@ total_response_ms
 
 공식 수치목표는 최신 협약/수행계획서의 승인값을 우선하며 `tests/evaluation/targets.yaml`로 관리한다.
 
-### 25.1 Final regression harness
+### 25.1 Level 3 승인 성능지표 (KPI-01~06과 분리)
+
+Level 3 승인 성능지표는 내부 KPI harness와 **별도**로 `backend/tests/evaluation/level3/`에서 버전 관리한다.
+
+| ID | 지표 | 이번 구현 |
+|---|---|---|
+| `L3-05` | Tool 검색 평균 응답시간 ≤ 3초 | `measure_l3_05.py` (`ToolRetrievalService.retrieve()`만 측정) |
+
+- 목표: `level3/targets.v1.yaml`
+- 고정 질의/반복: `level3/dataset.v1.yaml`
+- 방법·판정: `level3/METHOD.md`
+- 증적: `artifacts/level3/` (덮어쓰기 금지)
+- 진입점: `./scripts/level3-tool-retrieval-latency.sh --preflight|--run`
+
+`L3-01`~`L3-04`, `L3-06`은 targets에 예약만 두고 이 PR에서는 측정하지 않는다.
+
+### 25.2 Final regression harness
 
 Deterministic entrypoint (composes existing pytest modules; no second runtime):
 
@@ -1506,7 +1522,7 @@ Output:
 - `--unit-only` sets `scope=unit_api_only_integration_omitted` and
   `full_integration_regression=false` (do not call this “final integration PASS”)
 
-### 25.2 KPI measurement harness
+### 25.3 KPI measurement harness
 
 ```bash
 ./scripts/measure-kpi.sh --mode offline   # default
@@ -1597,7 +1613,7 @@ Known exclusions:
 - Live modes require explicit pin/smoke env (see `live_prerequisites.yaml` / attempts YAML); otherwise `NOT_MEASURED`
 - Generated evidence under `artifacts/` / `evidence/` is not committed
 
-### 25.3 Production smoke evidence references
+### 25.4 Production smoke evidence references
 
 Prior close-out smoke/recovery chains (issue references; not re-run by this harness):
 
@@ -1899,7 +1915,7 @@ Evidence에는 최소 commit SHA, environment, dataset/config version, 실행시
 
 Issue #119 harnesses write runtime JSON under gitignored `artifacts/regression/` and
 `artifacts/kpi/` (override with `MCPFLOW_ARTIFACT_DIR`). Schema/examples and counting
-rules are documented in §25.1–§25.2; do not commit generated reports containing
+rules are documented in §25.2–§25.3; do not commit generated reports containing
 environment-specific inventory.
 
 ---
