@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from app.schemas.structured_request import StructuredRequestV1
@@ -64,6 +65,94 @@ def _normalized_capability(value: str) -> str:
     return value.casefold().strip().replace("_", ".").replace("/", ".")
 
 
+# Only explicit temporal entities count. Repeating the user's message in the
+# intent/constraints is NOT sufficient evidence of temporal extraction.
+_TEMPORAL_NAMES = frozenset({
+    "when", "date", "time", "datetime", "date_time", "schedule",
+    "scheduled_at", "start", "start_at", "start_date", "start_time",
+    "start_datetime", "start_date_time", "end", "end_at", "end_date",
+    "end_time", "end_datetime", "period", "date_range", "time_range",
+    "range", "from", "to",
+})
+_DATE_RE = re.compile(
+    r"(?<!\\d)(20\\d{2})\\s*(?:년|[-./])\\s*(\\d{1,2})"
+    r"\\s*(?:월|[-./])\\s*(\\d{1,2})(?:일)?(?!\\d)"
+)
+_MONTH_RE = re.compile(
+    r"(?<!\\d)(20\\d{2})\\s*(?:년|[-./])\\s*(\\d{1,2})(?:월)?"
+    r"(?!(?:\\s*\\d{1,2}\\s*일)|[-./]\\d|\\d)"
+)
+_HHMM_RE = re.compile(r"(?<!\\d)([01]?\\d|2[0-3]):([0-5]\\d)(?!\\d)")
+_KO_CLOCK_RE = re.compile(r"(오전|오후)?\\s*(\\d{1,2})\\s*시(?:\\s*(\\d{1,2})\\s*분)?")
+
+
+def _time_entities(structured: StructuredRequestV1) -> str:
+    return " ".join(
+        str(entity.value) for entity in structured.entities
+        if entity.name.casefold().strip() in _TEMPORAL_NAMES
+        and getattr(entity.source, "value", str(entity.source)) == "USER_EXPLICIT"
+    )
+
+
+def _observed_dates(text: str) -> set[str]:
+    return {
+        f"{int(y):04d}-{int(m):02d}-{int(d):02d}"
+        for y, m, d in _DATE_RE.findall(text)
+        if 1 <= int(m) <= 12 and 1 <= int(d) <= 31
+    }
+
+
+def _observed_months(text: str) -> set[str]:
+    return {
+        f"{int(y):04d}-{int(m):02d}"
+        for y, m in _MONTH_RE.findall(text)
+        if 1 <= int(m) <= 12
+    }
+
+
+def _observed_times(text: str) -> set[str]:
+    clocks = {
+        f"{int(h):02d}:{int(m):02d}"
+        for h, m in _HHMM_RE.findall(text)
+    }
+    for am_pm, h, m in _KO_CLOCK_RE.findall(text):
+        hour = int(h)
+        minute = int(m) if m else 0
+        if minute > 59 or hour > 23:
+            continue
+        if am_pm == "오전":
+            if hour > 12:
+                continue
+            hour = hour % 12
+        elif am_pm == "오후":
+            if hour > 12:
+                continue
+            hour = hour % 12 + 12
+        clocks.add(f"{hour:02d}:{minute:02d}")
+    return clocks
+
+
+def _temporal_checks(case: dict[str, Any], structured: StructuredRequestV1) -> dict[str, bool]:
+    expected = case.get("expected_temporal") or {}
+    if not expected:
+        return {}
+    extracted = _time_entities(structured)
+    dates = _observed_dates(extracted)
+    months = _observed_months(extracted)
+    times = _observed_times(extracted)
+    result = {
+        f"date:{date}": date in dates
+        for date in expected.get("dates", [])
+    }
+    result.update({
+        f"month:{month}": month in months
+        for month in expected.get("months", [])
+    })
+    if "time_24h" in expected:
+        result["time_24h"] = expected["time_24h"] in times
+    return result
+
+
 def score_case(case: dict[str, Any], structured: StructuredRequestV1) -> dict[str, Any]:
     """All-or-nothing case score with deterministic, inspectable subchecks."""
     rubric = _RUBRIC[case["family"]]
@@ -102,7 +191,9 @@ def score_case(case: dict[str, Any], structured: StructuredRequestV1) -> dict[st
             and expected_substring.casefold() in str(entity.value).casefold()
             for entity in entities.get(name, [])
         )
+    temporal_checks = _temporal_checks(case, structured)
     checks = {
+        "temporal": all(temporal_checks.values()),
         "intent": intent_ok,
         "capability": capability_ok,
         "risk": risk_ok,
@@ -113,6 +204,7 @@ def score_case(case: dict[str, Any], structured: StructuredRequestV1) -> dict[st
         "passed": all(checks.values()),
         "checks": checks,
         "entity_checks": entity_checks,
+        "temporal_checks": temporal_checks,
         "observed": {
             "intent": structured.intent,
             "required_capabilities": list(structured.required_capabilities),
