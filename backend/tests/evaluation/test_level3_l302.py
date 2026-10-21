@@ -407,3 +407,97 @@ async def test_validation_diagnostics_do_not_expose_model_values() -> None:
         set(issue) == {"field", "type"}
         for issue in row["validation_issues"]
     )
+
+
+# Candidate v2 gold checks run without a v2 model call or any gold approval.
+def _load_l302_v2_yaml(path):
+    import yaml
+
+    return yaml.safe_load(path.read_text(encoding="utf-8"))
+
+
+_L302_V2_ROOT = __import__("pathlib").Path(__file__).resolve().parent / "level3"
+
+
+def test_v2_candidate_gold_is_complete_and_not_yet_approved() -> None:
+    from collections import Counter
+
+    gold = _load_l302_v2_yaml(_L302_V2_ROOT / "dataset_l302.v2.yaml")
+
+    assert gold["schema_version"] == "mcpflow.level3_analyzer_dataset.v2"
+    assert gold["dataset_version"] == "level3-natural-language-analysis.v2"
+    assert gold["method_review_status"] == "APPROVED"
+    # Deliberately fail closed until separate gold-review commit changes the gate.
+    assert gold["review_status"] == "PENDING_REVIEW"
+    assert gold["reviewed_by"] is None
+    assert gold["reviewed_at"] is None
+    assert gold["measurement_performed"] is False
+
+    cases = gold["cases"]
+    assert len(cases) == 20
+    assert len({row["id"] for row in cases}) == 20
+    assert len({row["request_text"] for row in cases}) == 20
+    assert Counter(row["family"] for row in cases) == {
+        "lookup": 6, "create": 4, "update": 4, "verbatim": 4, "ambiguous": 2,
+    }
+
+    original = _load_l302_v2_yaml(_L302_V2_ROOT / "dataset_l302.v1.yaml")
+    prior_requests = {row["request_text"] for row in original["cases"]}
+    assert not prior_requests.intersection(row["request_text"] for row in cases)
+
+
+def test_v2_gold_semantic_fields_and_temporal_bounds() -> None:
+    from datetime import date
+
+    cases = _load_l302_v2_yaml(_L302_V2_ROOT / "dataset_l302.v2.yaml")["cases"]
+
+    for row in cases:
+        gold = row["gold"]
+        assert isinstance(row["review_note"], str) and row["review_note"].strip()
+        assert isinstance(row["request_text"], str) and row["request_text"].strip()
+        assert set(gold["intent"]) == {"domain", "action", "object"}
+        assert all(str(value).strip() for value in gold["intent"].values())
+        assert isinstance(gold["entities"], list)
+        assert gold["risk"]
+        assert set(gold["risk"]) <= {
+            "READ_ONLY", "IDEMPOTENT_WRITE", "NON_IDEMPOTENT_WRITE",
+            "DESTRUCTIVE", "UNKNOWN",
+        }
+
+        roles = set()
+        for entity in gold["entities"]:
+            assert set(entity) == {"role", "value", "source"}
+            assert entity["role"] not in roles
+            roles.add(entity["role"])
+            assert entity["role"] and entity["value"]
+            assert entity["source"] == "USER_EXPLICIT"
+
+        if row["family"] == "ambiguous":
+            assert gold["needs_clarification"] is True
+            assert gold["capability"] is None
+            assert gold["missing_meaning"]
+            assert gold["risk"] == ["UNKNOWN"]
+        else:
+            assert gold["needs_clarification"] is False
+            capability = gold["capability"]
+            assert isinstance(capability, dict)
+            assert set(capability) == {"domain", "action"}
+            assert all(value for value in capability.values())
+
+        temporal = gold.get("temporal")
+        if temporal:
+            assert temporal["kind"] in {"date", "range", "month", "datetime"}
+            for value in temporal.get("dates", []):
+                assert date.fromisoformat(value).isoformat() == value
+            for value in temporal.get("months", []):
+                assert len(value) == 7
+                assert date.fromisoformat(value + "-01").strftime("%Y-%m") == value
+            if temporal["kind"] == "range":
+                assert len(temporal["dates"]) == 2
+                assert temporal["dates"][0] <= temporal["dates"][1]
+            if temporal["kind"] == "datetime":
+                assert len(temporal["dates"]) == 1
+                clock = temporal["time_24h"]
+                assert len(clock) == 5 and clock[2] == ":"
+                hh, mm = clock.split(":")
+                assert 0 <= int(hh) < 24 and 0 <= int(mm) < 60
