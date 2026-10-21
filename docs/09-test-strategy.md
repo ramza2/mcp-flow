@@ -1470,15 +1470,19 @@ Level 3 승인 성능지표는 내부 KPI harness와 **별도**로 `backend/test
 
 | ID | 지표 | 이번 구현 |
 |---|---|---|
+| `L3-02` | 자연어 업무지시 분석 성공률 ≥ 85% | `measure_l3_02.py` (운영 Analyzer 핵심 처리 재사용, 정답 데이터셋 검토 필요) |
 | `L3-05` | Tool 검색 평균 응답시간 ≤ 3초 | `measure_l3_05.py` (`ToolRetrievalService.retrieve()`만 측정) |
 
 - 목표: `level3/targets.v1.yaml`
-- 고정 질의/반복: `level3/dataset.v1.yaml`
-- 방법·판정: `level3/METHOD.md`
+- L3-02 고정 정답셋/채점: `level3/dataset_l302.v1.yaml`, `level3/scoring_l302.py`
+- L3-02 측정 방법/검토 게이트: `level3/METHOD_L302.md`
+- L3-05 고정 질의/반복: `level3/dataset.v2.yaml`
+- L3-05 방법·판정: `level3/METHOD.md`
 - 증적: `artifacts/level3/` (덮어쓰기 금지)
-- 진입점: `./scripts/level3-tool-retrieval-latency.sh --preflight|--run`
+- L3-05 진입점: `./scripts/level3-tool-retrieval-latency.sh --preflight|--run`
+- L3-02 진입점: `python -m tests.evaluation.level3.measure_l3_02 --preflight|--run`
 
-`L3-01`~`L3-04`, `L3-06`은 targets에 예약만 두고 이 PR에서는 측정하지 않는다.
+`L3-01`, `L3-03`, `L3-04`, `L3-06`은 targets에 예약만 두고 이 PR에서는 측정하지 않는다.
 
 ### 25.2 Final regression harness
 
