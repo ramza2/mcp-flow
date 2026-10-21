@@ -114,6 +114,16 @@ def test_synthetic_twenty_outcome_reviews_and_target() -> None:
     assert score["judgment"] == "NOT_MET"
 
 
+def test_approval_threshold_cannot_be_weakened() -> None:
+    gold = _gold()
+    score = score_reviewed_dataset(
+        gold, gold_sha256=DUMMY_DIGEST, evidence=_evidence(gold),
+        target_min_percent=0.0,
+    )
+    assert score["judgment"] == "INCOMPLETE"
+    assert score["reason"] == "APPROVED_TARGET_MISMATCH"
+
+
 def test_incomplete_review_set_and_hash_mismatch_fail_closed() -> None:
     gold = _gold()
     base = _evidence(gold)
