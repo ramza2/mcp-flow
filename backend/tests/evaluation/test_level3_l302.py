@@ -298,6 +298,15 @@ def test_calendar_list_entire_period_and_month_must_be_extracted() -> None:
         {"date": "2026-11-02"}
     ], mode="list")
     assert score_case(rows["L04"], single_day_only)["checks"]["temporal"] is False
+    korean_single_day = _calendar_structured([
+        {"date": "2026년 11월 2일"}
+    ], mode="list")
+    assert score_case(rows["L04"], korean_single_day)["checks"]["temporal"] is False
+
+    iso_month = _calendar_structured([
+        {"period": "2026-11"}
+    ], mode="list")
+    assert score_case(rows["L04"], iso_month)["passed"] is True
 
 
 def test_gold_reviewer_and_temporal_expectations_fail_closed() -> None:
