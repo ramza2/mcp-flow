@@ -42,7 +42,7 @@ def _review(reviewer: str, checks: dict[str, bool]) -> dict:
         "reviewed_at": DUMMY_TIME,
         "evidence_ref": f"fixture-{reviewer}",
         "rationale": "Synthetic example evidence for scorer tests only.",
-        "checks": checks,
+        "checks": dict(checks),
     }
 
 
