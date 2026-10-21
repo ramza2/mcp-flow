@@ -1,32 +1,37 @@
 # Level 3 approval performance targets (separate from KPI-01..06 / targets.yaml).
-# Only L3-05 is measured by the tooling in this package for this version.
+# Official approved six indicators. Only L3-05 evaluator is implemented in this PR.
+# Thresholds are approval goals; NOT_IMPLEMENTED does not imply failure or achievement.
 schema_version: mcpflow.level3_targets.v1
 targets_version: level3.targets.v1
 
 targets:
   L3-01:
-    name: "응답시간"
+    name: "MCP 서버 연동 성공률"
     status: NOT_IMPLEMENTED
-    target: null
-    notes: Reserved for Level 3 approval suite; not measured in this PR.
+    measured_value_unit: percent
+    target_min_percent: 90.0
+    notes: Measure actual MCP server connection attempts separately from discovery/registration.
 
   L3-02:
-    name: "Tool 매핑 정확도"
+    name: "자연어 업무지시 분석 성공률"
     status: NOT_IMPLEMENTED
-    target: null
-    notes: Reserved for Level 3 approval suite; not measured in this PR.
+    measured_value_unit: percent
+    target_min_percent: 85.0
+    notes: Compare actual StructuredRequest analysis with fixed expected results; Tool mapping alone is insufficient.
 
   L3-03:
-    name: "연계·검증 완료 MCP Tool 수"
+    name: "예약작업 정상 수행률"
     status: NOT_IMPLEMENTED
-    target: null
-    notes: Reserved for Level 3 approval suite; not measured in this PR.
+    measured_value_unit: percent
+    target_min_percent: 90.0
+    notes: Verify due schedule occurrences and actual Execution outcomes, not unit tests.
 
   L3-04:
-    name: "등록 성공률"
+    name: "복합 실행 시나리오 완료율"
     status: NOT_IMPLEMENTED
-    target: null
-    notes: Reserved for Level 3 approval suite; not measured in this PR.
+    measured_value_unit: percent
+    target_min_percent: 85.0
+    notes: Reuse validated scenario Execution evidence, not inferred unit test results.
 
   L3-05:
     name: "Tool 검색 평균 응답시간"
@@ -45,7 +50,8 @@ targets:
     notes: Approval gate MET when complete average ≤ 3.0s; else NOT_MET.
 
   L3-06:
-    name: "운영 기능 통과율"
+    name: "연계·검증 완료 MCP Tool 수"
     status: NOT_IMPLEMENTED
-    target: null
-    notes: Reserved for Level 3 approval suite; not measured in this PR.
+    measured_value_unit: count
+    target_min_count: 10
+    notes: Count unique connected and verified MCP Tools with reproducible evidence.
