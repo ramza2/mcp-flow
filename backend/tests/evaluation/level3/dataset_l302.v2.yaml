@@ -202,21 +202,21 @@ cases:
     family: ambiguous
     request_text: "지난번에 이야기한 그 항목도 바꿔줘"
     gold:
-      intent: {"domain":"unknown","action":"clarify","object":"unspecified referenced item"}
+      intent: {"domain":"unknown","action":"update","object":"unspecified referenced item"}
       capability: null
       entities: []
       risk: ["UNKNOWN"]
       needs_clarification: true
       missing_meaning: ["대상 항목 식별","원하는 변경 내용"]
-    review_note: "과거 대화 맥락 없음, 임의 항목 생성 및 기능 추정 금지"
+    review_note: "수정 동작은 명시됐으나 변경 대상과 내용은 미지정; 과거 맥락 없이 기능 추정 금지"
   - id: A02
     family: ambiguous
     request_text: "이어서 처리해줘"
     gold:
-      intent: {"domain":"unknown","action":"clarify","object":"unspecified continuing task"}
+      intent: {"domain":"unknown","action":"continue","object":"unspecified continuing task"}
       capability: null
       entities: []
       risk: ["UNKNOWN"]
       needs_clarification: true
       missing_meaning: ["이어서 수행할 업무 식별"]
-    review_note: "이전 작업 맥락 없으므로 명확화 필요"
+    review_note: "계속하라는 요청이지만 이전 작업 맥락 없음; 작업 대상 확인 필요"
