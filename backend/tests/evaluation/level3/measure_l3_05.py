@@ -573,13 +573,10 @@ def datetime_stamp() -> str:
 
 
 def _write_evidence(report: dict[str, Any], *, path: Path) -> Path:
-    if path.exists():
-        raise FileExistsError(f"Refuse to overwrite existing evidence file: {path}")
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(report, indent=2, ensure_ascii=False) + "\n",
-        encoding="utf-8",
-    )
+    # 'x' uses exclusive creation, closing the exists()/write_text() race.
+    with path.open("x", encoding="utf-8") as evidence_file:
+        evidence_file.write(json.dumps(report, indent=2, ensure_ascii=False) + "\n")
     return path
 
 
