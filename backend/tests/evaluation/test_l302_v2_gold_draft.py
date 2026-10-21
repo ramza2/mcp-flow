@@ -10,10 +10,14 @@ from collections import Counter
 from datetime import date
 from pathlib import Path
 
-from tests.evaluation.harness.common import load_yaml
+import yaml
 
 
 ROOT = Path(__file__).resolve().parent / "level3"
+
+
+def load_yaml(path: Path) -> dict:
+    return yaml.safe_load(path.read_text(encoding="utf-8"))
 
 
 def test_v2_candidate_gold_is_complete_and_not_yet_approved() -> None:
