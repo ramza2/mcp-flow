@@ -1,4 +1,4 @@
-# Level 3 L3-02 — 자연어 업무지시 분석 성공률 (평가 데이터셋 검토 초안)
+# Level 3 L3-02 — 자연어 업무지시 분석 성공률 (승인된 평가 데이터셋)
 
 승인 성능목표 **85% 이상**. 이 평가는 기존 내부 KPI-02 (자연어→Tool Top-1
 매핑 정확도)와 **별개**이며, Tool 선택 성공으로 대체하지 않는다.
@@ -42,13 +42,13 @@ Tool 검색/선택, MCP 실행, 임베딩, 예약작업 시간도 포함하지 �
 
 ### 중요: 골드셋 검토
 
-현재 고정 데이터셋은 **`PENDING_REVIEW` 초안**이다.
-결과보고서의 공식 수치로 쓰기 전 담당자/전문가가 각 문장·기대 의미·
-엔터티/리스크 기준을 검토해야 한다. `--run` 실행은
+**2026-10-21 과제 담당자가 채팅에서 20건의 고정 정답셋과 사전 정의된 채점 기준을 명시적으로 승인**했다.
+`dataset_l302.v1.yaml`의 상태는 **`APPROVED`**이며, 세부 승인 경위는 `GOLD_REVIEW_L302.md`에 기록한다.
+이번 승인은 정답셋에 대한 담당자 승인이지 별도의 외부 전문기관 인증이나 성능목표 달성 판정이 아니다. `--run` 실행은
 `--ack-gold-reviewed`(검토 확인)에 의해 보호된다. 이 플래그는 **실제 검토가
 끝난 후에만** 사용해야 한다. 또한 **review_status=APPROVED + reviewed_by + reviewed_at**이
 정답셋에 모두 포함되지 않으면 `--ack-gold-reviewed`를 넘겨도 실행을 거부한다.
-승인 기록은 담당자 검토 후 **별도 커밋**으로 추가하고 CI 통과를 확인한다.
+정답셋 승인 기록은 **별도 승인 PR/커밋**으로 남기고 CI 통과를 확인한다.
 평가 결과에 검토자, 검토 시각, 데이터셋 해시를 남긴다.
 
 ## 서버 Preflight (DB SELECT만 수행, LLM 호출 없음)
@@ -84,6 +84,6 @@ docker compose --env-file .env.server \
 
 - AgentVersion `PUBLISHED` / Agent `ACTIVE` / 요청 스키마 v1
 - 실제 LLMProfile 참조가 존재하며 `OPENAI_COMPATIBLE` Provider
-- 데이터셋과 채점 기준을 담당자가 검토하고 고정 (`PENDING_REVIEW`에서는 공식 실행 불가)
+- 데이터셋과 채점 기준 담당자 승인 (`APPROVED`), 승인 커밋의 CI 통과 및 병합 확인
 - ModelOps Gateway 연결 가능 (preflight는 네트워크 조회하지 않음)
 - `artifacts/level3` 컨테이너 UID 10001 쓰기 가능
