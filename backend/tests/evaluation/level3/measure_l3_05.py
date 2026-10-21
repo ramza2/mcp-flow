@@ -452,8 +452,6 @@ async def _run_async(args: argparse.Namespace) -> dict[str, Any]:
         }
 
     sha = git_sha()
-    stamp = measured_at().replace(":", "").replace("-", "")
-    # measured_at is ISO; use compact stamp for filenames
     stamp = datetime_stamp()
     report: dict[str, Any] = {
         "schema_version": EVIDENCE_SCHEMA_VERSION,
