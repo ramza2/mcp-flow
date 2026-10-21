@@ -1,10 +1,14 @@
-# L3-02 operator-review draft gold set. Freeze and review BEFORE official runs.
+# L3-02 approved gold set, reviewed by project 담당자 via explicit chat approval.
+# 2026-10-21: approval covered all 20 fixed cases and predeclared rubric.
+# Do not alter any case or scoring rule after seeing live model outputs.
 # Gold temporal values use explicit absolute 2026 dates to avoid run-date drift.
 # Tool names are NOT expected output here: this evaluates natural-language
 # intent/capability/entity/risk/time extraction by the production Analyzer contract.
 schema_version: mcpflow.level3_analyzer_dataset.v1
 dataset_version: level3-natural-language-analysis.v1
-review_status: PENDING_REVIEW
+review_status: APPROVED
+reviewed_by: "과제 담당자 (대화에서 명시적으로 승인)"
+reviewed_at: "2026-10-21"
 cases:
   - id: W01
     request_text: "서울의 현재 날씨를 알려줘"
