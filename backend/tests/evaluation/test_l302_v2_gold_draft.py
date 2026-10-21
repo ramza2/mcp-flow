@@ -10,13 +10,13 @@ from collections import Counter
 from datetime import date
 from pathlib import Path
 
-import yaml
-
 
 ROOT = Path(__file__).resolve().parent / "level3"
 
 
 def load_yaml(path: Path) -> dict:
+    import yaml
+
     return yaml.safe_load(path.read_text(encoding="utf-8"))
 
 
