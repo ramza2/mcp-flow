@@ -52,7 +52,7 @@ cases:
     expected_entities: {title: "정기회의"}
     expected_temporal: {dates: ["2026-11-06"], time_24h: "11:00"}
   - id: L01
-    request_text: "2026년 11월 2일부터 2026년 11월 6일까지 등록된 일정 목록을 조회해줘"
+    request_text: "2026년 11월 2일부터 2026년 11월 6일까지 예정된 일정 목록을 조회해줘"
     family: calendar_list
     expected_entities: {}
     expected_temporal: {dates: ["2026-11-02", "2026-11-06"]}
