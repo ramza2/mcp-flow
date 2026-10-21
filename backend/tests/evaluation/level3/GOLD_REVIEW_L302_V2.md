@@ -20,7 +20,7 @@
 | R05 | 조회 | 거래처 해솔테크의 미결제 청구서 목록을 찾아줘 | invoice/list | customer=해솔테크 (USER_EXPLICIT); risk=READ_ONLY |
 | R06 | 조회 | 2026년 8월의 서비스 장애 기록을 조회해줘 | incident/list | 시점={"kind":"month","months":["2026-08"]}; risk=READ_ONLY |
 | C01 | 등록 | 프로젝트 오로라에 '데이터 검증' 작업을 새로 등록해줘 | task/create | project=오로라 (USER_EXPLICIT); title=데이터 검증 (USER_EXPLICIT); risk=IDEMPOTENT_WRITE/NON_IDEMPOTENT_WRITE |
-| C02 | 등록 | 2026년 12월 3일 오전 10시에 '고객 피드백 검토' 작업을 만들어줘 | task/create | title=고객 피드백 검토 (USER_EXPLICIT); 시점={"kind":"datetime","dates":["2026-12-03"],"time_24h":"10:00"}; risk=IDEMPOTENT_WRITE/NON_IDEMPOTENT_WRITE |
+| C02 | 등록 | '고객 피드백 검토' 작업을 새로 만들고 마감 시각을 2026년 12월 3일 오전 10시로 지정해줘 | task/create | title=고객 피드백 검토 (USER_EXPLICIT); 시점={"kind":"datetime","dates":["2026-12-03"],"time_24h":"10:00"}; risk=IDEMPOTENT_WRITE/NON_IDEMPOTENT_WRITE |
 | C03 | 등록 | 김민준을 담당자로 지정해서 '대시보드 점검' 할 일을 생성해줘 | task/create | assignee=김민준 (USER_EXPLICIT); title=대시보드 점검 (USER_EXPLICIT); risk=IDEMPOTENT_WRITE/NON_IDEMPOTENT_WRITE |
 | C04 | 등록 | 거래처 솔빛상사에 대한 '후속 연락' 작업을 새로 추가해줘 | task/create | customer=솔빛상사 (USER_EXPLICIT); title=후속 연락 (USER_EXPLICIT); risk=IDEMPOTENT_WRITE/NON_IDEMPOTENT_WRITE |
 | U01 | 수정 | 작업 TK-918의 상태를 완료로 변경해줘 | task/update | task_id=TK-918 (USER_EXPLICIT); status=완료 (USER_EXPLICIT); risk=IDEMPOTENT_WRITE/NON_IDEMPOTENT_WRITE |
