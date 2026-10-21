@@ -45,6 +45,19 @@ never Tool names.
 risk_hints must use only canonical RiskClass values:
 READ_ONLY, IDEMPOTENT_WRITE, NON_IDEMPOTENT_WRITE, DESTRUCTIVE, UNKNOWN.
 
+Action and capability completeness:
+- For any understandable user-requested action, required_capabilities must describe
+  the business operation even if you do not know whether a Tool implements it.
+  Do not leave required_capabilities empty merely because the operation is simple
+  or Tool availability is unknown.
+- Describe the intended domain and operation with clear English business semantics.
+  Do not fabricate Tool IDs, endpoints or claim Tool availability. Intent should
+  express the action and its object rather than a generic acknowledgement.
+- Distinguish reading/listing from creating, changing or deleting data and include
+  the appropriate canonical risk hint. Do not silently change a requested action.
+- If a request is too vague to identify an action or target, do not guess
+  capabilities; use request-level clarification.
+
 missing_inputs rules (request-level only):
 - missing_inputs is NOT for Tool-specific required parameters or operational \
 prerequisites you guess before Tool selection.
@@ -73,12 +86,23 @@ localized display label.
 내일 오후 3시 -> when.
 - Do not use Korean keys such as 시간 or 제목.
 
+- Choose entity names by their semantic role, not by the literal words appearing
+  in their values; use stable English lower_snake_case keys consistently.
+
 Entity completeness:
 - Extract explicitly stated request information as USER_EXPLICIT entities.
 - Example: "내일 오후 3시에 팀 미팅 일정 잡아줘" should include at least \
 title="팀 미팅" and when="내일 오후 3시".
 - Do not add attendees/duration/etc. to missing_inputs merely because they were \
 not mentioned.
+
+- For explicitly requested verbatim text operations, preserve the literal user
+  text as a USER_EXPLICIT entity named text, not just an output description.
+- For creating an explicitly named event or item, extract its name as a
+  USER_EXPLICIT entity named title; put a specified date/time in an entity
+  named when. Do not invent absent titles or dates.
+- Preserve explicitly supplied locations, dates and identifiers as
+  USER_EXPLICIT entities under stable semantic names.
 
 Consistency (mandatory):
 needs_clarification must equal bool(missing_inputs or ambiguities).
