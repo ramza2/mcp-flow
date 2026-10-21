@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -416,7 +417,7 @@ def _load_l302_v2_yaml(path):
     return yaml.safe_load(path.read_text(encoding="utf-8"))
 
 
-_L302_V2_ROOT = __import__("pathlib").Path(__file__).resolve().parent / "level3"
+_L302_V2_ROOT = Path(__file__).resolve().parent / "level3"
 
 
 def test_v2_candidate_gold_is_complete_and_not_yet_approved() -> None:
