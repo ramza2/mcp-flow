@@ -1,0 +1,222 @@
+# L3-02 v2 NEW candidate evaluation gold set; METHODOLOGY APPROVED but THESE CASES NOT REVIEWED.
+# No run harness is allowed to accept v2 data until separate case-by-case gold approval.
+# All persons, company names, project names, identifiers and documents are fictional examples.
+# Golden intent/capability objects express semantic meaning, NOT exact output keywords or Tool IDs.
+# All 8 criteria (intent/capability/entities/provenance/temporal/risk/ambiguity/schema) must pass per case.
+schema_version: mcpflow.level3_analyzer_dataset.v2
+dataset_version: level3-natural-language-analysis.v2
+method_review_status: APPROVED
+method_reviewed_by: "과제 담당자 (채팅에서 명시적으로 승인)"
+method_reviewed_at: "2026-10-21"
+review_status: PENDING_REVIEW
+reviewed_by: null
+reviewed_at: null
+measurement_performed: false
+cases:
+  - id: R01
+    family: lookup
+    request_text: "프로젝트 아틀라스의 2026년 9월 2일자 검토 문서를 찾아줘"
+    gold:
+      intent: {"domain":"document","action":"search","object":"review document"}
+      capability: {"domain":"document","action":"search"}
+      entities: [{"role":"project","value":"아틀라스","source":"USER_EXPLICIT"}]
+      risk: ["READ_ONLY"]
+      needs_clarification: false
+      temporal: {"kind":"date","dates":["2026-09-02"]}
+    review_note: "문서 검색이며 문서 생성·갱신 아님; 날짜는 문서 식별 조건"
+  - id: R02
+    family: lookup
+    request_text: "품목 코드 RB-204의 현재 재고 수량을 확인해줘"
+    gold:
+      intent: {"domain":"inventory","action":"lookup","object":"stock quantity"}
+      capability: {"domain":"inventory","action":"lookup"}
+      entities: [{"role":"item_code","value":"RB-204","source":"USER_EXPLICIT"}]
+      risk: ["READ_ONLY"]
+      needs_clarification: false
+    review_note: "현재 재고량 조회, 재고 수정 아님"
+  - id: R03
+    family: lookup
+    request_text: "지원 티켓 INC-7315의 처리 상태를 조회해줘"
+    gold:
+      intent: {"domain":"support_ticket","action":"lookup","object":"ticket status"}
+      capability: {"domain":"support_ticket","action":"lookup"}
+      entities: [{"role":"ticket_id","value":"INC-7315","source":"USER_EXPLICIT"}]
+      risk: ["READ_ONLY"]
+      needs_clarification: false
+    review_note: "지정 티켓의 상태 조회"
+  - id: R04
+    family: lookup
+    request_text: "2026년 9월 1일부터 9월 7일까지 접수된 문의 목록을 보여줘"
+    gold:
+      intent: {"domain":"inquiry","action":"list","object":"received inquiries"}
+      capability: {"domain":"inquiry","action":"list"}
+      entities: []
+      risk: ["READ_ONLY"]
+      needs_clarification: false
+      temporal: {"kind":"range","dates":["2026-09-01","2026-09-07"]}
+    review_note: "양쪽 날짜 경계 포함, 기간 내 접수된 문의의 목록"
+  - id: R05
+    family: lookup
+    request_text: "거래처 해솔테크의 미결제 청구서 목록을 찾아줘"
+    gold:
+      intent: {"domain":"invoice","action":"list","object":"unpaid invoices"}
+      capability: {"domain":"invoice","action":"list"}
+      entities: [{"role":"customer","value":"해솔테크","source":"USER_EXPLICIT"}]
+      risk: ["READ_ONLY"]
+      needs_clarification: false
+      conditions: ["미결제 상태만"]
+    review_note: "미결제 상태 필터가 빠지면 실패; 거래처 이름은 사용자 명시"
+  - id: R06
+    family: lookup
+    request_text: "2026년 8월의 서비스 장애 기록을 조회해줘"
+    gold:
+      intent: {"domain":"incident","action":"list","object":"service incident records"}
+      capability: {"domain":"incident","action":"list"}
+      entities: []
+      risk: ["READ_ONLY"]
+      needs_clarification: false
+      temporal: {"kind":"month","months":["2026-08"]}
+    review_note: "2026년 8월 전체이지 임의의 단일 일자가 아님"
+  - id: C01
+    family: create
+    request_text: "프로젝트 오로라에 '데이터 검증' 작업을 새로 등록해줘"
+    gold:
+      intent: {"domain":"task","action":"create","object":"task"}
+      capability: {"domain":"task","action":"create"}
+      entities: [{"role":"project","value":"오로라","source":"USER_EXPLICIT"},{"role":"title","value":"데이터 검증","source":"USER_EXPLICIT"}]
+      risk: ["IDEMPOTENT_WRITE","NON_IDEMPOTENT_WRITE"]
+      needs_clarification: false
+    review_note: "업무 작업 신규 생성, 일정 회의 생성 아님"
+  - id: C02
+    family: create
+    request_text: "2026년 12월 3일 오전 10시에 '고객 피드백 검토' 작업을 만들어줘"
+    gold:
+      intent: {"domain":"task","action":"create","object":"task"}
+      capability: {"domain":"task","action":"create"}
+      entities: [{"role":"title","value":"고객 피드백 검토","source":"USER_EXPLICIT"}]
+      risk: ["IDEMPOTENT_WRITE","NON_IDEMPOTENT_WRITE"]
+      needs_clarification: false
+      temporal: {"kind":"datetime","dates":["2026-12-03"],"time_24h":"10:00"}
+    review_note: "생성 작업과 명시 시점 모두 보존"
+  - id: C03
+    family: create
+    request_text: "김민준을 담당자로 지정해서 '대시보드 점검' 할 일을 생성해줘"
+    gold:
+      intent: {"domain":"task","action":"create","object":"task"}
+      capability: {"domain":"task","action":"create"}
+      entities: [{"role":"assignee","value":"김민준","source":"USER_EXPLICIT"},{"role":"title","value":"대시보드 점검","source":"USER_EXPLICIT"}]
+      risk: ["IDEMPOTENT_WRITE","NON_IDEMPOTENT_WRITE"]
+      needs_clarification: false
+    review_note: "담당자와 제목이 각각 명시적; 실제 계정 존재 여부는 Selector 영역"
+  - id: C04
+    family: create
+    request_text: "거래처 솔빛상사에 대한 '후속 연락' 작업을 새로 추가해줘"
+    gold:
+      intent: {"domain":"task","action":"create","object":"task"}
+      capability: {"domain":"task","action":"create"}
+      entities: [{"role":"customer","value":"솔빛상사","source":"USER_EXPLICIT"},{"role":"title","value":"후속 연락","source":"USER_EXPLICIT"}]
+      risk: ["IDEMPOTENT_WRITE","NON_IDEMPOTENT_WRITE"]
+      needs_clarification: false
+    review_note: "새로운 작업 등록, 고객사 정보 자체 변경 아님"
+  - id: U01
+    family: update
+    request_text: "작업 TK-918의 상태를 완료로 변경해줘"
+    gold:
+      intent: {"domain":"task","action":"update","object":"task status"}
+      capability: {"domain":"task","action":"update"}
+      entities: [{"role":"task_id","value":"TK-918","source":"USER_EXPLICIT"},{"role":"status","value":"완료","source":"USER_EXPLICIT"}]
+      risk: ["IDEMPOTENT_WRITE","NON_IDEMPOTENT_WRITE"]
+      needs_clarification: false
+    review_note: "상태 변경이므로 READ_ONLY 불가"
+  - id: U02
+    family: update
+    request_text: "버그 BUG-420의 우선순위를 높음으로 바꿔줘"
+    gold:
+      intent: {"domain":"issue","action":"update","object":"priority"}
+      capability: {"domain":"issue","action":"update"}
+      entities: [{"role":"issue_id","value":"BUG-420","source":"USER_EXPLICIT"},{"role":"priority","value":"높음","source":"USER_EXPLICIT"}]
+      risk: ["IDEMPOTENT_WRITE","NON_IDEMPOTENT_WRITE"]
+      needs_clarification: false
+    review_note: "문제 기록 삭제나 신규 생성이 아닌 우선순위 수정"
+  - id: U03
+    family: update
+    request_text: "문서 DOC-256의 제목을 '서비스 운영 지침'으로 수정해줘"
+    gold:
+      intent: {"domain":"document","action":"update","object":"document title"}
+      capability: {"domain":"document","action":"update"}
+      entities: [{"role":"document_id","value":"DOC-256","source":"USER_EXPLICIT"},{"role":"title","value":"서비스 운영 지침","source":"USER_EXPLICIT"}]
+      risk: ["IDEMPOTENT_WRITE","NON_IDEMPOTENT_WRITE"]
+      needs_clarification: false
+    review_note: "문서 내용 수정이 아니라 제목 수정"
+  - id: U04
+    family: update
+    request_text: "고객 문의 CS-190의 담당자를 이지훈으로 변경해줘"
+    gold:
+      intent: {"domain":"inquiry","action":"update","object":"assignee"}
+      capability: {"domain":"inquiry","action":"update"}
+      entities: [{"role":"inquiry_id","value":"CS-190","source":"USER_EXPLICIT"},{"role":"assignee","value":"이지훈","source":"USER_EXPLICIT"}]
+      risk: ["IDEMPOTENT_WRITE","NON_IDEMPOTENT_WRITE"]
+      needs_clarification: false
+    review_note: "담당자 변경, 조회 아님"
+  - id: E01
+    family: verbatim
+    request_text: "'QA_PASS_2026' 문자열을 한 글자도 바꾸지 말고 돌려줘"
+    gold:
+      intent: {"domain":"text","action":"echo","object":"verbatim text"}
+      capability: {"domain":"text","action":"echo"}
+      entities: [{"role":"text","value":"QA_PASS_2026","source":"USER_EXPLICIT"}]
+      risk: ["READ_ONLY"]
+      needs_clarification: false
+    review_note: "문자열 내용 보존, 표시만 하는 일반 응답과 구분"
+  - id: E02
+    family: verbatim
+    request_text: "괄호 안의 내용까지 포함해서 '(검수 대기)'를 그대로 출력해줘"
+    gold:
+      intent: {"domain":"text","action":"echo","object":"verbatim text"}
+      capability: {"domain":"text","action":"echo"}
+      entities: [{"role":"text","value":"(검수 대기)","source":"USER_EXPLICIT"}]
+      risk: ["READ_ONLY"]
+      needs_clarification: false
+    review_note: "괄호 포함 원문 텍스트 완전 보존"
+  - id: E03
+    family: verbatim
+    request_text: "다음 문장을 수정 없이 반복해줘: 오늘 점검은 14:30에 시작합니다."
+    gold:
+      intent: {"domain":"text","action":"echo","object":"verbatim text"}
+      capability: {"domain":"text","action":"echo"}
+      entities: [{"role":"text","value":"오늘 점검은 14:30에 시작합니다.","source":"USER_EXPLICIT"}]
+      risk: ["READ_ONLY"]
+      needs_clarification: false
+    review_note: "14:30은 인용 원문의 일부이지 별도 작업 예약 요청이 아님"
+  - id: E04
+    family: verbatim
+    request_text: "문자열 '문서-A/B-03'을 그대로 반환해줘"
+    gold:
+      intent: {"domain":"text","action":"echo","object":"verbatim text"}
+      capability: {"domain":"text","action":"echo"}
+      entities: [{"role":"text","value":"문서-A/B-03","source":"USER_EXPLICIT"}]
+      risk: ["READ_ONLY"]
+      needs_clarification: false
+    review_note: "특수문자와 대소문자 보존"
+  - id: A01
+    family: ambiguous
+    request_text: "지난번에 이야기한 그 항목도 바꿔줘"
+    gold:
+      intent: {"domain":"unknown","action":"clarify","object":"unspecified referenced item"}
+      capability: null
+      entities: []
+      risk: ["UNKNOWN"]
+      needs_clarification: true
+      missing_meaning: ["대상 항목 식별","원하는 변경 내용"]
+    review_note: "과거 대화 맥락 없음, 임의 항목 생성 및 기능 추정 금지"
+  - id: A02
+    family: ambiguous
+    request_text: "이어서 처리해줘"
+    gold:
+      intent: {"domain":"unknown","action":"clarify","object":"unspecified continuing task"}
+      capability: null
+      entities: []
+      risk: ["UNKNOWN"]
+      needs_clarification: true
+      missing_meaning: ["이어서 수행할 업무 식별"]
+    review_note: "이전 작업 맥락 없으므로 명확화 필요"
