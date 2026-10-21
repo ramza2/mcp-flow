@@ -4,10 +4,6 @@ This test does NOT approve the gold or perform semantic model scoring.
 The v2 evaluator must remain separate from approved v1 scoring/runner.
 """
 
-from __future__ import annotations
-
-from collections import Counter
-from datetime import date
 from pathlib import Path
 
 
@@ -21,6 +17,8 @@ def load_yaml(path: Path) -> dict:
 
 
 def test_v2_candidate_gold_is_complete_and_not_yet_approved() -> None:
+    from collections import Counter
+
     gold = load_yaml(ROOT / "dataset_l302.v2.yaml")
 
     assert gold["schema_version"] == "mcpflow.level3_analyzer_dataset.v2"
@@ -46,6 +44,8 @@ def test_v2_candidate_gold_is_complete_and_not_yet_approved() -> None:
 
 
 def test_v2_gold_semantic_fields_and_temporal_bounds() -> None:
+    from datetime import date
+
     cases = load_yaml(ROOT / "dataset_l302.v2.yaml")["cases"]
 
     for row in cases:
