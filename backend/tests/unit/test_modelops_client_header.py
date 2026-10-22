@@ -6,7 +6,6 @@ import json
 
 import httpx
 import pytest
-
 from app.model_provider.client import (
     EmbeddingConnectionTarget,
     LLMConnectionTarget,
