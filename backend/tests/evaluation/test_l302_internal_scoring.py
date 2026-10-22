@@ -25,6 +25,13 @@ DIGEST = "a" * 64
 
 def _gold(*, synthetic_approval: bool = False) -> dict:
     gold = yaml.safe_load(DATASET.read_text(encoding="utf-8"))
+    # Force an explicitly unapproved synthetic fixture; real gold is now approved.
+    gold.update(
+        review_status="PENDING_REVIEW",
+        reviewed_by=None,
+        reviewed_at=None,
+        owner_review=None,
+    )
     if synthetic_approval:
         # Fixture only; do not use synthetic metadata in real gold or reporting.
         gold.update(
@@ -73,6 +80,17 @@ def _evidence(gold: dict, *, fail_ids: set[str] | None = None) -> dict:
         "run_ref": "synthetic-test-only",
         "cases": rows,
     }
+
+
+def test_actual_approved_gold_has_verified_review_fingerprint() -> None:
+    actual = yaml.safe_load(DATASET.read_text(encoding="utf-8"))
+    assert actual["review_status"] == "APPROVED"
+    assert actual["measurement_performed"] is False
+    assert gold_gate(actual)["ok"] is True
+    assert (
+        actual["owner_review"]["case_set_sha256"]
+        == case_set_sha256(actual["cases"])
+    )
 
 
 def test_internal_unapproved_gold_blocks_scoring() -> None:
@@ -183,6 +201,7 @@ async def test_internal_pending_gold_blocks_db_and_model(
 
     monkeypatch.setattr(collector, "db_url", forbidden)
     monkeypatch.setattr(collector, "ModelProviderClient", forbidden)
+    monkeypatch.setattr(collector, "load_gold", lambda: (_gold(), DIGEST))
     report = await collector.execute(argparse.Namespace(
         run=True,
         preflight=False,
@@ -200,6 +219,7 @@ async def test_internal_pending_gold_blocks_db_and_model(
 async def test_internal_preflight_checks_only_gate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(collector, "load_gold", lambda: (_gold(), DIGEST))
     monkeypatch.setattr(
         collector, "db_url",
         lambda: (_ for _ in ()).throw(AssertionError("no DB during preflight")),
@@ -211,6 +231,26 @@ async def test_internal_preflight_checks_only_gate(
     assert report["run_permitted"] is False
     assert report["gate_reason"] == "INTERNAL_GOLD_NOT_APPROVED"
     assert report["judgment"] == "INCOMPLETE"
+
+
+@pytest.mark.asyncio
+async def test_real_gold_still_requires_explicit_measurement_ack(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def forbidden() -> str:
+        raise AssertionError("live DB/LLM must not be called without ack")
+    monkeypatch.setattr(collector, "db_url", forbidden)
+    monkeypatch.setattr(collector, "ModelProviderClient", forbidden)
+    result = await collector.execute(argparse.Namespace(
+        run=True,
+        preflight=False,
+        ack_gold_reviewed=False,
+        write_artifact=True,
+        agent_version_id="45e06703-7af8-4e1b-9da9-518cea072759",
+    ))
+    assert result["run_permitted"] is True
+    assert result["judgment"] == "INCOMPLETE"
+    assert result["reason"] == "INTERNAL_GOLD_REVIEW_ACK_REQUIRED"
 
 
 def test_internal_private_dir_has_restricted_access(
