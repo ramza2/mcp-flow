@@ -14,6 +14,7 @@ import yaml
 from tests.evaluation.level3 import collect_l302_internal as collector
 from tests.evaluation.level3.scoring_l302_internal import (
     CRITERIA,
+    case_set_sha256,
     gold_gate,
     score_reviewed_dataset,
 )
@@ -32,6 +33,7 @@ def _gold(*, synthetic_approval: bool = False) -> dict:
             reviewed_at="2026-10-22T10:00:00+09:00",
             owner_review={
                 "reviewer_ref": "TEST_OWNER_NOT_A_REAL_APPROVAL",
+                "case_set_sha256": case_set_sha256(gold["cases"]),
                 "reviewed_at": "2026-10-22T10:00:00+09:00",
                 "evidence_ref": "test-fixture-only",
                 "case_decisions": [
@@ -94,6 +96,16 @@ def test_synthetic_owner_must_review_each_of_twenty_cases() -> None:
     gold = _gold(synthetic_approval=True)
     gold["owner_review"]["reviewer_ref"] = "SOMEONE_ELSE"
     assert gold_gate(gold)["reason"] == "INTERNAL_OWNER_REVIEW_MISSING"
+
+
+def test_owner_approval_is_invalidated_by_changes_to_gold_case_content() -> None:
+    gold = _gold(synthetic_approval=True)
+    assert gold_gate(gold)["ok"] is True
+    gold["cases"][0]["request_text"] += " (수정본)"
+    assert gold_gate(gold)["reason"] == "INTERNAL_OWNER_REVIEW_CASE_HASH_MISMATCH"
+    assert score_reviewed_dataset(
+        gold, gold_sha256=DIGEST, evidence=_evidence(gold)
+    )["judgment"] == "INCOMPLETE"
 
 
 def test_synthetic_85_percent_threshold() -> None:
