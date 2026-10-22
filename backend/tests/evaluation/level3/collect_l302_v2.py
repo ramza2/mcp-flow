@@ -235,7 +235,8 @@ async def execute(args: argparse.Namespace) -> dict[str, Any]:
 
             private_rows: list[dict[str, Any]] = []
             public_rows: list[dict[str, Any]] = []
-            async with ModelProviderClient() as provider:
+            provider = ModelProviderClient()
+            try:
                 analyzer = RequestAnalyzerService(session, model_provider=provider)
                 for case in gold["cases"]:
                     item = await observe_one(
@@ -248,6 +249,8 @@ async def execute(args: argparse.Namespace) -> dict[str, Any]:
                     )
                     private_rows.append(item["private_observation"])
                     public_rows.append(item["public_case"])
+            finally:
+                await provider.aclose()
             report["case_results"] = public_rows
             report["observed_cases"] = len(public_rows)
             report["reason"] = "PENDING_INDEPENDENT_SEMANTIC_REVIEWS"
