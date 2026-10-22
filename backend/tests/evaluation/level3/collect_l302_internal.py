@@ -11,7 +11,6 @@ import argparse
 import asyncio
 import hashlib
 import json
-import os
 import stat
 import sys
 import uuid
