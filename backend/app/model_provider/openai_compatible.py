@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import re
 import time
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -33,6 +36,9 @@ _EMBEDDING_PROBE_INPUT = "mcpflow connection test"
 # Profile `request_timeout_ms` may override runtime generate_json/embed_texts only.
 DEFAULT_REQUEST_TIMEOUT_MS = 15000
 _DEFAULT_TIMEOUT_MS = DEFAULT_REQUEST_TIMEOUT_MS
+
+_MODELOPS_GATEWAY_HOST = "modelops-gateway.openlink.kr"
+_CLIENT_KEY_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\\Z")
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,13 +83,35 @@ class OpenAICompatibleAdapter:
             await self._http.aclose()
             self._http = None
 
-    def _auth_headers(self, bearer_token: str | None) -> dict[str, str]:
+    def _auth_headers(
+        self, bearer_token: str | None, *, base_url: str
+    ) -> dict[str, str]:
         headers = {
             "Accept": "application/json",
             "Content-Type": "application/json",
         }
         if bearer_token:
             headers["Authorization"] = f"Bearer {bearer_token}"
+
+        # MCPFlow uses this adapter for arbitrary OpenAI-compatible providers.
+        # Never forward its ModelOps project identifier to third-party hosts.
+        target = urlsplit(base_url.strip())
+        if (
+            target.scheme.lower() == "https"
+            and target.hostname == _MODELOPS_GATEWAY_HOST
+            and target.port in (None, 443)
+            and target.username is None
+            and target.password is None
+        ):
+            client_key = os.getenv("MODELOPS_CLIENT_KEY", "").strip()
+            if client_key:
+                if not _CLIENT_KEY_PATTERN.fullmatch(client_key):
+                    raise ModelProviderError(
+                        error_code=PROTOCOL,
+                        message="Invalid ModelOps client key configuration.",
+                        retryable=False,
+                    )
+                headers["X-AI-Client"] = client_key
         return headers
 
     def _map_transport_error(self, exc: Exception) -> ModelProviderError:
@@ -180,7 +208,7 @@ class OpenAICompatibleAdapter:
         started = time.perf_counter()
         api_root = normalize_openai_compatible_root(base_url)
         url = join_api_path(api_root, "models")
-        headers = self._auth_headers(bearer_token)
+        headers = self._auth_headers(bearer_token, base_url=base_url)
         try:
             response = await self._request(
                 method="GET",
@@ -245,7 +273,7 @@ class OpenAICompatibleAdapter:
 
         api_root = normalize_openai_compatible_root(base_url)
         url = join_api_path(api_root, "embeddings")
-        headers = self._auth_headers(bearer_token)
+        headers = self._auth_headers(bearer_token, base_url=base_url)
         body = {"model": model, "input": inputs}
         response = await self._request(
             method="POST",
@@ -384,7 +412,7 @@ class OpenAICompatibleAdapter:
         started = time.perf_counter()
         api_root = normalize_openai_compatible_root(base_url)
         url = join_api_path(api_root, "embeddings")
-        headers = self._auth_headers(bearer_token)
+        headers = self._auth_headers(bearer_token, base_url=base_url)
         body = {"model": model, "input": _EMBEDDING_PROBE_INPUT}
         try:
             response = await self._request(
@@ -578,7 +606,7 @@ class OpenAICompatibleAdapter:
 
         api_root = normalize_openai_compatible_root(base_url)
         url = join_api_path(api_root, "chat/completions")
-        headers = self._auth_headers(bearer_token)
+        headers = self._auth_headers(bearer_token, base_url=base_url)
         body = self._merge_chat_parameters(
             model=model, messages=messages, parameters=parameters
         )
