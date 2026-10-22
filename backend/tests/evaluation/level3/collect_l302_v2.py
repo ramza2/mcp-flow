@@ -284,7 +284,9 @@ async def execute(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="L3-02 v2 approved-gold live observation collector")
+    parser = argparse.ArgumentParser(
+        description="L3-02 v2 approved-gold live observation collector"
+    )
     modes = parser.add_mutually_exclusive_group(required=True)
     modes.add_argument("--preflight", action="store_true")
     modes.add_argument("--run", action="store_true")
