@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+import argparse
+import os
+import stat
 from copy import deepcopy
 from pathlib import Path
 
+import pytest
 import yaml
 
+from tests.evaluation.level3 import collect_l302_internal as collector
 from tests.evaluation.level3.scoring_l302_internal import (
     CRITERIA,
     gold_gate,
@@ -155,3 +160,53 @@ def test_schema_failures_count_and_eight_checks_are_required() -> None:
     assert score_reviewed_dataset(
         gold, gold_sha256=DIGEST, evidence=tampered
     )["reason"] == "EIGHT_CRITERIA_REVIEW_INVALID"
+
+
+@pytest.mark.asyncio
+async def test_internal_pending_gold_blocks_db_and_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def forbidden() -> str:
+        raise AssertionError("unapproved gold must not access DB or model")
+
+    monkeypatch.setattr(collector, "db_url", forbidden)
+    monkeypatch.setattr(collector, "ModelProviderClient", forbidden)
+    report = await collector.execute(argparse.Namespace(
+        run=True,
+        preflight=False,
+        agent_version_id="45e06703-7af8-4e1b-9da9-518cea072759",
+        ack_gold_reviewed=True,
+        write_artifact=True,
+    ))
+    assert report["run_permitted"] is False
+    assert report["judgment"] == "INCOMPLETE"
+    assert report["reason"] == "INTERNAL_GOLD_NOT_APPROVED"
+    assert "case_results" not in report
+
+
+@pytest.mark.asyncio
+async def test_internal_preflight_checks_only_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        collector, "db_url",
+        lambda: (_ for _ in ()).throw(AssertionError("no DB during preflight")),
+    )
+    report = await collector.execute(argparse.Namespace(
+        run=False, preflight=True,
+    ))
+    assert report["ok"] is True
+    assert report["run_permitted"] is False
+    assert report["gate_reason"] == "INTERNAL_GOLD_NOT_APPROVED"
+    assert report["judgment"] == "INCOMPLETE"
+
+
+def test_internal_private_dir_has_restricted_access(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(collector, "artifact_dir", lambda _kind: tmp_path)
+    path = collector.private_dir()
+    assert stat.S_IMODE(path.stat().st_mode) == 0o700
+    os.chmod(path, 0o755)
+    with pytest.raises(ValueError, match="PRIVATE_EVIDENCE_PERMISSIONS"):
+        collector.private_dir()
