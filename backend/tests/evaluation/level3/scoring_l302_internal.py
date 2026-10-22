@@ -7,6 +7,8 @@ Never claim external certification or silently substitute this for v1/v2.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from collections import Counter
 from typing import Any
@@ -25,6 +27,14 @@ _SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 
 def _nonblank(value: Any) -> bool:
     return isinstance(value, str) and bool(value.strip())
+
+
+def case_set_sha256(cases: list[dict[str, Any]]) -> str:
+    """Pin owner approval to exact gold cases, independent of YAML formatting."""
+    canonical = json.dumps(
+        cases, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
 
 
 def gold_gate(gold: dict[str, Any]) -> dict[str, Any]:
@@ -56,6 +66,9 @@ def gold_gate(gold: dict[str, Any]) -> dict[str, Any]:
     review = gold.get("owner_review")
     if not isinstance(review, dict) or review.get("reviewer_ref") != owner:
         return {"ok": False, "reason": "INTERNAL_OWNER_REVIEW_MISSING"}
+    # The review must attest to these exact 20 request texts and gold values.
+    if review.get("case_set_sha256") != case_set_sha256(cases):
+        return {"ok": False, "reason": "INTERNAL_OWNER_REVIEW_CASE_HASH_MISMATCH"}
     if not _nonblank(review.get("reviewed_at")) or not _nonblank(
         review.get("evidence_ref")
     ):

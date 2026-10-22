@@ -40,11 +40,19 @@ docker compose --env-file .env.server \
 ## 실제 담당자 1인 검토 이후 단계
 
 1. 담당자가 `L302_INTERNAL_OWNER_GOLD_CHECKLIST.md` 20건을 실제로 검토한 뒤, 정답에 대한 의견을 확정한다.
-2. 정답셋 `owner_review.case_decisions`에 그 사람의 20개 실제 검토 결과와 근거를 반영한다. 과제 담당자 별도 승인·날짜 및 증적을 남긴다.
-3. 골드셋을 새로운 승인 PR로 동결하고 CI를 검증한다. 모델 출력은 이 전 단계에서 열어보지 않는다.
-4. 승인된 데이터셋을 이용해 `collect_l302_internal.py --run --ack-gold-reviewed --write-artifact --agent-version-id <uuid>`를 **실측 1회** 수행한다. `--write-artifact`가 private/public 증적을 서로 다른 파일로 배타 생성한다.
-5. 접근통제된 관측을 실제 담당자 1인이 검토한다. 각 문항당 의도/기능/엔터티/출처/시간/위험/모호성/스키마 8개 bool과 평가 근거·일시를 기록한다.
-6. `score_reviewed_dataset`에 같은 승인 `gold_sha256`, 동일 `run_ref`, 정확히 20문항의 판정 기록을 전달해 `INTERNAL_MET` 또는 `INTERNAL_NOT_MET` 결과를 계산한다.
+2. 아래 오프라인 명령으로 20문항의 형태·유형·정답 누락과 `case_set_sha256`을 확인한다. 이 검사는 **실제 사람의 확인이나 승인 대신이 아니다**.
+
+   ```bash
+   cd ~/mcp-flow/backend
+   python -m tests.evaluation.level3.audit_l302_internal_gold
+   ```
+
+   결과의 `case_set_sha256`은 검토한 문장과 정답 내용의 지문이다. `ok: true`는 정적 형식 검사 통과이지 최종 승인 뜻이 아니다.
+3. 정답셋 `owner_review.case_decisions`에 실제 담당자의 20개 실제 검토 결과와 근거를 반영하고, `owner_review.case_set_sha256`에 위 지문을 함께 기록한다. 과제 담당자 별도 승인·날짜 및 증적을 남긴다.
+4. 골드셋을 새로운 승인 PR로 동결하고 CI를 검증한다. 모델 출력은 이 전 단계에서 열어보지 않는다.
+5. 승인된 데이터셋을 이용해 `collect_l302_internal.py --run --ack-gold-reviewed --write-artifact --agent-version-id <uuid>`를 **실측 1회** 수행한다. `--write-artifact`가 private/public 증적을 서로 다른 파일로 배타 생성한다.
+6. 접근통제된 관측을 실제 담당자 1인이 검토한다. 각 문항당 의도/기능/엔터티/출처/시간/위험/모호성/스키마 8개 bool과 평가 근거·일시를 기록한다.
+7. `score_reviewed_dataset`에 같은 승인 `gold_sha256`, 동일 `run_ref`, 정확히 20문항의 판정 기록을 전달해 `INTERNAL_MET` 또는 `INTERNAL_NOT_MET` 결과를 계산한다.
 
 - 성능 목표는 항상 **85% 이상(20건 중 17건 이상)**.
 - DB 쓰기나 MCP Tool 실제 실행은 이 지표에 포함하지 않는다.
