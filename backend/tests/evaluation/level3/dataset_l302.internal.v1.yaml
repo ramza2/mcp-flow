@@ -1,5 +1,6 @@
 # L3-02 INTERNAL v1 NEW candidate gold set — 1-owner self-assessment method approved 2026-10-22.
-# Gold 20 cases are NOT YET REVIEWED or APPROVED; never run LLM measurement.
+# Human project owner confirmed all 20 cases and approved the internal gold via chat on 2026-10-22.
+# No LLM measurement has been performed; independent two-reviewer v2 gold remains unapproved.
 # This separate version does not change 2-independent-review v2 gold or its method.
 # All persons, company names, project names, identifiers and documents are fictional examples.
 # Golden intent/capability objects express semantic meaning, NOT exact output keywords or Tool IDs.
@@ -9,10 +10,75 @@ dataset_version: level3-natural-language-analysis.internal.v1
 method_review_status: APPROVED_INTERNAL_METHOD_ONLY
 method_reviewed_by: "과제 담당자 (채팅에서 명시적으로 승인)"
 method_reviewed_at: "2026-10-22"
-review_status: PENDING_REVIEW
-reviewed_by: null
-reviewed_at: null
-owner_review: null
+review_status: APPROVED
+reviewed_by: "과제 담당자 (2026-10-22 채팅 승인)"
+reviewed_at: "2026-10-22 KST"
+owner_review:
+  reviewer_ref: "과제 담당자 (2026-10-22 채팅 승인)"
+  reviewed_at: "2026-10-22 KST"
+  evidence_ref: "2026-10-22 프로젝트 대화: 20개 문항 모두 확인했고 정답셋 승인"
+  case_set_sha256: "bbcfb06e881e64be9bfa0176c5a4e0bc79573193083711c1edc165d5a0db1b37"
+  case_decisions:
+    - case_id: R01
+      decision: APPROVED
+      rationale: "과제 담당자가 20개 문항 모두 확인하고 정답셋을 일괄 승인했다고 명시적으로 회신함"
+    - case_id: R02
+      decision: APPROVED
+      rationale: "과제 담당자가 20개 문항 모두 확인하고 정답셋을 일괄 승인했다고 명시적으로 회신함"
+    - case_id: R03
+      decision: APPROVED
+      rationale: "과제 담당자가 20개 문항 모두 확인하고 정답셋을 일괄 승인했다고 명시적으로 회신함"
+    - case_id: R04
+      decision: APPROVED
+      rationale: "과제 담당자가 20개 문항 모두 확인하고 정답셋을 일괄 승인했다고 명시적으로 회신함"
+    - case_id: R05
+      decision: APPROVED
+      rationale: "과제 담당자가 20개 문항 모두 확인하고 정답셋을 일괄 승인했다고 명시적으로 회신함"
+    - case_id: R06
+      decision: APPROVED
+      rationale: "과제 담당자가 20개 문항 모두 확인하고 정답셋을 일괄 승인했다고 명시적으로 회신함"
+    - case_id: C01
+      decision: APPROVED
+      rationale: "과제 담당자가 20개 문항 모두 확인하고 정답셋을 일괄 승인했다고 명시적으로 회신함"
+    - case_id: C02
+      decision: APPROVED
+      rationale: "과제 담당자가 20개 문항 모두 확인하고 정답셋을 일괄 승인했다고 명시적으로 회신함"
+    - case_id: C03
+      decision: APPROVED
+      rationale: "과제 담당자가 20개 문항 모두 확인하고 정답셋을 일괄 승인했다고 명시적으로 회신함"
+    - case_id: C04
+      decision: APPROVED
+      rationale: "과제 담당자가 20개 문항 모두 확인하고 정답셋을 일괄 승인했다고 명시적으로 회신함"
+    - case_id: U01
+      decision: APPROVED
+      rationale: "과제 담당자가 20개 문항 모두 확인하고 정답셋을 일괄 승인했다고 명시적으로 회신함"
+    - case_id: U02
+      decision: APPROVED
+      rationale: "과제 담당자가 20개 문항 모두 확인하고 정답셋을 일괄 승인했다고 명시적으로 회신함"
+    - case_id: U03
+      decision: APPROVED
+      rationale: "과제 담당자가 20개 문항 모두 확인하고 정답셋을 일괄 승인했다고 명시적으로 회신함"
+    - case_id: U04
+      decision: APPROVED
+      rationale: "과제 담당자가 20개 문항 모두 확인하고 정답셋을 일괄 승인했다고 명시적으로 회신함"
+    - case_id: E01
+      decision: APPROVED
+      rationale: "과제 담당자가 20개 문항 모두 확인하고 정답셋을 일괄 승인했다고 명시적으로 회신함"
+    - case_id: E02
+      decision: APPROVED
+      rationale: "과제 담당자가 20개 문항 모두 확인하고 정답셋을 일괄 승인했다고 명시적으로 회신함"
+    - case_id: E03
+      decision: APPROVED
+      rationale: "과제 담당자가 20개 문항 모두 확인하고 정답셋을 일괄 승인했다고 명시적으로 회신함"
+    - case_id: E04
+      decision: APPROVED
+      rationale: "과제 담당자가 20개 문항 모두 확인하고 정답셋을 일괄 승인했다고 명시적으로 회신함"
+    - case_id: A01
+      decision: APPROVED
+      rationale: "과제 담당자가 20개 문항 모두 확인하고 정답셋을 일괄 승인했다고 명시적으로 회신함"
+    - case_id: A02
+      decision: APPROVED
+      rationale: "과제 담당자가 20개 문항 모두 확인하고 정답셋을 일괄 승인했다고 명시적으로 회신함"
 measurement_performed: false
 cases:
   - id: R01
