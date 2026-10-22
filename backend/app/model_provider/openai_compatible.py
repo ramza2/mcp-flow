@@ -38,7 +38,7 @@ DEFAULT_REQUEST_TIMEOUT_MS = 15000
 _DEFAULT_TIMEOUT_MS = DEFAULT_REQUEST_TIMEOUT_MS
 
 _MODELOPS_GATEWAY_HOST = "modelops-gateway.openlink.kr"
-_CLIENT_KEY_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\\Z")
+_CLIENT_KEY_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 
 
 @dataclass(frozen=True, slots=True)
