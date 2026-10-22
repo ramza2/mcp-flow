@@ -108,6 +108,14 @@ def audit_gold(gold: Any) -> dict[str, Any]:
             issues.append({"case_id": cid, "reason": "RISK_GOLD_INVALID"})
         if family == "ambiguous" and risks != ["UNKNOWN"]:
             issues.append({"case_id": cid, "reason": "AMBIGUOUS_RISK_INVALID"})
+        if family in {"lookup", "verbatim"} and risks != ["READ_ONLY"]:
+            issues.append({"case_id": cid, "reason": "READ_ONLY_FAMILY_RISK_INVALID"})
+        if family in {"create", "update"} and (
+            not isinstance(risks, list)
+            or not risks
+            or any(r not in {"IDEMPOTENT_WRITE", "NON_IDEMPOTENT_WRITE"} for r in risks)
+        ):
+            issues.append({"case_id": cid, "reason": "WRITE_FAMILY_RISK_INVALID"})
 
     if len(cases) != 20 or len(ids) != 20 or len(set(ids)) != 20:
         issues.append({"case_id": "-", "reason": "CASE_COUNT_OR_ID_INVALID"})
