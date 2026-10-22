@@ -113,8 +113,12 @@ def audit_gold(gold: Any) -> dict[str, Any]:
         issues.append({"case_id": "-", "reason": "CASE_COUNT_OR_ID_INVALID"})
     if Counter(families) != Counter(FAMILY_COUNTS):
         issues.append({"case_id": "-", "reason": "FAMILY_DISTRIBUTION_INVALID"})
-    if len({x.get("request_text") for x in cases if isinstance(x, dict)}) != 20:
-        issues.append({"case_id": "-", "reason": "REQUEST_DUPLICATE"})
+    texts = [
+        x.get("request_text") for x in cases
+        if isinstance(x, dict) and isinstance(x.get("request_text"), str)
+    ]
+    if len(texts) != 20 or len(set(texts)) != 20:
+        issues.append({"case_id": "-", "reason": "REQUEST_DUPLICATE_OR_INVALID"})
     return {
         "ok": not issues,
         "reason": None if not issues else "STATIC_GOLD_VALIDATION_FAILED",
