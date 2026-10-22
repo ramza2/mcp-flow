@@ -103,8 +103,8 @@ class OpenAICompatibleAdapter:
             and target.username is None
             and target.password is None
         ):
-            client_key = os.getenv("MODELOPS_CLIENT_KEY", "").strip()
-            if client_key:
+            client_key = os.getenv("MODELOPS_CLIENT_KEY", "")
+            if client_key.strip():
                 if not _CLIENT_KEY_PATTERN.fullmatch(client_key):
                     raise ModelProviderError(
                         error_code=PROTOCOL,
