@@ -109,6 +109,9 @@ async def execute(args: argparse.Namespace) -> dict[str, Any]:
     if not args.ack_gold_reviewed:
         result.update(ok=False, reason="INTERNAL_GOLD_REVIEW_ACK_REQUIRED")
         return result
+    if not args.write_artifact:
+        result.update(ok=False, reason="IMMUTABLE_EVIDENCE_REQUIRED")
+        return result
     if sha in {"", "unknown"}:
         result.update(ok=False, reason="GIT_SHA_UNKNOWN")
         return result
