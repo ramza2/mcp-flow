@@ -27,7 +27,7 @@ const navConfig: NavItem[] = [
     label: 'Work',
     icon: <Briefcase size={16} />,
     children: [
-      { label: 'Agent Run', path: '/run', icon: <Play size={14} /> },
+      { label: 'Agent Run (데모)', path: '/run', icon: <Play size={14} /> },
       { label: 'Executions', path: '/executions', icon: <Activity size={14} />, permission: 'execution.view' },
       { label: 'Schedules', path: '/schedules', icon: <Calendar size={14} />, permission: 'schedule.view' },
       { label: 'Approvals', path: '/approvals', icon: <CheckSquare size={14} />, permission: 'approval.view' },
