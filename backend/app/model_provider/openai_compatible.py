@@ -208,8 +208,8 @@ class OpenAICompatibleAdapter:
         started = time.perf_counter()
         api_root = normalize_openai_compatible_root(base_url)
         url = join_api_path(api_root, "models")
-        headers = self._auth_headers(bearer_token, base_url=base_url)
         try:
+            headers = self._auth_headers(bearer_token, base_url=base_url)
             response = await self._request(
                 method="GET",
                 url=url,
@@ -412,9 +412,9 @@ class OpenAICompatibleAdapter:
         started = time.perf_counter()
         api_root = normalize_openai_compatible_root(base_url)
         url = join_api_path(api_root, "embeddings")
-        headers = self._auth_headers(bearer_token, base_url=base_url)
         body = {"model": model, "input": _EMBEDDING_PROBE_INPUT}
         try:
+            headers = self._auth_headers(bearer_token, base_url=base_url)
             response = await self._request(
                 method="POST",
                 url=url,
