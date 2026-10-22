@@ -266,7 +266,7 @@ async def test_project_identification_does_not_override_bearer_authentication(
 async def test_invalid_key_returns_structured_failure_for_connection_probes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("MODELOPS_CLIENT_KEY", "invalid\\r\\nclient")
+    monkeypatch.setenv("MODELOPS_CLIENT_KEY", "invalid\r\nclient")
     captured: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
