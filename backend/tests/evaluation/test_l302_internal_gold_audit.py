@@ -56,6 +56,16 @@ def test_audit_rejects_silent_write_to_read_risk_or_ambiguous_capability() -> No
     result = audit.audit_gold(gold)
     assert any(x["reason"] == "RISK_GOLD_INVALID" for x in result["issues"])
 
+    gold = _gold()
+    gold["cases"][6]["gold"]["risk"] = ["READ_ONLY"]
+    result = audit.audit_gold(gold)
+    assert any(x["reason"] == "WRITE_FAMILY_RISK_INVALID" for x in result["issues"])
+
+    gold = _gold()
+    gold["cases"][1]["gold"]["risk"] = ["NON_IDEMPOTENT_WRITE"]
+    result = audit.audit_gold(gold)
+    assert any(x["reason"] == "READ_ONLY_FAMILY_RISK_INVALID" for x in result["issues"])
+
 
 def test_case_fingerprint_changes_when_request_or_gold_changes() -> None:
     gold = _gold()
