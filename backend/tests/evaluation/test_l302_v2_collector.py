@@ -16,7 +16,9 @@ from tests.evaluation.level3 import collect_l302_v2 as collector
 
 
 @pytest.mark.asyncio
-async def test_unapproved_gold_blocks_run_before_db_or_model(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_unapproved_gold_blocks_run_before_db_or_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     def _forbidden() -> str:
         raise AssertionError("DB access must not be possible before gold approval")
 
