@@ -1,4 +1,4 @@
-"""Pure offline checks for unapproved L3-02 internal gold review preparation."""
+"""Pure offline checks for approved L3-02 internal gold shape and fingerprint."""
 
 from copy import deepcopy
 
@@ -11,12 +11,12 @@ def _gold() -> dict:
     return yaml.safe_load(audit.GOLD_FILE.read_text(encoding="utf-8"))
 
 
-def test_draft_gold_is_statically_ready_but_not_human_approved() -> None:
+def test_approved_gold_is_statically_valid_without_simulating_human_review() -> None:
     result = audit.audit_gold(_gold())
     assert result["ok"] is True
     assert result["case_count"] == 20
-    assert result["gold_gate"] == "INTERNAL_GOLD_NOT_APPROVED"
-    assert result["review_status"] == "PENDING_REVIEW"
+    assert result["gold_gate"] is None
+    assert result["review_status"] == "APPROVED"
     assert result["owner_confirmation"] == "NOT_PERFORMED_BY_STATIC_AUDIT"
     assert len(result["case_set_sha256"]) == 64
     assert result["issues"] == []
