@@ -7,6 +7,14 @@ import {
 import StatusBadge, { RiskBadge } from '../../components/ui/StatusBadge';
 import Button from '../../components/ui/Button';
 import type { AgentRequestStatus, ExecutionStatus, StepStatus } from '../../domain';
+import {
+  DEMO_REQUEST,
+  DEMO_LIMITATION,
+  DEMO_UNSUPPORTED_INPUT,
+  DEMO_FINISHED,
+  REAL_EXECUTIONS_PATH,
+  isDemoRequest,
+} from './agentRunDemo';
 
 const AGENTS = [
   { id: 'agt-001', name: 'General Work Assistant', description: '일반 업무 자동화 및 정보 조회', version: 'v3', available: true, capabilities: ['문서 검색', '이메일 발송', '일정 관리'] },
@@ -81,7 +89,7 @@ export default function AgentRun() {
     await delay(400);
     setAgentRequestStatus('ANALYZING');
     await delay(700);
-    addMessage({ type: 'analysis', content: '보고서 파일을 생성한 후 이메일로 전송하는 요청으로 이해했습니다.' });
+    addMessage({ type: 'analysis', content: '데모용 고정 분석 예시: 주간 보고서를 생성한 후 이메일로 전송하는 요청입니다. 실제 AI 분석 결과가 아닙니다.' });
 
     setAgentRequestStatus('RETRIEVING');
     await delay(500);
@@ -205,10 +213,8 @@ export default function AgentRun() {
     addMessage({
       type: 'result',
       data: {
-        status: 'SUCCEEDED',
-        summary: `주간 보고서(${planningAnswer || '기간 미지정'})가 생성되어 개발팀 3명에게 이메일을 발송했습니다.`,
-        artifact: 'report_2026-09-02.pdf',
-        executionId: 'EXE-20260902-00125',
+        status: 'DEMO_ONLY',
+        summary: `${DEMO_FINISHED} (선택한 예시 기간: ${planningAnswer || '기간 미지정'})`, 
       },
     });
   };
@@ -217,7 +223,16 @@ export default function AgentRun() {
     if (!inputText.trim()) return;
     const text = inputText;
     setInputText('');
-    runDemoFlow(text);
+    if (!isDemoRequest(text)) {
+      setPhase('idle');
+      setAgentRequestStatus(null);
+      setExecutionStatus(null);
+      setExecutionSteps([]);
+      addMessage({ type: 'user', content: text });
+      addMessage({ type: 'analysis', content: DEMO_UNSUPPORTED_INPUT });
+      return;
+    }
+    void runDemoFlow(text);
   };
 
   const busy = phase !== 'idle' && phase !== 'done';
@@ -225,6 +240,9 @@ export default function AgentRun() {
   return (
     <div className="flex h-full" style={{ height: 'calc(100vh - 48px)' }}>
       <div className="flex flex-col flex-1 min-w-0 border-r border-slate-200">
+        <div role="status" className="px-4 py-3 bg-amber-50 border-b border-amber-200 text-amber-900 text-xs leading-relaxed">
+          <strong>데모 화면 — 실제 실행 아님.</strong> {DEMO_LIMITATION}
+        </div>
         <div className="px-4 py-3 border-b border-slate-100 bg-white">
           <div className="relative">
             <button
@@ -267,7 +285,7 @@ export default function AgentRun() {
               <p className="text-sm font-medium text-slate-700">무엇을 도와드릴까요?</p>
               <p className="text-xs text-slate-400 mt-1">AgentRequest 계획과 Execution 실행이 분리되어 표시됩니다.</p>
               <div className="mt-4 flex flex-col gap-2 w-full max-w-xs">
-                {['주간 보고서를 생성하고 개발팀에 이메일로 발송해줘'].map(t => (
+                {[DEMO_REQUEST].map(t => (
                   <button key={t} onClick={() => setInputText(t)} className="text-left text-xs p-2.5 rounded-lg border border-slate-200 hover:border-indigo-300 hover:bg-indigo-50 text-slate-600 hover:text-indigo-700 transition-colors">
                     {t}
                   </button>
@@ -295,12 +313,12 @@ export default function AgentRun() {
               value={inputText}
               onChange={e => setInputText(e.target.value)}
               onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend(); } }}
-              placeholder="MCPFlow에게 업무를 요청하세요..."
+              placeholder="고정 예시 문장만 데모 실행 가능 (실제 업무 분석 미지원)"
               rows={2}
               disabled={busy}
               className="flex-1 resize-none px-3 py-2 text-sm border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent disabled:bg-slate-50 disabled:text-slate-400"
             />
-            <Button onClick={handleSend} icon={<Send size={14} />} disabled={!inputText.trim() || busy} size="md">전송</Button>
+            <Button onClick={handleSend} icon={<Send size={14} />} disabled={!inputText.trim() || busy} size="md">데모 실행</Button>
           </div>
         </div>
       </div>
@@ -308,13 +326,13 @@ export default function AgentRun() {
       {/* Plan / Execution panel — statuses separated */}
       <div className="w-80 flex-shrink-0 flex flex-col bg-slate-50 overflow-y-auto">
         <div className="px-4 py-3 border-b border-slate-200 bg-white space-y-2">
-          <span className="text-sm font-semibold text-slate-800">Plan / Execution</span>
+          <span className="text-sm font-semibold text-slate-800">데모 Plan / Execution (가상)</span>
           <div className="flex items-center justify-between gap-2">
-            <span className="text-[10px] uppercase tracking-wide text-slate-400">Agent Request Status</span>
+            <span className="text-[10px] uppercase tracking-wide text-slate-400">Agent Request (시뮬레이션)</span>
             {agentRequestStatus ? <StatusBadge status={agentRequestStatus} size="sm" /> : <span className="text-xs text-slate-300">–</span>}
           </div>
           <div className="flex items-center justify-between gap-2">
-            <span className="text-[10px] uppercase tracking-wide text-slate-400">Execution Status</span>
+            <span className="text-[10px] uppercase tracking-wide text-slate-400">Execution (시뮬레이션)</span>
             {executionStatus ? <StatusBadge status={executionStatus} size="sm" /> : <span className="text-xs text-slate-300">–</span>}
           </div>
         </div>
@@ -372,10 +390,10 @@ export default function AgentRun() {
 
           {phase === 'done' && (
             <button
-              onClick={() => navigate('/executions/EXE-20260902-00125')}
+              onClick={() => navigate(REAL_EXECUTIONS_PATH)}
               className="w-full flex items-center justify-center gap-2 py-2.5 text-sm text-indigo-600 hover:text-indigo-700 bg-indigo-50 hover:bg-indigo-100 rounded-lg transition-colors"
             >
-              <ExternalLink size={13} /> Execution 상세 보기
+              <ExternalLink size={13} /> 실제 Execution 목록 열기
             </button>
           )}
         </div>
@@ -456,7 +474,7 @@ function MessageCard({
             <p className="text-xs text-slate-400 mb-3">이후 Execution CREATED → QUEUED → RUNNING</p>
             <div className="flex gap-2">
               <Button variant="outline" size="sm">취소</Button>
-              <Button size="sm" onClick={onConfirm}>Confirm & Run</Button>
+              <Button size="sm" onClick={onConfirm}>데모 실행 단계 계속</Button>
             </div>
           </div>
         </div>
@@ -468,7 +486,7 @@ function MessageCard({
           <div className="bg-white border border-slate-200 rounded-2xl rounded-tl-sm px-4 py-3">
             <div className="flex items-center gap-2 mb-1">
               <Loader2 size={13} className="animate-spin text-indigo-500" />
-              <span className="text-sm font-medium text-slate-800">Execution 시작</span>
+              <span className="text-sm font-medium text-slate-800">Execution 단계 시뮬레이션</span>
             </div>
             <p className="text-[10px] text-slate-400 font-mono">AgentRequest remains READY · Execution Status separate</p>
           </div>
@@ -524,9 +542,9 @@ function MessageCard({
             <CheckCircle2 size={14} className="text-green-600" />
           </div>
           <div className="border rounded-2xl rounded-tl-sm px-4 py-3 max-w-sm bg-green-50 border-green-200">
-            <p className="text-sm font-medium mb-1 text-green-800">Execution SUCCEEDED</p>
+            <p className="text-sm font-medium mb-1 text-green-800">데모 시뮬레이션 완료 — 실제 실행 없음</p>
             <p className="text-sm text-slate-700 mb-2">{d.summary as string}</p>
-            <p className="text-xs text-slate-400 mt-2 font-mono">Execution: {d.executionId as string}</p>
+            <p className="text-xs text-amber-700 mt-2">Execution ID가 생성되지 않았습니다.</p>
           </div>
         </div>
       );

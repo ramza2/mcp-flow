@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import AgentRun from '@/screens/work/AgentRun';
+import { DEMO_REQUEST } from '@/screens/work/agentRunDemo';
 import { renderWithRouter } from '../test-utils';
 
 describe('AgentRun — AgentRequest vs Execution separation', () => {
@@ -15,17 +16,18 @@ describe('AgentRun — AgentRequest vs Execution separation', () => {
 
   it('renders separate Agent Request Status and Execution Status panels', () => {
     renderWithRouter(<AgentRun />, { path: '/run', route: '/run' });
-    expect(screen.getByText('Agent Request Status')).toBeInTheDocument();
-    expect(screen.getByText('Execution Status')).toBeInTheDocument();
+    expect(screen.getByText('Agent Request (시뮬레이션)')).toBeInTheDocument();
+    expect(screen.getByText('Execution (시뮬레이션)')).toBeInTheDocument();
+    expect(screen.getByText(/데모 화면 — 실제 실행 아님/)).toBeInTheDocument();
   });
 
   it('shows Planning WAITING_INPUT as Agent needs information (not MCP Tool)', async () => {
     const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTimeAsync });
     renderWithRouter(<AgentRun />, { path: '/run', route: '/run' });
 
-    const input = screen.getAllByPlaceholderText(/업무를 요청/i)[0];
-    await user.type(input, '주간 보고서 생성');
-    await user.click(screen.getAllByRole('button', { name: /전송/i })[0]);
+    const input = screen.getByPlaceholderText(/고정 예시 문장만/);
+    await user.type(input, DEMO_REQUEST);
+    await user.click(screen.getByRole('button', { name: '데모 실행' }));
 
     await act(async () => {
       await vi.advanceTimersByTimeAsync(5000);
