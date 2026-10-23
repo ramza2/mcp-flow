@@ -11,20 +11,24 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 
 from app.agent.request_analyzer import RequestAnalyzerService
+from app.agent.tool_selector import ToolSelectorService
 from app.api.dependencies import CurrentPrincipalDep, DbSessionDep
 from app.core.errors import AppError
 from app.model_provider.errors import ModelProviderError
 from app.models.agent import Agent, AgentVersion
 from app.models.conversation import AgentRequest
+from app.models.mcp import MCPTool, MCPToolVersion
 from app.repositories.agent import AgentRepository
 from app.repositories.agent_request import AgentRequestRepository
 from app.repositories.agent_version import AgentVersionRepository
 from app.repositories.conversation import ConversationRepository
+from app.repositories.tool_selection import ToolSelectionRepository
 from app.schemas.clarification import (
     ClarificationResponseResult,
     ClarificationResponseSubmit,
 )
 from app.schemas.execution import AgentRequestExecutionCreateResult
+from app.schemas.tool_selection import SelectionDecision
 from app.services.agent_request import AgentRequestService
 from app.services.clarification_response import (
     ClarificationResponseService,
@@ -100,6 +104,21 @@ class AgentRunRequestView(BaseModel):
     analyzed_at: datetime | None
 
 
+class AgentRunSelectionView(BaseModel):
+    id: uuid.UUID
+    decision: SelectionDecision
+    selected_tool_version_id: uuid.UUID | None
+    selected_tool_name: str | None
+    confidence: float | None
+    reason_summary: str | None
+    created_at: datetime
+
+
+class AgentRunSelectionResult(BaseModel):
+    request: AgentRunRequestView
+    selection: AgentRunSelectionView | None
+
+
 def _view(row: Any) -> AgentRunRequestView:
     return AgentRunRequestView.model_validate({
         "id": row.id,
@@ -121,6 +140,41 @@ async def _owned_request(session: DbSessionDep, request_id: uuid.UUID, user_id: 
         raise AppError(code="NOT_FOUND", message="요청을 찾을 수 없습니다.", status_code=404)
     return request
 
+
+
+async def _selection_view(
+    session: DbSessionDep, row: Any
+) -> AgentRunSelectionView:
+    tool_name: str | None = None
+    if row.selected_tool_version_id is not None:
+        name_row = (await session.execute(
+            select(MCPTool.display_name, MCPTool.remote_name)
+            .join(MCPToolVersion, MCPToolVersion.mcp_tool_id == MCPTool.id)
+            .where(MCPToolVersion.id == row.selected_tool_version_id)
+        )).first()
+        if name_row is not None:
+            tool_name = name_row[0] or name_row[1]
+    return AgentRunSelectionView(
+        id=row.id,
+        decision=row.decision,
+        selected_tool_version_id=row.selected_tool_version_id,
+        selected_tool_name=tool_name,
+        confidence=row.confidence,
+        reason_summary=row.reason_summary,
+        created_at=row.created_at,
+    )
+
+
+async def _selection_result(
+    session: DbSessionDep, request: AgentRequest
+) -> AgentRunSelectionResult:
+    run = await ToolSelectionRepository(session).get_latest_for_agent_request(
+        request.id
+    )
+    return AgentRunSelectionResult(
+        request=_view(request),
+        selection=await _selection_view(session, run) if run is not None else None,
+    )
 
 @router.post("", response_model=AgentRunRequestView, status_code=status.HTTP_201_CREATED)
 async def submit_agent_run(
@@ -237,6 +291,44 @@ async def analyze_agent_run(
     await session.refresh(request)
     return _view(request)
 
+
+
+
+@router.get("/{request_id}/selection", response_model=AgentRunSelectionResult)
+async def get_agent_run_selection(
+    request_id: uuid.UUID,
+    session: DbSessionDep,
+    principal: CurrentPrincipalDep,
+) -> AgentRunSelectionResult:
+    request = await _owned_request(session, request_id, principal.user_id)
+    return await _selection_result(session, request)
+
+
+@router.post("/{request_id}/select-tool", response_model=AgentRunSelectionResult)
+async def select_agent_run_tool(
+    request_id: uuid.UUID,
+    session: DbSessionDep,
+    principal: CurrentPrincipalDep,
+) -> AgentRunSelectionResult:
+    """Explicit one-shot Tool retrieval / selection, never MCP execution."""
+    request = await _owned_request(session, request_id, principal.user_id)
+    if request.status != "RETRIEVING":
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message="Tool 검색·선택을 시작할 수 없는 요청 상태입니다.",
+            status_code=409,
+        )
+    try:
+        await ToolSelectorService(session).select(agent_request_id=request_id)
+    except ModelProviderError as exc:
+        raise AppError(
+            code="MODEL_PROVIDER_UNAVAILABLE",
+            message="Tool 검색·선택에 실패했습니다. 저장 상태를 확인해 주세요.",
+            status_code=502,
+            retryable=exc.retryable,
+        ) from exc
+    await session.refresh(request)
+    return await _selection_result(session, request)
 
 
 @router.post(
