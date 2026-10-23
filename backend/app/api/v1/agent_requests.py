@@ -10,29 +10,27 @@ from fastapi import APIRouter, Header, Response, status
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 
+from app.agent.request_analyzer import RequestAnalyzerService
+from app.api.dependencies import CurrentPrincipalDep, DbSessionDep
+from app.core.errors import AppError
+from app.model_provider.errors import ModelProviderError
 from app.models.agent import Agent, AgentVersion
 from app.models.conversation import AgentRequest
-
-from app.agent.request_analyzer import RequestAnalyzerService
-from app.model_provider.errors import ModelProviderError
 from app.repositories.agent import AgentRepository
 from app.repositories.agent_request import AgentRequestRepository
 from app.repositories.agent_version import AgentVersionRepository
 from app.repositories.conversation import ConversationRepository
-from app.services.agent_request import AgentRequestService
-from app.services.conversation import ConversationService
-
-from app.api.dependencies import CurrentPrincipalDep, DbSessionDep
-from app.core.errors import AppError
 from app.schemas.clarification import (
     ClarificationResponseResult,
     ClarificationResponseSubmit,
 )
 from app.schemas.execution import AgentRequestExecutionCreateResult
+from app.services.agent_request import AgentRequestService
 from app.services.clarification_response import (
     ClarificationResponseService,
     to_api_result,
 )
+from app.services.conversation import ConversationService
 from app.services.execution_creation import ExecutionCreationService
 
 router = APIRouter(prefix="/agent-requests", tags=["agent-requests"])
@@ -150,7 +148,11 @@ async def submit_agent_run(
         or version.status != "PUBLISHED"
         or version.request_schema_version != "1.0"
     ):
-        raise AppError(code="RESOURCE_CONFLICT", message="게시된 Agent 버전이 유효하지 않습니다.", status_code=409)
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message="게시된 Agent 버전이 유효하지 않습니다.",
+            status_code=409,
+        )
 
     conversations = ConversationService(session)
     conversation = await conversations.create_conversation(
@@ -217,7 +219,11 @@ async def analyze_agent_run(
     """
     request = await _owned_request(session, request_id, principal.user_id)
     if request.status != "RECEIVED":
-        raise AppError(code="RESOURCE_CONFLICT", message="이미 분석을 시작한 요청입니다.", status_code=409)
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message="이미 분석을 시작한 요청입니다.",
+            status_code=409,
+        )
     try:
         await RequestAnalyzerService(session).analyze(agent_request_id=request_id)
     except ModelProviderError as exc:
