@@ -589,6 +589,14 @@ POST  /agents/{agent_id}/versions/{version_id}/publish
 POST  /agents/{agent_id}/versions/{version_id}/deprecate
 ```
 
+### Ownership and visibility
+
+- `POST /agents` sets `owner_id` (and `created_by`) from the authenticated Session principal. Clients must not supply `owner_id`.
+- Default `visibility` is `PRIVATE` (`PRIVATE` / `RESTRICTED` / `INTERNAL`).
+- `GET /agents` and `GET /agents/{agent_id}` expose `INTERNAL` Agents to any authenticated actor, and `PRIVATE` / `RESTRICTED` only to the owner. Non-visible Agents return `404 NOT_FOUND` (not `403`).
+- Mutations (`PATCH`, version create/validate/publish/deprecate, Tool Grant `PUT`) require ownership; non-owners receive `404 NOT_FOUND`.
+- Agent Run `GET /agent-requests/available-agents` uses the same visibility rule for runnable `ACTIVE` + current `PUBLISHED` Agents.
+
 ### Version Tool Grants
 
 Grant는 AgentVersion에 귀속된다.

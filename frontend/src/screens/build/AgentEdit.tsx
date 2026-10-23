@@ -1,190 +1,292 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useNavigate, useParams } from 'react-router';
 import { Plus, Search, X } from 'lucide-react';
 import PageHeader from '../../components/ui/PageHeader';
 import Button from '../../components/ui/Button';
-import { InlineAlert } from '../../components/ui/EmptyState';
-import { RiskBadge, VerificationBadge } from '../../components/ui/StatusBadge';
-import { mockAgents, mockAgentFull, mockTools, mockModelProfiles, mockMCPServers } from '../../data/mock';
+import { ErrorState, InlineAlert, LoadingSkeleton } from '../../components/ui/EmptyState';
+import {
+  activateAgent,
+  createAgentVersion,
+  getAgent,
+  getAgentVersion,
+  listAgentToolGrants,
+  listAgentVersions,
+  publishAgentVersion,
+  putAgentToolGrants,
+  updateAgent,
+  validateAgentVersion,
+} from '../../api/agents';
+import { listMCPServers, listMCPTools } from '../../api/mcp';
+import { listLLMProfiles } from '../../api/modelProfiles';
+import { isAbortError, isApiError } from '../../api/client';
+import type { AgentDto, AgentVersionDto, LLMProfileDto, MCPServerDto, MCPToolDto } from '../../api/types';
+import { AGENT_VISIBILITIES, type AgentVisibility } from '../../domain';
 
 type VersionStatus = 'DRAFT' | 'PUBLISHED' | 'DEPRECATED';
-
-const CAPABILITY_BY_TOOL: Record<string, string> = {
-  'tool-001': 'weather.lookup',
-  'tool-002': 'document.search',
-  'tool-003': 'report.generate',
-  'tool-004': 'email.send',
-  'tool-005': 'calendar.write',
-  'tool-006': 'hr.lookup',
-  'tool-007': 'data.delete',
-  'tool-008': 'weather.forecast',
-};
-
-const RISK_OPTIONS = ['READ_ONLY', 'IDEMPOTENT_WRITE', 'NON_IDEMPOTENT_WRITE', 'DESTRUCTIVE', 'UNKNOWN'];
 
 export default function AgentEdit() {
   const navigate = useNavigate();
   const { agentId, versionId } = useParams();
   const isNewVersionRoute = !versionId || versionId === 'new';
 
-  const existingAgent = mockAgents.find(a => a.id === agentId);
-  /** New Agent flow: unknown agt-* id = new Logical Agent + initial DRAFT Version (never fall back to agt-001). */
-  const isNewLogicalAgent = !existingAgent && !!agentId?.startsWith('agt-');
-  const unknownAgentId = !existingAgent && !isNewLogicalAgent;
+  const [agent, setAgent] = useState<AgentDto | null>(null);
+  const [version, setVersion] = useState<AgentVersionDto | null>(null);
+  const [profiles, setProfiles] = useState<LLMProfileDto[]>([]);
+  const [tools, setTools] = useState<MCPToolDto[]>([]);
+  const [servers, setServers] = useState<MCPServerDto[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<{ message: string; requestId?: string } | null>(null);
 
-  const defaultModel = mockModelProfiles.find(m => m.type === 'LLM')?.name ?? 'Claude 3.5 Sonnet';
-  const blankFull = {
-    description: '',
-    purpose: '',
-    visibility: 'INTERNAL',
-    createdAt: new Date().toISOString().slice(0, 10),
-    currentVersion: null as string | null,
-    allowedToolIds: [] as string[],
-    instructions: '',
-    versions: [{
-      version: 'v1',
-      status: 'DRAFT' as const,
-      changeSummary: 'Initial draft',
-      validation: null as 'VALID' | 'INVALID' | 'WARNING' | null,
-      createdBy: 'admin',
-      createdAt: new Date().toISOString().slice(0, 10),
-      publishedAt: null as string | null,
-    }],
-  };
-
-  const agent = existingAgent ?? (isNewLogicalAgent
-    ? {
-      id: agentId!,
-      name: 'New Agent',
-      status: 'DRAFT' as const,
-      publishedVersion: null as string | null,
-      allowedTools: 0,
-      modelProfile: defaultModel,
-      owner: 'admin',
-      updatedAt: new Date().toISOString().slice(0, 10),
-      versions: [{ version: 'v1', status: 'DRAFT' as const, createdAt: new Date().toISOString().slice(0, 10), author: 'admin' }],
-    }
-    : {
-      id: agentId ?? 'unknown',
-      name: 'Unknown Agent',
-      status: 'DRAFT' as const,
-      publishedVersion: null as string | null,
-      allowedTools: 0,
-      modelProfile: defaultModel,
-      owner: 'admin',
-      updatedAt: '',
-      versions: [] as typeof mockAgents[0]['versions'],
-    });
-
-  const full = isNewLogicalAgent
-    ? blankFull
-    : (existingAgent ? (mockAgentFull[existingAgent.id] ?? blankFull) : blankFull);
-
-  const isNew = isNewVersionRoute || isNewLogicalAgent;
-  const existing = !isNewVersionRoute && !isNewLogicalAgent
-    ? full.versions.find(v => v.version === versionId)
-    : undefined;
-  const versionStatus = (isNew ? 'DRAFT' : (existing?.status ?? 'DRAFT')) as VersionStatus;
-  const readOnly = versionStatus === 'DEPRECATED';
-  const publishedBlocked = versionStatus === 'PUBLISHED';
-
-  const [name, setName] = useState(isNewLogicalAgent ? '' : (existingAgent?.name ?? ''));
-  const [purpose, setPurpose] = useState(isNewLogicalAgent ? '' : full.purpose);
-  const [visibility, setVisibility] = useState(full.visibility);
-  const [modelProfile, setModelProfile] = useState(agent.modelProfile);
-  const [instructions, setInstructions] = useState(isNewLogicalAgent ? '' : full.instructions);
-  const [selectedTools, setSelectedTools] = useState<string[]>(isNew ? [] : full.allowedToolIds);
+  const [name, setName] = useState('');
+  const [description, setDescription] = useState('');
+  const [visibility, setVisibility] = useState<AgentVisibility>('PRIVATE');
+  const [changeSummary, setChangeSummary] = useState('');
+  const [instructions, setInstructions] = useState('');
+  const [llmProfileId, setLlmProfileId] = useState('');
+  const [selectedTools, setSelectedTools] = useState<string[]>([]);
   const [autoSelectThreshold, setAutoSelectThreshold] = useState(0.82);
   const [confirmationThreshold, setConfirmationThreshold] = useState(0.60);
   const [maxCandidates, setMaxCandidates] = useState(5);
-  const [requirePlanConfirmation, setRequirePlanConfirmation] = useState(true);
-  const [maxSteps, setMaxSteps] = useState(10);
-  const [maxDuration, setMaxDuration] = useState(300);
-  const [maxParallelism, setMaxParallelism] = useState(4);
-  const [maxLoopIterations, setMaxLoopIterations] = useState(50);
-  const [evalDataset, setEvalDataset] = useState('default-work-assistant');
-  const [saving, setSaving] = useState(false);
-  const [publishing, setPublishing] = useState(false);
-
   const [toolSearch, setToolSearch] = useState('');
   const [serverFilter, setServerFilter] = useState('ALL');
-  const [capabilityFilter, setCapabilityFilter] = useState('ALL');
-  const [riskFilter, setRiskFilter] = useState('ALL');
 
-  const capabilities = useMemo(
-    () => Array.from(new Set(mockTools.map(t => CAPABILITY_BY_TOOL[t.id] ?? 'general'))).sort(),
-    [],
+  const [saving, setSaving] = useState(false);
+  const [publishing, setPublishing] = useState(false);
+  const [formError, setFormError] = useState<string | null>(null);
+  const [validationMessages, setValidationMessages] = useState<string[]>([]);
+
+  useEffect(() => {
+    if (!agentId) return;
+    const controller = new AbortController();
+    let cancelled = false;
+    setLoading(true);
+    setLoadError(null);
+
+    (async () => {
+      try {
+        const [agentRow, versionPage, profilePage, toolPage, serverPage] = await Promise.all([
+          getAgent(agentId, controller.signal),
+          listAgentVersions(agentId, { page_size: 50, sort: '-version_no', signal: controller.signal }),
+          listLLMProfiles({ page_size: 100, signal: controller.signal }),
+          listMCPTools({ page_size: 100, status: 'ACTIVE', signal: controller.signal }),
+          listMCPServers({ page_size: 100, signal: controller.signal }),
+        ]);
+        if (cancelled) return;
+
+        setAgent(agentRow);
+        setName(agentRow.name);
+        setDescription(agentRow.description ?? '');
+        setVisibility(agentRow.visibility);
+        setProfiles(profilePage.items);
+        setTools(toolPage.items);
+        setServers(serverPage.items);
+
+        let loadedVersion: AgentVersionDto | null = null;
+        if (!isNewVersionRoute && versionId) {
+          loadedVersion = await getAgentVersion(agentId, versionId, controller.signal);
+        } else if (isNewVersionRoute && agentRow.current_version_id) {
+          // Prefill from current published version; create a new DRAFT on save.
+          loadedVersion = versionPage.items.find(v => v.id === agentRow.current_version_id) ?? null;
+        }
+
+        if (loadedVersion) {
+          if (!isNewVersionRoute) setVersion(loadedVersion);
+          setInstructions(loadedVersion.system_instruction);
+          setLlmProfileId(loadedVersion.llm_profile_id);
+          setChangeSummary(isNewVersionRoute ? '' : (loadedVersion.change_summary ?? ''));
+          const sel = loadedVersion.selection_settings as {
+            auto_select_threshold?: number;
+            confirmation_threshold?: number;
+            max_candidates?: number;
+          };
+          if (typeof sel.auto_select_threshold === 'number') setAutoSelectThreshold(sel.auto_select_threshold);
+          if (typeof sel.confirmation_threshold === 'number') setConfirmationThreshold(sel.confirmation_threshold);
+          if (typeof sel.max_candidates === 'number') setMaxCandidates(sel.max_candidates);
+          if (!isNewVersionRoute) {
+            const grants = await listAgentToolGrants(agentId, loadedVersion.id, controller.signal);
+            if (!cancelled) setSelectedTools(grants.items.map(g => g.mcp_tool_id));
+          }
+        } else if (profilePage.items[0]) {
+          setLlmProfileId(profilePage.items[0].id);
+        }
+      } catch (err) {
+        if (isAbortError(err) || cancelled) return;
+        const apiErr = isApiError(err) ? err : null;
+        setLoadError({
+          message: apiErr?.message ?? 'Agent 편집 데이터를 불러오지 못했습니다.',
+          requestId: apiErr?.requestId ?? undefined,
+        });
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      controller.abort();
+    };
+  }, [agentId, versionId, isNewVersionRoute]);
+
+  const versionStatus = (version?.status ?? 'DRAFT') as VersionStatus;
+  const readOnly = versionStatus === 'DEPRECATED';
+  const publishedBlocked = versionStatus === 'PUBLISHED';
+  const serverNameById = useMemo(
+    () => Object.fromEntries(servers.map(s => [s.id, s.name])),
+    [servers],
   );
 
   const filteredTools = useMemo(() => {
     const q = toolSearch.trim().toLowerCase();
-    return mockTools.filter(t => {
-      const capability = CAPABILITY_BY_TOOL[t.id] ?? 'general';
-      if (serverFilter !== 'ALL' && t.serverId !== serverFilter) return false;
-      if (capabilityFilter !== 'ALL' && capability !== capabilityFilter) return false;
-      if (riskFilter !== 'ALL' && t.riskClass !== riskFilter) return false;
+    return tools.filter(t => {
+      if (serverFilter !== 'ALL' && t.mcp_server_id !== serverFilter) return false;
       if (!q) return true;
-      return (
-        t.displayName.toLowerCase().includes(q) ||
-        t.sourceName.toLowerCase().includes(q) ||
-        t.serverName.toLowerCase().includes(q) ||
-        capability.toLowerCase().includes(q)
-      );
+      const label = (t.display_name ?? t.remote_name).toLowerCase();
+      const server = (serverNameById[t.mcp_server_id] ?? '').toLowerCase();
+      return label.includes(q) || t.remote_name.toLowerCase().includes(q) || server.includes(q);
     });
-  }, [toolSearch, serverFilter, capabilityFilter, riskFilter]);
+  }, [tools, toolSearch, serverFilter, serverNameById]);
 
-  const selectedToolObjs = mockTools.filter(t => selectedTools.includes(t.id));
+  const selectedToolObjs = tools.filter(t => selectedTools.includes(t.id));
 
-  const validationIssues = useMemo(() => {
+  const clientErrors = useMemo(() => {
     const errors: string[] = [];
-    const warnings: string[] = [];
     if (!name.trim()) errors.push('Agent 이름이 필요합니다.');
     if (!instructions.trim()) errors.push('Instructions가 비어 있습니다.');
-    if (!modelProfile) errors.push('Model Profile이 선택되지 않았습니다.');
-    if (selectedTools.length === 0) errors.push('최소 1개 이상의 Tool Scope가 필요합니다.');
-    if (maxSteps < 1) errors.push('max_steps는 1 이상이어야 합니다.');
-    if (maxDuration < 1) errors.push('max_duration_seconds는 1 이상이어야 합니다.');
-    if (maxLoopIterations < 1) errors.push('max_loop_iterations는 1 이상이어야 합니다.');
+    if (!llmProfileId) errors.push('LLM Profile이 선택되지 않았습니다.');
     if (autoSelectThreshold < confirmationThreshold) {
-      warnings.push('auto_select_threshold가 confirmation_threshold보다 낮습니다.');
+      errors.push('auto_select_threshold는 confirmation_threshold 이상이어야 합니다.');
     }
-    const inactive = selectedToolObjs.filter(t => t.status !== 'ACTIVE');
-    if (inactive.length > 0) {
-      errors.push(`비활성/차단 Tool이 포함되어 있습니다: ${inactive.map(t => t.displayName).join(', ')}`);
-    }
-    const unverified = selectedToolObjs.filter(t => t.verification !== 'VERIFIED');
-    if (unverified.length > 0) {
-      warnings.push(`미검증 Tool이 포함되어 있습니다: ${unverified.map(t => t.displayName).join(', ')}`);
-    }
-    return { errors, warnings };
-  }, [name, instructions, modelProfile, selectedTools, selectedToolObjs, maxSteps, maxDuration, maxLoopIterations, autoSelectThreshold, confirmationThreshold]);
-
-  const canPublish = validationIssues.errors.length === 0;
+    return errors;
+  }, [name, instructions, llmProfileId, autoSelectThreshold, confirmationThreshold]);
 
   const toggleTool = (id: string) => {
     if (readOnly || publishedBlocked) return;
     setSelectedTools(prev => (prev.includes(id) ? prev.filter(t => t !== id) : [...prev, id]));
   };
 
+  const persistDraft = async (): Promise<{ agent: AgentDto; version: AgentVersionDto }> => {
+    if (!agentId || !agent) throw new Error('Agent가 없습니다.');
+    if (clientErrors.length > 0) {
+      throw new Error(clientErrors[0]);
+    }
+
+    const patched = await updateAgent(
+      agentId,
+      {
+        name: name.trim(),
+        description: description.trim() || null,
+        visibility,
+      },
+      agent.lock_version,
+    );
+    setAgent(patched);
+
+    const versionBody = {
+      system_instruction: instructions.trim(),
+      llm_profile_id: llmProfileId,
+      request_schema_version: '1.0',
+      plan_schema_version: '1.0',
+      selection_settings: {
+        auto_select_threshold: autoSelectThreshold,
+        confirmation_threshold: confirmationThreshold,
+        max_candidates: maxCandidates,
+      },
+      planning_settings: {},
+      response_settings: {},
+      change_summary: changeSummary.trim() || null,
+    };
+
+    let savedVersion: AgentVersionDto;
+    if (version && version.status === 'DRAFT' && !isNewVersionRoute) {
+      const contentChanged =
+        version.system_instruction !== versionBody.system_instruction
+        || version.llm_profile_id !== versionBody.llm_profile_id
+        || JSON.stringify(version.selection_settings) !== JSON.stringify(versionBody.selection_settings)
+        || (version.change_summary ?? null) !== versionBody.change_summary;
+      // No AgentVersion PATCH in this API slice — content changes create a successor DRAFT.
+      savedVersion = contentChanged
+        ? await createAgentVersion(agentId, { ...versionBody, source_version_id: version.id })
+        : version;
+    } else {
+      savedVersion = await createAgentVersion(agentId, {
+        ...versionBody,
+        source_version_id: agent.current_version_id ?? undefined,
+      });
+    }
+
+    await putAgentToolGrants(agentId, savedVersion.id, {
+      items: selectedTools.map(mcp_tool_id => ({
+        mcp_tool_id,
+        effect: 'ALLOW' as const,
+        // null = no constraints. {} is non-null and fails closed in ParameterBuilder.
+        parameter_constraints: null,
+        requires_confirmation: false,
+      })),
+    });
+
+    setVersion(savedVersion);
+    return { agent: patched, version: savedVersion };
+  };
+
   const handleSave = async () => {
     setSaving(true);
-    await new Promise(r => setTimeout(r, 700));
-    setSaving(false);
-    navigate(`/agents/${agent.id}`);
+    setFormError(null);
+    try {
+      const saved = await persistDraft();
+      navigate(`/agents/${saved.agent.id}/versions/${saved.version.id}/edit`, { replace: true });
+    } catch (err) {
+      const apiErr = isApiError(err) ? err : null;
+      setFormError(apiErr?.message ?? (err instanceof Error ? err.message : 'Draft 저장에 실패했습니다.'));
+    } finally {
+      setSaving(false);
+    }
   };
 
   const handlePublish = async () => {
-    if (!canPublish) return;
     setPublishing(true);
-    await new Promise(r => setTimeout(r, 900));
-    setPublishing(false);
-    navigate(`/agents/${agent.id}`);
+    setFormError(null);
+    setValidationMessages([]);
+    try {
+      const saved = await persistDraft();
+      const validated = await validateAgentVersion(saved.agent.id, saved.version.id);
+      if (validated.validation_status !== 'VALID') {
+        const report = validated.validation_report as { errors?: Array<{ message?: string }> } | null;
+        const messages = (report?.errors ?? []).map(e => e.message ?? 'validation error');
+        setValidationMessages(messages.length ? messages : ['버전 검증이 INVALID입니다.']);
+        setVersion(prev => prev ? {
+          ...prev,
+          validation_status: validated.validation_status,
+          validation_report: validated.validation_report,
+        } : prev);
+        return;
+      }
+      await publishAgentVersion(saved.agent.id, saved.version.id);
+      const fresh = await getAgent(saved.agent.id);
+      await activateAgent(fresh.id, fresh.lock_version);
+      navigate(`/agents/${saved.agent.id}`);
+    } catch (err) {
+      const apiErr = isApiError(err) ? err : null;
+      setFormError(apiErr?.message ?? (err instanceof Error ? err.message : 'Publish에 실패했습니다.'));
+    } finally {
+      setPublishing(false);
+    }
   };
 
-  if (unknownAgentId) {
+  if (loading) {
     return (
       <div className="p-6">
-        <InlineAlert type="warning" message={`Agent를 찾을 수 없습니다: ${agentId ?? '(missing id)'}`} />
+        <LoadingSkeleton rows={10} />
+      </div>
+    );
+  }
+
+  if (loadError || !agent) {
+    return (
+      <div className="p-6">
+        <ErrorState
+          message={loadError?.message ?? `Agent를 찾을 수 없습니다: ${agentId ?? '(missing id)'}`}
+          requestId={loadError?.requestId}
+        />
         <div className="mt-4">
           <Button variant="outline" onClick={() => navigate('/agents')}>Agents로 돌아가기</Button>
         </div>
@@ -192,16 +294,16 @@ export default function AgentEdit() {
     );
   }
 
-  if (publishedBlocked) {
+  if (publishedBlocked && version) {
     return (
       <div>
         <PageHeader
           breadcrumbs={[
             { label: 'Agents', to: '/agents' },
             { label: agent.name, to: `/agents/${agent.id}` },
-            { label: `${versionId}` },
+            { label: `v${version.version_no}` },
           ]}
-          title={`Agent Version ${versionId}`}
+          title={`Agent Version v${version.version_no}`}
           actions={<Button variant="outline" onClick={() => navigate(`/agents/${agent.id}`)}>닫기</Button>}
         />
         <div className="p-6 max-w-2xl space-y-4">
@@ -228,16 +330,14 @@ export default function AgentEdit() {
         breadcrumbs={[
           { label: 'Agents', to: '/agents' },
           { label: agent.name, to: `/agents/${agent.id}` },
-          { label: isNew ? '새 버전' : readOnly ? `${versionId} View` : `${versionId} 편집` },
+          { label: isNewVersionRoute ? '새 버전' : readOnly ? `v${version?.version_no} View` : `v${version?.version_no ?? '?'} 편집` },
         ]}
         title={
-          isNewLogicalAgent
-            ? 'New Agent · Draft v1'
-            : isNewVersionRoute
-              ? '새 Agent 버전'
-              : readOnly
-                ? `Agent Version View (${versionId})`
-                : `Agent 버전 편집 (${versionId})`
+          isNewVersionRoute && !version
+            ? 'New Agent · Draft'
+            : readOnly
+              ? `Agent Version View (v${version?.version_no})`
+              : `Agent 버전 편집 (v${version?.version_no ?? 'new'})`
         }
         actions={
           <>
@@ -250,26 +350,30 @@ export default function AgentEdit() {
         {readOnly ? (
           <InlineAlert type="info" message="DEPRECATED Version은 View만 가능합니다. 수정하려면 새 DRAFT Version을 생성하세요." />
         ) : (
-          <InlineAlert type="info" message="편집 내용은 DRAFT 버전으로 저장됩니다. Blocking validation error가 없을 때만 Publish할 수 있습니다." />
+          <InlineAlert type="info" message="편집 내용은 DRAFT 버전으로 저장됩니다. 서버 Validate가 VALID일 때만 Publish·Activate됩니다." />
         )}
+        {formError && <InlineAlert type="error" message={formError} />}
 
         <Section title="1. Basic">
           <Field label="이름">
             <input value={name} onChange={e => setName(e.target.value)} disabled={readOnly} className={inputClass} />
           </Field>
-          <Field label="Purpose">
-            <textarea value={purpose} onChange={e => setPurpose(e.target.value)} disabled={readOnly} rows={2} className={`${inputClass} h-auto py-2 resize-y`} />
+          <Field label="Description">
+            <textarea value={description} onChange={e => setDescription(e.target.value)} disabled={readOnly} rows={2} className={`${inputClass} h-auto py-2 resize-y`} />
           </Field>
           <div className="grid grid-cols-2 gap-4">
             <Field label="Visibility">
-              <select value={visibility} onChange={e => setVisibility(e.target.value)} disabled={readOnly} className={inputClass}>
-                <option value="PRIVATE">PRIVATE</option>
-                <option value="RESTRICTED">RESTRICTED</option>
-                <option value="INTERNAL">INTERNAL</option>
+              <select
+                value={visibility}
+                onChange={e => setVisibility(e.target.value as AgentVisibility)}
+                disabled={readOnly}
+                className={inputClass}
+              >
+                {AGENT_VISIBILITIES.map(v => <option key={v} value={v}>{v}</option>)}
               </select>
             </Field>
             <Field label="Change Summary">
-              <input defaultValue={existing?.changeSummary ?? ''} disabled={readOnly} placeholder="변경 요약" className={inputClass} />
+              <input value={changeSummary} onChange={e => setChangeSummary(e.target.value)} disabled={readOnly} placeholder="변경 요약" className={inputClass} />
             </Field>
           </div>
         </Section>
@@ -286,12 +390,16 @@ export default function AgentEdit() {
 
         <Section title="3. Model Profile">
           <Field label="LLM Profile">
-            <select value={modelProfile} onChange={e => setModelProfile(e.target.value)} disabled={readOnly} className={inputClass}>
-              {mockModelProfiles.filter(m => m.type === 'LLM').map(m => (
-                <option key={m.id} value={m.name}>{m.name}</option>
+            <select value={llmProfileId} onChange={e => setLlmProfileId(e.target.value)} disabled={readOnly} className={inputClass}>
+              <option value="">Select LLM Profile</option>
+              {profiles.map(p => (
+                <option key={p.id} value={p.id}>{p.name} ({p.model})</option>
               ))}
             </select>
           </Field>
+          {profiles.length === 0 && (
+            <InlineAlert type="warning" message="등록된 LLM Profile이 없습니다. Admin → Model Profiles에서 먼저 생성하세요." />
+          )}
         </Section>
 
         <Section title={`4. Tool Scope (${selectedTools.length})`}>
@@ -307,22 +415,12 @@ export default function AgentEdit() {
                   className={`${inputClass} pl-8`}
                 />
               </div>
-              <div className="grid grid-cols-3 gap-2">
-                <select value={serverFilter} onChange={e => setServerFilter(e.target.value)} disabled={readOnly} className={inputClass}>
-                  <option value="ALL">MCP Server</option>
-                  {mockMCPServers.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
-                </select>
-                <select value={capabilityFilter} onChange={e => setCapabilityFilter(e.target.value)} disabled={readOnly} className={inputClass}>
-                  <option value="ALL">Capability</option>
-                  {capabilities.map(c => <option key={c} value={c}>{c}</option>)}
-                </select>
-                <select value={riskFilter} onChange={e => setRiskFilter(e.target.value)} disabled={readOnly} className={inputClass}>
-                  <option value="ALL">Risk Class</option>
-                  {RISK_OPTIONS.map(r => <option key={r} value={r}>{r}</option>)}
-                </select>
-              </div>
+              <select value={serverFilter} onChange={e => setServerFilter(e.target.value)} disabled={readOnly} className={inputClass}>
+                <option value="ALL">MCP Server</option>
+                {servers.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+              </select>
               <div>
-                <p className="text-xs font-medium text-slate-500 mb-2">Available Tools</p>
+                <p className="text-xs font-medium text-slate-500 mb-2">Available Tools (ACTIVE)</p>
                 <div className="space-y-1.5 max-h-80 overflow-auto border border-slate-200 rounded-lg p-2">
                   {filteredTools.map(tool => {
                     const selected = selectedTools.includes(tool.id);
@@ -339,18 +437,16 @@ export default function AgentEdit() {
                           className="mt-0.5 accent-indigo-600"
                         />
                         <div className="min-w-0 flex-1">
-                          <div className="text-sm font-medium text-slate-800">{tool.displayName}</div>
-                          <div className="text-xs text-slate-400 mt-0.5">{tool.serverName} · {CAPABILITY_BY_TOOL[tool.id]}</div>
-                          <div className="flex items-center gap-2 mt-1.5">
-                            <RiskBadge risk={tool.riskClass} />
-                            <VerificationBadge status={tool.verification} />
+                          <div className="text-sm font-medium text-slate-800">{tool.display_name ?? tool.remote_name}</div>
+                          <div className="text-xs text-slate-400 mt-0.5">
+                            {serverNameById[tool.mcp_server_id] ?? tool.mcp_server_id} · {tool.remote_name}
                           </div>
                         </div>
                       </label>
                     );
                   })}
                   {filteredTools.length === 0 && (
-                    <p className="text-xs text-slate-400 text-center py-6">조건에 맞는 Tool이 없습니다.</p>
+                    <p className="text-xs text-slate-400 text-center py-6">조건에 맞는 ACTIVE Tool이 없습니다.</p>
                   )}
                 </div>
               </div>
@@ -362,14 +458,9 @@ export default function AgentEdit() {
                 {selectedToolObjs.map(tool => (
                   <div key={tool.id} className="flex items-start gap-3 p-2.5 rounded-lg border border-slate-200 bg-white">
                     <div className="min-w-0 flex-1">
-                      <div className="text-sm font-medium text-slate-800">{tool.displayName}</div>
+                      <div className="text-sm font-medium text-slate-800">{tool.display_name ?? tool.remote_name}</div>
                       <div className="text-xs text-slate-400 mt-0.5">
-                        Tool Name: <span className="font-mono">{tool.sourceName}</span>
-                      </div>
-                      <div className="text-xs text-slate-400">MCP Server: {tool.serverName}</div>
-                      <div className="flex items-center gap-2 mt-1.5">
-                        <RiskBadge risk={tool.riskClass} />
-                        <VerificationBadge status={tool.verification} />
+                        Tool Name: <span className="font-mono">{tool.remote_name}</span>
                       </div>
                     </div>
                     {!readOnly && (
@@ -380,14 +471,14 @@ export default function AgentEdit() {
                   </div>
                 ))}
                 {selectedToolObjs.length === 0 && (
-                  <p className="text-xs text-slate-400 text-center py-8">선택된 Tool이 없습니다.</p>
+                  <p className="text-xs text-slate-400 text-center py-8">선택된 Tool이 없습니다. (선택 없이도 Validate 가능)</p>
                 )}
               </div>
             </div>
           </div>
         </Section>
 
-        <Section title="5. Planning / Confirmation Policy">
+        <Section title="5. Selection Settings">
           <div className="grid grid-cols-3 gap-4">
             <Field label="auto_select_threshold">
               <input type="number" step="0.01" min={0} max={1} value={autoSelectThreshold} disabled={readOnly}
@@ -402,74 +493,23 @@ export default function AgentEdit() {
                 onChange={e => setMaxCandidates(Number(e.target.value))} className={inputClass} />
             </Field>
           </div>
-          <label className={`flex items-center gap-2 text-sm text-slate-700 ${readOnly ? 'opacity-70' : ''}`}>
-            <input
-              type="checkbox"
-              checked={requirePlanConfirmation}
-              disabled={readOnly}
-              onChange={e => setRequirePlanConfirmation(e.target.checked)}
-              className="accent-indigo-600"
-            />
-            실행 전 Plan Confirmation 요구 (WAITING_CONFIRMATION)
-          </label>
         </Section>
 
-        <Section title="6. Limits">
-          <div className="grid grid-cols-2 gap-4">
-            <Field label="max_steps">
-              <input type="number" min={1} value={maxSteps} disabled={readOnly}
-                onChange={e => setMaxSteps(Number(e.target.value))} className={inputClass} />
-            </Field>
-            <Field label="max_duration_seconds">
-              <input type="number" min={1} value={maxDuration} disabled={readOnly}
-                onChange={e => setMaxDuration(Number(e.target.value))} className={inputClass} />
-            </Field>
-            <Field label="max_parallelism">
-              <input type="number" min={1} value={maxParallelism} disabled={readOnly}
-                onChange={e => setMaxParallelism(Number(e.target.value))} className={inputClass} />
-            </Field>
-            <Field label="max_loop_iterations">
-              <input type="number" min={1} value={maxLoopIterations} disabled={readOnly}
-                onChange={e => setMaxLoopIterations(Number(e.target.value))} className={inputClass} />
-            </Field>
-          </div>
-        </Section>
-
-        <Section title="7. Evaluation">
-          <Field label="Evaluation Dataset">
-            <select value={evalDataset} onChange={e => setEvalDataset(e.target.value)} disabled={readOnly} className={inputClass}>
-              <option value="default-work-assistant">default-work-assistant</option>
-              <option value="report-generation">report-generation</option>
-              <option value="tool-selection-hard">tool-selection-hard</option>
-            </select>
-          </Field>
-          <p className="text-xs text-slate-400">
-            Evaluation Run은 AgentVersion, Model Profile, Registry snapshot을 고정해 재현합니다. (Mock)
-          </p>
-        </Section>
-
-        <Section title="8. Validate & Publish">
+        <Section title="6. Validate & Publish">
           <div className="space-y-3">
-            <div>
-              <p className="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2">Validation Summary</p>
-              {validationIssues.errors.length === 0 && validationIssues.warnings.length === 0 ? (
-                <InlineAlert type="info" message="Blocking error가 없습니다. Publish할 수 있습니다." />
-              ) : (
-                <div className="space-y-2">
-                  {validationIssues.errors.map(msg => (
-                    <InlineAlert key={msg} type="error" message={msg} />
-                  ))}
-                  {validationIssues.warnings.map(msg => (
-                    <InlineAlert key={msg} type="warning" message={msg} />
-                  ))}
-                </div>
-              )}
-            </div>
+            {clientErrors.length === 0 && validationMessages.length === 0 ? (
+              <InlineAlert type="info" message="필수 입력을 채운 뒤 Draft 저장 또는 Publish(검증→게시→활성화)를 실행하세요." />
+            ) : (
+              <div className="space-y-2">
+                {clientErrors.map(msg => <InlineAlert key={msg} type="error" message={msg} />)}
+                {validationMessages.map(msg => <InlineAlert key={msg} type="error" message={msg} />)}
+              </div>
+            )}
             {!readOnly && (
               <div className="flex gap-2">
                 <Button variant="outline" loading={saving} onClick={handleSave}>Draft 저장</Button>
-                <Button loading={publishing} disabled={!canPublish} onClick={handlePublish}>
-                  Publish
+                <Button loading={publishing} disabled={clientErrors.length > 0} onClick={handlePublish}>
+                  Publish & Activate
                 </Button>
               </div>
             )}

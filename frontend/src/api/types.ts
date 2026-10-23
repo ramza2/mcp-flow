@@ -4,6 +4,10 @@
  */
 
 import type {
+  AgentStatus,
+  AgentVersionStatus,
+  AgentVersionValidationStatus,
+  AgentVisibility,
   ExternalMCPReviewDecision,
   ExternalMCPReviewState,
   ExternalMCPSearchStatus,
@@ -271,6 +275,134 @@ export interface ListParams {
   mcp_server_id?: string;
   signal?: AbortSignal;
 }
+
+/** Agent registry — backend/app/schemas/agent.py (docs/06 §10). */
+
+export interface AgentDto {
+  id: string;
+  code: string;
+  name: string;
+  description: string | null;
+  status: AgentStatus;
+  current_version_id: string | null;
+  owner_id: string | null;
+  visibility: AgentVisibility;
+  created_at: string;
+  created_by: string | null;
+  updated_at: string;
+  updated_by: string | null;
+  lock_version: number;
+}
+
+export type AgentListDto = PageDto<AgentDto>;
+
+export interface AgentCreateRequest {
+  name: string;
+  description?: string | null;
+  visibility?: AgentVisibility;
+}
+
+export interface AgentUpdateRequest {
+  name?: string;
+  description?: string | null;
+  visibility?: AgentVisibility;
+  status?: AgentStatus;
+  lock_version?: number;
+}
+
+export interface AgentSelectionSettings {
+  auto_select_threshold: number;
+  confirmation_threshold: number;
+  max_candidates: number;
+}
+
+export interface AgentVersionDto {
+  id: string;
+  agent_id: string;
+  version_no: number;
+  status: AgentVersionStatus;
+  system_instruction: string;
+  llm_profile_id: string;
+  request_schema_version: string;
+  plan_schema_version: string;
+  selection_settings: AgentSelectionSettings | Record<string, JsonValue>;
+  planning_settings: Record<string, JsonValue>;
+  response_settings: Record<string, JsonValue>;
+  validation_status: AgentVersionValidationStatus;
+  validation_report: Record<string, JsonValue> | null;
+  content_hash: string;
+  change_summary: string | null;
+  published_at: string | null;
+  published_by: string | null;
+  deprecated_at: string | null;
+  deprecated_by: string | null;
+  created_at: string;
+  created_by: string | null;
+}
+
+export type AgentVersionListDto = PageDto<AgentVersionDto>;
+
+export interface AgentVersionCreateRequest {
+  system_instruction?: string;
+  llm_profile_id?: string;
+  request_schema_version?: string;
+  plan_schema_version?: string;
+  selection_settings?: AgentSelectionSettings;
+  planning_settings?: Record<string, JsonValue>;
+  response_settings?: Record<string, JsonValue>;
+  change_summary?: string | null;
+  source_version_id?: string | null;
+}
+
+export interface AgentVersionValidationDto {
+  id: string;
+  agent_id: string;
+  version_no: number;
+  status: AgentVersionStatus;
+  validation_status: AgentVersionValidationStatus;
+  validation_report: Record<string, JsonValue> | null;
+}
+
+export interface AgentToolGrantDto {
+  agent_version_id: string;
+  mcp_tool_id: string;
+  effect: 'ALLOW' | 'DENY';
+  parameter_constraints: Record<string, JsonValue> | null;
+  requires_confirmation: boolean;
+  created_at: string;
+  created_by: string | null;
+}
+
+export interface AgentToolGrantListDto {
+  items: AgentToolGrantDto[];
+}
+
+export interface AgentToolGrantPutRequest {
+  items: Array<{
+    mcp_tool_id: string;
+    effect: 'ALLOW' | 'DENY';
+    parameter_constraints?: Record<string, JsonValue> | null;
+    requires_confirmation?: boolean;
+  }>;
+}
+
+export interface LLMProfileDto {
+  id: string;
+  code: string;
+  name: string;
+  provider: string;
+  model: string;
+  base_url: string;
+  credential_secret_id: string | null;
+  parameters: Record<string, JsonValue> | null;
+  request_timeout_ms: number | null;
+  status: string | null;
+  created_at: string;
+  updated_at: string;
+  lock_version: number;
+}
+
+export type LLMProfileListDto = PageDto<LLMProfileDto>;
 
 /** External MCP Discovery — backend/app/schemas/external_discovery.py (docs/06 §19). */
 

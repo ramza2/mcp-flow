@@ -183,6 +183,22 @@ async def test_live_agent_run_private_other_owner_is_hidden_and_rejected(
 
 
 @pytest.mark.asyncio
+async def test_live_agent_run_private_own_active_published_is_listed(
+    authenticated_db_client: AsyncClient,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    session = await authenticated_db_client.get("/api/v1/auth/session")
+    assert session.status_code == 200, session.text
+    owner_id = uuid.UUID(session.json()["user"]["id"])
+    agent_id, _ = await _seed_runnable(
+        db_session_factory, visibility="PRIVATE", owner_id=owner_id
+    )
+    agents = await authenticated_db_client.get("/api/v1/agent-requests/available-agents")
+    assert agents.status_code == 200
+    assert any(a["id"] == str(agent_id) for a in agents.json()["items"])
+
+
+@pytest.mark.asyncio
 async def test_unowned_agent_run_request_does_not_leak(
     authenticated_db_client: AsyncClient,
 ) -> None:

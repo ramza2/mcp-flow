@@ -7,6 +7,8 @@ import {
   AGENT_REQUEST_STATUSES,
   AGENT_STATUSES,
   AGENT_VERSION_STATUSES,
+  AGENT_VERSION_VALIDATION_STATUSES,
+  AGENT_VISIBILITIES,
   APPROVAL_STATUSES,
   AUDIT_ACTOR_TYPES,
   AUDIT_RESULTS,
@@ -75,8 +77,16 @@ describe('Canonical Domain Contract (docs/04/05)', () => {
     expectExact(AGENT_STATUSES, ['DRAFT', 'ACTIVE', 'INACTIVE', 'ARCHIVED']);
   });
 
+  it('Agent visibility', () => {
+    expectExact(AGENT_VISIBILITIES, ['PRIVATE', 'RESTRICTED', 'INTERNAL']);
+  });
+
   it('AgentVersion', () => {
     expectExact(AGENT_VERSION_STATUSES, ['DRAFT', 'PUBLISHED', 'DEPRECATED']);
+  });
+
+  it('AgentVersion validation', () => {
+    expectExact(AGENT_VERSION_VALIDATION_STATUSES, ['VALID', 'INVALID']);
   });
 
   it('Workflow logical status', () => {
