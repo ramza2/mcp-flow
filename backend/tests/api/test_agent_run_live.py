@@ -12,7 +12,6 @@ import pytest
 from app.model_provider.client import ModelProviderClient
 from app.models.agent import AgentVersion
 from app.models.model_profile import LLMProfile
-from app.models.user import User
 from app.repositories.agent import AgentRepository
 from app.repositories.agent_version import AgentVersionRepository
 from httpx import AsyncClient
