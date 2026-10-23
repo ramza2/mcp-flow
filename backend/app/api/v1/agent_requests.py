@@ -8,6 +8,10 @@ from typing import Any
 
 from fastapi import APIRouter, Header, Response, status
 from pydantic import BaseModel, ConfigDict, Field
+from sqlalchemy import select
+
+from app.models.agent import Agent, AgentVersion
+from app.models.conversation import AgentRequest
 
 from app.agent.request_analyzer import RequestAnalyzerService
 from app.model_provider.errors import ModelProviderError
@@ -32,6 +36,47 @@ from app.services.clarification_response import (
 from app.services.execution_creation import ExecutionCreationService
 
 router = APIRouter(prefix="/agent-requests", tags=["agent-requests"])
+
+
+class RunnableAgentView(BaseModel):
+    id: uuid.UUID
+    name: str
+    description: str | None
+    agent_version_id: uuid.UUID
+    version_no: int
+
+
+class RunnableAgentsView(BaseModel):
+    items: list[RunnableAgentView]
+
+
+@router.get("/available-agents", response_model=RunnableAgentsView)
+async def available_agents(
+    session: DbSessionDep,
+    principal: CurrentPrincipalDep,
+) -> RunnableAgentsView:
+    # Do not expose DRAFT, unversioned, or other owners' PRIVATE/RESTRICTED agents.
+    rows = (await session.execute(
+        select(Agent, AgentVersion)
+        .join(AgentVersion, Agent.current_version_id == AgentVersion.id)
+        .where(
+            Agent.deleted_at.is_(None),
+            Agent.status == "ACTIVE",
+            AgentVersion.status == "PUBLISHED",
+            AgentVersion.request_schema_version == "1.0",
+        )
+        .order_by(Agent.name, Agent.id)
+    )).all()
+    items = [
+        RunnableAgentView(
+            id=agent.id, name=agent.name, description=agent.description,
+            agent_version_id=version.id, version_no=version.version_no,
+        )
+        for agent, version in rows
+        if version.agent_id == agent.id
+        and (agent.visibility == "INTERNAL" or agent.owner_id == principal.user_id)
+    ]
+    return RunnableAgentsView(items=items)
 
 
 class AgentRunSubmit(BaseModel):
@@ -96,7 +141,7 @@ async def submit_agent_run(
     agent = await agents.get(body.agent_id)
     if agent is None or agent.status != "ACTIVE" or agent.current_version_id is None:
         raise AppError(code="NOT_FOUND", message="사용 가능한 Agent가 아닙니다.", status_code=404)
-    if agent.visibility == "PRIVATE" and agent.owner_id != principal.user_id:
+    if agent.visibility != "INTERNAL" and agent.owner_id != principal.user_id:
         raise AppError(code="NOT_FOUND", message="사용 가능한 Agent가 아닙니다.", status_code=404)
     version = await AgentVersionRepository(session).get(agent.current_version_id)
     if (
@@ -139,12 +184,15 @@ async def latest_agent_run(
     conversation = await ConversationRepository(session).get(conversation_id)
     if conversation is None or conversation.owner_id != principal.user_id:
         raise AppError(code="NOT_FOUND", message="대화를 찾을 수 없습니다.", status_code=404)
-    rows = await AgentRequestRepository(session).list_for_conversation(
-        conversation_id, limit=1, offset=0,
-    )
-    if not rows:
+    row = (await session.execute(
+        select(AgentRequest)
+        .where(AgentRequest.conversation_id == conversation_id)
+        .order_by(AgentRequest.created_at.desc(), AgentRequest.id.desc())
+        .limit(1)
+    )).scalar_one_or_none()
+    if row is None:
         raise AppError(code="NOT_FOUND", message="대화 내 요청이 없습니다.", status_code=404)
-    return _view(rows[-1])
+    return _view(row)
 
 
 @router.get("/{request_id}", response_model=AgentRunRequestView)
