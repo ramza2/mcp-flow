@@ -151,3 +151,10 @@ export function putAgentToolGrants(
 export function activateAgent(agentId: string, lockVersion: number, signal?: AbortSignal) {
   return updateAgent(agentId, { status: 'ACTIVE' }, lockVersion, signal);
 }
+
+export function deleteAgent(agentId: string, signal?: AbortSignal) {
+  return apiRequest<void>(`/agents/${agentId}`, {
+    method: 'DELETE',
+    signal,
+  });
+}

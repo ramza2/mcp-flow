@@ -9,12 +9,14 @@ vi.mock('@/api/agents', () => ({
   listAgentVersions: vi.fn(),
   getAgentVersion: vi.fn(),
   listAgentToolGrants: vi.fn(),
+  createAgent: vi.fn(),
   createAgentVersion: vi.fn(),
   putAgentToolGrants: vi.fn(),
   updateAgent: vi.fn(),
   validateAgentVersion: vi.fn(),
   publishAgentVersion: vi.fn(),
   activateAgent: vi.fn(),
+  deleteAgent: vi.fn(),
 }));
 
 vi.mock('@/api/modelProfiles', () => ({
@@ -31,6 +33,7 @@ vi.mock('@/api/mcp', async () => {
 });
 
 import {
+  createAgent,
   getAgent,
   listAgentToolGrants,
   listAgentVersions,
@@ -40,29 +43,7 @@ import { listMCPServers, listMCPTools } from '@/api/mcp';
 
 describe('New Agent / New Workflow draft regression', () => {
   beforeEach(() => {
-    vi.mocked(getAgent).mockResolvedValue({
-      id: 'agt-newblank01',
-      code: 'new-agent',
-      name: 'New Agent',
-      description: null,
-      status: 'DRAFT',
-      current_version_id: null,
-      owner_id: 'user-1',
-      visibility: 'PRIVATE',
-      created_at: '2026-10-23T00:00:00Z',
-      created_by: 'user-1',
-      updated_at: '2026-10-23T00:00:00Z',
-      updated_by: 'user-1',
-      lock_version: 1,
-    });
-    vi.mocked(listAgentVersions).mockResolvedValue({
-      items: [],
-      page: 1,
-      page_size: 50,
-      total: 0,
-      has_next: false,
-    });
-    vi.mocked(listAgentToolGrants).mockResolvedValue({ items: [] });
+    vi.clearAllMocks();
     vi.mocked(listLLMProfiles).mockResolvedValue({
       items: [{
         id: 'llm-1',
@@ -100,15 +81,20 @@ describe('New Agent / New Workflow draft regression', () => {
     });
   });
 
-  it('API-backed new Agent draft does not inherit mock General Work Assistant content', async () => {
+  it('local /agents/new draft does not call createAgent or inherit mock content', async () => {
     renderWithRouter(<AgentEdit />, {
       path: '/agents/:agentId/versions/:versionId/edit',
-      route: '/agents/agt-newblank01/versions/new/edit',
+      route: '/agents/new/versions/new/edit',
     });
 
     await waitFor(() => {
       expect(screen.getByText(/New Agent · Draft/i)).toBeInTheDocument();
     });
+    expect(createAgent).not.toHaveBeenCalled();
+    expect(getAgent).not.toHaveBeenCalled();
+    expect(listAgentVersions).not.toHaveBeenCalled();
+    expect(listAgentToolGrants).not.toHaveBeenCalled();
+    expect(screen.getByText(/아직 DB에 저장되지 않았습니다/i)).toBeInTheDocument();
     expect(screen.queryByDisplayValue('General Work Assistant')).not.toBeInTheDocument();
     expect(screen.queryByText(/당신은 MCPFlow 업무 자동화 Agent/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/agt-001/i)).not.toBeInTheDocument();

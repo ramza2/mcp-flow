@@ -145,6 +145,17 @@ async def patch_agent(
     return AgentResponse.model_validate(agent)
 
 
+@router.delete("/{agent_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_agent(
+    session: DbSessionDep,
+    principal: CurrentPrincipalDep,
+    agent_id: uuid.UUID,
+) -> None:
+    """Soft-delete own DRAFT Agent with no publish history (docs/06 §10)."""
+
+    await AgentService(session).delete(agent_id, actor_id=principal.user_id)
+
+
 @router.get("/{agent_id}/versions", response_model=AgentVersionListResponse)
 async def list_versions(
     session: DbSessionDep,

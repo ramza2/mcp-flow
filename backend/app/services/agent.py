@@ -6,11 +6,21 @@ import re
 import uuid
 
 from fastapi import status
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.audit.writer import ACTION_AGENT_DELETE, AuditWriter
 from app.core.errors import AppError
-from app.domain.enums import AgentStatus, AgentVersionStatus, AgentVisibility
-from app.models.agent import Agent
+from app.domain.enums import (
+    AgentStatus,
+    AgentVersionStatus,
+    AgentVisibility,
+    AuditActorType,
+    AuditResult,
+)
+from app.models.agent import Agent, AgentVersion
+from app.models.conversation import AgentRequest, Conversation
+from app.models.schedule import Schedule
 from app.repositories.agent import AgentRepository
 from app.repositories.agent_version import AgentVersionRepository
 from app.schemas.agent import AgentCreate, AgentUpdate
@@ -161,6 +171,111 @@ class AgentService:
         await self._session.commit()
         await self._session.refresh(updated)
         return updated
+
+    async def delete(self, agent_id: uuid.UUID, *, actor_id: uuid.UUID) -> None:
+        """Soft-delete own DRAFT Agents with no publish history and no live refs."""
+
+        agent = await self.require_owned(agent_id, owner_id=actor_id)
+
+        if AgentStatus(agent.status) != AgentStatus.DRAFT:
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message="Only DRAFT Agents without publish history can be deleted.",
+                status_code=status.HTTP_409_CONFLICT,
+            )
+        if agent.current_version_id is not None:
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message="Agents with a current published version cannot be deleted.",
+                status_code=status.HTTP_409_CONFLICT,
+            )
+        if await self._versions.has_publish_history(agent_id):
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message="Agents with publish history cannot be deleted.",
+                status_code=status.HTTP_409_CONFLICT,
+            )
+
+        await self._assert_no_delete_blockers(agent_id)
+
+        before = {
+            "id": str(agent.id),
+            "code": agent.code,
+            "name": agent.name,
+            "status": agent.status,
+            "owner_id": str(agent.owner_id) if agent.owner_id else None,
+            "visibility": agent.visibility,
+        }
+        await self._agents.soft_delete(agent, deleted_by=actor_id)
+        await AuditWriter(self._session).append(
+            actor_type=AuditActorType.USER,
+            actor_id=str(actor_id),
+            action=ACTION_AGENT_DELETE,
+            result=AuditResult.SUCCESS,
+            resource_type="AGENT",
+            resource_id=str(agent_id),
+            before_data=before,
+            after_data={"deleted": True},
+            change_set={"deleted_at": "set"},
+            reason="owner_soft_delete_draft",
+        )
+        await self._session.commit()
+
+    async def _assert_no_delete_blockers(self, agent_id: uuid.UUID) -> None:
+        conversation_count = int(
+            (
+                await self._session.execute(
+                    select(func.count())
+                    .select_from(Conversation)
+                    .where(
+                        Conversation.agent_id == agent_id,
+                        Conversation.deleted_at.is_(None),
+                    )
+                )
+            ).scalar_one()
+        )
+        if conversation_count > 0:
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message="Agent is referenced by conversations and cannot be deleted.",
+                status_code=status.HTTP_409_CONFLICT,
+            )
+
+        version_ids = select(AgentVersion.id).where(AgentVersion.agent_id == agent_id)
+        request_count = int(
+            (
+                await self._session.execute(
+                    select(func.count())
+                    .select_from(AgentRequest)
+                    .where(AgentRequest.agent_version_id.in_(version_ids))
+                )
+            ).scalar_one()
+        )
+        if request_count > 0:
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message="Agent is referenced by agent requests and cannot be deleted.",
+                status_code=status.HTTP_409_CONFLICT,
+            )
+
+        schedule_count = int(
+            (
+                await self._session.execute(
+                    select(func.count())
+                    .select_from(Schedule)
+                    .where(
+                        Schedule.deleted_at.is_(None),
+                        Schedule.agent_version_id.in_(version_ids),
+                    )
+                )
+            ).scalar_one()
+        )
+        if schedule_count > 0:
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message="Agent is referenced by schedules and cannot be deleted.",
+                status_code=status.HTTP_409_CONFLICT,
+            )
 
     async def _assert_status_transition(
         self, agent: Agent, new_status: AgentStatus

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import Select, func, or_, select, update
@@ -148,6 +149,20 @@ class AgentRepository:
             return None
         await self._session.refresh(row)
         return row
+
+    async def soft_delete(
+        self,
+        agent: Agent,
+        *,
+        deleted_by: uuid.UUID | None = None,
+    ) -> Agent:
+        agent.deleted_at = datetime.now(UTC)
+        agent.lock_version = int(agent.lock_version) + 1
+        if deleted_by is not None:
+            agent.updated_by = deleted_by
+        await self._session.flush()
+        await self._session.refresh(agent)
+        return agent
 
     async def set_current_version(
         self,
