@@ -8,6 +8,7 @@ import Login from './screens/Login';
 // Work
 import Dashboard from './screens/Dashboard';
 import AgentRun from './screens/work/AgentRun';
+import AgentRunLive from './screens/work/AgentRunLive';
 import Executions from './screens/work/Executions';
 import ExecutionDetail from './screens/work/ExecutionDetail';
 import Approvals from './screens/work/Approvals';
@@ -61,8 +62,9 @@ export const router = createBrowserRouter([
           { index: true, Component: Dashboard },
 
           // Work
-          { path: 'run', Component: AgentRun },
-          { path: 'run/:conversationId', Component: AgentRun },
+          { path: 'run', Component: AgentRunLive },
+          { path: 'run/:conversationId', Component: AgentRunLive },
+          { path: 'run/demo', Component: AgentRun },
           { path: 'executions', Component: Executions },
           { path: 'executions/:executionId', Component: ExecutionDetail },
           { path: 'approvals', Component: Approvals },
