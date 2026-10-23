@@ -13,8 +13,8 @@ from types import SimpleNamespace
 import pytest
 from app.agent.tool_selector import ToolSelectorService
 from app.model_provider.client import ModelProviderClient
-from app.models.conversation import AgentRequest
 from app.models.agent import AgentVersion
+from app.models.conversation import AgentRequest
 from app.models.model_profile import LLMProfile
 from app.repositories.agent import AgentRepository
 from app.repositories.agent_version import AgentVersionRepository
