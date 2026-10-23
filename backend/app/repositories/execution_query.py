@@ -43,6 +43,7 @@ class ExecutionListFilters:
     source_types: tuple[str, ...] = ()
     trigger_types: tuple[str, ...] = ()
     requester_id: uuid.UUID | None = None
+    agent_request_id: uuid.UUID | None = None
     agent_version_id: uuid.UUID | None = None
     workflow_version_id: uuid.UUID | None = None
     schedule_occurrence_id: uuid.UUID | None = None
@@ -92,6 +93,8 @@ class ExecutionQueryRepository:
             stmt = stmt.where(Execution.trigger_type.in_(filters.trigger_types))
         if filters.requester_id is not None:
             stmt = stmt.where(Execution.requester_id == filters.requester_id)
+        if filters.agent_request_id is not None:
+            stmt = stmt.where(Execution.agent_request_id == filters.agent_request_id)
         if filters.agent_version_id is not None:
             stmt = stmt.where(Execution.agent_version_id == filters.agent_version_id)
         if filters.workflow_version_id is not None:

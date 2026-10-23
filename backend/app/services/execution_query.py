@@ -87,6 +87,7 @@ class ExecutionListQuery:
     source_type: str | None = None
     trigger_type: str | None = None
     requester_id: uuid.UUID | None = None
+    agent_request_id: uuid.UUID | None = None
     agent_version_id: uuid.UUID | None = None
     workflow_version_id: uuid.UUID | None = None
     schedule_occurrence_id: uuid.UUID | None = None
@@ -244,6 +245,7 @@ class ExecutionQueryService:
             source_types=source_types,
             trigger_types=trigger_types,
             requester_id=requester_id,
+            agent_request_id=query.agent_request_id,
             agent_version_id=query.agent_version_id,
             workflow_version_id=query.workflow_version_id,
             schedule_occurrence_id=query.schedule_occurrence_id,

@@ -7,6 +7,7 @@ import { isAbortError, isApiError } from '../../api/client';
 import {
   analyzeAgentRun,
   buildAgentRunParameters,
+  createAgentRunExecution,
   generateAgentRunPlan,
   getAgentRunProgress,
   getConversationLatestAgentRun,
@@ -23,6 +24,7 @@ import {
   type RunnableAgentDto,
 } from '../../api/agentRun';
 import type { JsonValue } from '../../api/types';
+import { listExecutions } from '../../api/executions';
 
 function failureMessage(err: unknown): string {
   if (isApiError(err)) return err.message;
@@ -69,6 +71,9 @@ export default function AgentRunLive() {
   const [request, setRequest] = useState<AgentRunRequestDto | null>(null);
   const [selection, setSelection] = useState<AgentRunSelectionDto | null>(null);
   const [progress, setProgress] = useState<AgentRunProgressDto | null>(null);
+  const [execution, setExecution] = useState<{ id: string; status: string } | null>(null);
+  const [executionLoadedForRequest, setExecutionLoadedForRequest] = useState('');
+  const [executionConfirmed, setExecutionConfirmed] = useState(false);
   const [questionValues, setQuestionValues] = useState<Record<string, string>>({});
   const [loadingAgents, setLoadingAgents] = useState(true);
   const [working, setWorking] = useState(false);
@@ -95,13 +100,22 @@ export default function AgentRunLive() {
       const latest = await getConversationLatestAgentRun(conversationId, signal);
       if (signal?.aborted) return;
       setRequest(latest);
-      const [selected, stage] = await Promise.all([
-        getAgentRunSelection(latest.id, signal), getAgentRunProgress(latest.id, signal),
+      const [selected, stage, history] = await Promise.all([
+        getAgentRunSelection(latest.id, signal),
+        getAgentRunProgress(latest.id, signal),
+        listExecutions({
+          agent_request_id: latest.id,
+          source_type: 'AGENT_REQUEST',
+          page_size: 1,
+          signal,
+        }),
       ]);
       if (signal?.aborted) return;
       setRequest(stage.request);
       setSelection(selected.selection);
       setProgress(stage);
+      setExecution(history.items[0] ?? null);
+      setExecutionLoadedForRequest(latest.id);
       setError(null);
     } catch (err: unknown) {
       if (!isAbortError(err) && !signal?.aborted) setError(failureMessage(err));
@@ -113,6 +127,8 @@ export default function AgentRunLive() {
       setRequest(null);
       setSelection(null);
       setProgress(null);
+      setExecution(null);
+      setExecutionLoadedForRequest('');
       return;
     }
     const controller = new AbortController();
@@ -123,6 +139,10 @@ export default function AgentRunLive() {
   useEffect(() => {
     setQuestionValues({});
   }, [progress?.open_clarification?.id]);
+
+  useEffect(() => {
+    setExecutionConfirmed(false);
+  }, [request?.id]);
 
   const startAnalysis = async (requestId: string) => {
     try {
@@ -148,6 +168,8 @@ export default function AgentRunLive() {
       setRequest(created);
       setSelection(null);
       setProgress(null);
+      setExecution(null);
+      setExecutionLoadedForRequest('');
       navigate(`/run/${created.conversation_id}`);
       await startAnalysis(created.id);
     } catch (err: unknown) {
@@ -244,6 +266,29 @@ export default function AgentRunLive() {
     }
   };
 
+  const handleCreateExecution = async () => {
+    if (
+      inFlight.current || !request || request.status !== 'READY'
+      || executionLoadedForRequest !== request.id || execution || !executionConfirmed
+    ) return;
+    inFlight.current = true;
+    setWorking(true);
+    setError(null);
+    try {
+      const created = await createAgentRunExecution(request.id);
+      setExecution({ id: created.id, status: created.status });
+      setExecutionConfirmed(false);
+      navigate(`/executions/${created.id}`);
+    } catch (err: unknown) {
+      // A timeout/disconnect might occur after the server committed the Execution.
+      // Never retry automatically; re-read history first. Manual repeats use the same key.
+      setError(`실행 생성 결과 확인 필요: ${failureMessage(err)}. 상태 새로고침으로 확인하세요. 자동 재시도하지 않습니다.`);
+    } finally {
+      inFlight.current = false;
+      setWorking(false);
+    }
+  };
+
   const selectionLabel: Record<AgentRunSelectionDto['decision'], string> = {
     AUTO_SELECT: '자동 선택',
     CONFIRM: '선택 확인 필요',
@@ -261,12 +306,12 @@ export default function AgentRunLive() {
         </h1>
         <p className="text-sm text-slate-500 mt-1">
           실제 DB와 ModelOps 분석을 사용합니다. Tool 선택부터 파라미터 구성·계획 생성·검증·확인까지 연결됩니다.
-          계획 확인 후에도 실제 MCP Tool 호출은 별도의 Execution에서 진행됩니다.
+          검증 완료 후 명시적으로 실행을 시작하면 별도 Execution에서 진행됩니다.
         </p>
       </header>
       <div className="rounded-lg border border-blue-200 bg-blue-50 p-3 text-sm text-blue-900">
-        <strong>현재 지원 범위:</strong> 실제 Agent 요청 분석 → Tool 선택 → 입력값 구성 → 단일 Tool 실행계획 → 정책 검증/사용자 확인.
-        각 단계는 버튼으로 시작합니다. 계획 READY는 실제 실행 완료가 아니며 외부 MCP Tool을 호출하지 않습니다.
+        <strong>현재 지원 범위:</strong> 실제 Agent 요청 분석 → Tool 선택 → 입력값 구성 → 단일 Tool 실행계획 → 정책 검증/사용자 확인 → 실행 생성.
+        실행 시작을 누르면 별도 Execution이 생성되고, 이후 외부 MCP Tool 호출은 실행 Worker에서 비동기로 처리됩니다.
       </div>
 
       <section className="rounded-xl border border-slate-200 bg-white p-5 space-y-3">
@@ -339,8 +384,28 @@ export default function AgentRunLive() {
           )}
           {request.status === 'READY' && (
             <p className="text-sm text-green-800">
-              계획 검증이 완료됐습니다. 실제 Tool 실행은 별도의 Execution을 생성한 후 진행됩니다.
+              계획 검증이 완료됐습니다. 실제 업무 실행은 별도 확인 후 시작할 수 있습니다.
             </p>
+          )}
+          {request.status === 'READY' && executionLoadedForRequest === request.id && !execution && (
+            <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 space-y-3">
+              <p className="text-sm text-amber-900">
+                실제 실행을 시작하면 외부 MCP Tool이 호출되며, 외부 데이터 변경이나 업무 처리가 발생할 수 있습니다.
+              </p>
+              <label className="flex gap-2 items-start text-sm text-amber-900">
+                <input
+                  type="checkbox"
+                  className="mt-1"
+                  checked={executionConfirmed}
+                  disabled={working}
+                  onChange={(event) => setExecutionConfirmed(event.target.checked)}
+                />
+                실제 시스템에서 실행되는 작업임을 확인했습니다.
+              </label>
+              <Button size="sm" disabled={working || !executionConfirmed} onClick={() => void handleCreateExecution()}>
+                실제 업무 실행 시작
+              </Button>
+            </div>
           )}
           {request.status === 'SELECTING' && !working && (
             <p className="text-sm text-amber-700">
@@ -503,9 +568,18 @@ export default function AgentRunLive() {
               )}
             </div>
           )}
-          <div className="border-t pt-3 flex items-center gap-3 text-sm text-slate-500">
-            <span>Execution: 생성되지 않음</span>
-            <Button size="sm" variant="outline" onClick={() => navigate('/executions')}>실제 Execution 이력 보기</Button>
+          <div className="border-t pt-3 flex items-center gap-3 flex-wrap text-sm text-slate-500">
+            {execution && executionLoadedForRequest === request.id ? (
+              <>
+                <span>Execution: {execution.status} · {execution.id}</span>
+                <Button size="sm" onClick={() => navigate(`/executions/${execution.id}`)}>
+                  실행 결과·단계 이력 보기
+                </Button>
+              </>
+            ) : (
+              <span>Execution: {executionLoadedForRequest === request.id ? '생성되지 않음' : '확인 중'}</span>
+            )}
+            <Button size="sm" variant="outline" onClick={() => navigate('/executions')}>전체 실행 이력 보기</Button>
           </div>
         </section>
       )}
