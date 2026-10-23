@@ -253,6 +253,18 @@ async def test_real_gold_still_requires_explicit_measurement_ack(
     assert result["reason"] == "INTERNAL_GOLD_REVIEW_ACK_REQUIRED"
 
 
+def test_internal_public_review_state_is_single_human_not_independent() -> None:
+    source = {
+        "case_id": "R01",
+        "observed_sha256": "a" * 64,
+        "review_state": "PENDING_INDEPENDENT_SEMANTIC_REVIEWS",
+    }
+    result = collector.internal_public_case(source)
+    assert result["review_state"] == "PENDING_SINGLE_HUMAN_SEMANTIC_REVIEW"
+    assert result["observed_sha256"] == source["observed_sha256"]
+    assert source["review_state"] == "PENDING_INDEPENDENT_SEMANTIC_REVIEWS"
+
+
 def test_live_evidence_precheck_is_writable_and_cleans_probe_files(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
