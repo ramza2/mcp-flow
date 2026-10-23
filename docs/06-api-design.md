@@ -675,6 +675,28 @@ AUTO_EXECUTE_SAFE
 
 기본은 `PLAN_ONLY`다.
 
+### 11.1.1 Agent Run UI 단계별 연동 (기존 Canonical 경로 유지)
+
+`/run` UI의 실제 접수·분석·선택 흐름은 아래 편의 API를 사용한다.
+기존 `POST /conversations/{conversation_id}/agent-requests` 계약을 대체하지 않는다.
+
+```text
+GET  /api/v1/agent-requests/available-agents
+POST /api/v1/agent-requests
+POST /api/v1/agent-requests/{request_id}/analyze
+GET  /api/v1/agent-requests/{request_id}
+GET  /api/v1/agent-requests/conversations/{conversation_id}/latest
+GET  /api/v1/agent-requests/{request_id}/selection
+POST /api/v1/agent-requests/{request_id}/select-tool
+```
+
+- `POST /agent-requests`는 `agent_id`, `request_text`로 Conversation·USER message·RECEIVED AgentRequest만 원자적으로 생성한다.
+- `analyze`는 RECEIVED 상태에서만 기존 RequestAnalyzer를 명시적으로 한 번 호출한다.
+- `select-tool`은 RETRIEVING 상태에서만 기존 ToolSelector(권한 적용 검색/평가)를 명시적으로 호출한다. MCP Tool 호출이나 Execution 생성은 하지 않는다.
+- `GET /selection`은 요청 소유자에게 최근 ToolSelectionRun의 안전한 요약(`decision`, 선택 Tool 이름/버전, `confidence`, `reason_summary`, 시각)과 현재 요청 상태를 반환한다. 실행 증적/비밀/내부 프롬프트는 노출하지 않는다. 선택 이력이 없으면 `selection=null`이다.
+- 상태는 AgentRequest와 ToolSelectionRun을 그대로 사용하며 별도 상태값·DB 테이블은 추가하지 않는다. 중복 요청은 상태 검사/CAS로 거절하며 클라이언트 자동 재시도는 없다.
+- 실제 Plan 생성, 사용자 확인 응답, Execution 생성·MCP 호출은 후속 연결 범위다.
+
 ### 11.2 READY Response
 
 ```json
