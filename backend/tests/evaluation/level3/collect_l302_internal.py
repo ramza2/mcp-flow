@@ -11,6 +11,7 @@ import argparse
 import asyncio
 import hashlib
 import json
+import os
 import stat
 import sys
 import uuid
@@ -66,6 +67,23 @@ def private_dir() -> Path:
     return path
 
 
+def precheck_evidence_paths() -> Path:
+    """Fail before any model calls when immutable public/private evidence cannot be saved."""
+    public = artifact_dir("level3")
+    if public.is_symlink() or not public.is_dir():
+        raise ValueError("PUBLIC_EVIDENCE_PATH_INVALID")
+    restricted = private_dir()
+    for directory in (public, restricted):
+        probe = directory / f".l302-internal-probe-{uuid.uuid4().hex}"
+        flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(probe, flags, 0o600)
+        try:
+            os.close(fd)
+        finally:
+            probe.unlink(missing_ok=True)
+    return restricted
+
+
 async def execute(args: argparse.Namespace) -> dict[str, Any]:
     sha = git_sha()
     result: dict[str, Any] = {
@@ -119,6 +137,12 @@ async def execute(args: argparse.Namespace) -> dict[str, Any]:
     except (ValueError, TypeError):
         result.update(ok=False, reason="AGENT_VERSION_ID_INVALID")
         return result
+    try:
+        restricted_evidence_dir = precheck_evidence_paths()
+    except (OSError, ValueError):
+        result.update(ok=False, reason="EVIDENCE_PRECHECK_FAILED")
+        return result
+
     url = db_url()
     if not url:
         result.update(ok=False, reason="DATABASE_URL_MISSING")
@@ -178,7 +202,7 @@ async def execute(args: argparse.Namespace) -> dict[str, Any]:
             if args.write_artifact:
                 stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
                 base = f"l3_02_internal_{sha[:12]}_{stamp}_{run_ref}"
-                secret_path = private_dir() / (base + ".json")
+                secret_path = restricted_evidence_dir / (base + ".json")
                 private = {
                     "schema_version": SCHEMA_VERSION,
                     "run_ref": run_ref,
