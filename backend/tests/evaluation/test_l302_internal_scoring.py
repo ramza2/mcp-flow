@@ -253,6 +253,56 @@ async def test_real_gold_still_requires_explicit_measurement_ack(
     assert result["reason"] == "INTERNAL_GOLD_REVIEW_ACK_REQUIRED"
 
 
+def test_internal_public_review_state_is_single_human_not_independent() -> None:
+    source = {
+        "case_id": "R01",
+        "observed_sha256": "a" * 64,
+        "review_state": "PENDING_INDEPENDENT_SEMANTIC_REVIEWS",
+    }
+    result = collector.internal_public_case(source)
+    assert result["review_state"] == "PENDING_SINGLE_HUMAN_SEMANTIC_REVIEW"
+    assert result["observed_sha256"] == source["observed_sha256"]
+    assert source["review_state"] == "PENDING_INDEPENDENT_SEMANTIC_REVIEWS"
+
+
+def test_live_evidence_precheck_is_writable_and_cleans_probe_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(collector, "artifact_dir", lambda _kind: tmp_path)
+    restricted = collector.precheck_evidence_paths()
+    assert restricted == tmp_path / "l302-internal-private"
+    assert stat.S_IMODE(restricted.stat().st_mode) == 0o700
+    assert not list(tmp_path.glob(".l302-internal-probe-*"))
+    assert not list(restricted.glob(".l302-internal-probe-*"))
+
+
+@pytest.mark.asyncio
+async def test_evidence_precheck_failure_blocks_db_and_model_before_measurement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Real approved gold + real run flags, but never create a DB or LLM request.
+    monkeypatch.setattr(collector, "git_sha", lambda: "a" * 40)
+    monkeypatch.setattr(collector, "artifact_dir", lambda _kind: tmp_path)
+    bad_private = tmp_path / "l302-internal-private"
+    bad_private.mkdir(mode=0o755)
+    bad_private.chmod(0o755)
+
+    def forbidden() -> str:
+        raise AssertionError("DB and model are not allowed before evidence precheck")
+
+    monkeypatch.setattr(collector, "db_url", forbidden)
+    monkeypatch.setattr(collector, "ModelProviderClient", forbidden)
+    report = await collector.execute(argparse.Namespace(
+        run=True, preflight=False,
+        ack_gold_reviewed=True, write_artifact=True,
+        agent_version_id="45e06703-7af8-4e1b-9da9-518cea072759",
+    ))
+    assert report["ok"] is False
+    assert report["reason"] == "EVIDENCE_PRECHECK_FAILED"
+    assert report["judgment"] == "INCOMPLETE"
+    assert "case_results" not in report
+
+
 def test_internal_private_dir_has_restricted_access(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
