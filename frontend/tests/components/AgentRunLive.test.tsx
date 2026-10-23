@@ -10,6 +10,8 @@ const mocks = vi.hoisted(() => ({
   submit: vi.fn(),
   analyze: vi.fn(),
   latest: vi.fn(),
+  getSelection: vi.fn(),
+  select: vi.fn(),
 }));
 
 vi.mock('@/api/agentRun', () => ({
@@ -17,11 +19,14 @@ vi.mock('@/api/agentRun', () => ({
   submitAgentRun: mocks.submit,
   analyzeAgentRun: mocks.analyze,
   getConversationLatestAgentRun: mocks.latest,
+  getAgentRunSelection: mocks.getSelection,
+  selectToolForAgentRun: mocks.select,
 }));
 
 const conversationId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
 const requestId = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
 const agentId = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
+const toolVersionId = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee';
 
 function row(status: string, structured: object | null = null) {
   return {
@@ -34,6 +39,18 @@ function row(status: string, structured: object | null = null) {
     rejection_code: null,
     created_at: '2026-10-23T10:00:00Z',
     analyzed_at: status === 'RECEIVED' ? null : '2026-10-23T10:00:01Z',
+  };
+}
+
+function selection(decision: 'AUTO_SELECT' | 'NO_MATCH' = 'AUTO_SELECT') {
+  return {
+    id: 'ffffffff-ffff-4fff-8fff-ffffffffffff',
+    decision,
+    selected_tool_version_id: decision === 'AUTO_SELECT' ? toolVersionId : null,
+    selected_tool_name: decision === 'AUTO_SELECT' ? '날씨 조회' : null,
+    confidence: decision === 'AUTO_SELECT' ? 0.92 : null,
+    reason_summary: null,
+    created_at: '2026-10-23T10:00:02Z',
   };
 }
 
@@ -67,6 +84,18 @@ describe('AgentRunLive — real phase 1, no fake execution', () => {
     mocks.latest.mockResolvedValue(row('RETRIEVING', {
       intent: 'Find documents', required_capabilities: ['document.lookup'],
     }));
+    mocks.getSelection.mockResolvedValue({
+      request: row('RETRIEVING', {
+        intent: 'Find documents', required_capabilities: ['document.lookup'],
+      }),
+      selection: null,
+    });
+    mocks.select.mockResolvedValue({
+      request: row('BUILDING_PARAMETERS', {
+        intent: 'Find documents', required_capabilities: ['document.lookup'],
+      }),
+      selection: selection(),
+    });
   });
 
   it('submits once, invokes real analyzer once, and never claims Tool/Execution completed', async () => {
@@ -103,8 +132,33 @@ describe('AgentRunLive — real phase 1, no fake execution', () => {
     expect(mocks.submit).not.toHaveBeenCalled();
   });
 
+  it('explicitly selects a real Tool and does not claim it executed', async () => {
+    renderLive(`/run/${conversationId}`);
+    fireEvent.click(await screen.findByRole('button', { name: '실제 Tool 검색·선택' }));
+    await waitFor(() => expect(mocks.select).toHaveBeenCalledWith(requestId));
+    expect(await screen.findByText(/선택 Tool: 날씨 조회/)).toBeTruthy();
+    expect(screen.getByText('자동 선택')).toBeTruthy();
+    expect(screen.getByText(/MCP 호출 또는 업무 실행 완료를 의미하지 않습니다/)).toBeTruthy();
+    expect(screen.getByText('Execution: 생성되지 않음')).toBeTruthy();
+    expect(mocks.select).toHaveBeenCalledTimes(1);
+  });
+
+  it('restores a persisted selection after F5 without rerunning Tool selection', async () => {
+    mocks.getSelection.mockResolvedValue({
+      request: row('BUILDING_PARAMETERS', { intent: 'Find documents' }),
+      selection: selection('AUTO_SELECT'),
+    });
+    renderLive(`/run/${conversationId}`);
+    expect(await screen.findByText(/선택 Tool: 날씨 조회/)).toBeTruthy();
+    expect(mocks.select).not.toHaveBeenCalled();
+    expect(mocks.analyze).not.toHaveBeenCalled();
+  });
+
   it('does not auto-retry persisted ANALYZING after reload', async () => {
     mocks.latest.mockResolvedValue(row('ANALYZING'));
+    mocks.getSelection.mockResolvedValue({
+      request: row('ANALYZING'), selection: null,
+    });
     renderLive(`/run/${conversationId}`);
     expect(await screen.findByText(/분석이 진행 중이거나 중단됐을 수 있습니다/)).toBeTruthy();
     expect(mocks.analyze).not.toHaveBeenCalled();
