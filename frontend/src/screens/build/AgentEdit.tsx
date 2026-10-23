@@ -218,7 +218,8 @@ export default function AgentEdit() {
       items: selectedTools.map(mcp_tool_id => ({
         mcp_tool_id,
         effect: 'ALLOW' as const,
-        parameter_constraints: {},
+        // null = no constraints. {} is non-null and fails closed in ParameterBuilder.
+        parameter_constraints: null,
         requires_confirmation: false,
       })),
     });

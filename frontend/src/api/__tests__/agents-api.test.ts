@@ -6,6 +6,7 @@ import {
   createAgentVersion,
   listAgents,
   publishAgentVersion,
+  putAgentToolGrants,
   validateAgentVersion,
 } from '../agents';
 
@@ -182,5 +183,31 @@ describe('Agent registry API contracts', () => {
     const body = JSON.parse(String((fetchMock.mock.calls[0][1] as RequestInit).body));
     expect(body.llm_profile_id).toBe('p1');
     expect(body.selection_settings.max_candidates).toBe(5);
+  });
+
+  it('putAgentToolGrants keeps parameter_constraints null in the request body', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ items: [] }));
+    vi.stubGlobal('fetch', fetchMock);
+    setCachedCsrfTokenForTests('csrf-test');
+
+    await putAgentToolGrants('agt-1', 'ver-1', {
+      items: [{
+        mcp_tool_id: 'tool-1',
+        effect: 'ALLOW',
+        parameter_constraints: null,
+        requires_confirmation: false,
+      }],
+    });
+
+    const raw = String((fetchMock.mock.calls[0][1] as RequestInit).body);
+    expect(raw).toContain('"parameter_constraints":null');
+    const body = JSON.parse(raw) as {
+      items: Array<{ parameter_constraints: unknown }>;
+    };
+    expect(body.items).toHaveLength(1);
+    expect(body.items[0].parameter_constraints).toBeNull();
+    expect(body.items[0]).not.toEqual(
+      expect.objectContaining({ parameter_constraints: {} }),
+    );
   });
 });
