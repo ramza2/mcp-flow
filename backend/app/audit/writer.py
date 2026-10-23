@@ -22,6 +22,7 @@ ACTION_EXECUTION_CREATE = "execution.create"
 ACTION_EXECUTION_CANCEL = "execution.cancel"
 ACTION_APPROVAL_DECISION = "approval.decision"
 ACTION_SCHEDULE_TRIGGER = "schedule.trigger"
+ACTION_AGENT_DELETE = "agent.delete"
 
 
 class AuditWriter:

@@ -9,12 +9,15 @@ import FilterBar from '../../components/ui/FilterBar';
 import Button from '../../components/ui/Button';
 import Pagination from '../../components/ui/Pagination';
 import { EmptyState, ErrorState, LoadingSkeleton } from '../../components/ui/EmptyState';
-import { createAgent, listAgents } from '../../api/agents';
+import { listAgents } from '../../api/agents';
 import { isAbortError, isApiError } from '../../api/client';
 import type { AgentDto } from '../../api/types';
 import { AGENT_STATUSES, formatTimestamp } from '../../domain';
 
 const PAGE_SIZE = 20;
+
+/** Local unsaved New Agent route — no DB row until Draft 저장 / Publish. */
+export const NEW_AGENT_PATH = '/agents/new/versions/new/edit';
 
 export default function Agents() {
   const navigate = useNavigate();
@@ -26,7 +29,6 @@ export default function Agents() {
   const [total, setTotal] = useState(0);
   const [hasNext, setHasNext] = useState(false);
   const [loading, setLoading] = useState(true);
-  const [creating, setCreating] = useState(false);
   const [error, setError] = useState<{ message: string; requestId?: string } | null>(null);
 
   useEffect(() => {
@@ -89,25 +91,9 @@ export default function Agents() {
     }
   };
 
-  const handleNewAgent = async () => {
-    setCreating(true);
-    setError(null);
-    try {
-      const created = await createAgent({
-        name: 'New Agent',
-        description: null,
-        visibility: 'PRIVATE',
-      });
-      navigate(`/agents/${created.id}/versions/new/edit`);
-    } catch (err) {
-      const apiErr = isApiError(err) ? err : null;
-      setError({
-        message: apiErr?.message ?? 'Agent를 생성하지 못했습니다.',
-        requestId: apiErr?.requestId ?? undefined,
-      });
-    } finally {
-      setCreating(false);
-    }
+  const handleNewAgent = () => {
+    // Local form only — POST /agents happens on first Draft 저장 or Publish.
+    navigate(NEW_AGENT_PATH);
   };
 
   const columns: Column<AgentDto>[] = [
@@ -143,7 +129,7 @@ export default function Agents() {
         title="Agents"
         description="자연어 요청을 처리하는 AI Agent와 버전을 관리합니다."
         actions={
-          <Button icon={<Plus size={14} />} loading={creating} onClick={handleNewAgent}>
+          <Button icon={<Plus size={14} />} onClick={handleNewAgent}>
             New Agent
           </Button>
         }

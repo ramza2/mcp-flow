@@ -1,13 +1,15 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useNavigate, useParams } from 'react-router';
-import { ArrowLeft, Pencil, Plus, Rocket, Power } from 'lucide-react';
+import { ArrowLeft, Pencil, Plus, Rocket, Power, Trash2 } from 'lucide-react';
 import StatusBadge, { VersionBadge } from '../../components/ui/StatusBadge';
 import { TabBar } from '../../components/ui/Tabs';
 import Button from '../../components/ui/Button';
 import DataTable, { Column } from '../../components/ui/DataTable';
+import { ConfirmDialog } from '../../components/ui/Dialog';
 import { ErrorState, InlineAlert, LoadingSkeleton } from '../../components/ui/EmptyState';
 import {
   activateAgent,
+  deleteAgent,
   getAgent,
   listAgentToolGrants,
   listAgentVersions,
@@ -29,6 +31,8 @@ export default function AgentDetail() {
   const [grants, setGrants] = useState<AgentToolGrantDto[]>([]);
   const [loading, setLoading] = useState(true);
   const [actionBusy, setActionBusy] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteOpen, setDeleteOpen] = useState(false);
   const [error, setError] = useState<{ message: string; requestId?: string } | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
 
@@ -90,6 +94,15 @@ export default function AgentDetail() {
   const latest = versions[0] ?? null;
   const latestStatus = (latest?.status ?? 'DRAFT') as VersionStatus;
   const currentPublished = versions.find(v => v.id === agent?.current_version_id) ?? null;
+  const hasPublishHistory = versions.some(v =>
+    v.status === 'PUBLISHED' || v.status === 'DEPRECATED' || v.published_at != null,
+  );
+  const canDelete = Boolean(
+    agent
+    && agent.status === 'DRAFT'
+    && agent.current_version_id == null
+    && !hasPublishHistory,
+  );
 
   const handleLatestPrimary = () => {
     if (!agent) return;
@@ -135,6 +148,23 @@ export default function AgentDetail() {
       setActionError(apiErr?.message ?? '활성화에 실패했습니다.');
     } finally {
       setActionBusy(false);
+    }
+  };
+
+  const handleDelete = async () => {
+    if (!agent || !canDelete) return;
+    setDeleting(true);
+    setActionError(null);
+    try {
+      await deleteAgent(agent.id);
+      setDeleteOpen(false);
+      navigate('/agents');
+    } catch (err) {
+      const apiErr = isApiError(err) ? err : null;
+      setActionError(apiErr?.message ?? 'Agent 삭제에 실패했습니다.');
+      setDeleteOpen(false);
+    } finally {
+      setDeleting(false);
     }
   };
 
@@ -206,6 +236,16 @@ export default function AgentDetail() {
             >
               Activate
             </Button>
+            {canDelete && (
+              <Button
+                size="sm"
+                variant="outline"
+                icon={<Trash2 size={13} />}
+                onClick={() => setDeleteOpen(true)}
+              >
+                삭제
+              </Button>
+            )}
           </div>
         </div>
         {actionError && (
@@ -286,6 +326,17 @@ export default function AgentDetail() {
           </div>
         )}
       </div>
+
+      <ConfirmDialog
+        open={deleteOpen}
+        onClose={() => setDeleteOpen(false)}
+        onConfirm={handleDelete}
+        title="Agent 삭제"
+        description="이 DRAFT Agent를 삭제합니다. 게시 이력이 없는 본인 소유 DRAFT만 삭제할 수 있습니다."
+        confirmLabel="삭제"
+        danger
+        loading={deleting}
+      />
     </div>
   );
 }

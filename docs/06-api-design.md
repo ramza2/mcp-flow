@@ -577,16 +577,17 @@ PENDING VERIFIED FAILED EXPIRED
 ### Logical Agent
 
 ```text
-GET   /agents
-POST  /agents
-GET   /agents/{agent_id}
-PATCH /agents/{agent_id}
-GET   /agents/{agent_id}/versions
-POST  /agents/{agent_id}/versions
-GET   /agents/{agent_id}/versions/{version_id}
-POST  /agents/{agent_id}/versions/{version_id}/validate
-POST  /agents/{agent_id}/versions/{version_id}/publish
-POST  /agents/{agent_id}/versions/{version_id}/deprecate
+GET    /agents
+POST   /agents
+GET    /agents/{agent_id}
+PATCH  /agents/{agent_id}
+DELETE /agents/{agent_id}
+GET    /agents/{agent_id}/versions
+POST   /agents/{agent_id}/versions
+GET    /agents/{agent_id}/versions/{version_id}
+POST   /agents/{agent_id}/versions/{version_id}/validate
+POST   /agents/{agent_id}/versions/{version_id}/publish
+POST   /agents/{agent_id}/versions/{version_id}/deprecate
 ```
 
 ### Ownership and visibility
@@ -594,8 +595,15 @@ POST  /agents/{agent_id}/versions/{version_id}/deprecate
 - `POST /agents` sets `owner_id` (and `created_by`) from the authenticated Session principal. Clients must not supply `owner_id`.
 - Default `visibility` is `PRIVATE` (`PRIVATE` / `RESTRICTED` / `INTERNAL`).
 - `GET /agents` and `GET /agents/{agent_id}` expose `INTERNAL` Agents to any authenticated actor, and `PRIVATE` / `RESTRICTED` only to the owner. Non-visible Agents return `404 NOT_FOUND` (not `403`).
-- Mutations (`PATCH`, version create/validate/publish/deprecate, Tool Grant `PUT`) require ownership; non-owners receive `404 NOT_FOUND`.
+- Mutations (`PATCH`, `DELETE`, version create/validate/publish/deprecate, Tool Grant `PUT`) require ownership; non-owners receive `404 NOT_FOUND`.
 - Agent Run `GET /agent-requests/available-agents` uses the same visibility rule for runnable `ACTIVE` + current `PUBLISHED` Agents.
+
+### Delete
+
+- `DELETE /agents/{agent_id}` soft-deletes (`deleted_at`) an Agent owned by the caller.
+- Allowed only when logical status is `DRAFT`, there is no `current_version_id`, and no version has publish history (`PUBLISHED` / `DEPRECATED` / `published_at`).
+- Rejected (`409 RESOURCE_CONFLICT`) when ACTIVE or when conversations / agent requests / schedules reference the Agent.
+- Emits Audit action `agent.delete`. Does not hard-delete versions or rewrite evaluation Agent ownership.
 
 ### Version Tool Grants
 
