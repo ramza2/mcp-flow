@@ -11,6 +11,9 @@ from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
+from app.agent.parameter_builder import ParameterBuilderService
+from app.agent.plan_generator import PlanGeneratorService
+from app.agent.plan_validator import PlanValidatorService
 from app.agent.tool_selector import ToolSelectorService
 from app.model_provider.client import ModelProviderClient
 from app.models.agent import AgentVersion
@@ -18,6 +21,10 @@ from app.models.conversation import AgentRequest
 from app.models.model_profile import LLMProfile
 from app.repositories.agent import AgentRepository
 from app.repositories.agent_version import AgentVersionRepository
+from app.repositories.clarification_request import ClarificationRequestRepository
+from app.repositories.parameter_build import ParameterBuildRepository
+from app.repositories.plan_generation import PlanGenerationRepository
+from app.repositories.plan_validation import PlanValidationRepository
 from app.repositories.tool_selection import ToolSelectionRepository
 from httpx import AsyncClient
 from sqlalchemy import select, update
@@ -275,3 +282,161 @@ async def test_agent_run_selection_bridge_is_owner_scoped_and_one_shot(
             f"/api/v1/agent-requests/{missing}/select-tool"
         )
     ).status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_agent_run_planning_bridge_is_owner_scoped_and_stage_gated(
+    authenticated_db_client: AsyncClient,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent_id, _ = await _seed_runnable(db_session_factory)
+    response = await authenticated_db_client.post(
+        "/api/v1/agent-requests",
+        json={"agent_id": str(agent_id), "request_text": "문서 조회해줘"},
+    )
+    assert response.status_code == 201
+    request_id = response.json()["id"]
+    base = f"/api/v1/agent-requests/{request_id}"
+
+    initial = await authenticated_db_client.get(f"{base}/progress")
+    assert initial.status_code == 200
+    assert initial.json()["parameter_build"] is None
+    assert initial.json()["plan"] is None
+    assert initial.json()["validation"] is None
+
+    for suffix in ("build-parameters", "generate-plan", "validate-plan"):
+        assert (await authenticated_db_client.post(f"{base}/{suffix}")).status_code == 409
+
+    unknown = uuid.uuid4()
+    for suffix in ("progress", "build-parameters", "generate-plan", "validate-plan"):
+        method = "get" if suffix == "progress" else "post"
+        result = await getattr(authenticated_db_client, method)(
+            f"/api/v1/agent-requests/{unknown}/{suffix}"
+        )
+        assert result.status_code == 404
+
+    async with db_session_factory() as session:
+        await session.execute(
+            update(AgentRequest).where(AgentRequest.id == uuid.UUID(request_id))
+            .values(status="BUILDING_PARAMETERS")
+        )
+        await session.commit()
+
+    calls: list[tuple[str, uuid.UUID]] = []
+
+    async def _advance(name: str, request_uuid: uuid.UUID, to_status: str):
+        calls.append((name, request_uuid))
+        async with db_session_factory() as session:
+            await session.execute(
+                update(AgentRequest).where(AgentRequest.id == request_uuid)
+                .values(status=to_status)
+            )
+            await session.commit()
+
+    async def fake_build(self, *, agent_request_id: uuid.UUID):
+        await _advance("build", agent_request_id, "PLANNING")
+
+    async def fake_generate(self, *, agent_request_id: uuid.UUID):
+        await _advance("generate", agent_request_id, "VALIDATING")
+
+    async def fake_validate(self, *, agent_request_id: uuid.UUID):
+        await _advance("validate", agent_request_id, "READY")
+
+    monkeypatch.setattr(ParameterBuilderService, "build", fake_build)
+    monkeypatch.setattr(PlanGeneratorService, "generate", fake_generate)
+    monkeypatch.setattr(PlanValidatorService, "validate", fake_validate)
+
+    for suffix, expected_status in (
+        ("build-parameters", "PLANNING"),
+        ("generate-plan", "VALIDATING"),
+        ("validate-plan", "READY"),
+    ):
+        result = await authenticated_db_client.post(f"{base}/{suffix}")
+        assert result.status_code == 200, result.text
+        assert result.json()["request"]["status"] == expected_status
+        assert (await authenticated_db_client.post(f"{base}/{suffix}")).status_code == 409
+    assert [name for name, _ in calls] == ["build", "generate", "validate"]
+    assert all(id_ == uuid.UUID(request_id) for _, id_ in calls)
+
+
+@pytest.mark.asyncio
+async def test_agent_run_progress_is_safe_projection_without_binding_values(
+    authenticated_db_client: AsyncClient,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent_id, _ = await _seed_runnable(db_session_factory)
+    response = await authenticated_db_client.post(
+        "/api/v1/agent-requests",
+        json={"agent_id": str(agent_id), "request_text": "자료를 요약해 줘"},
+    )
+    assert response.status_code == 201
+    request_id = response.json()["id"]
+    now = datetime.now(UTC)
+    secret = "MUST_NOT_APPEAR_PRIVATE_SECRET"
+
+    async def fake_parameter(self, request_uuid: uuid.UUID):
+        assert request_uuid == uuid.UUID(request_id)
+        return SimpleNamespace(
+            id=uuid.uuid4(), tool_version_id=uuid.uuid4(),
+            is_complete=True, missing_fields=[], created_at=now,
+            bindings_snapshot={"password": secret},
+        )
+
+    async def fake_plan(self, request_uuid: uuid.UUID):
+        assert request_uuid == uuid.UUID(request_id)
+        return SimpleNamespace(
+            id=uuid.uuid4(), plan_hash="a" * 64, created_at=now,
+            plan_snapshot={
+                "goal": "문서 검색", "steps": [{"name": "도구 실행", "config": {"token": secret}}],
+            },
+        )
+
+    async def fake_validation(self, request_uuid: uuid.UUID):
+        assert request_uuid == uuid.UUID(request_id)
+        return SimpleNamespace(
+            id=uuid.uuid4(), decision="WAITING_CONFIRMATION",
+            confirmation_required=True, errors=[], warnings=[],
+            created_at=now, policy_snapshot={"token": secret},
+        )
+
+    async def fake_clarification(self, request_uuid: uuid.UUID):
+        assert request_uuid == uuid.UUID(request_id)
+        return SimpleNamespace(
+            id=uuid.uuid4(), request_type="PLAN_CONFIRMATION",
+            prompt_text="실행계획 확인", requested_at=now,
+            question_schema={
+                "properties": {
+                    "confirmed": {"type": "boolean", "default": secret},
+                },
+                "required": ["confirmed"],
+            },
+            response_payload={"token": secret},
+        )
+
+    monkeypatch.setattr(
+        ParameterBuildRepository, "get_latest_for_agent_request", fake_parameter
+    )
+    monkeypatch.setattr(
+        PlanGenerationRepository, "get_latest_for_agent_request", fake_plan
+    )
+    monkeypatch.setattr(
+        PlanValidationRepository, "get_latest_for_agent_request", fake_validation
+    )
+    monkeypatch.setattr(
+        ClarificationRequestRepository, "get_open_for_agent_request", fake_clarification
+    )
+    result = await authenticated_db_client.get(
+        f"/api/v1/agent-requests/{request_id}/progress"
+    )
+    assert result.status_code == 200, result.text
+    data = result.json()
+    assert data["plan"]["goal"] == "문서 검색"
+    assert data["plan"]["step_names"] == ["도구 실행"]
+    assert data["validation"]["decision"] == "WAITING_CONFIRMATION"
+    assert data["open_clarification"]["fields"][0]["value_type"] == "boolean"
+    assert secret not in result.text
+    assert "bindings_snapshot" not in result.text
+    assert "plan_snapshot" not in result.text
+    assert "response_payload" not in result.text

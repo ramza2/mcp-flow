@@ -6,19 +6,58 @@ import StatusBadge from '../../components/ui/StatusBadge';
 import { isAbortError, isApiError } from '../../api/client';
 import {
   analyzeAgentRun,
+  buildAgentRunParameters,
+  generateAgentRunPlan,
+  getAgentRunProgress,
   getConversationLatestAgentRun,
   getAgentRunSelection,
   listRunnableAgents,
+  respondToAgentRunClarification,
   selectToolForAgentRun,
   submitAgentRun,
+  validateAgentRunPlan,
+  type AgentRunProgressDto,
+  type AgentRunQuestionFieldDto,
   type AgentRunRequestDto,
   type AgentRunSelectionDto,
   type RunnableAgentDto,
 } from '../../api/agentRun';
+import type { JsonValue } from '../../api/types';
 
 function failureMessage(err: unknown): string {
   if (isApiError(err)) return err.message;
   return err instanceof Error ? err.message : '요청 처리 중 오류가 발생했습니다.';
+}
+
+
+function fieldValue(field: AgentRunQuestionFieldDto, raw: string): JsonValue {
+  const value = raw.trim();
+  if (!value) throw new Error('필수 입력값을 입력해 주세요: ' + field.name);
+  if (field.value_type === 'boolean') {
+    if (value === 'true') return true;
+    if (value === 'false') return false;
+    throw new Error('예 또는 아니오를 선택해 주세요: ' + field.name);
+  }
+  if (field.value_type === 'number' || field.value_type === 'integer') {
+    const numberValue = Number(value);
+    if (!Number.isFinite(numberValue) || (field.value_type === 'integer' && !Number.isInteger(numberValue))) {
+      throw new Error('유효한 숫자를 입력해 주세요: ' + field.name);
+    }
+    return numberValue;
+  }
+  if (field.value_type === 'object' || field.value_type === 'array') {
+    let parsed: JsonValue;
+    try {
+      parsed = JSON.parse(value) as JsonValue;
+    } catch {
+      throw new Error('올바른 JSON 형식으로 입력해 주세요: ' + field.name);
+    }
+    if (field.value_type === 'array' ? !Array.isArray(parsed) : !parsed || Array.isArray(parsed) || typeof parsed !== 'object') {
+      throw new Error('입력 형식을 확인해 주세요: ' + field.name);
+    }
+    return parsed;
+  }
+  return raw;
 }
 
 export default function AgentRunLive() {
@@ -29,6 +68,8 @@ export default function AgentRunLive() {
   const [prompt, setPrompt] = useState('');
   const [request, setRequest] = useState<AgentRunRequestDto | null>(null);
   const [selection, setSelection] = useState<AgentRunSelectionDto | null>(null);
+  const [progress, setProgress] = useState<AgentRunProgressDto | null>(null);
+  const [questionValues, setQuestionValues] = useState<Record<string, string>>({});
   const [loadingAgents, setLoadingAgents] = useState(true);
   const [working, setWorking] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -54,10 +95,13 @@ export default function AgentRunLive() {
       const latest = await getConversationLatestAgentRun(conversationId, signal);
       if (signal?.aborted) return;
       setRequest(latest);
-      const selected = await getAgentRunSelection(latest.id, signal);
+      const [selected, stage] = await Promise.all([
+        getAgentRunSelection(latest.id, signal), getAgentRunProgress(latest.id, signal),
+      ]);
       if (signal?.aborted) return;
-      setRequest(selected.request);
+      setRequest(stage.request);
       setSelection(selected.selection);
+      setProgress(stage);
       setError(null);
     } catch (err: unknown) {
       if (!isAbortError(err) && !signal?.aborted) setError(failureMessage(err));
@@ -68,12 +112,17 @@ export default function AgentRunLive() {
     if (!conversationId) {
       setRequest(null);
       setSelection(null);
+      setProgress(null);
       return;
     }
     const controller = new AbortController();
     void refresh(controller.signal);
     return () => controller.abort();
   }, [conversationId, refresh]);
+
+  useEffect(() => {
+    setQuestionValues({});
+  }, [progress?.open_clarification?.id]);
 
   const startAnalysis = async (requestId: string) => {
     try {
@@ -98,6 +147,7 @@ export default function AgentRunLive() {
       setPrompt('');
       setRequest(created);
       setSelection(null);
+      setProgress(null);
       navigate(`/run/${created.conversation_id}`);
       await startAnalysis(created.id);
     } catch (err: unknown) {
@@ -130,9 +180,64 @@ export default function AgentRunLive() {
       const selected = await selectToolForAgentRun(request.id);
       setRequest(selected.request);
       setSelection(selected.selection);
+      setProgress(await getAgentRunProgress(request.id));
     } catch (err: unknown) {
       setError(`Tool 검색·선택 확인 필요: ${failureMessage(err)}. 상태 새로고침으로 확인하세요.`);
       // Never auto-retry a possibly in-flight embedding / LLM selection.
+    } finally {
+      inFlight.current = false;
+      setWorking(false);
+    }
+  };
+
+
+  const handlePlanningStep = async () => {
+    if (inFlight.current || !request) return;
+    const status = request.status;
+    if (!['BUILDING_PARAMETERS', 'PLANNING', 'VALIDATING'].includes(status)) return;
+    inFlight.current = true;
+    setWorking(true);
+    setError(null);
+    try {
+      const result = status === 'BUILDING_PARAMETERS'
+        ? await buildAgentRunParameters(request.id)
+        : status === 'PLANNING'
+          ? await generateAgentRunPlan(request.id)
+          : await validateAgentRunPlan(request.id);
+      setRequest(result.request);
+      setProgress(result);
+    } catch (err: unknown) {
+      setError('계획 처리 결과 확인 필요: ' + failureMessage(err) + '. 상태 새로고침으로 확인하세요.');
+    } finally {
+      inFlight.current = false;
+      setWorking(false);
+    }
+  };
+
+  const handleClarification = async (confirmation?: boolean) => {
+    const clarification = progress?.open_clarification;
+    if (inFlight.current || !request || !clarification) return;
+    inFlight.current = true;
+    setWorking(true);
+    setError(null);
+    try {
+      let payload: Record<string, JsonValue>;
+      if (clarification.request_type === 'MISSING_PARAMETER') {
+        payload = {};
+        for (const field of clarification.fields) {
+          const raw = questionValues[field.name] ?? '';
+          if (!raw.trim() && !field.required) continue;
+          payload[field.name] = fieldValue(field, raw);
+        }
+      } else {
+        if (confirmation === undefined) throw new Error('확인 여부를 선택해 주세요.');
+        payload = { confirmed: confirmation };
+      }
+      await respondToAgentRunClarification(request.id, clarification.id, payload);
+      setQuestionValues({});
+      await refresh();
+    } catch (err: unknown) {
+      setError('추가 입력/확인 처리 실패: ' + failureMessage(err));
     } finally {
       inFlight.current = false;
       setWorking(false);
@@ -155,14 +260,13 @@ export default function AgentRunLive() {
           <Bot size={20} /> Agent 업무 지시
         </h1>
         <p className="text-sm text-slate-500 mt-1">
-          실제 DB와 ModelOps 분석을 사용합니다. 자연어 분석과 Tool 검색·선택까지 연결되었습니다.
-          계획 생성과 실제 실행은 다음 개발 범위입니다.
+          실제 DB와 ModelOps 분석을 사용합니다. Tool 선택부터 파라미터 구성·계획 생성·검증·확인까지 연결됩니다.
+          계획 확인 후에도 실제 MCP Tool 호출은 별도의 Execution에서 진행됩니다.
         </p>
       </header>
       <div className="rounded-lg border border-blue-200 bg-blue-50 p-3 text-sm text-blue-900">
-        <strong>현재 지원 범위:</strong> 실제 Agent 버전으로 요청 등록·LLM 분석·Tool 검색 및 선택.
-        RETRIEVING 상태에서 검색·선택 버튼을 눌러야 시작됩니다.
-        계획과 Execution은 아직 생성하지 않으며, 외부 MCP Tool은 호출하지 않습니다.
+        <strong>현재 지원 범위:</strong> 실제 Agent 요청 분석 → Tool 선택 → 입력값 구성 → 단일 Tool 실행계획 → 정책 검증/사용자 확인.
+        각 단계는 버튼으로 시작합니다. 계획 READY는 실제 실행 완료가 아니며 외부 MCP Tool을 호출하지 않습니다.
       </div>
 
       <section className="rounded-xl border border-slate-200 bg-white p-5 space-y-3">
@@ -223,8 +327,20 @@ export default function AgentRunLive() {
           {request.status === 'RECEIVED' && !working && (
             <Button size="sm" onClick={() => void handleResumeAnalysis()}>저장된 요청 분석 시작</Button>
           )}
-          {request.status === 'RETRIEVING' && !working && !selection && (
+          {request.status === 'RETRIEVING' && !working && (
             <Button size="sm" onClick={() => void handleSelectTool()}>실제 Tool 검색·선택</Button>
+          )}
+          {['BUILDING_PARAMETERS', 'PLANNING', 'VALIDATING'].includes(request.status) && !working && (
+            <Button size="sm" onClick={() => void handlePlanningStep()}>
+              {request.status === 'BUILDING_PARAMETERS'
+                ? '입력 파라미터 구성'
+                : request.status === 'PLANNING' ? '실행계획 생성' : '실행계획 검증'}
+            </Button>
+          )}
+          {request.status === 'READY' && (
+            <p className="text-sm text-green-800">
+              계획 검증이 완료됐습니다. 실제 Tool 실행은 별도의 Execution을 생성한 후 진행됩니다.
+            </p>
           )}
           {request.status === 'SELECTING' && !working && (
             <p className="text-sm text-amber-700">
@@ -261,7 +377,7 @@ export default function AgentRunLive() {
                 }, null, 2)}</pre>
               </div>
               {request.status === 'WAITING_INPUT' ? (
-                <p className="text-amber-700 text-sm">명확화가 필요합니다. 실제 질문 응답 연동은 후속 단계에서 제공합니다.</p>
+                <p className="text-amber-700 text-sm">추가 입력이 필요합니다. 아래 입력 항목을 확인해 주세요.</p>
               ) : (
                 <p className="text-sm text-slate-500">
                   {selection
@@ -296,6 +412,95 @@ export default function AgentRunLive() {
               <p className="text-xs text-indigo-700">
                 이 결과는 검색·선택 기록이며 MCP 호출 또는 업무 실행 완료를 의미하지 않습니다.
               </p>
+            </div>
+          )}
+
+          {progress?.parameter_build && (
+            <div className="rounded-lg bg-slate-50 p-3 space-y-1">
+              <h3 className="text-sm font-semibold">입력 파라미터 구성 결과</h3>
+              <p className="text-sm">{progress.parameter_build.is_complete ? '필수 입력 완료' : '추가 입력 필요'}</p>
+              {progress.parameter_build.missing_fields.length > 0 && (
+                <p className="text-xs">미입력 항목: {progress.parameter_build.missing_fields.join(', ')}</p>
+              )}
+            </div>
+          )}
+          {progress?.plan && (
+            <div className="rounded-lg bg-slate-50 p-3 space-y-2">
+              <h3 className="text-sm font-semibold">저장된 실행계획 요약</h3>
+              <p className="text-sm">목적: {progress.plan.goal ?? '목적 미지정'}</p>
+              <p className="text-sm">단계 수: {progress.plan.step_count}</p>
+              <p className="text-sm">단계: {progress.plan.step_names.join(', ') || '표시할 단계 없음'}</p>
+              <p className="text-xs font-mono break-all">Plan Hash: {progress.plan.plan_hash}</p>
+              <p className="text-xs text-slate-500">입력값·Secret 참조·원본 binding은 화면에 표시하지 않습니다.</p>
+            </div>
+          )}
+          {progress?.validation && (
+            <div className="rounded-lg bg-slate-50 p-3 space-y-1">
+              <h3 className="text-sm font-semibold">계획 검증 결과</h3>
+              <p className="text-sm">{progress.validation.decision}</p>
+              <p className="text-xs">
+                오류 {progress.validation.error_count}건 · 경고 {progress.validation.warning_count}건
+              </p>
+            </div>
+          )}
+          {progress?.open_clarification && (
+            <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 space-y-3">
+              <h3 className="text-sm font-semibold text-amber-900">
+                {progress.open_clarification.request_type === 'MISSING_PARAMETER'
+                  ? '추가 정보 입력' : progress.open_clarification.request_type === 'TOOL_CONFIRMATION'
+                    ? '선택 Tool 확인' : '실행계획 확인'}
+              </h3>
+              <p className="text-sm text-amber-900">{progress.open_clarification.prompt_text}</p>
+              {progress.open_clarification.request_type === 'MISSING_PARAMETER' ? (
+                <>
+                  <p className="text-xs text-amber-800">비밀번호·토큰 등 원문 비밀정보를 직접 입력하지 마세요.</p>
+                  {progress.open_clarification.fields.map((field) => (
+                    <div key={field.name} className="space-y-1">
+                      <label className="block text-sm font-medium text-amber-900" htmlFor={'question-' + field.name}>
+                        {field.name}{field.required ? ' (필수)' : ''}
+                      </label>
+                      {field.description && <p className="text-xs">{field.description}</p>}
+                      {field.value_type === 'boolean' ? (
+                        <select
+                          id={'question-' + field.name}
+                          className="w-full border rounded p-2 text-sm"
+                          disabled={working}
+                          value={questionValues[field.name] ?? ''}
+                          onChange={(event) => setQuestionValues((prev) => ({ ...prev, [field.name]: event.target.value }))}
+                        >
+                          <option value="">선택해 주세요</option>
+                          <option value="true">예</option>
+                          <option value="false">아니오</option>
+                        </select>
+                      ) : (
+                        <input
+                          id={'question-' + field.name}
+                          type={field.value_type === 'integer' || field.value_type === 'number' ? 'number' : 'text'}
+                          step={field.value_type === 'integer' ? '1' : 'any'}
+                          className="w-full border rounded p-2 text-sm"
+                          disabled={working}
+                          placeholder={field.value_type === 'object' || field.value_type === 'array'
+                            ? 'JSON 형식으로 입력' : '값을 입력해 주세요'}
+                          value={questionValues[field.name] ?? ''}
+                          onChange={(event) => setQuestionValues((prev) => ({ ...prev, [field.name]: event.target.value }))}
+                        />
+                      )}
+                    </div>
+                  ))}
+                  <Button size="sm" disabled={working} onClick={() => void handleClarification()}>
+                    입력 내용 제출
+                  </Button>
+                </>
+              ) : (
+                <div className="flex gap-2">
+                  <Button size="sm" disabled={working} onClick={() => void handleClarification(true)}>
+                    확인하고 계속
+                  </Button>
+                  <Button size="sm" variant="outline" disabled={working} onClick={() => void handleClarification(false)}>
+                    거절하고 종료
+                  </Button>
+                </div>
+              )}
             </div>
           )}
           <div className="border-t pt-3 flex items-center gap-3 text-sm text-slate-500">

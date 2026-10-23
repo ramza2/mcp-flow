@@ -688,6 +688,11 @@ GET  /api/v1/agent-requests/{request_id}
 GET  /api/v1/agent-requests/conversations/{conversation_id}/latest
 GET  /api/v1/agent-requests/{request_id}/selection
 POST /api/v1/agent-requests/{request_id}/select-tool
+GET  /api/v1/agent-requests/{request_id}/progress
+POST /api/v1/agent-requests/{request_id}/build-parameters
+POST /api/v1/agent-requests/{request_id}/generate-plan
+POST /api/v1/agent-requests/{request_id}/validate-plan
+POST /api/v1/agent-requests/{request_id}/clarifications/{clarification_id}/responses
 ```
 
 - `POST /agent-requests`는 `agent_id`, `request_text`로 Conversation·USER message·RECEIVED AgentRequest만 원자적으로 생성한다.
@@ -695,7 +700,12 @@ POST /api/v1/agent-requests/{request_id}/select-tool
 - `select-tool`은 RETRIEVING 상태에서만 기존 ToolSelector(권한 적용 검색/평가)를 명시적으로 호출한다. MCP Tool 호출이나 Execution 생성은 하지 않는다.
 - `GET /selection`은 요청 소유자에게 최근 ToolSelectionRun의 안전한 요약(`decision`, 선택 Tool 이름/버전, `confidence`, `reason_summary`, 시각)과 현재 요청 상태를 반환한다. 실행 증적/비밀/내부 프롬프트는 노출하지 않는다. 선택 이력이 없으면 `selection=null`이다.
 - 상태는 AgentRequest와 ToolSelectionRun을 그대로 사용하며 별도 상태값·DB 테이블은 추가하지 않는다. 중복 요청은 상태 검사/CAS로 거절하며 클라이언트 자동 재시도는 없다.
-- 실제 Plan 생성, 사용자 확인 응답, Execution 생성·MCP 호출은 후속 연결 범위다.
+- `build-parameters`는 BUILDING_PARAMETERS에서 기존 ParameterBuilder를 호출해 PLANNING 또는 WAITING_INPUT으로 전이한다.
+- `generate-plan`은 PLANNING에서 기존 deterministic 단일 TOOL PlanGenerator를 호출해 VALIDATING으로 전이한다. 복합 Plan 저작 기능을 새로 만들지 않는다.
+- `validate-plan`은 VALIDATING에서 기존 PlanValidator를 호출해 READY/WAITING_CONFIRMATION/REJECTED/FAILED로 전이한다.
+- `GET /progress`는 요청 소유자에게 최근 ParameterBuild/PlanGeneration/PlanValidation와 현재 OPEN Clarification의 제한된 요약을 반환한다. 원본 `bindings_snapshot`, `plan_snapshot`, secret·response payload·정책 상세는 내보내지 않는다.
+- 사용자 확인은 기존 `POST /clarifications/{id}/responses`의 `{"response_payload":{"confirmed":true|false}}`를 사용한다. 동의 후에는 계획을 다시 VALIDATING에서 검증하고, 거절은 CANCELLED로 종료한다.
+- 각 단계는 명시적 1회 호출이며 상태/CAS 충돌은 409로 거절한다. 외부 MCP Tool 실행 및 Execution 생성은 아직 Agent Run UI에서 시작하지 않는다.
 
 ### 11.2 READY Response
 
