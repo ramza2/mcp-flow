@@ -987,6 +987,16 @@ GET  /executions/{execution_id}/artifacts     # deferred
 GET  /executions/{execution_id}/metrics       # deferred
 ```
 
+Agent Run 화면에서는 검증 완료된 `READY` 요청을 사용자가 명시적으로 확인한 뒤
+`POST /agent-requests/{request_id}/executions`를 호출한다. 생성 응답은
+`CREATED`이며 실제 Worker 완료를 의미하지 않는다. 진행 상태·Step·결과는 기존
+Execution 상세 조회와 SSE(실패 시 polling)로 확인한다. 모호한 네트워크 실패 시
+생성을 자동 재호출하지 않고 이력 조회로 영속 상태부터 확인한다.
+
+`GET /api/v1/executions`는 선택적 UUID 필터 `agent_request_id`를 지원한다.
+해당 요청의 Execution을 F5 이후에도 복원하기 위한 필터이며, 기존 자기 이력
+또는 `execution.read` 권한 범위는 동일하게 적용된다.
+
 ### 14.1 Execution Source
 
 ```text

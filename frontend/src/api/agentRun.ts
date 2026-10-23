@@ -1,4 +1,4 @@
-/** Real AgentRun planning API. Execution and MCP calls remain separate. */
+/** Real AgentRun planning + explicit Execution creation API. */
 import { apiRequest } from './client';
 import type { JsonValue } from './types';
 import type { AgentRequestStatus } from '../domain';
@@ -158,5 +158,26 @@ export function respondToAgentRunClarification(
   }>(`/agent-requests/${requestId}/clarifications/${clarificationId}/responses`, {
     method: 'POST',
     body: { response_payload: responsePayload },
+  });
+}
+
+/** Execution is created only by the user's explicit action; queue/worker runs asynchronously. */
+export interface AgentRunExecutionCreateDto {
+  id: string;
+  status: string;
+  source_type: string;
+  trigger_type: string;
+  agent_request_id: string;
+  agent_version_id: string;
+  plan_hash: string;
+  requested_at: string;
+  step_count: number;
+}
+
+export function createAgentRunExecution(requestId: string) {
+  // Stable per-request key prevents duplicate creation on timeout/F5/manual retry.
+  return apiRequest<AgentRunExecutionCreateDto>(`/agent-requests/${requestId}/executions`, {
+    method: 'POST',
+    headers: { 'Idempotency-Key': `agent-run:${requestId}` },
   });
 }

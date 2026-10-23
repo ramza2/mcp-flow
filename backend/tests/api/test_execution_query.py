@@ -817,3 +817,19 @@ async def test_terminal_duration_null_and_safe_result_summary(
     assert "input_snapshot" not in body
     assert "policy_snapshot" not in body
     assert "plan_snapshot" not in body
+
+
+@pytest.mark.asyncio
+async def test_agent_request_id_query_param_validates_uuid(
+    unauthenticated_db_client: AsyncClient,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    client, _user_id = await _client_for(
+        unauthenticated_db_client, db_session_factory, with_execution_read=False
+    )
+    valid = await client.get(API, params={"agent_request_id": str(uuid.uuid4())})
+    assert valid.status_code == 200, valid.text
+    assert valid.json()["items"] == []
+
+    invalid = await client.get(API, params={"agent_request_id": "not-a-uuid"})
+    assert invalid.status_code == 422

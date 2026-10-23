@@ -150,6 +150,7 @@ export interface ExecutionListParams {
   source_type?: string;
   trigger_type?: string;
   requester_id?: string;
+  agent_request_id?: string;
   agent_version_id?: string;
   workflow_version_id?: string;
   schedule_occurrence_id?: string;
@@ -172,6 +173,7 @@ export function listExecutions(params: ExecutionListParams = {}) {
       source_type: params.source_type,
       trigger_type: params.trigger_type,
       requester_id: params.requester_id,
+      agent_request_id: params.agent_request_id,
       agent_version_id: params.agent_version_id,
       workflow_version_id: params.workflow_version_id,
       schedule_occurrence_id: params.schedule_occurrence_id,

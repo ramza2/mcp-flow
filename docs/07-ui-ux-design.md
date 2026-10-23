@@ -340,6 +340,11 @@ Agent 선택
 
 **Planning 전 WAITING_INPUT**과 **Execution 중 MRTR WAITING_INPUT**을 UI에서 구분한다.
 
+Agent Run의 `READY`는 실행 완료가 아니다. 실제 업무 실행 시작 전에 외부 부작용
+확인을 요구하고, 생성 시 `Idempotency-Key`를 사용한다. 실행 생성 후에는
+`/executions/:executionId`로 이동한다. F5 재진입 시 `agent_request_id`로
+기존 실행을 복원하고 중복 시작 버튼 대신 실행 상세 진입을 제공한다.
+
 예:
 
 ```text
