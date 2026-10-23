@@ -15,8 +15,16 @@ export type ToolVerificationStatus = (typeof TOOL_VERIFICATION_STATUSES)[number]
 export const AGENT_STATUSES = ['DRAFT', 'ACTIVE', 'INACTIVE', 'ARCHIVED'] as const;
 export type AgentStatus = (typeof AGENT_STATUSES)[number];
 
+/** docs/05 agents.visibility */
+export const AGENT_VISIBILITIES = ['PRIVATE', 'RESTRICTED', 'INTERNAL'] as const;
+export type AgentVisibility = (typeof AGENT_VISIBILITIES)[number];
+
 export const AGENT_VERSION_STATUSES = ['DRAFT', 'PUBLISHED', 'DEPRECATED'] as const;
 export type AgentVersionStatus = (typeof AGENT_VERSION_STATUSES)[number];
+
+/** docs/05 agent_versions.validation_status — not ToolVersion WARNING. */
+export const AGENT_VERSION_VALIDATION_STATUSES = ['VALID', 'INVALID'] as const;
+export type AgentVersionValidationStatus = (typeof AGENT_VERSION_VALIDATION_STATUSES)[number];
 
 export const WORKFLOW_STATUSES = ['DRAFT', 'ACTIVE', 'INACTIVE', 'ARCHIVED'] as const;
 export type WorkflowStatus = (typeof WORKFLOW_STATUSES)[number];

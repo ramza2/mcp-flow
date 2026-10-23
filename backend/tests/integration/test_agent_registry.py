@@ -218,20 +218,23 @@ async def test_agent_patch_cas(
     integration_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     async with integration_session_factory() as session:
+        owner_id = uuid.uuid4()
         agent = await AgentService(session).create(
-            AgentCreate(name="CAS Agent", visibility=AgentVisibility.PRIVATE)
+            AgentCreate(name="CAS Agent", visibility=AgentVisibility.PRIVATE),
+            owner_id=owner_id,
         )
         agent_id = agent.id
 
     async def _patch(name: str) -> str | None:
         async with integration_session_factory() as session:
             service = AgentService(session)
-            current = await service.get(agent_id)
+            current = await service.get(agent_id, viewer_id=owner_id)
             try:
                 updated = await service.update(
                     agent_id,
                     AgentUpdate(name=name, lock_version=current.lock_version),
                     expected_lock_version=int(current.lock_version),
+                    actor_id=owner_id,
                 )
                 return updated.name
             except Exception as exc:  # noqa: BLE001
@@ -257,7 +260,9 @@ async def test_concurrent_version_create(
     integration_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     async with integration_session_factory() as session:
-        agent = await AgentService(session).create(AgentCreate(name="VerRace"))
+        agent = await AgentService(session).create(
+            AgentCreate(name="VerRace"), owner_id=uuid.uuid4()
+        )
         agent_id = agent.id
 
     async def _create(summary: str) -> int | str:
@@ -297,7 +302,7 @@ async def test_concurrent_publish(
     async with integration_session_factory() as session:
         service = AgentService(session)
         version_service = AgentVersionService(session)
-        agent = await service.create(AgentCreate(name="PubRace"))
+        agent = await service.create(AgentCreate(name="PubRace"), owner_id=uuid.uuid4())
         agent_id = agent.id
         profile_id = await _seed_llm_profile(session)
         v2 = await version_service.create_version(
@@ -426,7 +431,9 @@ async def test_clone_holds_source_lock_before_grant_replace(
     new_fp = canonical_grant_fingerprint(new_items)
 
     async with integration_session_factory() as session:
-        agent = await AgentService(session).create(AgentCreate(name="CloneLockA"))
+        agent = await AgentService(session).create(
+            AgentCreate(name="CloneLockA"), owner_id=uuid.uuid4()
+        )
         agent_id = agent.id
         source = await AgentVersionService(session).create_version(
             agent_id, _version_create(change_summary="source")
@@ -550,7 +557,9 @@ async def test_grant_replace_holds_source_lock_before_clone(
     new_fp = canonical_grant_fingerprint(new_items)
 
     async with integration_session_factory() as session:
-        agent = await AgentService(session).create(AgentCreate(name="CloneLockB"))
+        agent = await AgentService(session).create(
+            AgentCreate(name="CloneLockB"), owner_id=uuid.uuid4()
+        )
         agent_id = agent.id
         source = await AgentVersionService(session).create_version(
             agent_id, _version_create(change_summary="source")

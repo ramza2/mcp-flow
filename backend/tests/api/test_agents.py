@@ -85,18 +85,39 @@ async def _seed_tool(db_session_factory, *, status: str = "ACTIVE") -> uuid.UUID
         return tool.id
 
 
+async def _session_user_id(client: AsyncClient) -> str:
+    session = await client.get("/api/v1/auth/session")
+    assert session.status_code == 200, session.text
+    return session.json()["user"]["id"]
+
+
 @pytest.mark.asyncio
 async def test_agent_crud_list_and_patch(db_client: AsyncClient) -> None:
+    user_id = await _session_user_id(db_client)
     created = await _create_agent(db_client, name="Alpha Agent")
     assert created["status"] == "DRAFT"
     assert created["visibility"] == "PRIVATE"
     assert created["lock_version"] == 1
     assert created["current_version_id"] is None
+    assert created["owner_id"] == user_id
+    assert created["created_by"] == user_id
     assert "code" in created
+
+    # Client cannot assign owner_id on create (extra=forbid).
+    hijack = await db_client.post(
+        API,
+        json={
+            "name": "Hijack",
+            "visibility": "PRIVATE",
+            "owner_id": str(uuid.uuid4()),
+        },
+    )
+    assert hijack.status_code == 422
 
     detail = await db_client.get(f"{API}/{created['id']}")
     assert detail.status_code == 200
     assert detail.json()["name"] == "Alpha Agent"
+    assert detail.json()["owner_id"] == user_id
 
     listing = await db_client.get(API, params={"q": "Alpha"})
     assert listing.status_code == 200
@@ -112,6 +133,7 @@ async def test_agent_crud_list_and_patch(db_client: AsyncClient) -> None:
     assert body["name"] == "Alpha Renamed"
     assert body["visibility"] == "INTERNAL"
     assert body["lock_version"] == 2
+    assert body["owner_id"] == user_id
 
 
 @pytest.mark.asyncio
@@ -652,3 +674,64 @@ async def test_grant_change_invalidates_validation_and_blocks_publish(
     published = await db_client.post(f"{API}/{agent_id}/versions/{version_id}/publish")
     assert published.status_code == 200
     assert published.json()["status"] == "PUBLISHED"
+
+
+@pytest.mark.asyncio
+async def test_agent_private_visibility_hides_other_owners_agents(
+    db_client: AsyncClient,
+    db_session_factory,
+) -> None:
+    """PRIVATE/RESTRICTED registry rows are owner-scoped; INTERNAL remains shared."""
+    from app.repositories.agent import AgentRepository
+
+    other_id = uuid.uuid4()
+    async with db_session_factory() as session:
+        private_other = await AgentRepository(session).create(
+            code=f"priv-{uuid.uuid4().hex[:8]}",
+            name="Other Private Agent",
+            visibility="PRIVATE",
+            status="DRAFT",
+            owner_id=other_id,
+        )
+        restricted_other = await AgentRepository(session).create(
+            code=f"rest-{uuid.uuid4().hex[:8]}",
+            name="Other Restricted Agent",
+            visibility="RESTRICTED",
+            status="DRAFT",
+            owner_id=other_id,
+        )
+        internal_other = await AgentRepository(session).create(
+            code=f"intl-{uuid.uuid4().hex[:8]}",
+            name="Other Internal Agent",
+            visibility="INTERNAL",
+            status="DRAFT",
+            owner_id=other_id,
+        )
+        await session.commit()
+        private_id = private_other.id
+        restricted_id = restricted_other.id
+        internal_id = internal_other.id
+
+    own = await _create_agent(db_client, name="Mine Private", visibility="PRIVATE")
+    own_id = own["id"]
+
+    listing = await db_client.get(API, params={"page_size": 100})
+    assert listing.status_code == 200
+    ids = {item["id"] for item in listing.json()["items"]}
+    assert own_id in ids
+    assert str(internal_id) in ids
+    assert str(private_id) not in ids
+    assert str(restricted_id) not in ids
+
+    assert (await db_client.get(f"{API}/{own_id}")).status_code == 200
+    assert (await db_client.get(f"{API}/{internal_id}")).status_code == 200
+    assert (await db_client.get(f"{API}/{private_id}")).status_code == 404
+    assert (await db_client.get(f"{API}/{restricted_id}")).status_code == 404
+
+    # Mutations on another owner's INTERNAL agent are not allowed.
+    mutate = await db_client.patch(
+        f"{API}/{internal_id}",
+        headers={"If-Match": "1"},
+        json={"name": "Hijacked", "lock_version": 1},
+    )
+    assert mutate.status_code == 404

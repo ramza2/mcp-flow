@@ -43,6 +43,40 @@ class AgentService:
             )
         return agent
 
+    @staticmethod
+    def is_visible(agent: Agent, viewer_id: uuid.UUID) -> bool:
+        """Registry/read visibility — INTERNAL shared; PRIVATE/RESTRICTED owner-only."""
+
+        if agent.visibility == AgentVisibility.INTERNAL:
+            return True
+        return agent.owner_id is not None and agent.owner_id == viewer_id
+
+    async def require_visible(
+        self, agent_id: uuid.UUID, *, viewer_id: uuid.UUID
+    ) -> Agent:
+        agent = await self._require(agent_id)
+        if not self.is_visible(agent, viewer_id):
+            raise AppError(
+                code="NOT_FOUND",
+                message="Agent not found.",
+                status_code=status.HTTP_404_NOT_FOUND,
+            )
+        return agent
+
+    async def require_owned(
+        self, agent_id: uuid.UUID, *, owner_id: uuid.UUID
+    ) -> Agent:
+        """Mutations require ownership (404, not 403 — match Schedule / Run submit)."""
+
+        agent = await self._require(agent_id)
+        if agent.owner_id is None or agent.owner_id != owner_id:
+            raise AppError(
+                code="NOT_FOUND",
+                message="Agent not found.",
+                status_code=status.HTTP_404_NOT_FOUND,
+            )
+        return agent
+
     def _raise_version_conflict(self) -> None:
         raise AppError(
             code="RESOURCE_VERSION_CONFLICT",
@@ -50,7 +84,7 @@ class AgentService:
             status_code=status.HTTP_409_CONFLICT,
         )
 
-    async def create(self, data: AgentCreate) -> Agent:
+    async def create(self, data: AgentCreate, *, owner_id: uuid.UUID) -> Agent:
         code = _generate_agent_code(data.name)
         if await self._agents.get_by_code(code) is not None:
             code = _generate_agent_code(data.name)
@@ -61,6 +95,8 @@ class AgentService:
             description=data.description,
             visibility=str(data.visibility),
             status=AgentStatus.DRAFT,
+            owner_id=owner_id,
+            created_by=owner_id,
         )
         await self._session.commit()
         await self._session.refresh(agent)
@@ -69,6 +105,7 @@ class AgentService:
     async def list(
         self,
         *,
+        viewer_id: uuid.UUID,
         page: int = 1,
         page_size: int = 20,
         status_filter: str | None = None,
@@ -81,10 +118,11 @@ class AgentService:
             status=status_filter,
             q=q,
             sort=sort,
+            viewer_id=viewer_id,
         )
 
-    async def get(self, agent_id: uuid.UUID) -> Agent:
-        return await self._require(agent_id)
+    async def get(self, agent_id: uuid.UUID, *, viewer_id: uuid.UUID) -> Agent:
+        return await self.require_visible(agent_id, viewer_id=viewer_id)
 
     async def update(
         self,
@@ -92,8 +130,9 @@ class AgentService:
         data: AgentUpdate,
         *,
         expected_lock_version: int,
+        actor_id: uuid.UUID,
     ) -> Agent:
-        agent = await self._require(agent_id)
+        agent = await self.require_owned(agent_id, owner_id=actor_id)
         payload = data.model_dump(exclude_unset=True, exclude={"lock_version"})
 
         if "status" in payload:
@@ -106,6 +145,7 @@ class AgentService:
         updated = await self._agents.update_atomic(
             agent_id,
             expected_lock_version=expected_lock_version,
+            updated_by=actor_id,
             **payload,
         )
         if updated is None:

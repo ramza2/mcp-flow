@@ -71,9 +71,21 @@ class AgentRepository:
         status: str | None = None,
         q: str | None = None,
         sort: str = "-updated_at",
+        viewer_id: uuid.UUID | None = None,
     ) -> tuple[list[Agent], int]:
+        """List Agents. When viewer_id is set, only INTERNAL or owned rows are returned."""
+
         field, direction = parse_sort(sort, allowed=ALLOWED_AGENT_SORT)
         stmt = self._live()
+
+        if viewer_id is not None:
+            # Match Agent Run visibility: INTERNAL is shared; PRIVATE/RESTRICTED are owner-only.
+            stmt = stmt.where(
+                or_(
+                    Agent.visibility == "INTERNAL",
+                    Agent.owner_id == viewer_id,
+                )
+            )
 
         if status:
             statuses = [part.strip() for part in status.split(",") if part.strip()]
