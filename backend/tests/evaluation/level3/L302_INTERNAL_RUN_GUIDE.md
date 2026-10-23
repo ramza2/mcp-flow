@@ -66,11 +66,13 @@ docker compose --env-file .env.server \
 
 ### A. 실제 Published AgentVersion 조회 (DB SELECT만)
 
+**주의:** `docker compose exec api python`은 컨테이너 PID 1의 환경설정을 자동 상속하지 않아 `MCPFLOW_DATABASE_URL`이 없을 수 있습니다. `/entrypoint.sh python`을 명시적으로 실행하면 기존 secret file로부터 이 변수를 현재 Python 프로세스용으로 안전하게 조립합니다. DB URL이나 비밀번호는 절대 출력하지 않습니다.
+
 ```bash
 cd ~/mcp-flow
 docker compose --env-file .env.server \
   -f compose.yaml -f compose.server.yaml \
-  exec -T api python - <<'PY'
+  exec -T api /entrypoint.sh python - <<'PY'
 import asyncio
 import os
 from urllib.parse import urlsplit
