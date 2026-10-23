@@ -1,4 +1,4 @@
-/** Real AgentRun analysis + Tool selection API. No fake executions or MCP calls. */
+/** Real AgentRun planning API. Execution and MCP calls remain separate. */
 import { apiRequest } from './client';
 import type { JsonValue } from './types';
 import type { AgentRequestStatus } from '../domain';
@@ -77,4 +77,86 @@ export function getConversationLatestAgentRun(conversationId: string, signal?: A
     `/agent-requests/conversations/${conversationId}/latest`,
     { signal },
   );
+}
+
+
+export interface AgentRunParameterDto {
+  id: string;
+  tool_version_id: string;
+  is_complete: boolean;
+  missing_fields: string[];
+  created_at: string;
+}
+
+export interface AgentRunPlanDto {
+  id: string;
+  plan_hash: string;
+  goal: string | null;
+  step_names: string[];
+  step_count: number;
+  created_at: string;
+}
+
+export interface AgentRunValidationDto {
+  id: string;
+  decision: string;
+  confirmation_required: boolean;
+  error_count: number;
+  warning_count: number;
+  created_at: string;
+}
+
+export interface AgentRunQuestionFieldDto {
+  name: string;
+  value_type: string;
+  description: string | null;
+  required: boolean;
+}
+
+export interface AgentRunClarificationDto {
+  id: string;
+  request_type: 'MISSING_PARAMETER' | 'TOOL_CONFIRMATION' | 'PLAN_CONFIRMATION';
+  prompt_text: string;
+  fields: AgentRunQuestionFieldDto[];
+  requested_at: string;
+}
+
+export interface AgentRunProgressDto {
+  request: AgentRunRequestDto;
+  parameter_build: AgentRunParameterDto | null;
+  plan: AgentRunPlanDto | null;
+  validation: AgentRunValidationDto | null;
+  open_clarification: AgentRunClarificationDto | null;
+}
+
+export function getAgentRunProgress(requestId: string, signal?: AbortSignal) {
+  return apiRequest<AgentRunProgressDto>(`/agent-requests/${requestId}/progress`, { signal });
+}
+
+export function buildAgentRunParameters(requestId: string) {
+  return apiRequest<AgentRunProgressDto>(`/agent-requests/${requestId}/build-parameters`, { method: 'POST' });
+}
+
+export function generateAgentRunPlan(requestId: string) {
+  return apiRequest<AgentRunProgressDto>(`/agent-requests/${requestId}/generate-plan`, { method: 'POST' });
+}
+
+export function validateAgentRunPlan(requestId: string) {
+  return apiRequest<AgentRunProgressDto>(`/agent-requests/${requestId}/validate-plan`, { method: 'POST' });
+}
+
+export function respondToAgentRunClarification(
+  requestId: string,
+  clarificationId: string,
+  responsePayload: Record<string, JsonValue>,
+) {
+  return apiRequest<{
+    agent_request_id: string;
+    clarification_id: string;
+    clarification_status: string;
+    agent_request_status: AgentRequestStatus;
+  }>(`/agent-requests/${requestId}/clarifications/${clarificationId}/responses`, {
+    method: 'POST',
+    body: { response_payload: responsePayload },
+  });
 }
