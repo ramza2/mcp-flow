@@ -10,6 +10,9 @@ from fastapi import APIRouter, Header, Response, status
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 
+from app.agent.parameter_builder import ParameterBuilderService
+from app.agent.plan_generator import PlanGeneratorService
+from app.agent.plan_validator import PlanValidatorService
 from app.agent.request_analyzer import RequestAnalyzerService
 from app.agent.tool_selector import ToolSelectorService
 from app.api.dependencies import CurrentPrincipalDep, DbSessionDep
@@ -21,7 +24,11 @@ from app.models.mcp import MCPTool, MCPToolVersion
 from app.repositories.agent import AgentRepository
 from app.repositories.agent_request import AgentRequestRepository
 from app.repositories.agent_version import AgentVersionRepository
+from app.repositories.clarification_request import ClarificationRequestRepository
 from app.repositories.conversation import ConversationRepository
+from app.repositories.parameter_build import ParameterBuildRepository
+from app.repositories.plan_generation import PlanGenerationRepository
+from app.repositories.plan_validation import PlanValidationRepository
 from app.repositories.tool_selection import ToolSelectionRepository
 from app.schemas.clarification import (
     ClarificationResponseResult,
@@ -176,6 +183,144 @@ async def _selection_result(
         selection=await _selection_view(session, run) if run is not None else None,
     )
 
+
+class AgentRunParameterView(BaseModel):
+    id: uuid.UUID
+    tool_version_id: uuid.UUID
+    is_complete: bool
+    missing_fields: list[str]
+    created_at: datetime
+
+
+class AgentRunPlanView(BaseModel):
+    id: uuid.UUID
+    plan_hash: str
+    goal: str | None
+    step_names: list[str]
+    step_count: int
+    created_at: datetime
+
+
+class AgentRunValidationView(BaseModel):
+    id: uuid.UUID
+    decision: str
+    confirmation_required: bool
+    error_count: int
+    warning_count: int
+    created_at: datetime
+
+
+class AgentRunQuestionFieldView(BaseModel):
+    name: str
+    value_type: str
+    description: str | None
+    required: bool
+
+
+class AgentRunClarificationView(BaseModel):
+    id: uuid.UUID
+    request_type: str
+    prompt_text: str
+    fields: list[AgentRunQuestionFieldView]
+    requested_at: datetime
+
+
+class AgentRunProgressResult(BaseModel):
+    request: AgentRunRequestView
+    parameter_build: AgentRunParameterView | None
+    plan: AgentRunPlanView | None
+    validation: AgentRunValidationView | None
+    open_clarification: AgentRunClarificationView | None
+
+
+def _question_fields(question_schema: Any) -> list[AgentRunQuestionFieldView]:
+    """Allowlisted question-field projection; never return raw schema/secret values."""
+    if not isinstance(question_schema, dict):
+        return []
+    properties = question_schema.get("properties")
+    if not isinstance(properties, dict):
+        return []
+    required = question_schema.get("required")
+    required_names = required if isinstance(required, list) else []
+    fields: list[AgentRunQuestionFieldView] = []
+    for name, schema in list(properties.items())[:50]:
+        if not isinstance(name, str) or not isinstance(schema, dict):
+            continue
+        value_type = schema.get("type")
+        if value_type not in {"string", "number", "integer", "boolean", "object", "array"}:
+            value_type = "string"
+        description = schema.get("description")
+        fields.append(AgentRunQuestionFieldView(
+            name=name,
+            value_type=value_type,
+            description=description[:250] if isinstance(description, str) else None,
+            required=name in required_names,
+        ))
+    return fields
+
+
+async def _progress_result(
+    session: DbSessionDep, request: AgentRequest
+) -> AgentRunProgressResult:
+    parameter = await ParameterBuildRepository(session).get_latest_for_agent_request(
+        request.id
+    )
+    plan = await PlanGenerationRepository(session).get_latest_for_agent_request(
+        request.id
+    )
+    validation = await PlanValidationRepository(session).get_latest_for_agent_request(
+        request.id
+    )
+    clarification = await ClarificationRequestRepository(session).get_open_for_agent_request(
+        request.id
+    )
+    plan_view: AgentRunPlanView | None = None
+    if plan is not None:
+        snapshot = plan.plan_snapshot if isinstance(plan.plan_snapshot, dict) else {}
+        steps = snapshot.get("steps")
+        step_items = steps if isinstance(steps, list) else []
+        names = [
+            step["name"][:200]
+            for step in step_items[:50]
+            if isinstance(step, dict) and isinstance(step.get("name"), str)
+        ]
+        goal = snapshot.get("goal")
+        plan_view = AgentRunPlanView(
+            id=plan.id,
+            plan_hash=plan.plan_hash,
+            goal=goal[:500] if isinstance(goal, str) else None,
+            step_names=names,
+            step_count=len(step_items),
+            created_at=plan.created_at,
+        )
+    return AgentRunProgressResult(
+        request=_view(request),
+        parameter_build=AgentRunParameterView(
+            id=parameter.id,
+            tool_version_id=parameter.tool_version_id,
+            is_complete=parameter.is_complete,
+            missing_fields=list(parameter.missing_fields or []),
+            created_at=parameter.created_at,
+        ) if parameter is not None else None,
+        plan=plan_view,
+        validation=AgentRunValidationView(
+            id=validation.id,
+            decision=validation.decision,
+            confirmation_required=validation.confirmation_required,
+            error_count=len(validation.errors or []),
+            warning_count=len(validation.warnings or []),
+            created_at=validation.created_at,
+        ) if validation is not None else None,
+        open_clarification=AgentRunClarificationView(
+            id=clarification.id,
+            request_type=clarification.request_type,
+            prompt_text=clarification.prompt_text,
+            fields=_question_fields(clarification.question_schema),
+            requested_at=clarification.requested_at,
+        ) if clarification is not None else None,
+    )
+
+
 @router.post("", response_model=AgentRunRequestView, status_code=status.HTTP_201_CREATED)
 async def submit_agent_run(
     body: AgentRunSubmit,
@@ -329,6 +474,71 @@ async def select_agent_run_tool(
         ) from exc
     await session.refresh(request)
     return await _selection_result(session, request)
+
+
+
+@router.get("/{request_id}/progress", response_model=AgentRunProgressResult)
+async def get_agent_run_progress(
+    request_id: uuid.UUID,
+    session: DbSessionDep,
+    principal: CurrentPrincipalDep,
+) -> AgentRunProgressResult:
+    request = await _owned_request(session, request_id, principal.user_id)
+    return await _progress_result(session, request)
+
+
+@router.post("/{request_id}/build-parameters", response_model=AgentRunProgressResult)
+async def build_agent_run_parameters(
+    request_id: uuid.UUID,
+    session: DbSessionDep,
+    principal: CurrentPrincipalDep,
+) -> AgentRunProgressResult:
+    request = await _owned_request(session, request_id, principal.user_id)
+    if request.status != "BUILDING_PARAMETERS":
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message="파라미터를 구성할 수 없는 요청 상태입니다.",
+            status_code=409,
+        )
+    await ParameterBuilderService(session).build(agent_request_id=request_id)
+    await session.refresh(request)
+    return await _progress_result(session, request)
+
+
+@router.post("/{request_id}/generate-plan", response_model=AgentRunProgressResult)
+async def generate_agent_run_plan(
+    request_id: uuid.UUID,
+    session: DbSessionDep,
+    principal: CurrentPrincipalDep,
+) -> AgentRunProgressResult:
+    request = await _owned_request(session, request_id, principal.user_id)
+    if request.status != "PLANNING":
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message="계획을 생성할 수 없는 요청 상태입니다.",
+            status_code=409,
+        )
+    await PlanGeneratorService(session).generate(agent_request_id=request_id)
+    await session.refresh(request)
+    return await _progress_result(session, request)
+
+
+@router.post("/{request_id}/validate-plan", response_model=AgentRunProgressResult)
+async def validate_agent_run_plan(
+    request_id: uuid.UUID,
+    session: DbSessionDep,
+    principal: CurrentPrincipalDep,
+) -> AgentRunProgressResult:
+    request = await _owned_request(session, request_id, principal.user_id)
+    if request.status != "VALIDATING":
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message="계획을 검증할 수 없는 요청 상태입니다.",
+            status_code=409,
+        )
+    await PlanValidatorService(session).validate(agent_request_id=request_id)
+    await session.refresh(request)
+    return await _progress_result(session, request)
 
 
 @router.post(
