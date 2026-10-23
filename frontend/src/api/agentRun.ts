@@ -1,4 +1,4 @@
-/** Real AgentRun phase-1 API. No mock agents, fake executions or auto Tool calls. */
+/** Real AgentRun analysis + Tool selection API. No fake executions or MCP calls. */
 import { apiRequest } from './client';
 import type { JsonValue } from './types';
 import type { AgentRequestStatus } from '../domain';
@@ -38,6 +38,34 @@ export function analyzeAgentRun(requestId: string) {
   return apiRequest<AgentRunRequestDto>(`/agent-requests/${requestId}/analyze`, {
     method: 'POST',
   });
+}
+
+export interface AgentRunSelectionDto {
+  id: string;
+  decision: 'AUTO_SELECT' | 'CONFIRM' | 'CLARIFY' | 'NO_MATCH';
+  selected_tool_version_id: string | null;
+  selected_tool_name: string | null;
+  confidence: number | null;
+  reason_summary: string | null;
+  created_at: string;
+}
+
+export interface AgentRunSelectionResultDto {
+  request: AgentRunRequestDto;
+  selection: AgentRunSelectionDto | null;
+}
+
+export function getAgentRunSelection(requestId: string, signal?: AbortSignal) {
+  return apiRequest<AgentRunSelectionResultDto>(
+    `/agent-requests/${requestId}/selection`, { signal },
+  );
+}
+
+export function selectToolForAgentRun(requestId: string) {
+  return apiRequest<AgentRunSelectionResultDto>(
+    `/agent-requests/${requestId}/select-tool`,
+    { method: 'POST' },
+  );
 }
 
 export function getAgentRunRequest(requestId: string, signal?: AbortSignal) {
