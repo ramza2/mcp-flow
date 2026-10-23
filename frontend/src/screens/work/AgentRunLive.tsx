@@ -7,9 +7,12 @@ import { isAbortError, isApiError } from '../../api/client';
 import {
   analyzeAgentRun,
   getConversationLatestAgentRun,
+  getAgentRunSelection,
   listRunnableAgents,
+  selectToolForAgentRun,
   submitAgentRun,
   type AgentRunRequestDto,
+  type AgentRunSelectionDto,
   type RunnableAgentDto,
 } from '../../api/agentRun';
 
@@ -25,6 +28,7 @@ export default function AgentRunLive() {
   const [agentId, setAgentId] = useState('');
   const [prompt, setPrompt] = useState('');
   const [request, setRequest] = useState<AgentRunRequestDto | null>(null);
+  const [selection, setSelection] = useState<AgentRunSelectionDto | null>(null);
   const [loadingAgents, setLoadingAgents] = useState(true);
   const [working, setWorking] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -50,6 +54,10 @@ export default function AgentRunLive() {
       const latest = await getConversationLatestAgentRun(conversationId, signal);
       if (signal?.aborted) return;
       setRequest(latest);
+      const selected = await getAgentRunSelection(latest.id, signal);
+      if (signal?.aborted) return;
+      setRequest(selected.request);
+      setSelection(selected.selection);
       setError(null);
     } catch (err: unknown) {
       if (!isAbortError(err) && !signal?.aborted) setError(failureMessage(err));
@@ -59,6 +67,7 @@ export default function AgentRunLive() {
   useEffect(() => {
     if (!conversationId) {
       setRequest(null);
+      setSelection(null);
       return;
     }
     const controller = new AbortController();
@@ -88,6 +97,7 @@ export default function AgentRunLive() {
       const created = await submitAgentRun(agentId, text);
       setPrompt('');
       setRequest(created);
+      setSelection(null);
       navigate(`/run/${created.conversation_id}`);
       await startAnalysis(created.id);
     } catch (err: unknown) {
@@ -111,6 +121,31 @@ export default function AgentRunLive() {
     }
   };
 
+  const handleSelectTool = async () => {
+    if (inFlight.current || !request || request.status !== 'RETRIEVING') return;
+    inFlight.current = true;
+    setWorking(true);
+    setError(null);
+    try {
+      const selected = await selectToolForAgentRun(request.id);
+      setRequest(selected.request);
+      setSelection(selected.selection);
+    } catch (err: unknown) {
+      setError(`Tool 검색·선택 확인 필요: ${failureMessage(err)}. 상태 새로고침으로 확인하세요.`);
+      // Never auto-retry a possibly in-flight embedding / LLM selection.
+    } finally {
+      inFlight.current = false;
+      setWorking(false);
+    }
+  };
+
+  const selectionLabel: Record<AgentRunSelectionDto['decision'], string> = {
+    AUTO_SELECT: '자동 선택',
+    CONFIRM: '선택 확인 필요',
+    CLARIFY: '추가 입력 필요',
+    NO_MATCH: '일치하는 Tool 없음',
+  };
+
   const data = request?.structured_request;
 
   return (
@@ -120,14 +155,14 @@ export default function AgentRunLive() {
           <Bot size={20} /> Agent 업무 지시
         </h1>
         <p className="text-sm text-slate-500 mt-1">
-          실제 DB와 ModelOps 분석을 사용합니다. 현재는 자연어 분석 단계이며,
-          MCP Tool 선택·계획·실행 연결은 다음 개발 범위입니다.
+          실제 DB와 ModelOps 분석을 사용합니다. 자연어 분석과 Tool 검색·선택까지 연결되었습니다.
+          계획 생성과 실제 실행은 다음 개발 범위입니다.
         </p>
       </header>
       <div className="rounded-lg border border-blue-200 bg-blue-50 p-3 text-sm text-blue-900">
-        <strong>현재 지원 범위:</strong> 실제 Agent 버전으로 요청 등록 및 LLM 의도 분석.
-        분석 결과의 RETRIEVING 상태는 Tool 검색이 실행되었다는 뜻이 아닙니다.
-        실제 Execution은 생성하지 않으며, 이메일·파일 생성 등 부작용도 없습니다.
+        <strong>현재 지원 범위:</strong> 실제 Agent 버전으로 요청 등록·LLM 분석·Tool 검색 및 선택.
+        RETRIEVING 상태에서 검색·선택 버튼을 눌러야 시작됩니다.
+        계획과 Execution은 아직 생성하지 않으며, 외부 MCP Tool은 호출하지 않습니다.
       </div>
 
       <section className="rounded-xl border border-slate-200 bg-white p-5 space-y-3">
@@ -184,9 +219,17 @@ export default function AgentRunLive() {
           </div>
           <p className="text-xs text-slate-500 font-mono break-all">요청 ID: {request.id}</p>
           <p className="text-sm text-slate-800 whitespace-pre-wrap">{request.raw_request_text}</p>
-          {working && <div role="status" className="flex gap-2 items-center text-sm text-indigo-700"><Loader2 size={15} className="animate-spin" />실제 LLM 분석을 요청 중입니다.</div>}
+          {working && <div role="status" className="flex gap-2 items-center text-sm text-indigo-700"><Loader2 size={15} className="animate-spin" />{request.status === 'RETRIEVING' ? '실제 Tool 검색·선택 중입니다.' : '실제 LLM 분석을 요청 중입니다.'}</div>}
           {request.status === 'RECEIVED' && !working && (
             <Button size="sm" onClick={() => void handleResumeAnalysis()}>저장된 요청 분석 시작</Button>
+          )}
+          {request.status === 'RETRIEVING' && !working && !selection && (
+            <Button size="sm" onClick={() => void handleSelectTool()}>실제 Tool 검색·선택</Button>
+          )}
+          {request.status === 'SELECTING' && !working && (
+            <p className="text-sm text-amber-700">
+              Tool 평가가 진행 중이거나 중단됐을 수 있습니다. 저장 상태를 새로고침해 확인하세요.
+            </p>
           )}
           {request.status === 'ANALYZING' && !working && (
             <p className="text-sm text-amber-700">
@@ -195,7 +238,7 @@ export default function AgentRunLive() {
             </p>
           )}
           {request.status === 'FAILED' && (
-            <p className="text-sm text-red-700">실제 분석이 실패했습니다. 요청 이력은 보존됩니다.</p>
+            <p className="text-sm text-red-700">요청 처리가 실패했습니다. 저장된 상태와 이력은 보존됩니다.</p>
           )}
           {data && (
             <div className="space-y-3">
@@ -221,9 +264,38 @@ export default function AgentRunLive() {
                 <p className="text-amber-700 text-sm">명확화가 필요합니다. 실제 질문 응답 연동은 후속 단계에서 제공합니다.</p>
               ) : (
                 <p className="text-sm text-slate-500">
-                  분석 결과가 DB에 저장됐습니다. Tool 검색·계획·실행은 아직 시작되지 않았습니다.
+                  {selection
+                    ? 'Tool 선택 결과가 DB에 저장됐습니다. 계획 생성과 실행은 시작되지 않았습니다.'
+                    : '분석 결과가 DB에 저장됐습니다. Tool 검색·선택은 버튼을 눌러 시작할 수 있습니다.'}
                 </p>
               )}
+            </div>
+          )}
+          {selection && (
+            <div className="rounded-lg border border-indigo-200 bg-indigo-50 p-3 space-y-2">
+              <h3 className="text-sm font-semibold text-indigo-900">실제 Tool 선택 결과</h3>
+              <p className="text-sm text-indigo-900">{selectionLabel[selection.decision]}</p>
+              {selection.selected_tool_version_id && (
+                <p className="text-sm text-indigo-900">
+                  선택 Tool: {selection.selected_tool_name ?? '이름 확인 불가'}
+                  <span className="block text-xs font-mono break-all">
+                    Version ID: {selection.selected_tool_version_id}
+                  </span>
+                </p>
+              )}
+              {selection.confidence !== null && (
+                <p className="text-xs text-indigo-800">
+                  선택 신뢰도: {Math.round(selection.confidence * 100)}%
+                </p>
+              )}
+              {selection.reason_summary && (
+                <p className="text-sm text-indigo-800 whitespace-pre-wrap">
+                  {selection.reason_summary}
+                </p>
+              )}
+              <p className="text-xs text-indigo-700">
+                이 결과는 검색·선택 기록이며 MCP 호출 또는 업무 실행 완료를 의미하지 않습니다.
+              </p>
             </div>
           )}
           <div className="border-t pt-3 flex items-center gap-3 text-sm text-slate-500">

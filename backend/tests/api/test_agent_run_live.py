@@ -7,15 +7,20 @@ not claims of actual ModelOps performance or MCP execution.
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime
+from types import SimpleNamespace
 
 import pytest
+from app.agent.tool_selector import ToolSelectorService
 from app.model_provider.client import ModelProviderClient
 from app.models.agent import AgentVersion
+from app.models.conversation import AgentRequest
 from app.models.model_profile import LLMProfile
 from app.repositories.agent import AgentRepository
 from app.repositories.agent_version import AgentVersionRepository
+from app.repositories.tool_selection import ToolSelectionRepository
 from httpx import AsyncClient
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
@@ -183,3 +188,90 @@ async def test_unowned_agent_run_request_does_not_leak(
         f"/api/v1/agent-requests/{missing_id}/analyze"
     )
     assert response.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_agent_run_selection_bridge_is_owner_scoped_and_one_shot(
+    authenticated_db_client: AsyncClient,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent_id, _ = await _seed_runnable(db_session_factory)
+    created_response = await authenticated_db_client.post(
+        "/api/v1/agent-requests",
+        json={"agent_id": str(agent_id), "request_text": "날씨를 조회해줘"},
+    )
+    assert created_response.status_code == 201
+    request_id = created_response.json()["id"]
+    base = f"/api/v1/agent-requests/{request_id}"
+
+    before = await authenticated_db_client.get(f"{base}/selection")
+    assert before.status_code == 200
+    assert before.json()["selection"] is None
+
+    premature = await authenticated_db_client.post(f"{base}/select-tool")
+    assert premature.status_code == 409
+
+    async with db_session_factory() as session:
+        await session.execute(
+            update(AgentRequest)
+            .where(AgentRequest.id == uuid.UUID(request_id))
+            .values(status="RETRIEVING")
+        )
+        await session.commit()
+
+    stored_run = SimpleNamespace(
+        id=uuid.uuid4(),
+        decision="NO_MATCH",
+        selected_tool_version_id=None,
+        confidence=None,
+        reason_summary=None,
+        created_at=datetime.now(UTC),
+    )
+    calls: list[uuid.UUID] = []
+
+    async def fake_select(self, *, agent_request_id: uuid.UUID):
+        calls.append(agent_request_id)
+        async with db_session_factory() as session:
+            await session.execute(
+                update(AgentRequest)
+                .where(AgentRequest.id == agent_request_id)
+                .values(status="REJECTED")
+            )
+            await session.commit()
+
+    async def fake_latest(self, agent_request_id: uuid.UUID):
+        assert agent_request_id == uuid.UUID(request_id)
+        return stored_run
+
+    monkeypatch.setattr(ToolSelectorService, "select", fake_select)
+    monkeypatch.setattr(
+        ToolSelectionRepository, "get_latest_for_agent_request", fake_latest
+    )
+
+    selected = await authenticated_db_client.post(f"{base}/select-tool")
+    assert selected.status_code == 200, selected.text
+    assert selected.json()["request"]["status"] == "REJECTED"
+    assert selected.json()["selection"]["decision"] == "NO_MATCH"
+    assert selected.json()["selection"]["selected_tool_version_id"] is None
+    assert calls == [uuid.UUID(request_id)]
+
+    persisted = await authenticated_db_client.get(f"{base}/selection")
+    assert persisted.status_code == 200
+    assert persisted.json()["selection"]["id"] == str(stored_run.id)
+
+    duplicate = await authenticated_db_client.post(f"{base}/select-tool")
+    assert duplicate.status_code == 409
+    assert calls == [uuid.UUID(request_id)]
+
+    missing = uuid.uuid4()
+    assert (
+        await authenticated_db_client.get(
+            f"/api/v1/agent-requests/{missing}/selection"
+        )
+    ).status_code == 404
+    assert (
+        await authenticated_db_client.post(
+            f"/api/v1/agent-requests/{missing}/select-tool"
+        )
+    ).status_code == 404
