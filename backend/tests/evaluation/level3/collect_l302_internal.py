@@ -67,6 +67,13 @@ def private_dir() -> Path:
     return path
 
 
+def internal_public_case(public_case: dict[str, Any]) -> dict[str, Any]:
+    """Label pending observations according to the actual one-reviewer method."""
+    result = dict(public_case)
+    result["review_state"] = "PENDING_SINGLE_HUMAN_SEMANTIC_REVIEW"
+    return result
+
+
 def precheck_evidence_paths() -> Path:
     """Fail before any model calls when immutable public/private evidence cannot be saved."""
     public = artifact_dir("level3")
@@ -189,7 +196,7 @@ async def execute(args: argparse.Namespace) -> dict[str, Any]:
                         system_instruction=version.system_instruction,
                         case=case,
                     )
-                    public_cases.append(observation["public_case"])
+                    public_cases.append(internal_public_case(observation["public_case"]))
                     private_cases.append(observation["private_observation"])
             finally:
                 await provider.aclose()
