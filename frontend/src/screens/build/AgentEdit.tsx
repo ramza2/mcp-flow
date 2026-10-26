@@ -393,8 +393,13 @@ export default function AgentEdit() {
     if (isLocalNew && canDeleteDraftAgent(agent) && agent) {
       try {
         await deleteAgent(agent.id);
-      } catch {
-        // Best-effort cleanup; surface via navigation away either way.
+      } catch (err) {
+        const apiErr = isApiError(err) ? err : null;
+        setFormError(
+          apiErr?.message
+            ?? (err instanceof Error ? err.message : '임시 Agent 삭제에 실패했습니다. 다시 시도하세요.'),
+        );
+        return;
       }
       navigate('/agents');
       return;

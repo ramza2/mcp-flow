@@ -256,4 +256,42 @@ describe('AgentEdit persist / validate safety', () => {
       expect(router.state.location.pathname).toBe('/agents');
     });
   });
+
+  it('keeps the editor open when cancel soft-delete fails so the user can retry', async () => {
+    const created = {
+      ...savedAgent,
+      id: 'agt-stuck',
+      name: 'Stuck Agent',
+      code: 'stuck-agent',
+    };
+    vi.mocked(createAgent).mockResolvedValue(created);
+    vi.mocked(createAgentVersion).mockRejectedValue(new Error('version failed'));
+    vi.mocked(deleteAgent).mockRejectedValue(new Error('delete failed'));
+
+    const { router } = renderWithRouter(<AgentEdit />, {
+      path: '/agents/:agentId/versions/:versionId/edit',
+      route: '/agents/new/versions/new/edit',
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText(/New Agent · Draft/i)).toBeInTheDocument();
+    });
+
+    fillNewAgentForm('Stuck Agent', 'stuck instructions');
+    fireEvent.click(screen.getAllByRole('button', { name: 'Draft 저장' })[0]);
+
+    await waitFor(() => {
+      expect(createAgent).toHaveBeenCalledTimes(1);
+      expect(screen.getByText(/version failed/i)).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getAllByRole('button', { name: '취소' })[0]);
+
+    await waitFor(() => {
+      expect(deleteAgent).toHaveBeenCalledWith('agt-stuck');
+      expect(screen.getByText(/delete failed/i)).toBeInTheDocument();
+    });
+    expect(router.state.location.pathname).toBe('/agents/new/versions/new/edit');
+    expect(screen.getByText(/New Agent · Draft/i)).toBeInTheDocument();
+  });
 });
