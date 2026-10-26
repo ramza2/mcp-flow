@@ -27,6 +27,45 @@ import { AGENT_VISIBILITIES, type AgentVisibility } from '../../domain';
 
 type VersionStatus = 'DRAFT' | 'PUBLISHED' | 'DEPRECATED';
 
+type FormSnapshot = {
+  name: string;
+  description: string;
+  visibility: AgentVisibility;
+  changeSummary: string;
+  instructions: string;
+  llmProfileId: string;
+  selectedTools: string;
+  autoSelectThreshold: number;
+  confirmationThreshold: number;
+  maxCandidates: number;
+};
+
+function buildSnapshot(input: {
+  name: string;
+  description: string;
+  visibility: AgentVisibility;
+  changeSummary: string;
+  instructions: string;
+  llmProfileId: string;
+  selectedTools: string[];
+  autoSelectThreshold: number;
+  confirmationThreshold: number;
+  maxCandidates: number;
+}): FormSnapshot {
+  return {
+    name: input.name,
+    description: input.description,
+    visibility: input.visibility,
+    changeSummary: input.changeSummary,
+    instructions: input.instructions,
+    llmProfileId: input.llmProfileId,
+    selectedTools: [...input.selectedTools].sort().join(','),
+    autoSelectThreshold: input.autoSelectThreshold,
+    confirmationThreshold: input.confirmationThreshold,
+    maxCandidates: input.maxCandidates,
+  };
+}
+
 export default function AgentEdit() {
   const navigate = useNavigate();
   const { agentId, versionId } = useParams();
@@ -54,6 +93,7 @@ export default function AgentEdit() {
   const [maxCandidates, setMaxCandidates] = useState(5);
   const [toolSearch, setToolSearch] = useState('');
   const [serverFilter, setServerFilter] = useState('ALL');
+  const [savedSnapshot, setSavedSnapshot] = useState<FormSnapshot | null>(null);
 
   const [saving, setSaving] = useState(false);
   const [validating, setValidating] = useState(false);
@@ -94,6 +134,9 @@ export default function AgentEdit() {
           setInstructions('');
           setChangeSummary('');
           setSelectedTools([]);
+          setSavedSnapshot(null);
+          setValidationOk(null);
+          setValidationMessages([]);
           if (profilePage.items[0]) setLlmProfileId(profilePage.items[0].id);
           return;
         }
@@ -123,23 +166,49 @@ export default function AgentEdit() {
 
         if (loadedVersion) {
           if (!isNewVersionRoute) setVersion(loadedVersion);
-          setInstructions(loadedVersion.system_instruction);
-          setLlmProfileId(loadedVersion.llm_profile_id);
-          setChangeSummary(isNewVersionRoute ? '' : (loadedVersion.change_summary ?? ''));
+          const nextInstructions = loadedVersion.system_instruction;
+          const nextLlm = loadedVersion.llm_profile_id;
+          const nextSummary = isNewVersionRoute ? '' : (loadedVersion.change_summary ?? '');
           const sel = loadedVersion.selection_settings as {
             auto_select_threshold?: number;
             confirmation_threshold?: number;
             max_candidates?: number;
           };
-          if (typeof sel.auto_select_threshold === 'number') setAutoSelectThreshold(sel.auto_select_threshold);
-          if (typeof sel.confirmation_threshold === 'number') setConfirmationThreshold(sel.confirmation_threshold);
-          if (typeof sel.max_candidates === 'number') setMaxCandidates(sel.max_candidates);
+          const nextAuto = typeof sel.auto_select_threshold === 'number' ? sel.auto_select_threshold : 0.82;
+          const nextConfirm = typeof sel.confirmation_threshold === 'number' ? sel.confirmation_threshold : 0.60;
+          const nextMax = typeof sel.max_candidates === 'number' ? sel.max_candidates : 5;
+          let nextTools: string[] = [];
           if (!isNewVersionRoute) {
             const grants = await listAgentToolGrants(agentId, loadedVersion.id, controller.signal);
-            if (!cancelled) setSelectedTools(grants.items.map(g => g.mcp_tool_id));
+            if (!cancelled) nextTools = grants.items.map(g => g.mcp_tool_id);
+          }
+          if (cancelled) return;
+          setInstructions(nextInstructions);
+          setLlmProfileId(nextLlm);
+          setChangeSummary(nextSummary);
+          setAutoSelectThreshold(nextAuto);
+          setConfirmationThreshold(nextConfirm);
+          setMaxCandidates(nextMax);
+          setSelectedTools(nextTools);
+          if (!isNewVersionRoute) {
+            setSavedSnapshot(buildSnapshot({
+              name: agentRow.name,
+              description: agentRow.description ?? '',
+              visibility: agentRow.visibility,
+              changeSummary: nextSummary,
+              instructions: nextInstructions,
+              llmProfileId: nextLlm,
+              selectedTools: nextTools,
+              autoSelectThreshold: nextAuto,
+              confirmationThreshold: nextConfirm,
+              maxCandidates: nextMax,
+            }));
+          } else {
+            setSavedSnapshot(null);
           }
         } else if (profilePage.items[0]) {
           setLlmProfileId(profilePage.items[0].id);
+          setSavedSnapshot(null);
         }
       } catch (err) {
         if (isAbortError(err) || cancelled) return;
@@ -191,26 +260,66 @@ export default function AgentEdit() {
     return errors;
   }, [name, instructions, llmProfileId, autoSelectThreshold, confirmationThreshold]);
 
+  const currentSnapshot = useMemo(
+    () => buildSnapshot({
+      name,
+      description,
+      visibility,
+      changeSummary,
+      instructions,
+      llmProfileId,
+      selectedTools,
+      autoSelectThreshold,
+      confirmationThreshold,
+      maxCandidates,
+    }),
+    [
+      name,
+      description,
+      visibility,
+      changeSummary,
+      instructions,
+      llmProfileId,
+      selectedTools,
+      autoSelectThreshold,
+      confirmationThreshold,
+      maxCandidates,
+    ],
+  );
+
+  const isDirty = useMemo(() => {
+    if (!savedSnapshot) return true;
+    return JSON.stringify(currentSnapshot) !== JSON.stringify(savedSnapshot);
+  }, [currentSnapshot, savedSnapshot]);
+
+  useEffect(() => {
+    if (!isDirty) return;
+    // Stale VALID from a previous saved snapshot must not remain visible.
+    setValidationOk(null);
+  }, [isDirty]);
+
   const toggleTool = (id: string) => {
     if (readOnly || publishedBlocked) return;
     setSelectedTools(prev => (prev.includes(id) ? prev.filter(t => t !== id) : [...prev, id]));
   };
 
-  const canDeleteSavedDraft = Boolean(
-    agent
-    && agent.status === 'DRAFT'
-    && agent.current_version_id == null
-    && !hasPublishHistory
-    && !isLocalNew,
+  const canDeleteDraftAgent = (row: AgentDto | null) => Boolean(
+    row
+    && row.status === 'DRAFT'
+    && row.current_version_id == null
+    && !hasPublishHistory,
   );
+
+  const canDeleteSavedDraft = canDeleteDraftAgent(agent) && !isLocalNew;
 
   const persistDraft = async (): Promise<{ agent: AgentDto; version: AgentVersionDto }> => {
     if (clientErrors.length > 0) {
       throw new Error(clientErrors[0]);
     }
 
+    // Reuse in-memory Agent after a partial first-save failure — never create twice.
     let targetAgent = agent;
-    if (isLocalNew || !targetAgent) {
+    if (!targetAgent) {
       targetAgent = await createAgent({
         name: name.trim() || 'New Agent',
         description: description.trim() || null,
@@ -246,7 +355,7 @@ export default function AgentEdit() {
     };
 
     let savedVersion: AgentVersionDto;
-    if (version && version.status === 'DRAFT' && !isNewVersionRoute && !isLocalNew) {
+    if (version && version.status === 'DRAFT' && !isNewVersionRoute) {
       const contentChanged =
         version.system_instruction !== versionBody.system_instruction
         || version.llm_profile_id !== versionBody.llm_profile_id
@@ -273,11 +382,23 @@ export default function AgentEdit() {
     });
 
     setVersion(savedVersion);
+    setSavedSnapshot(currentSnapshot);
+    setValidationOk(null);
     return { agent: targetAgent, version: savedVersion };
   };
 
-  const handleCancel = () => {
-    // Local unsaved form never POSTed — leave without creating a DB row.
+  const handleCancel = async () => {
+    // Partial first-save may have created a DRAFT Agent while still on /agents/new.
+    // Soft-delete it so cancel does not leave a hidden orphan.
+    if (isLocalNew && canDeleteDraftAgent(agent) && agent) {
+      try {
+        await deleteAgent(agent.id);
+      } catch {
+        // Best-effort cleanup; surface via navigation away either way.
+      }
+      navigate('/agents');
+      return;
+    }
     if (isLocalNew || !agent) {
       navigate('/agents');
       return;
@@ -306,9 +427,9 @@ export default function AgentEdit() {
     setValidationMessages([]);
     setValidationOk(null);
     try {
-      if (isLocalNew || !agent || !version) {
+      if (isLocalNew || !agent || !version || isDirty) {
         setValidationMessages([
-          '서버 Validate는 저장된 DRAFT Version이 필요합니다. 먼저 Draft 저장을 실행하세요.',
+          '저장되지 않은 변경사항이 있습니다. 먼저 Draft 저장을 실행한 뒤 Validate하세요.',
         ]);
         return;
       }
