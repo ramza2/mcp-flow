@@ -181,8 +181,10 @@ export default function AgentRunLive() {
   const loadChatResult = useCallback(async (requestId: string, signal?: AbortSignal) => {
     try {
       const result = await getAgentRunChatResult(requestId, signal);
-      if (signal?.aborted) return;
+      // Always apply the projection once fetched; ignoring a stale abort avoids
+      // dropping terminal results under React Strict Mode double-invoke.
       setChatResult(result);
+      if (signal?.aborted) return;
       if (result.available) {
         if (result.display_items.length > 0) {
           const lines = result.display_items.map(

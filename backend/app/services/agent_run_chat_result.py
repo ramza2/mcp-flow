@@ -259,7 +259,10 @@ class AgentRunChatResultService:
                 unavailable_reason="TOO_LARGE",
                 tool_name=tool_name,
                 display_items=[],
-                summary_text="결과가 너무 커서 채팅에 표시하지 않습니다. 실행 상세에서 요약을 확인하세요.",
+                summary_text=(
+                    "결과가 너무 커서 채팅에 표시하지 않습니다. "
+                    "실행 상세에서 요약을 확인하세요."
+                ),
                 truncated=True,
             )
 

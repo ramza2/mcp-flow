@@ -37,12 +37,12 @@ from app.schemas.clarification import (
 from app.schemas.execution import AgentRequestExecutionCreateResult
 from app.schemas.tool_selection import SelectionDecision
 from app.services.agent_request import AgentRequestService
+from app.services.agent_run_chat_result import AgentRunChatResultService
 from app.services.clarification_response import (
     ClarificationResponseService,
     to_api_result,
 )
 from app.services.conversation import ConversationService
-from app.services.agent_run_chat_result import AgentRunChatResultService
 from app.services.execution_creation import ExecutionCreationService
 
 router = APIRouter(prefix="/agent-requests", tags=["agent-requests"])

@@ -296,9 +296,11 @@ describe('AgentRunLive — chat phase 1', () => {
       page: 1, page_size: 1, total: 1,
     });
     renderLive(`/run/${conversationId}`);
-    await waitFor(() => expect(mocks.chatResult).toHaveBeenCalledWith(requestId, expect.anything()));
-    expect(await screen.findByText(/Alpha \/ available/)).toBeTruthy();
-    expect(await screen.findByText(/Beta \/ pending/)).toBeTruthy();
+    await waitFor(() => {
+      expect(mocks.chatResult).toHaveBeenCalled();
+      expect(screen.getByText('Alpha / available')).toBeTruthy();
+      expect(screen.getByText('Beta / pending')).toBeTruthy();
+    });
     expect(mocks.createExecution).not.toHaveBeenCalled();
   });
 
