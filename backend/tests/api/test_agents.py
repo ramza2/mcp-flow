@@ -735,3 +735,93 @@ async def test_agent_private_visibility_hides_other_owners_agents(
         json={"name": "Hijacked", "lock_version": 1},
     )
     assert mutate.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_agent_delete_own_draft_without_publish_history(
+    db_client: AsyncClient,
+) -> None:
+    created = await _create_agent(db_client, name="Deletable Draft")
+    agent_id = created["id"]
+    assert created["status"] == "DRAFT"
+    assert created["current_version_id"] is None
+
+    deleted = await db_client.delete(f"{API}/{agent_id}")
+    assert deleted.status_code == 204, deleted.text
+
+    missing = await db_client.get(f"{API}/{agent_id}")
+    assert missing.status_code == 404
+
+    listing = await db_client.get(API, params={"q": "Deletable Draft"})
+    assert listing.status_code == 200
+    assert all(item["id"] != agent_id for item in listing.json()["items"])
+
+
+@pytest.mark.asyncio
+async def test_agent_delete_rejects_active_and_publish_history(
+    db_client: AsyncClient,
+) -> None:
+    created = await _create_agent(db_client, name="Published Agent")
+    agent_id = created["id"]
+    profile = await _create_llm_profile(db_client)
+    version = await db_client.post(
+        f"{API}/{agent_id}/versions",
+        json=_version_body(llm_profile_id=profile["id"]),
+    )
+    assert version.status_code == 201, version.text
+    version_id = version.json()["id"]
+    assert (
+        await db_client.post(f"{API}/{agent_id}/versions/{version_id}/validate")
+    ).status_code == 200
+    published = await db_client.post(f"{API}/{agent_id}/versions/{version_id}/publish")
+    assert published.status_code == 200, published.text
+
+    reject_history = await db_client.delete(f"{API}/{agent_id}")
+    assert reject_history.status_code == 409
+    assert reject_history.json()["error"]["code"] == "RESOURCE_CONFLICT"
+
+    agent = await db_client.get(f"{API}/{agent_id}")
+    lock = agent.json()["lock_version"]
+    active = await db_client.patch(
+        f"{API}/{agent_id}",
+        headers={"If-Match": str(lock)},
+        json={"status": "ACTIVE", "lock_version": lock},
+    )
+    assert active.status_code == 200
+    reject_active = await db_client.delete(f"{API}/{agent_id}")
+    assert reject_active.status_code == 409
+    assert reject_active.json()["error"]["code"] == "RESOURCE_CONFLICT"
+
+
+@pytest.mark.asyncio
+async def test_agent_delete_hides_other_owners_private_and_keeps_eval_agents(
+    db_client: AsyncClient,
+    db_session_factory,
+) -> None:
+    """Other owners' PRIVATE agents stay hidden; delete must not expose or remove them."""
+    from app.repositories.agent import AgentRepository
+
+    other_id = uuid.uuid4()
+    async with db_session_factory() as session:
+        eval_agent = await AgentRepository(session).create(
+            code=f"kpi-eval-{uuid.uuid4().hex[:8]}",
+            name="KPI Eval Agent",
+            visibility="PRIVATE",
+            status="ACTIVE",
+            owner_id=other_id,
+        )
+        await session.commit()
+        eval_id = eval_agent.id
+
+    listing = await db_client.get(API, params={"page_size": 100})
+    assert listing.status_code == 200
+    assert str(eval_id) not in {item["id"] for item in listing.json()["items"]}
+
+    forbidden = await db_client.delete(f"{API}/{eval_id}")
+    assert forbidden.status_code == 404
+
+    async with db_session_factory() as session:
+        still = await AgentRepository(session).get(eval_id)
+        assert still is not None
+        assert still.deleted_at is None
+        assert still.owner_id == other_id

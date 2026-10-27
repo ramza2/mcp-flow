@@ -6,7 +6,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.agent import AgentVersion
@@ -160,3 +160,19 @@ class AgentVersionRepository:
         await self._session.flush()
         await self._session.refresh(version)
         return version
+
+    async def has_publish_history(self, agent_id: uuid.UUID) -> bool:
+        """True if any version was ever published (PUBLISHED/DEPRECATED or published_at)."""
+
+        stmt = (
+            select(func.count())
+            .select_from(AgentVersion)
+            .where(
+                AgentVersion.agent_id == agent_id,
+                or_(
+                    AgentVersion.status.in_(("PUBLISHED", "DEPRECATED")),
+                    AgentVersion.published_at.is_not(None),
+                ),
+            )
+        )
+        return int((await self._session.execute(stmt)).scalar_one()) > 0

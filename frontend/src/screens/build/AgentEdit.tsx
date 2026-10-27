@@ -1,12 +1,15 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useNavigate, useParams } from 'react-router';
-import { Plus, Search, X } from 'lucide-react';
+import { Plus, Search, Trash2, X } from 'lucide-react';
 import PageHeader from '../../components/ui/PageHeader';
 import Button from '../../components/ui/Button';
+import { ConfirmDialog } from '../../components/ui/Dialog';
 import { ErrorState, InlineAlert, LoadingSkeleton } from '../../components/ui/EmptyState';
 import {
   activateAgent,
+  createAgent,
   createAgentVersion,
+  deleteAgent,
   getAgent,
   getAgentVersion,
   listAgentToolGrants,
@@ -24,13 +27,54 @@ import { AGENT_VISIBILITIES, type AgentVisibility } from '../../domain';
 
 type VersionStatus = 'DRAFT' | 'PUBLISHED' | 'DEPRECATED';
 
+type FormSnapshot = {
+  name: string;
+  description: string;
+  visibility: AgentVisibility;
+  changeSummary: string;
+  instructions: string;
+  llmProfileId: string;
+  selectedTools: string;
+  autoSelectThreshold: number;
+  confirmationThreshold: number;
+  maxCandidates: number;
+};
+
+function buildSnapshot(input: {
+  name: string;
+  description: string;
+  visibility: AgentVisibility;
+  changeSummary: string;
+  instructions: string;
+  llmProfileId: string;
+  selectedTools: string[];
+  autoSelectThreshold: number;
+  confirmationThreshold: number;
+  maxCandidates: number;
+}): FormSnapshot {
+  return {
+    name: input.name,
+    description: input.description,
+    visibility: input.visibility,
+    changeSummary: input.changeSummary,
+    instructions: input.instructions,
+    llmProfileId: input.llmProfileId,
+    selectedTools: [...input.selectedTools].sort().join(','),
+    autoSelectThreshold: input.autoSelectThreshold,
+    confirmationThreshold: input.confirmationThreshold,
+    maxCandidates: input.maxCandidates,
+  };
+}
+
 export default function AgentEdit() {
   const navigate = useNavigate();
   const { agentId, versionId } = useParams();
+  const isLocalNew = agentId === 'new';
   const isNewVersionRoute = !versionId || versionId === 'new';
 
   const [agent, setAgent] = useState<AgentDto | null>(null);
   const [version, setVersion] = useState<AgentVersionDto | null>(null);
+  const [hasPublishHistory, setHasPublishHistory] = useState(false);
   const [profiles, setProfiles] = useState<LLMProfileDto[]>([]);
   const [tools, setTools] = useState<MCPToolDto[]>([]);
   const [servers, setServers] = useState<MCPServerDto[]>([]);
@@ -49,11 +93,16 @@ export default function AgentEdit() {
   const [maxCandidates, setMaxCandidates] = useState(5);
   const [toolSearch, setToolSearch] = useState('');
   const [serverFilter, setServerFilter] = useState('ALL');
+  const [savedSnapshot, setSavedSnapshot] = useState<FormSnapshot | null>(null);
 
   const [saving, setSaving] = useState(false);
+  const [validating, setValidating] = useState(false);
   const [publishing, setPublishing] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteOpen, setDeleteOpen] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
   const [validationMessages, setValidationMessages] = useState<string[]>([]);
+  const [validationOk, setValidationOk] = useState<string | null>(null);
 
   useEffect(() => {
     if (!agentId) return;
@@ -64,12 +113,37 @@ export default function AgentEdit() {
 
     (async () => {
       try {
-        const [agentRow, versionPage, profilePage, toolPage, serverPage] = await Promise.all([
-          getAgent(agentId, controller.signal),
-          listAgentVersions(agentId, { page_size: 50, sort: '-version_no', signal: controller.signal }),
+        const [profilePage, toolPage, serverPage] = await Promise.all([
           listLLMProfiles({ page_size: 100, signal: controller.signal }),
           listMCPTools({ page_size: 100, status: 'ACTIVE', signal: controller.signal }),
           listMCPServers({ page_size: 100, signal: controller.signal }),
+        ]);
+        if (cancelled) return;
+
+        setProfiles(profilePage.items);
+        setTools(toolPage.items);
+        setServers(serverPage.items);
+
+        if (isLocalNew) {
+          setAgent(null);
+          setVersion(null);
+          setHasPublishHistory(false);
+          setName('');
+          setDescription('');
+          setVisibility('PRIVATE');
+          setInstructions('');
+          setChangeSummary('');
+          setSelectedTools([]);
+          setSavedSnapshot(null);
+          setValidationOk(null);
+          setValidationMessages([]);
+          if (profilePage.items[0]) setLlmProfileId(profilePage.items[0].id);
+          return;
+        }
+
+        const [agentRow, versionPage] = await Promise.all([
+          getAgent(agentId, controller.signal),
+          listAgentVersions(agentId, { page_size: 50, sort: '-version_no', signal: controller.signal }),
         ]);
         if (cancelled) return;
 
@@ -77,37 +151,64 @@ export default function AgentEdit() {
         setName(agentRow.name);
         setDescription(agentRow.description ?? '');
         setVisibility(agentRow.visibility);
-        setProfiles(profilePage.items);
-        setTools(toolPage.items);
-        setServers(serverPage.items);
+        setHasPublishHistory(
+          versionPage.items.some(v =>
+            v.status === 'PUBLISHED' || v.status === 'DEPRECATED' || v.published_at != null,
+          ),
+        );
 
         let loadedVersion: AgentVersionDto | null = null;
         if (!isNewVersionRoute && versionId) {
           loadedVersion = await getAgentVersion(agentId, versionId, controller.signal);
         } else if (isNewVersionRoute && agentRow.current_version_id) {
-          // Prefill from current published version; create a new DRAFT on save.
           loadedVersion = versionPage.items.find(v => v.id === agentRow.current_version_id) ?? null;
         }
 
         if (loadedVersion) {
           if (!isNewVersionRoute) setVersion(loadedVersion);
-          setInstructions(loadedVersion.system_instruction);
-          setLlmProfileId(loadedVersion.llm_profile_id);
-          setChangeSummary(isNewVersionRoute ? '' : (loadedVersion.change_summary ?? ''));
+          const nextInstructions = loadedVersion.system_instruction;
+          const nextLlm = loadedVersion.llm_profile_id;
+          const nextSummary = isNewVersionRoute ? '' : (loadedVersion.change_summary ?? '');
           const sel = loadedVersion.selection_settings as {
             auto_select_threshold?: number;
             confirmation_threshold?: number;
             max_candidates?: number;
           };
-          if (typeof sel.auto_select_threshold === 'number') setAutoSelectThreshold(sel.auto_select_threshold);
-          if (typeof sel.confirmation_threshold === 'number') setConfirmationThreshold(sel.confirmation_threshold);
-          if (typeof sel.max_candidates === 'number') setMaxCandidates(sel.max_candidates);
+          const nextAuto = typeof sel.auto_select_threshold === 'number' ? sel.auto_select_threshold : 0.82;
+          const nextConfirm = typeof sel.confirmation_threshold === 'number' ? sel.confirmation_threshold : 0.60;
+          const nextMax = typeof sel.max_candidates === 'number' ? sel.max_candidates : 5;
+          let nextTools: string[] = [];
           if (!isNewVersionRoute) {
             const grants = await listAgentToolGrants(agentId, loadedVersion.id, controller.signal);
-            if (!cancelled) setSelectedTools(grants.items.map(g => g.mcp_tool_id));
+            if (!cancelled) nextTools = grants.items.map(g => g.mcp_tool_id);
+          }
+          if (cancelled) return;
+          setInstructions(nextInstructions);
+          setLlmProfileId(nextLlm);
+          setChangeSummary(nextSummary);
+          setAutoSelectThreshold(nextAuto);
+          setConfirmationThreshold(nextConfirm);
+          setMaxCandidates(nextMax);
+          setSelectedTools(nextTools);
+          if (!isNewVersionRoute) {
+            setSavedSnapshot(buildSnapshot({
+              name: agentRow.name,
+              description: agentRow.description ?? '',
+              visibility: agentRow.visibility,
+              changeSummary: nextSummary,
+              instructions: nextInstructions,
+              llmProfileId: nextLlm,
+              selectedTools: nextTools,
+              autoSelectThreshold: nextAuto,
+              confirmationThreshold: nextConfirm,
+              maxCandidates: nextMax,
+            }));
+          } else {
+            setSavedSnapshot(null);
           }
         } else if (profilePage.items[0]) {
           setLlmProfileId(profilePage.items[0].id);
+          setSavedSnapshot(null);
         }
       } catch (err) {
         if (isAbortError(err) || cancelled) return;
@@ -125,7 +226,7 @@ export default function AgentEdit() {
       cancelled = true;
       controller.abort();
     };
-  }, [agentId, versionId, isNewVersionRoute]);
+  }, [agentId, versionId, isNewVersionRoute, isLocalNew]);
 
   const versionStatus = (version?.status ?? 'DRAFT') as VersionStatus;
   const readOnly = versionStatus === 'DEPRECATED';
@@ -159,27 +260,84 @@ export default function AgentEdit() {
     return errors;
   }, [name, instructions, llmProfileId, autoSelectThreshold, confirmationThreshold]);
 
+  const currentSnapshot = useMemo(
+    () => buildSnapshot({
+      name,
+      description,
+      visibility,
+      changeSummary,
+      instructions,
+      llmProfileId,
+      selectedTools,
+      autoSelectThreshold,
+      confirmationThreshold,
+      maxCandidates,
+    }),
+    [
+      name,
+      description,
+      visibility,
+      changeSummary,
+      instructions,
+      llmProfileId,
+      selectedTools,
+      autoSelectThreshold,
+      confirmationThreshold,
+      maxCandidates,
+    ],
+  );
+
+  const isDirty = useMemo(() => {
+    if (!savedSnapshot) return true;
+    return JSON.stringify(currentSnapshot) !== JSON.stringify(savedSnapshot);
+  }, [currentSnapshot, savedSnapshot]);
+
+  useEffect(() => {
+    if (!isDirty) return;
+    // Stale VALID from a previous saved snapshot must not remain visible.
+    setValidationOk(null);
+  }, [isDirty]);
+
   const toggleTool = (id: string) => {
     if (readOnly || publishedBlocked) return;
     setSelectedTools(prev => (prev.includes(id) ? prev.filter(t => t !== id) : [...prev, id]));
   };
 
+  const canDeleteDraftAgent = (row: AgentDto | null) => Boolean(
+    row
+    && row.status === 'DRAFT'
+    && row.current_version_id == null
+    && !hasPublishHistory,
+  );
+
+  const canDeleteSavedDraft = canDeleteDraftAgent(agent) && !isLocalNew;
+
   const persistDraft = async (): Promise<{ agent: AgentDto; version: AgentVersionDto }> => {
-    if (!agentId || !agent) throw new Error('Agent가 없습니다.');
     if (clientErrors.length > 0) {
       throw new Error(clientErrors[0]);
     }
 
-    const patched = await updateAgent(
-      agentId,
-      {
-        name: name.trim(),
+    // Reuse in-memory Agent after a partial first-save failure — never create twice.
+    let targetAgent = agent;
+    if (!targetAgent) {
+      targetAgent = await createAgent({
+        name: name.trim() || 'New Agent',
         description: description.trim() || null,
         visibility,
-      },
-      agent.lock_version,
-    );
-    setAgent(patched);
+      });
+      setAgent(targetAgent);
+    } else {
+      targetAgent = await updateAgent(
+        targetAgent.id,
+        {
+          name: name.trim(),
+          description: description.trim() || null,
+          visibility,
+        },
+        targetAgent.lock_version,
+      );
+      setAgent(targetAgent);
+    }
 
     const versionBody = {
       system_instruction: instructions.trim(),
@@ -203,18 +361,17 @@ export default function AgentEdit() {
         || version.llm_profile_id !== versionBody.llm_profile_id
         || JSON.stringify(version.selection_settings) !== JSON.stringify(versionBody.selection_settings)
         || (version.change_summary ?? null) !== versionBody.change_summary;
-      // No AgentVersion PATCH in this API slice — content changes create a successor DRAFT.
       savedVersion = contentChanged
-        ? await createAgentVersion(agentId, { ...versionBody, source_version_id: version.id })
+        ? await createAgentVersion(targetAgent.id, { ...versionBody, source_version_id: version.id })
         : version;
     } else {
-      savedVersion = await createAgentVersion(agentId, {
+      savedVersion = await createAgentVersion(targetAgent.id, {
         ...versionBody,
-        source_version_id: agent.current_version_id ?? undefined,
+        source_version_id: targetAgent.current_version_id ?? undefined,
       });
     }
 
-    await putAgentToolGrants(agentId, savedVersion.id, {
+    await putAgentToolGrants(targetAgent.id, savedVersion.id, {
       items: selectedTools.map(mcp_tool_id => ({
         mcp_tool_id,
         effect: 'ALLOW' as const,
@@ -225,12 +382,39 @@ export default function AgentEdit() {
     });
 
     setVersion(savedVersion);
-    return { agent: patched, version: savedVersion };
+    setSavedSnapshot(currentSnapshot);
+    setValidationOk(null);
+    return { agent: targetAgent, version: savedVersion };
+  };
+
+  const handleCancel = async () => {
+    // Partial first-save may have created a DRAFT Agent while still on /agents/new.
+    // Soft-delete it so cancel does not leave a hidden orphan.
+    if (isLocalNew && canDeleteDraftAgent(agent) && agent) {
+      try {
+        await deleteAgent(agent.id);
+      } catch (err) {
+        const apiErr = isApiError(err) ? err : null;
+        setFormError(
+          apiErr?.message
+            ?? (err instanceof Error ? err.message : '임시 Agent 삭제에 실패했습니다. 다시 시도하세요.'),
+        );
+        return;
+      }
+      navigate('/agents');
+      return;
+    }
+    if (isLocalNew || !agent) {
+      navigate('/agents');
+      return;
+    }
+    navigate(`/agents/${agent.id}`);
   };
 
   const handleSave = async () => {
     setSaving(true);
     setFormError(null);
+    setValidationOk(null);
     try {
       const saved = await persistDraft();
       navigate(`/agents/${saved.agent.id}/versions/${saved.version.id}/edit`, { replace: true });
@@ -242,10 +426,44 @@ export default function AgentEdit() {
     }
   };
 
+  const handleValidate = async () => {
+    setValidating(true);
+    setFormError(null);
+    setValidationMessages([]);
+    setValidationOk(null);
+    try {
+      if (isLocalNew || !agent || !version || isDirty) {
+        setValidationMessages([
+          '저장되지 않은 변경사항이 있습니다. 먼저 Draft 저장을 실행한 뒤 Validate하세요.',
+        ]);
+        return;
+      }
+      const validated = await validateAgentVersion(agent.id, version.id);
+      setVersion(prev => prev ? {
+        ...prev,
+        validation_status: validated.validation_status,
+        validation_report: validated.validation_report,
+      } : prev);
+      if (validated.validation_status !== 'VALID') {
+        const report = validated.validation_report as { errors?: Array<{ message?: string }> } | null;
+        const messages = (report?.errors ?? []).map(e => e.message ?? 'validation error');
+        setValidationMessages(messages.length ? messages : ['버전 검증이 INVALID입니다.']);
+        return;
+      }
+      setValidationOk(`검증 결과: VALID (v${validated.version_no}). 게시/활성화는 수행하지 않았습니다.`);
+    } catch (err) {
+      const apiErr = isApiError(err) ? err : null;
+      setFormError(apiErr?.message ?? (err instanceof Error ? err.message : 'Validate에 실패했습니다.'));
+    } finally {
+      setValidating(false);
+    }
+  };
+
   const handlePublish = async () => {
     setPublishing(true);
     setFormError(null);
     setValidationMessages([]);
+    setValidationOk(null);
     try {
       const saved = await persistDraft();
       const validated = await validateAgentVersion(saved.agent.id, saved.version.id);
@@ -258,6 +476,7 @@ export default function AgentEdit() {
           validation_status: validated.validation_status,
           validation_report: validated.validation_report,
         } : prev);
+        navigate(`/agents/${saved.agent.id}/versions/${saved.version.id}/edit`, { replace: true });
         return;
       }
       await publishAgentVersion(saved.agent.id, saved.version.id);
@@ -272,6 +491,23 @@ export default function AgentEdit() {
     }
   };
 
+  const handleDelete = async () => {
+    if (!agent || !canDeleteSavedDraft) return;
+    setDeleting(true);
+    setFormError(null);
+    try {
+      await deleteAgent(agent.id);
+      setDeleteOpen(false);
+      navigate('/agents');
+    } catch (err) {
+      const apiErr = isApiError(err) ? err : null;
+      setFormError(apiErr?.message ?? 'Agent 삭제에 실패했습니다.');
+      setDeleteOpen(false);
+    } finally {
+      setDeleting(false);
+    }
+  };
+
   if (loading) {
     return (
       <div className="p-6">
@@ -280,7 +516,7 @@ export default function AgentEdit() {
     );
   }
 
-  if (loadError || !agent) {
+  if (loadError || (!isLocalNew && !agent)) {
     return (
       <div className="p-6">
         <ErrorState
@@ -294,7 +530,10 @@ export default function AgentEdit() {
     );
   }
 
-  if (publishedBlocked && version) {
+  const displayName = agent?.name || name || 'New Agent';
+  const agentPath = agent ? `/agents/${agent.id}` : '/agents';
+
+  if (publishedBlocked && version && agent) {
     return (
       <div>
         <PageHeader
@@ -329,11 +568,11 @@ export default function AgentEdit() {
       <PageHeader
         breadcrumbs={[
           { label: 'Agents', to: '/agents' },
-          { label: agent.name, to: `/agents/${agent.id}` },
-          { label: isNewVersionRoute ? '새 버전' : readOnly ? `v${version?.version_no} View` : `v${version?.version_no ?? '?'} 편집` },
+          { label: displayName, to: agentPath },
+          { label: isLocalNew || (isNewVersionRoute && !version) ? '새 버전' : readOnly ? `v${version?.version_no} View` : `v${version?.version_no ?? '?'} 편집` },
         ]}
         title={
-          isNewVersionRoute && !version
+          isLocalNew || (isNewVersionRoute && !version)
             ? 'New Agent · Draft'
             : readOnly
               ? `Agent Version View (v${version?.version_no})`
@@ -341,17 +580,25 @@ export default function AgentEdit() {
         }
         actions={
           <>
-            <Button variant="outline" onClick={() => navigate(`/agents/${agent.id}`)}>{readOnly ? '닫기' : '취소'}</Button>
+            <Button variant="outline" onClick={handleCancel}>{readOnly ? '닫기' : '취소'}</Button>
+            {canDeleteSavedDraft && (
+              <Button variant="outline" icon={<Trash2 size={13} />} onClick={() => setDeleteOpen(true)}>
+                삭제
+              </Button>
+            )}
             {!readOnly && <Button loading={saving} onClick={handleSave}>Draft 저장</Button>}
           </>
         }
       />
       <div className="p-6 max-w-5xl space-y-6">
+        {isLocalNew && (
+          <InlineAlert type="info" message="아직 DB에 저장되지 않았습니다. 취소하면 Agent가 생성되지 않습니다. Draft 저장 또는 Publish 시에만 생성됩니다." />
+        )}
         {readOnly ? (
           <InlineAlert type="info" message="DEPRECATED Version은 View만 가능합니다. 수정하려면 새 DRAFT Version을 생성하세요." />
-        ) : (
-          <InlineAlert type="info" message="편집 내용은 DRAFT 버전으로 저장됩니다. 서버 Validate가 VALID일 때만 Publish·Activate됩니다." />
-        )}
+        ) : !isLocalNew ? (
+          <InlineAlert type="info" message="편집 내용은 DRAFT 버전으로 저장됩니다. Validate는 서버 검증만 수행하며, Publish만 게시·활성화합니다." />
+        ) : null}
         {formError && <InlineAlert type="error" message={formError} />}
 
         <Section title="1. Basic">
@@ -497,23 +744,32 @@ export default function AgentEdit() {
 
         <Section title="6. Validate & Publish">
           <div className="space-y-3">
-            {clientErrors.length === 0 && validationMessages.length === 0 ? (
-              <InlineAlert type="info" message="필수 입력을 채운 뒤 Draft 저장 또는 Publish(검증→게시→활성화)를 실행하세요." />
+            {clientErrors.length === 0 && validationMessages.length === 0 && !validationOk ? (
+              <InlineAlert type="info" message="필수 입력을 채운 뒤 Draft 저장 → Validate → Publish를 순서대로 실행할 수 있습니다." />
             ) : (
               <div className="space-y-2">
                 {clientErrors.map(msg => <InlineAlert key={msg} type="error" message={msg} />)}
                 {validationMessages.map(msg => <InlineAlert key={msg} type="error" message={msg} />)}
+                {validationOk && <InlineAlert type="info" message={validationOk} />}
               </div>
             )}
             {!readOnly && (
-              <div className="flex gap-2">
+              <div className="flex gap-2 flex-wrap">
                 <Button variant="outline" loading={saving} onClick={handleSave}>Draft 저장</Button>
+                <Button
+                  variant="outline"
+                  loading={validating}
+                  disabled={clientErrors.length > 0}
+                  onClick={handleValidate}
+                >
+                  Validate
+                </Button>
                 <Button loading={publishing} disabled={clientErrors.length > 0} onClick={handlePublish}>
                   Publish & Activate
                 </Button>
               </div>
             )}
-            {readOnly && (
+            {readOnly && agent && (
               <Button icon={<Plus size={13} />} onClick={() => navigate(`/agents/${agent.id}/versions/new/edit`)}>
                 Create New Draft Version
               </Button>
@@ -521,6 +777,17 @@ export default function AgentEdit() {
           </div>
         </Section>
       </div>
+
+      <ConfirmDialog
+        open={deleteOpen}
+        onClose={() => setDeleteOpen(false)}
+        onConfirm={handleDelete}
+        title="Agent 삭제"
+        description="이 DRAFT Agent를 삭제합니다. 게시 이력이 없는 본인 소유 DRAFT만 삭제할 수 있습니다."
+        confirmLabel="삭제"
+        danger
+        loading={deleting}
+      />
     </div>
   );
 }

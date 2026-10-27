@@ -4,6 +4,7 @@ import {
   activateAgent,
   createAgent,
   createAgentVersion,
+  deleteAgent,
   listAgents,
   publishAgentVersion,
   putAgentToolGrants,
@@ -183,6 +184,17 @@ describe('Agent registry API contracts', () => {
     const body = JSON.parse(String((fetchMock.mock.calls[0][1] as RequestInit).body));
     expect(body.llm_profile_id).toBe('p1');
     expect(body.selection_settings.max_candidates).toBe(5);
+  });
+
+  it('deleteAgent issues DELETE without body', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
+    vi.stubGlobal('fetch', fetchMock);
+    setCachedCsrfTokenForTests('csrf-test');
+
+    await deleteAgent('agt-1');
+
+    expect(String(fetchMock.mock.calls[0][0])).toContain('/api/v1/agents/agt-1');
+    expect((fetchMock.mock.calls[0][1] as RequestInit).method).toBe('DELETE');
   });
 
   it('putAgentToolGrants keeps parameter_constraints null in the request body', async () => {
