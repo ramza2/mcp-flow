@@ -110,7 +110,8 @@ async def _seed_active_profile(session: AsyncSession) -> uuid.UUID:
 
 
 class RecordingPublisher:
-    def __init__(self) -> None:
+    def __init__(self, *, fail: bool = False) -> None:
+        self.fail = fail
         self.embedding_calls: list[tuple[uuid.UUID, uuid.UUID, uuid.UUID]] = []
 
     def publish_execution(self, **_k: Any) -> None:
@@ -135,6 +136,8 @@ class RecordingPublisher:
         embedding_profile_id: uuid.UUID,
         outbox_event_id: uuid.UUID,
     ) -> None:
+        if self.fail:
+            raise ConnectionError("broker unavailable")
         self.embedding_calls.append(
             (tool_version_id, embedding_profile_id, outbox_event_id)
         )
@@ -463,6 +466,42 @@ async def test_metadata_patch_enqueues_ensure_when_active(
 
 
 @pytest.mark.asyncio
+async def test_missing_without_outbox_enqueues_once_across_consecutive_polls(
+    db_session: AsyncSession,
+) -> None:
+    """MISSING with no prior Outbox must not Celery-stampede every poll."""
+    _tool_id, version_id, _lock = await _seed_tool(
+        db_session, status=MCPToolStatus.ACTIVE
+    )
+    profile_id = await _seed_active_profile(db_session)
+    await db_session.commit()
+
+    recovery = ToolEmbeddingRecoveryService(db_session)
+    first = await recovery.enqueue_recoverable(limit=50, min_age_seconds=30)
+    assert first.selected == 1
+    assert first.enqueued == 1
+    await db_session.commit()
+
+    second = await recovery.enqueue_recoverable(limit=50, min_age_seconds=30)
+    third = await recovery.enqueue_recoverable(limit=50, min_age_seconds=30)
+    await db_session.commit()
+    assert second.enqueued == 0
+    assert third.enqueued == 0
+
+    rows = (
+        await db_session.execute(
+            select(OutboxEvent).where(
+                OutboxEvent.event_type == "TOOL_EMBEDDING_ENSURE",
+                OutboxEvent.aggregate_id == version_id,
+            )
+        )
+    ).scalars().all()
+    assert len(rows) == 1
+    assert rows[0].published_at is None
+    assert rows[0].payload["embedding_profile_id"] == str(profile_id)
+
+
+@pytest.mark.asyncio
 async def test_missing_recovery_cooldown_blocks_consecutive_polls_then_recovers(
     db_session: AsyncSession,
 ) -> None:
@@ -480,22 +519,101 @@ async def test_missing_recovery_cooldown_blocks_consecutive_polls_then_recovers(
     await db_session.commit()
 
     recovery = ToolEmbeddingRecoveryService(db_session)
-    _p, first = await recovery.list_recoverable_version_ids(
-        limit=50, min_age_seconds=30
-    )
-    _p, second = await recovery.list_recoverable_version_ids(
-        limit=50, min_age_seconds=30
-    )
-    assert version_id not in first
-    assert version_id not in second
+    first = await recovery.enqueue_recoverable(limit=50, min_age_seconds=30)
+    second = await recovery.enqueue_recoverable(limit=50, min_age_seconds=30)
+    await db_session.commit()
+    assert first.enqueued == 0
+    assert second.enqueued == 0
 
-    # Lost/delayed work: after Outbox publish ages past cooldown, recover.
+    # Lost/delayed work: after Outbox publish ages past cooldown, re-enqueue.
     event.published_at = datetime.now(UTC) - timedelta(seconds=45)
     await db_session.commit()
-    _p, after_cooldown = await recovery.list_recoverable_version_ids(
-        limit=50, min_age_seconds=30
+    after = await recovery.enqueue_recoverable(limit=50, min_age_seconds=30)
+    await db_session.commit()
+    assert after.enqueued == 1
+
+    rows = (
+        await db_session.execute(
+            select(OutboxEvent).where(
+                OutboxEvent.event_type == "TOOL_EMBEDDING_ENSURE",
+                OutboxEvent.aggregate_id == version_id,
+            )
+        )
+    ).scalars().all()
+    assert len(rows) == 2
+    unpublished = [row for row in rows if row.published_at is None]
+    assert len(unpublished) == 1
+
+    # New publish resets cooldown — consecutive polls must not enqueue again.
+    unpublished[0].published_at = datetime.now(UTC)
+    await db_session.commit()
+    blocked = await recovery.enqueue_recoverable(limit=50, min_age_seconds=30)
+    await db_session.commit()
+    assert blocked.enqueued == 0
+    final_rows = (
+        await db_session.execute(
+            select(OutboxEvent).where(
+                OutboxEvent.event_type == "TOOL_EMBEDDING_ENSURE",
+                OutboxEvent.aggregate_id == version_id,
+            )
+        )
+    ).scalars().all()
+    assert len(final_rows) == 2
+
+
+@pytest.mark.asyncio
+async def test_recovery_outbox_survives_broker_failure_for_relay_retry(
+    db_session: AsyncSession,
+) -> None:
+    _tool_id, version_id, _lock = await _seed_tool(
+        db_session, status=MCPToolStatus.ACTIVE
     )
-    assert version_id in after_cooldown
+    profile_id = await _seed_active_profile(db_session)
+    await db_session.commit()
+
+    recovery = ToolEmbeddingRecoveryService(db_session)
+    enqueued = await recovery.enqueue_recoverable(limit=50, min_age_seconds=30)
+    await db_session.commit()
+    assert enqueued.enqueued == 1
+    assert enqueued.profile_id == profile_id
+
+    outbox = (
+        await db_session.execute(
+            select(OutboxEvent).where(
+                OutboxEvent.event_type == "TOOL_EMBEDDING_ENSURE",
+                OutboxEvent.aggregate_id == version_id,
+            )
+        )
+    ).scalar_one()
+    assert outbox.published_at is None
+    assert outbox.payload["embedding_profile_id"] == str(profile_id)
+
+    failed = await OutboxRelayService(db_session).publish_batch(
+        publisher=RecordingPublisher(fail=True), limit=10
+    )
+    await db_session.commit()
+    assert failed.failed >= 1
+    assert failed.published == 0
+
+    still = await OutboxRepository(db_session).get(outbox.id)
+    assert still is not None
+    assert still.published_at is None
+    assert still.last_error_code == "PUBLISH_FAILED"
+
+    # Unpublished evidence blocks another recovery enqueue.
+    again = await recovery.enqueue_recoverable(limit=50, min_age_seconds=30)
+    await db_session.commit()
+    assert again.enqueued == 0
+
+    # Durable Outbox retry path delivers on a later successful relay.
+    ok = await OutboxRelayService(db_session).publish_batch(
+        publisher=RecordingPublisher(), limit=10
+    )
+    await db_session.commit()
+    assert ok.published >= 1
+    delivered = await OutboxRepository(db_session).get(outbox.id)
+    assert delivered is not None
+    assert delivered.published_at is not None
 
 
 @pytest.mark.asyncio

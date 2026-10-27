@@ -60,6 +60,27 @@ async def run_iteration(*, settings: Settings | None = None) -> OutboxIterationR
         approval_expiry_selected = expiry.selected
         approval_expiry_expired = expiry.expired
 
+    # Enqueue durable TOOL_EMBEDDING_ENSURE before relay so broker delivery
+    # reuses Outbox publish/retry (never direct Celery from recovery).
+    tool_embedding_recovery_selected = 0
+    tool_embedding_recovery_published = 0
+    tool_embedding_recovery_failed = 0
+    async with session_scope() as session:
+        try:
+            emb_recovery = await ToolEmbeddingRecoveryService(
+                session
+            ).enqueue_recoverable(
+                limit=cfg.outbox_batch_size,
+                min_age_seconds=cfg.tool_embedding_republish_age_seconds,
+            )
+            await session.commit()
+            tool_embedding_recovery_selected = emb_recovery.selected
+            tool_embedding_recovery_published = emb_recovery.enqueued
+        except Exception:
+            await session.rollback()
+            tool_embedding_recovery_failed = 1
+            logger.warning("tool embedding recovery enqueue failed", exc_info=True)
+
     publisher = CeleryExecutionQueuePublisher()
     async with session_scope() as session:
         relay = OutboxRelayService(session)
@@ -168,37 +189,6 @@ async def run_iteration(*, settings: Settings | None = None) -> OutboxIterationR
                 test_run_id,
                 exc_info=True,
             )
-
-    tool_embedding_recovery_selected = 0
-    tool_embedding_recovery_published = 0
-    tool_embedding_recovery_failed = 0
-    embedding_profile_id: uuid.UUID | None = None
-    embedding_version_ids: list[uuid.UUID] = []
-    async with session_scope() as session:
-        embedding_profile_id, embedding_version_ids = (
-            await ToolEmbeddingRecoveryService(session).list_recoverable_version_ids(
-                limit=cfg.outbox_batch_size,
-                min_age_seconds=cfg.tool_embedding_republish_age_seconds,
-            )
-        )
-        tool_embedding_recovery_selected = len(embedding_version_ids)
-    if embedding_profile_id is not None:
-        for version_id in embedding_version_ids:
-            try:
-                publisher.publish_tool_embedding_ensure_recovery(
-                    tool_version_id=version_id,
-                    embedding_profile_id=embedding_profile_id,
-                )
-                tool_embedding_recovery_published += 1
-            except Exception:
-                tool_embedding_recovery_failed += 1
-                logger.warning(
-                    "tool embedding recovery publish failed "
-                    "tool_version_id=%s profile_id=%s",
-                    version_id,
-                    embedding_profile_id,
-                    exc_info=True,
-                )
 
     return OutboxIterationResult(
         staged=staged,
