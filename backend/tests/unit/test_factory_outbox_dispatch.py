@@ -76,6 +76,9 @@ class RecordingOutboxPublisher:
             raise ConnectionError("broker unavailable")
         self.factory_test_calls.append((test_run_id, outbox_event_id))
 
+    def publish_tool_embedding_ensure(self, **_kwargs: Any) -> None:
+        raise AssertionError("tool embedding unexpected")
+
     def publish_factory_recovery(self, *, job_id: uuid.UUID) -> None:
         if self.fail:
             raise ConnectionError("broker unavailable")

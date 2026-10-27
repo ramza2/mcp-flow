@@ -242,3 +242,70 @@ class CeleryExecutionQueuePublisher:
                 retry=True,
                 retry_policy=celery_app.conf.task_publish_retry_policy,
             )
+
+    def publish_tool_embedding_ensure(
+        self,
+        *,
+        tool_version_id: uuid.UUID,
+        embedding_profile_id: uuid.UUID,
+        outbox_event_id: uuid.UUID,
+    ) -> None:
+        """Publish ID-only ToolEmbedding ensure; DB row remains SoT."""
+
+        settings = get_settings()
+        transport_options = {
+            "socket_connect_timeout": settings.celery_publish_connect_timeout,
+            "socket_timeout": settings.celery_publish_socket_timeout,
+            "max_retries": settings.celery_publish_max_retries,
+        }
+        with celery_app.connection_for_write(
+            connect_timeout=settings.celery_publish_connect_timeout,
+            transport_options=transport_options,
+        ) as connection:
+            celery_app.send_task(
+                "mcpflow.maintenance.ensure_tool_embedding",
+                kwargs={
+                    "tool_version_id": str(tool_version_id),
+                    "embedding_profile_id": str(embedding_profile_id),
+                    "outbox_event_id": str(outbox_event_id),
+                },
+                queue="maintenance",
+                task_id=str(outbox_event_id),
+                connection=connection,
+                retry=True,
+                retry_policy=celery_app.conf.task_publish_retry_policy,
+            )
+
+    def publish_tool_embedding_ensure_recovery(
+        self,
+        *,
+        tool_version_id: uuid.UUID,
+        embedding_profile_id: uuid.UUID,
+    ) -> None:
+        """Republish ensure for MISSING/STALE/FAILED durable index gaps.
+
+        Candidates remain durable in PostgreSQL; a failed publish is safe —
+        the next outbox poll rediscovers the same eligible ToolVersion.
+        """
+
+        settings = get_settings()
+        transport_options = {
+            "socket_connect_timeout": settings.celery_publish_connect_timeout,
+            "socket_timeout": settings.celery_publish_socket_timeout,
+            "max_retries": settings.celery_publish_max_retries,
+        }
+        with celery_app.connection_for_write(
+            connect_timeout=settings.celery_publish_connect_timeout,
+            transport_options=transport_options,
+        ) as connection:
+            celery_app.send_task(
+                "mcpflow.maintenance.ensure_tool_embedding",
+                kwargs={
+                    "tool_version_id": str(tool_version_id),
+                    "embedding_profile_id": str(embedding_profile_id),
+                },
+                queue="maintenance",
+                connection=connection,
+                retry=True,
+                retry_policy=celery_app.conf.task_publish_retry_policy,
+            )

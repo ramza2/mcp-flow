@@ -147,6 +147,63 @@ class OutboxRepository:
         await self._session.flush()
         return row
 
+    async def create_tool_embedding_ensure(
+        self,
+        *,
+        tool_version_id: uuid.UUID,
+        embedding_profile_id: uuid.UUID,
+        created_at: datetime,
+    ) -> OutboxEvent:
+        """Durable ensure request; occurrence UUID keeps dedupe_key unique for re-ensure."""
+        occurrence_id = uuid.uuid4()
+        row = OutboxEvent(
+            id=occurrence_id,
+            event_type="TOOL_EMBEDDING_ENSURE",
+            aggregate_type="MCP_TOOL_VERSION",
+            aggregate_id=tool_version_id,
+            dedupe_key=(
+                f"tool_embedding:{tool_version_id}:{embedding_profile_id}"
+                f":ensure:{occurrence_id}"
+            ),
+            payload={
+                "tool_version_id": str(tool_version_id),
+                "embedding_profile_id": str(embedding_profile_id),
+            },
+            created_at=created_at,
+            last_attempt_at=None,
+            published_at=None,
+            publish_attempt_count=0,
+            last_error_code=None,
+            lock_version=1,
+        )
+        self._session.add(row)
+        await self._session.flush()
+        return row
+
+    async def find_unpublished_tool_embedding_ensure(
+        self,
+        *,
+        tool_version_id: uuid.UUID,
+        embedding_profile_id: uuid.UUID,
+    ) -> OutboxEvent | None:
+        """Return an unpublished ensure for the same version+profile, if any."""
+        expected_profile = str(embedding_profile_id)
+        stmt = (
+            select(OutboxEvent)
+            .where(
+                OutboxEvent.event_type == "TOOL_EMBEDDING_ENSURE",
+                OutboxEvent.published_at.is_(None),
+                OutboxEvent.aggregate_id == tool_version_id,
+            )
+            .order_by(OutboxEvent.created_at.asc(), OutboxEvent.id.asc())
+        )
+        rows = list((await self._session.execute(stmt)).scalars().all())
+        for row in rows:
+            payload = row.payload if isinstance(row.payload, dict) else {}
+            if payload.get("embedding_profile_id") == expected_profile:
+                return row
+        return None
+
     async def claim_unpublished_batch(self, *, limit: int) -> list[OutboxEvent]:
         stmt = (
             select(OutboxEvent)

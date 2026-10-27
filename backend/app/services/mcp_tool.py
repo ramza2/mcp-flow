@@ -14,6 +14,7 @@ from app.repositories.mcp_tool import MCPToolRepository
 from app.repositories.tool_embedding import ToolEmbeddingRepository
 from app.schemas.mcp_tool import MCPToolUpdate
 from app.search.tool_document import normalize_search_tags
+from app.search.tool_embedding_schedule import enqueue_ensure_for_active_tool
 
 _ACTIVATE_FROM = frozenset(
     {
@@ -105,6 +106,7 @@ class MCPToolService:
 
         if stale_needed:
             await ToolEmbeddingRepository(self._session).mark_stale_for_tool(tool_id)
+            await enqueue_ensure_for_active_tool(self._session, updated)
 
         await self._session.commit()
         await self._session.refresh(updated)
@@ -131,6 +133,7 @@ class MCPToolService:
             allowed_from_statuses=_ACTIVATE_FROM,
         )
         if updated is not None:
+            await enqueue_ensure_for_active_tool(self._session, updated)
             await self._session.commit()
             await self._session.refresh(updated)
             return updated
@@ -139,6 +142,8 @@ class MCPToolService:
         if int(current.lock_version) != int(expected_lock_version):
             self._raise_version_conflict()
         if current.status == MCPToolStatus.ACTIVE:
+            # Already ACTIVE: still schedule ensure so MISSING indexes recover.
+            await enqueue_ensure_for_active_tool(self._session, current)
             await self._session.commit()
             return current
         if current.status in _PRESERVED:

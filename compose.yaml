@@ -174,7 +174,7 @@ services:
         "app.infrastructure.celery_app:celery_app",
         "worker",
         "-Q",
-        "execution",
+        "execution,maintenance",
         "--loglevel=INFO",
       ]
 

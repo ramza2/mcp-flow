@@ -14,6 +14,7 @@ from app.db.session import dispose_db, init_db, session_scope
 from app.execution.queue import ExecutionQueueService, OutboxRelayService
 from app.execution.recovery import ExecutionRecoveryService
 from app.infrastructure.queue import CeleryExecutionQueuePublisher
+from app.search.tool_embedding_recovery import ToolEmbeddingRecoveryService
 from app.services.factory_recovery import FactoryRecoveryService
 
 logger = logging.getLogger(__name__)
@@ -36,6 +37,9 @@ class OutboxIterationResult:
     factory_test_recovery_selected: int
     factory_test_recovery_published: int
     factory_test_recovery_failed: int
+    tool_embedding_recovery_selected: int
+    tool_embedding_recovery_published: int
+    tool_embedding_recovery_failed: int
 
 
 async def run_iteration(*, settings: Settings | None = None) -> OutboxIterationResult:
@@ -165,6 +169,37 @@ async def run_iteration(*, settings: Settings | None = None) -> OutboxIterationR
                 exc_info=True,
             )
 
+    tool_embedding_recovery_selected = 0
+    tool_embedding_recovery_published = 0
+    tool_embedding_recovery_failed = 0
+    embedding_profile_id: uuid.UUID | None = None
+    embedding_version_ids: list[uuid.UUID] = []
+    async with session_scope() as session:
+        embedding_profile_id, embedding_version_ids = (
+            await ToolEmbeddingRecoveryService(session).list_recoverable_version_ids(
+                limit=cfg.outbox_batch_size,
+                min_age_seconds=cfg.tool_embedding_republish_age_seconds,
+            )
+        )
+        tool_embedding_recovery_selected = len(embedding_version_ids)
+    if embedding_profile_id is not None:
+        for version_id in embedding_version_ids:
+            try:
+                publisher.publish_tool_embedding_ensure_recovery(
+                    tool_version_id=version_id,
+                    embedding_profile_id=embedding_profile_id,
+                )
+                tool_embedding_recovery_published += 1
+            except Exception:
+                tool_embedding_recovery_failed += 1
+                logger.warning(
+                    "tool embedding recovery publish failed "
+                    "tool_version_id=%s profile_id=%s",
+                    version_id,
+                    embedding_profile_id,
+                    exc_info=True,
+                )
+
     return OutboxIterationResult(
         staged=staged,
         selected=result.selected,
@@ -181,6 +216,9 @@ async def run_iteration(*, settings: Settings | None = None) -> OutboxIterationR
         factory_test_recovery_selected=factory_test_recovery_selected,
         factory_test_recovery_published=factory_test_recovery_published,
         factory_test_recovery_failed=factory_test_recovery_failed,
+        tool_embedding_recovery_selected=tool_embedding_recovery_selected,
+        tool_embedding_recovery_published=tool_embedding_recovery_published,
+        tool_embedding_recovery_failed=tool_embedding_recovery_failed,
     )
 
 
@@ -217,6 +255,7 @@ async def _run() -> None:
                 or result.approval_expiry_selected
                 or result.factory_recovery_selected
                 or result.factory_test_recovery_selected
+                or result.tool_embedding_recovery_selected
             ):
                 logger.info(
                     "outbox iteration staged=%s selected=%s published=%s failed=%s"
@@ -226,7 +265,10 @@ async def _run() -> None:
                     " factory_recovery_failed=%s"
                     " factory_test_recovery_selected=%s"
                     " factory_test_recovery_published=%s"
-                    " factory_test_recovery_failed=%s",
+                    " factory_test_recovery_failed=%s"
+                    " tool_embedding_recovery_selected=%s"
+                    " tool_embedding_recovery_published=%s"
+                    " tool_embedding_recovery_failed=%s",
                     result.staged,
                     result.selected,
                     result.published,
@@ -242,6 +284,9 @@ async def _run() -> None:
                     result.factory_test_recovery_selected,
                     result.factory_test_recovery_published,
                     result.factory_test_recovery_failed,
+                    result.tool_embedding_recovery_selected,
+                    result.tool_embedding_recovery_published,
+                    result.tool_embedding_recovery_failed,
                 )
             try:
                 await asyncio.wait_for(

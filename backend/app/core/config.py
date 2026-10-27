@@ -71,6 +71,14 @@ class Settings(BaseSettings):
             "(covers lost broker messages after Outbox mark-published)."
         ),
     )
+    tool_embedding_republish_age_seconds: int = Field(
+        default=30,
+        ge=0,
+        description=(
+            "Minimum STALE/FAILED ToolEmbedding age before outbox poller "
+            "republishes ensure delivery (MISSING rows are always eligible)."
+        ),
+    )
 
     execution_lease_seconds: int = Field(default=60, gt=0)
     outbox_poll_interval_seconds: float = Field(default=1.0, gt=0)

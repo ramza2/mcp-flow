@@ -57,6 +57,14 @@ class ExecutionQueuePublisher(Protocol):
         outbox_event_id: uuid.UUID,
     ) -> None: ...
 
+    def publish_tool_embedding_ensure(
+        self,
+        *,
+        tool_version_id: uuid.UUID,
+        embedding_profile_id: uuid.UUID,
+        outbox_event_id: uuid.UUID,
+    ) -> None: ...
+
 
 @dataclass(frozen=True, slots=True)
 class PublishBatchResult:
@@ -254,6 +262,49 @@ def validate_factory_test_run_dispatch_event(row: object) -> uuid.UUID:
             status_code=409,
         )
     return test_run_id
+
+
+def validate_tool_embedding_ensure_event(
+    row: object,
+) -> tuple[uuid.UUID, uuid.UUID]:
+    """Validate ID-only ToolEmbedding ensure Outbox evidence."""
+
+    payload = getattr(row, "payload", None)
+    if not isinstance(payload, dict) or set(payload) != {
+        "tool_version_id",
+        "embedding_profile_id",
+    }:
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message="ToolEmbedding ensure Outbox payload is corrupted.",
+            status_code=409,
+        )
+    try:
+        tool_version_id = uuid.UUID(str(payload["tool_version_id"]))
+        embedding_profile_id = uuid.UUID(str(payload["embedding_profile_id"]))
+    except (TypeError, ValueError) as exc:
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message="ToolEmbedding ensure Outbox payload is corrupted.",
+            status_code=409,
+        ) from exc
+    dedupe = getattr(row, "dedupe_key", None)
+    expected_prefix = (
+        f"tool_embedding:{tool_version_id}:{embedding_profile_id}:ensure:"
+    )
+    if (
+        getattr(row, "event_type", None) != "TOOL_EMBEDDING_ENSURE"
+        or getattr(row, "aggregate_type", None) != "MCP_TOOL_VERSION"
+        or tool_version_id != getattr(row, "aggregate_id", None)
+        or not isinstance(dedupe, str)
+        or not dedupe.startswith(expected_prefix)
+    ):
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message="ToolEmbedding ensure Outbox lineage is corrupted.",
+            status_code=409,
+        )
+    return tool_version_id, embedding_profile_id
 
 
 class ExecutionQueueService:
@@ -477,6 +528,15 @@ class OutboxRelayService:
             test_run_id = validate_factory_test_run_dispatch_event(row)
             publisher.publish_factory_test_run(
                 test_run_id=test_run_id,
+                outbox_event_id=row.id,
+            )
+        elif event_type == "TOOL_EMBEDDING_ENSURE":
+            tool_version_id, embedding_profile_id = (
+                validate_tool_embedding_ensure_event(row)
+            )
+            publisher.publish_tool_embedding_ensure(
+                tool_version_id=tool_version_id,
+                embedding_profile_id=embedding_profile_id,
                 outbox_event_id=row.id,
             )
         else:

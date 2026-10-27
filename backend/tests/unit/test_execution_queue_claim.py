@@ -77,6 +77,17 @@ class FakePublisher:
         if self.fail:
             raise ConnectionError("broker unavailable")
 
+    def publish_tool_embedding_ensure(
+        self,
+        *,
+        tool_version_id: uuid.UUID,
+        embedding_profile_id: uuid.UUID,
+        outbox_event_id: uuid.UUID,
+    ) -> None:
+        self.calls.append((tool_version_id, embedding_profile_id, outbox_event_id))
+        if self.fail:
+            raise ConnectionError("broker unavailable")
+
 
 async def _created_execution(session: AsyncSession) -> tuple[uuid.UUID, str]:
     seeded = await _seed_ready(session)

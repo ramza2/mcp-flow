@@ -727,6 +727,9 @@ async def test_broker_publish_failure_leaves_unpublished_outbox(
             def publish_factory_test_run(self, **_kwargs: Any) -> None:
                 raise AssertionError("factory test-run unexpected")
 
+            def publish_tool_embedding_ensure(self, **_kwargs: Any) -> None:
+                raise AssertionError("tool embedding unexpected")
+
         result = await OutboxRelayService(session).publish_batch(
             publisher=BadPublisher(), limit=10
         )
@@ -768,6 +771,9 @@ async def test_broker_publish_failure_leaves_unpublished_outbox(
 
             def publish_factory_test_run(self, **_kwargs: Any) -> None:
                 raise AssertionError("factory test-run unexpected")
+
+            def publish_tool_embedding_ensure(self, **_kwargs: Any) -> None:
+                raise AssertionError("tool embedding unexpected")
 
         good = GoodPublisher()
         result2 = await OutboxRelayService(session).publish_batch(

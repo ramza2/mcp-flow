@@ -16,7 +16,7 @@ celery_app = Celery(
     "mcpflow",
     broker=settings.redis_url,
     backend=None,
-    include=["app.execution.tasks", "app.factory.tasks"],
+    include=["app.execution.tasks", "app.factory.tasks", "app.search.tasks"],
 )
 celery_app.conf.update(
     task_default_queue="execution",
@@ -27,6 +27,7 @@ celery_app.conf.update(
         "mcpflow.execution.mrtr_resume": {"queue": "execution"},
         "mcpflow.factory.analyze_openapi": {"queue": "factory"},
         "mcpflow.factory.run_sandbox_test": {"queue": "factory"},
+        "mcpflow.maintenance.ensure_tool_embedding": {"queue": "maintenance"},
     },
     task_serializer="json",
     accept_content=["json"],
