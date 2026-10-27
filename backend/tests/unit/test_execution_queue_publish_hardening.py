@@ -138,6 +138,9 @@ async def test_outbox_published_at_is_captured_after_publish_returns(
         def publish_factory_test_run(self, **_kwargs: object) -> None:
             raise AssertionError("factory test-run unexpected")
 
+        def publish_tool_embedding_ensure(self, **_kwargs: object) -> None:
+            raise AssertionError("tool embedding unexpected")
+
     monkeypatch.setattr(queue_module, "datetime", FakeDateTime)
 
     result = await OutboxRelayService(db_session).publish_batch(

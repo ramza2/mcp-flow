@@ -466,6 +466,9 @@ async def test_pg_outbox_publish_failure_then_recovery_one_analysis(
         def publish_factory_test_run(self, **_k: Any) -> None:
             raise AssertionError("unexpected test-run publish")
 
+        def publish_tool_embedding_ensure(self, **_k: Any) -> None:
+            raise AssertionError("unexpected tool embedding publish")
+
     storage = InMemoryObjectStorage()
     async with integration_session_factory() as session:
         user_id = await _seed_manage_user(session)

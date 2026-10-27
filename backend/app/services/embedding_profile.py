@@ -20,6 +20,7 @@ from app.schemas.model_profile import (
     EmbeddingProfileUpdate,
     ModelProfileConnectionTestResponse,
 )
+from app.search.tool_embedding_schedule import enqueue_rebuild_for_profile
 
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
 
@@ -178,6 +179,8 @@ class EmbeddingProfileService:
             await ToolEmbeddingRepository(self._session).mark_stale_for_profile(
                 profile_id
             )
+            if updated.is_active_for_tools:
+                await enqueue_rebuild_for_profile(self._session, profile_id)
 
         await self._session.commit()
         await self._session.refresh(updated)
@@ -202,7 +205,9 @@ class EmbeddingProfileService:
 
         # Idempotent: already active with matching If-Match — no lock bump.
         # Commit releases FOR UPDATE so other sessions are not blocked.
+        # Still enqueue rebuild so MISSING/STALE indexes recover.
         if target.is_active_for_tools:
+            await enqueue_rebuild_for_profile(self._session, profile_id)
             await self._session.commit()
             return target
 
@@ -233,6 +238,7 @@ class EmbeddingProfileService:
                     message="Embedding profile lock_version does not match.",
                     status_code=status.HTTP_409_CONFLICT,
                 )
+            await enqueue_rebuild_for_profile(self._session, activated.id)
             await self._session.commit()
             await self._session.refresh(activated)
             return activated

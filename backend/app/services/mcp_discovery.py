@@ -51,6 +51,7 @@ from app.schemas.mcp_server import (
     FactoryDiscoveryClassification,
     FactoryDiscoveryDiffSummary,
 )
+from app.search.tool_embedding_schedule import enqueue_tool_embedding_ensure
 
 
 @dataclass(slots=True)
@@ -1242,11 +1243,20 @@ class MCPDiscoveryService:
             desc = remote_by_name[name]
             meta = remote_meta[name]
             tool = existing_by_name[name]
+            prior_version_id = tool.current_version_id
             version = await self._ensure_version(tool.id, desc, meta)
             tool.current_version_id = version.id
             if tool.status == MCPToolStatus.MISSING:
                 tool.status = MCPToolStatus.DISCOVERED
             await self._tools.touch_last_seen(tool)
+            if (
+                tool.status == MCPToolStatus.ACTIVE
+                and version.id != prior_version_id
+            ):
+                await enqueue_tool_embedding_ensure(
+                    self._session,
+                    tool_version_id=version.id,
+                )
 
         for name in unchanged:
             tool = existing_by_name[name]

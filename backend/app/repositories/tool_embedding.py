@@ -5,11 +5,18 @@ from __future__ import annotations
 import math
 import uuid
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import select, text
+from sqlalchemy import and_, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.mcp import ToolEmbedding
+from app.domain.enums import (
+    MCPServerStatus,
+    MCPToolStatus,
+    ToolEmbeddingStatus,
+    ToolVersionValidationStatus,
+)
+from app.models.mcp import MCPServer, MCPTool, MCPToolVersion, ToolEmbedding
 
 
 @dataclass(frozen=True, slots=True)
@@ -226,31 +233,59 @@ class ToolEmbeddingRepository:
         return row
 
     async def list_missing_or_stale_for_profile(
-        self, profile_id: uuid.UUID
+        self,
+        profile_id: uuid.UUID,
+        *,
+        limit: int | None = None,
+        min_age_seconds: int | None = None,
     ) -> list[uuid.UUID]:
-        stmt = text(
-            """
-            SELECT t.current_version_id
-            FROM mcp_tools AS t
-            WHERE t.deleted_at IS NULL
-              AND t.current_version_id IS NOT NULL
-              AND (
-                NOT EXISTS (
-                  SELECT 1 FROM tool_embeddings te
-                  WHERE te.mcp_tool_version_id = t.current_version_id
-                    AND te.embedding_profile_id = :profile_id
-                )
-                OR EXISTS (
-                  SELECT 1 FROM tool_embeddings te
-                  WHERE te.mcp_tool_version_id = t.current_version_id
-                    AND te.embedding_profile_id = :profile_id
-                    AND te.status IN ('STALE', 'FAILED')
-                )
-              )
-            """
+        """List executable ToolVersion IDs needing ensure under a profile.
+
+        Candidates are limited to ACTIVE MCP Server + ACTIVE Tool + VALID
+        current ToolVersion (Factory INACTIVE tools index on activate).
+        Includes MISSING (no row) or STALE/FAILED rows. Optional
+        ``min_age_seconds`` ages STALE/FAILED ``updated_at`` so recovery does
+        not hammer a repeatedly failing provider every poll.
+        """
+        stale_failed = and_(
+            ToolEmbedding.mcp_tool_version_id == MCPTool.current_version_id,
+            ToolEmbedding.embedding_profile_id == profile_id,
+            ToolEmbedding.status.in_(
+                (ToolEmbeddingStatus.STALE, ToolEmbeddingStatus.FAILED)
+            ),
         )
-        result = await self._session.execute(stmt, {"profile_id": profile_id})
-        return [row[0] for row in result.all()]
+        if min_age_seconds is not None:
+            cutoff = datetime.now(UTC) - timedelta(seconds=int(min_age_seconds))
+            stale_failed = and_(stale_failed, ToolEmbedding.updated_at <= cutoff)
+
+        missing = ~select(ToolEmbedding.id).where(
+            ToolEmbedding.mcp_tool_version_id == MCPTool.current_version_id,
+            ToolEmbedding.embedding_profile_id == profile_id,
+        ).exists()
+        needs_refresh = select(ToolEmbedding.id).where(stale_failed).exists()
+
+        stmt = (
+            select(MCPTool.current_version_id)
+            .join(MCPServer, MCPServer.id == MCPTool.mcp_server_id)
+            .join(
+                MCPToolVersion,
+                MCPToolVersion.id == MCPTool.current_version_id,
+            )
+            .where(
+                MCPTool.deleted_at.is_(None),
+                MCPServer.deleted_at.is_(None),
+                MCPTool.current_version_id.is_not(None),
+                MCPTool.status == MCPToolStatus.ACTIVE,
+                MCPServer.status == MCPServerStatus.ACTIVE,
+                MCPToolVersion.validation_status == ToolVersionValidationStatus.VALID,
+                or_(missing, needs_refresh),
+            )
+            .order_by(MCPTool.updated_at.asc(), MCPTool.id.asc())
+        )
+        if limit is not None:
+            stmt = stmt.limit(int(limit))
+        result = await self._session.execute(stmt)
+        return [row[0] for row in result.all() if row[0] is not None]
 
     async def lexical_search(
         self,
