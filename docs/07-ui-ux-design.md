@@ -340,10 +340,14 @@ Agent 선택
 
 **Planning 전 WAITING_INPUT**과 **Execution 중 MRTR WAITING_INPUT**을 UI에서 구분한다.
 
-Agent Run의 `READY`는 실행 완료가 아니다. 실제 업무 실행 시작 전에 외부 부작용
-확인을 요구하고, 생성 시 `Idempotency-Key`를 사용한다. 실행 생성 후에는
-`/executions/:executionId`로 이동한다. F5 재진입 시 `agent_request_id`로
-기존 실행을 복원하고 중복 시작 버튼 대신 실행 상세 진입을 제공한다.
+Agent Run의 `READY`는 실행 완료가 아니다. 채팅형 1단계에서는 서버가
+`safe_auto_execute=true`(단일 `READ_ONLY` Tool, 확인·승인 불필요)로 표시한
+경우에만 같은 채팅 화면에서 Execution을 자동 시작하고 SSE/상태로 진행을
+표시한다. 그 외 READY·확인·승인·입력 누락은 채팅에 질문/안내만 하고 실행하지
+않는다. 비안전 경로의 명시 확인과 `Idempotency-Key`는 유지한다. 완료 후
+소유자 전용 `GET .../chat-result`로 Tool 응답 요약을 표시하며, 고급 보기로
+기존 단계별 UI·실행 상세(`/executions/:executionId`)에 접근한다. F5 재진입 시
+`agent_request_id`로 기존 실행을 복원하고 중복 시작을 막는다.
 
 예:
 
