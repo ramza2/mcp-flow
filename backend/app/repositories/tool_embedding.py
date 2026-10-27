@@ -10,8 +10,13 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import and_, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.domain.enums import ToolEmbeddingStatus
-from app.models.mcp import MCPTool, ToolEmbedding
+from app.domain.enums import (
+    MCPServerStatus,
+    MCPToolStatus,
+    ToolEmbeddingStatus,
+    ToolVersionValidationStatus,
+)
+from app.models.mcp import MCPServer, MCPTool, MCPToolVersion, ToolEmbedding
 
 
 @dataclass(frozen=True, slots=True)
@@ -234,12 +239,13 @@ class ToolEmbeddingRepository:
         limit: int | None = None,
         min_age_seconds: int | None = None,
     ) -> list[uuid.UUID]:
-        """List current ToolVersion IDs needing ensure under a profile.
+        """List executable ToolVersion IDs needing ensure under a profile.
 
-        Includes tools with no embedding row (MISSING) or STALE/FAILED rows.
-        Optional ``min_age_seconds`` applies only to STALE/FAILED rows (MISSING
-        is always eligible) so recovery polls do not hammer freshly failed
-        provider calls.
+        Candidates are limited to ACTIVE MCP Server + ACTIVE Tool + VALID
+        current ToolVersion (Factory INACTIVE tools index on activate).
+        Includes MISSING (no row) or STALE/FAILED rows. Optional
+        ``min_age_seconds`` ages STALE/FAILED ``updated_at`` so recovery does
+        not hammer a repeatedly failing provider every poll.
         """
         stale_failed = and_(
             ToolEmbedding.mcp_tool_version_id == MCPTool.current_version_id,
@@ -260,9 +266,18 @@ class ToolEmbeddingRepository:
 
         stmt = (
             select(MCPTool.current_version_id)
+            .join(MCPServer, MCPServer.id == MCPTool.mcp_server_id)
+            .join(
+                MCPToolVersion,
+                MCPToolVersion.id == MCPTool.current_version_id,
+            )
             .where(
                 MCPTool.deleted_at.is_(None),
+                MCPServer.deleted_at.is_(None),
                 MCPTool.current_version_id.is_not(None),
+                MCPTool.status == MCPToolStatus.ACTIVE,
+                MCPServer.status == MCPServerStatus.ACTIVE,
+                MCPToolVersion.validation_status == ToolVersionValidationStatus.VALID,
                 or_(missing, needs_refresh),
             )
             .order_by(MCPTool.updated_at.asc(), MCPTool.id.asc())

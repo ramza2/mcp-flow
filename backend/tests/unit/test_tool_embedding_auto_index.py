@@ -7,23 +7,29 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
-from app.domain.enums import MCPToolStatus, ToolEmbeddingStatus, ToolVersionValidationStatus
+from app.domain.enums import (
+    MCPServerStatus,
+    MCPToolStatus,
+    ToolEmbeddingStatus,
+    ToolVersionValidationStatus,
+)
 from app.execution.queue import (
     OutboxRelayService,
     validate_tool_embedding_ensure_event,
 )
-from app.models.mcp import ToolEmbedding
+from app.models.mcp import MCPToolVersion, ToolEmbedding
 from app.models.outbox import OutboxEvent
 from app.repositories.embedding_profile import EmbeddingProfileRepository
 from app.repositories.mcp_server import MCPServerRepository
 from app.repositories.mcp_tool import MCPToolRepository
 from app.repositories.outbox import OutboxRepository
+from app.repositories.tool_embedding import ToolEmbeddingRepository
+from app.schemas.mcp_tool import MCPToolUpdate
 from app.search.tool_embedding_recovery import ToolEmbeddingRecoveryService
 from app.search.tool_embedding_schedule import (
     enqueue_rebuild_for_profile,
     enqueue_tool_embedding_ensure,
 )
-from app.schemas.mcp_tool import MCPToolUpdate
 from app.services.embedding_profile import EmbeddingProfileService
 from app.services.mcp_tool import MCPToolService
 from sqlalchemy import select
@@ -37,31 +43,34 @@ def _add_embedding(
     profile_id: uuid.UUID,
     status: str,
     content_hash: str,
-) -> None:
-    session.add(
-        ToolEmbedding(
-            id=uuid.uuid4(),
-            mcp_tool_version_id=version_id,
-            embedding_profile_id=profile_id,
-            search_text="remote_name: pets",
-            search_tsv="pets",
-            embedding=None,
-            content_hash=content_hash,
-            status=status,
-        )
+) -> ToolEmbedding:
+    row = ToolEmbedding(
+        id=uuid.uuid4(),
+        mcp_tool_version_id=version_id,
+        embedding_profile_id=profile_id,
+        search_text="remote_name: pets",
+        search_tsv="pets",
+        embedding=None,
+        content_hash=content_hash,
+        status=status,
     )
+    session.add(row)
+    return row
 
 
 async def _seed_tool(
     session: AsyncSession,
     *,
     status: str = MCPToolStatus.DISCOVERED,
+    server_status: str = MCPServerStatus.ACTIVE,
+    validation_status: str = ToolVersionValidationStatus.VALID,
 ) -> tuple[uuid.UUID, uuid.UUID, int]:
     server = await MCPServerRepository(session).create(
         code=f"srv-{uuid.uuid4().hex[:8]}",
         name="Emb Auto Index Server",
         transport_type="STREAMABLE_HTTP",
         endpoint_url="https://mcp.test/mcp",
+        status=server_status,
     )
     tools = MCPToolRepository(session)
     tool = await tools.create_tool(
@@ -75,7 +84,7 @@ async def _seed_tool(
         mcp_tool_id=tool.id,
         version_no=1,
         content_hash=uuid.uuid4().hex + uuid.uuid4().hex,
-        validation_status=ToolVersionValidationStatus.VALID,
+        validation_status=validation_status,
         remote_description="List pets",
         input_schema={"type": "object", "properties": {}},
         output_schema=None,
@@ -291,7 +300,9 @@ async def test_outbox_relay_publishes_tool_embedding_ensure(
 async def test_recovery_skips_unpublished_and_fresh_failed(
     db_session: AsyncSession,
 ) -> None:
-    _tool_id, version_id, _lock = await _seed_tool(db_session)
+    _tool_id, version_id, _lock = await _seed_tool(
+        db_session, status=MCPToolStatus.ACTIVE
+    )
     profile_id = await _seed_active_profile(db_session)
     pending = await enqueue_tool_embedding_ensure(
         db_session,
@@ -304,20 +315,29 @@ async def test_recovery_skips_unpublished_and_fresh_failed(
     # Unpublished twin must be skipped by recovery.
     recovered_profile, recoverable = await ToolEmbeddingRecoveryService(
         db_session
-    ).list_recoverable_version_ids(limit=50, min_age_seconds=0)
+    ).list_recoverable_version_ids(limit=50, min_age_seconds=30)
     assert recovered_profile == profile_id
     assert version_id not in recoverable
 
-    # Mark published so recovery can see the still-MISSING index.
+    # Freshly published: still in cooldown (worker may still be generating).
     pending.published_at = datetime.now(UTC)
     await db_session.commit()
 
-    recovered_profile, recoverable = await ToolEmbeddingRecoveryService(
+    _profile, recoverable_cool = await ToolEmbeddingRecoveryService(
         db_session
-    ).list_recoverable_version_ids(limit=50, min_age_seconds=0)
-    assert version_id in recoverable
+    ).list_recoverable_version_ids(limit=50, min_age_seconds=30)
+    assert version_id not in recoverable_cool
 
-    # Fresh FAILED is filtered by min_age_seconds.
+    # After Outbox publish ages past cooldown, MISSING becomes recoverable.
+    pending.published_at = datetime.now(UTC) - timedelta(hours=2)
+    await db_session.commit()
+
+    _profile, recoverable_missing = await ToolEmbeddingRecoveryService(
+        db_session
+    ).list_recoverable_version_ids(limit=50, min_age_seconds=30)
+    assert version_id in recoverable_missing
+
+    # Fresh FAILED is filtered by embedding updated_at age.
     _add_embedding(
         db_session,
         version_id=version_id,
@@ -354,9 +374,15 @@ async def test_recovery_skips_unpublished_and_fresh_failed(
 async def test_rebuild_enqueues_only_missing_or_stale(
     db_session: AsyncSession,
 ) -> None:
-    _t1, ready_version, _ = await _seed_tool(db_session)
-    _t2, stale_version, _ = await _seed_tool(db_session)
-    _t3, missing_version, _ = await _seed_tool(db_session)
+    _t1, ready_version, _ = await _seed_tool(
+        db_session, status=MCPToolStatus.ACTIVE
+    )
+    _t2, stale_version, _ = await _seed_tool(
+        db_session, status=MCPToolStatus.ACTIVE
+    )
+    _t3, missing_version, _ = await _seed_tool(
+        db_session, status=MCPToolStatus.ACTIVE
+    )
     profile_id = await _seed_active_profile(db_session)
 
     _add_embedding(
@@ -434,3 +460,144 @@ async def test_metadata_patch_enqueues_ensure_when_active(
         )
     ).scalar_one()
     assert outbox.payload["embedding_profile_id"] == str(profile_id)
+
+
+@pytest.mark.asyncio
+async def test_missing_recovery_cooldown_blocks_consecutive_polls_then_recovers(
+    db_session: AsyncSession,
+) -> None:
+    _tool_id, version_id, _lock = await _seed_tool(
+        db_session, status=MCPToolStatus.ACTIVE
+    )
+    profile_id = await _seed_active_profile(db_session)
+    event = await enqueue_tool_embedding_ensure(
+        db_session,
+        tool_version_id=version_id,
+        embedding_profile_id=profile_id,
+    )
+    assert event is not None
+    event.published_at = datetime.now(UTC)
+    await db_session.commit()
+
+    recovery = ToolEmbeddingRecoveryService(db_session)
+    _p, first = await recovery.list_recoverable_version_ids(
+        limit=50, min_age_seconds=30
+    )
+    _p, second = await recovery.list_recoverable_version_ids(
+        limit=50, min_age_seconds=30
+    )
+    assert version_id not in first
+    assert version_id not in second
+
+    # Lost/delayed work: after Outbox publish ages past cooldown, recover.
+    event.published_at = datetime.now(UTC) - timedelta(seconds=45)
+    await db_session.commit()
+    _p, after_cooldown = await recovery.list_recoverable_version_ids(
+        limit=50, min_age_seconds=30
+    )
+    assert version_id in after_cooldown
+
+
+@pytest.mark.asyncio
+async def test_rebuild_excludes_inactive_tool_and_invalid_version(
+    db_session: AsyncSession,
+) -> None:
+    _active_id, active_version, _ = await _seed_tool(
+        db_session, status=MCPToolStatus.ACTIVE
+    )
+    _inactive_id, inactive_version, _ = await _seed_tool(
+        db_session, status=MCPToolStatus.INACTIVE
+    )
+    _invalid_tool_id, invalid_version, _ = await _seed_tool(
+        db_session,
+        status=MCPToolStatus.ACTIVE,
+        validation_status=ToolVersionValidationStatus.INVALID,
+    )
+    _draft_server_tool, draft_version, _ = await _seed_tool(
+        db_session,
+        status=MCPToolStatus.ACTIVE,
+        server_status=MCPServerStatus.DRAFT,
+    )
+    profile_id = await _seed_active_profile(db_session)
+    await db_session.commit()
+
+    # Confirm INVALID persisted as intended.
+    version_row = await db_session.get(MCPToolVersion, invalid_version)
+    assert version_row is not None
+    assert version_row.validation_status == ToolVersionValidationStatus.INVALID
+
+    candidates = await ToolEmbeddingRepository(
+        db_session
+    ).list_missing_or_stale_for_profile(profile_id)
+    assert active_version in candidates
+    assert inactive_version not in candidates
+    assert invalid_version not in candidates
+    assert draft_version not in candidates
+
+    enqueued = await enqueue_rebuild_for_profile(db_session, profile_id)
+    await db_session.commit()
+    assert enqueued == 1
+
+    outbox_versions = {
+        row.aggregate_id
+        for row in (
+            await db_session.execute(
+                select(OutboxEvent).where(
+                    OutboxEvent.event_type == "TOOL_EMBEDDING_ENSURE"
+                )
+            )
+        ).scalars().all()
+    }
+    assert outbox_versions == {active_version}
+
+
+@pytest.mark.asyncio
+async def test_missing_ensure_reaches_ready_and_leaves_recovery(
+    db_session: AsyncSession,
+) -> None:
+    _tool_id, version_id, _lock = await _seed_tool(
+        db_session, status=MCPToolStatus.ACTIVE
+    )
+    profile_id = await _seed_active_profile(db_session)
+    event = await enqueue_tool_embedding_ensure(
+        db_session,
+        tool_version_id=version_id,
+        embedding_profile_id=profile_id,
+    )
+    assert event is not None
+    await db_session.commit()
+
+    publisher = RecordingPublisher()
+    await OutboxRelayService(db_session).publish_batch(publisher=publisher, limit=10)
+    await db_session.commit()
+    assert len(publisher.embedding_calls) == 1
+
+    # Simulate successful worker persist (READY).
+    _add_embedding(
+        db_session,
+        version_id=version_id,
+        profile_id=profile_id,
+        status=ToolEmbeddingStatus.READY,
+        content_hash="e" * 64,
+    )
+    await db_session.commit()
+
+    missing = await ToolEmbeddingRepository(
+        db_session
+    ).list_missing_or_stale_for_profile(profile_id)
+    assert version_id not in missing
+
+    _p, recoverable = await ToolEmbeddingRecoveryService(
+        db_session
+    ).list_recoverable_version_ids(limit=50, min_age_seconds=0)
+    assert version_id not in recoverable
+
+    row = (
+        await db_session.execute(
+            select(ToolEmbedding).where(
+                ToolEmbedding.mcp_tool_version_id == version_id,
+                ToolEmbedding.embedding_profile_id == profile_id,
+            )
+        )
+    ).scalar_one()
+    assert row.status == ToolEmbeddingStatus.READY

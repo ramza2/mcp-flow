@@ -204,6 +204,29 @@ class OutboxRepository:
                 return row
         return None
 
+    async def find_latest_tool_embedding_ensure(
+        self,
+        *,
+        tool_version_id: uuid.UUID,
+        embedding_profile_id: uuid.UUID,
+    ) -> OutboxEvent | None:
+        """Latest ensure Outbox row for version+profile (published or not)."""
+        expected_profile = str(embedding_profile_id)
+        stmt = (
+            select(OutboxEvent)
+            .where(
+                OutboxEvent.event_type == "TOOL_EMBEDDING_ENSURE",
+                OutboxEvent.aggregate_id == tool_version_id,
+            )
+            .order_by(OutboxEvent.created_at.desc(), OutboxEvent.id.desc())
+        )
+        rows = list((await self._session.execute(stmt)).scalars().all())
+        for row in rows:
+            payload = row.payload if isinstance(row.payload, dict) else {}
+            if payload.get("embedding_profile_id") == expected_profile:
+                return row
+        return None
+
     async def claim_unpublished_batch(self, *, limit: int) -> list[OutboxEvent]:
         stmt = (
             select(OutboxEvent)
