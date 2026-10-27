@@ -16,7 +16,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.audit.sanitize import REDACTION_MARKER, sanitize_audit_value
+from app.audit.sanitize import sanitize_audit_value
 from app.execution.result_validator import validate_tool_result
 from app.mcp.contracts import NormalizedToolResult
 from app.models.execution import Execution, ExecutionStep
@@ -66,12 +66,45 @@ def _utf8_json_size(value: Any) -> int:
     )
 
 
+def _is_factory_runtime_wrapper(structured: dict[str, Any]) -> bool:
+    """Factory Runtime MCP envelope: ok + http_status + body|body_text."""
+    return isinstance(structured.get("ok"), bool) and isinstance(
+        structured.get("http_status"), int
+    ) and ("body" in structured or "body_text" in structured)
+
+
+def _extract_pets_list(structured: dict[str, Any]) -> list[Any] | None:
+    """Return the pets array from direct or Factory wrapper shapes.
+
+    Direct: ``{pets:[...]}``
+    Factory: ``{ok, http_status, body:{pets:[...]}}`` — only when upstream ok/2xx.
+    """
+    direct = structured.get("pets")
+    if isinstance(direct, list):
+        return direct
+
+    body = structured.get("body")
+    if not isinstance(body, dict):
+        return None
+    nested = body.get("pets")
+    if not isinstance(nested, list):
+        return None
+
+    # Factory (or Factory-like) envelope: never treat failed upstream as success.
+    if "ok" in structured and structured.get("ok") is not True:
+        return None
+    http_status = structured.get("http_status")
+    if isinstance(http_status, int) and not (200 <= http_status < 300):
+        return None
+    return nested
+
+
 def _project_pets(structured: Any) -> list[ChatDisplayItem] | None:
-    """Factory GET /pets shape: ``{pets:[{name,status},...]}``."""
+    """Allowlisted name/status rows from direct pets or Factory body.pets."""
     if not isinstance(structured, dict):
         return None
-    pets = structured.get("pets")
-    if not isinstance(pets, list):
+    pets = _extract_pets_list(structured)
+    if pets is None:
         return None
     items: list[ChatDisplayItem] = []
     for raw in pets[:CHAT_RESULT_MAX_DISPLAY_ITEMS]:
@@ -83,49 +116,24 @@ def _project_pets(structured: Any) -> list[ChatDisplayItem] | None:
             continue
         if not isinstance(status, str) or not status.strip():
             continue
-        items.append(ChatDisplayItem(name=name.strip()[:200], status=status.strip()[:64]))
+        items.append(
+            ChatDisplayItem(name=name.strip()[:200], status=status.strip()[:64])
+        )
     return items
 
 
-def _project_generic_items(structured: Any) -> list[ChatDisplayItem]:
-    """Best-effort name/status pairs from a list of objects."""
-    if isinstance(structured, dict):
-        for value in structured.values():
-            if isinstance(value, list):
-                items = _project_list_items(value)
-                if items:
-                    return items
-        return []
-    if isinstance(structured, list):
-        return _project_list_items(structured)
-    return []
+def _schema_validation_payload(structured: Any) -> Any:
+    """Choose the JSON value to re-validate against ToolVersion.output_schema.
 
-
-def _project_list_items(rows: list[Any]) -> list[ChatDisplayItem]:
-    items: list[ChatDisplayItem] = []
-    for raw in rows[:CHAT_RESULT_MAX_DISPLAY_ITEMS]:
-        if not isinstance(raw, dict):
-            continue
-        name = raw.get("name")
-        status = raw.get("status")
-        if isinstance(name, str) and name.strip() and isinstance(status, str) and status.strip():
-            items.append(
-                ChatDisplayItem(name=name.strip()[:200], status=status.strip()[:64])
-            )
-    return items
-
-
-def _content_summary(content: Any) -> str | None:
-    if not isinstance(content, list):
-        return None
-    texts: list[str] = []
-    for block in content[:10]:
-        if not isinstance(block, dict):
-            continue
-        if block.get("type") == "text" and isinstance(block.get("text"), str):
-            texts.append(block["text"].strip()[:500])
-    joined = " ".join(t for t in texts if t).strip()
-    return joined[:1000] if joined else None
+    Factory Runtime wraps upstream JSON under ``body``; validate that body
+    (not the ok/http_status envelope) when the Factory shape is present.
+    """
+    if not isinstance(structured, dict):
+        return structured
+    if _is_factory_runtime_wrapper(structured):
+        body = structured.get("body")
+        return body if isinstance(body, (dict, list)) else None
+    return structured
 
 
 class AgentRunChatResultService:
@@ -267,18 +275,33 @@ class AgentRunChatResultService:
             )
 
         structured = sanitized.get("structured_content")
+        # Never treat free-form Tool content (e.g. Factory "HTTP 200") or raw
+        # JSON dumps as the business result — allowlisted pets projection only.
+        if isinstance(structured, dict) and _is_factory_runtime_wrapper(structured):
+            if structured.get("ok") is not True:
+                return AgentRunChatResult(
+                    agent_request_id=request.id,
+                    execution_id=execution.id,
+                    execution_status=execution.status,
+                    available=False,
+                    unavailable_reason="UPSTREAM_FAILED",
+                    tool_name=tool_name,
+                    display_items=[],
+                    summary_text="외부 조회가 실패하여 결과를 표시하지 않습니다.",
+                    truncated=False,
+                )
+
         output_schema = await self._output_schema(step.mcp_tool_version_id)
         if output_schema is not None:
+            schema_payload = _schema_validation_payload(structured)
             # Re-validate display candidate against ToolVersion.output_schema.
             # Fail closed: do not show structured payload when invalid.
             synthetic = NormalizedToolResult(
                 protocol_success=True,
                 tool_error=False,
-                content=sanitized.get("content")
-                if isinstance(sanitized.get("content"), list)
-                else [],
-                structured_content=structured
-                if isinstance(structured, (dict, list))
+                content=[],
+                structured_content=schema_payload
+                if isinstance(schema_payload, (dict, list))
                 else None,
             )
             validation = validate_tool_result(synthetic, output_schema=output_schema)
@@ -296,25 +319,21 @@ class AgentRunChatResultService:
                 )
 
         pets = _project_pets(structured)
-        items = pets if pets is not None else _project_generic_items(structured)
-        summary = None
-        if items:
-            summary = (
-                f"{tool_name or '조회'} 결과 {len(items)}건을 가져왔습니다."
+        if not pets:
+            return AgentRunChatResult(
+                agent_request_id=request.id,
+                execution_id=execution.id,
+                execution_status=execution.status,
+                available=False,
+                unavailable_reason="NO_SAFE_PROJECTION",
+                tool_name=tool_name,
+                display_items=[],
+                summary_text=(
+                    "실행은 완료됐지만 채팅에 안전하게 표시할 수 있는 "
+                    "조회 항목이 없습니다."
+                ),
+                truncated=False,
             )
-        else:
-            summary = _content_summary(sanitized.get("content"))
-            if summary is None and structured is not None:
-                # Compact non-secret structured preview (already sanitized).
-                preview = json.dumps(
-                    structured, ensure_ascii=False, separators=(",", ":"), default=str
-                )
-                if REDACTION_MARKER in preview:
-                    summary = "결과에 민감 정보가 포함되어 일부만 표시됩니다."
-                else:
-                    summary = preview[:500]
-            if not summary:
-                summary = "실행이 완료되었습니다."
 
         return AgentRunChatResult(
             agent_request_id=request.id,
@@ -323,8 +342,8 @@ class AgentRunChatResultService:
             available=True,
             unavailable_reason=None,
             tool_name=tool_name,
-            display_items=items,
-            summary_text=summary,
+            display_items=pets,
+            summary_text=f"{tool_name or '조회'} 결과 {len(pets)}건을 가져왔습니다.",
             truncated=False,
         )
 

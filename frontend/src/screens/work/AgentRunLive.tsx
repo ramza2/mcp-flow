@@ -150,6 +150,8 @@ export default function AgentRunLive() {
   const autoPipelineLock = useRef(false);
   const autoExecAttemptedFor = useRef<string>('');
   const lastStatusMessage = useRef<string>('');
+  /** Dedupes final chat answer when SSE + polling both observe terminal. */
+  const chatResultAnnouncedFor = useRef<string>('');
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   const pushMessage = useCallback((role: ChatRole, text: string) => {
@@ -185,19 +187,27 @@ export default function AgentRunLive() {
       // dropping terminal results under React Strict Mode double-invoke.
       setChatResult(result);
       if (signal?.aborted) return;
-      if (result.available) {
-        if (result.display_items.length > 0) {
-          const lines = result.display_items.map(
-            (item) => `· ${item.name} / ${item.status}`,
-          );
-          pushMessage(
-            'assistant',
-            `${result.summary_text ?? '조회 결과입니다.'}\n${lines.join('\n')}`,
-          );
-        } else if (result.summary_text) {
-          pushMessage('assistant', result.summary_text);
-        }
-      } else if (result.summary_text && result.execution_status && TERMINAL_EXECUTION.has(result.execution_status)) {
+      const announceKey = result.execution_id ?? requestId;
+      const terminalStatus = result.execution_status;
+      const shouldAnnounce =
+        result.available
+        || (
+          Boolean(result.summary_text)
+          && terminalStatus != null
+          && TERMINAL_EXECUTION.has(terminalStatus)
+        );
+      if (!shouldAnnounce) return;
+      if (chatResultAnnouncedFor.current === announceKey) return;
+      chatResultAnnouncedFor.current = announceKey;
+      if (result.available && result.display_items.length > 0) {
+        const lines = result.display_items.map(
+          (item) => `· ${item.name} / ${item.status}`,
+        );
+        pushMessage(
+          'assistant',
+          `${result.summary_text ?? '조회 결과입니다.'}\n${lines.join('\n')}`,
+        );
+      } else if (result.summary_text) {
         pushMessage('assistant', result.summary_text);
       }
     } catch (err: unknown) {
@@ -263,6 +273,7 @@ export default function AgentRunLive() {
   useEffect(() => {
     setExecutionConfirmed(false);
     autoExecAttemptedFor.current = '';
+    chatResultAnnouncedFor.current = '';
   }, [request?.id]);
 
   // Execution SSE / polling while non-terminal.

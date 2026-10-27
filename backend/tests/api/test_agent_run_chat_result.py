@@ -260,3 +260,234 @@ async def test_chat_result_schema_invalid_fail_closed(
     assert body["available"] is False
     assert body["unavailable_reason"] == "SCHEMA_INVALID"
     assert body["display_items"] == []
+
+
+_PETS_OUTPUT_SCHEMA = {
+    "type": "object",
+    "required": ["pets"],
+    "properties": {
+        "pets": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "required": ["name", "status"],
+                "properties": {
+                    "name": {"type": "string"},
+                    "status": {"type": "string"},
+                },
+            },
+        }
+    },
+}
+
+
+@pytest.mark.asyncio
+async def test_chat_result_factory_wrapper_body_pets_not_http_status_text(
+    authenticated_db_client: AsyncClient,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Real Factory Runtime shape: ok/http_status/body.pets — not content 'HTTP 200'."""
+    session_info = await authenticated_db_client.get("/api/v1/auth/session")
+    owner_id = uuid.UUID(session_info.json()["user"]["id"])
+    agent_id, _ = await _seed_runnable(db_session_factory)
+    created = await authenticated_db_client.post(
+        "/api/v1/agent-requests",
+        json={"agent_id": str(agent_id), "request_text": "반려동물 목록 조회"},
+    )
+    assert created.status_code == 201, created.text
+    request_id = uuid.UUID(created.json()["id"])
+
+    async with db_session_factory() as session:
+        server = await MCPServerRepository(session).create(
+            code=f"srv-{uuid.uuid4().hex[:8]}",
+            name="Factory Pets Server",
+            transport_type="STREAMABLE_HTTP",
+            endpoint_url="http://127.0.0.1:8091",
+            status="ACTIVE",
+        )
+        tools = MCPToolRepository(session)
+        tool = await tools.create_tool(
+            mcp_server_id=server.id,
+            remote_name=f"factory.pets.{uuid.uuid4().hex[:6]}",
+            display_name="GET /pets",
+            tags=["pets"],
+            status="ACTIVE",
+        )
+        version = await tools.create_version(
+            mcp_tool_id=tool.id,
+            version_no=1,
+            content_hash=uuid.uuid4().hex + uuid.uuid4().hex,
+            validation_status="VALID",
+            remote_description="Factory list pets",
+            input_schema={"type": "object", "properties": {}},
+            output_schema=_PETS_OUTPUT_SCHEMA,
+        )
+        tool.current_version_id = version.id
+        now = datetime.now(UTC)
+        execution = Execution(
+            id=uuid.uuid4(),
+            source_type="AGENT_REQUEST",
+            trigger_type="USER",
+            requester_id=owner_id,
+            agent_request_id=request_id,
+            status="SUCCEEDED",
+            plan_schema_version="1.0",
+            plan_snapshot={"steps": []},
+            plan_hash="a" * 64,
+            input_snapshot={},
+            policy_snapshot={},
+            requested_at=now,
+            finished_at=now,
+            lock_version=1,
+        )
+        session.add(execution)
+        await session.flush()
+        session.add(
+            ExecutionStep(
+                id=uuid.uuid4(),
+                execution_id=execution.id,
+                step_key="factory_list_pets",
+                step_type="TOOL",
+                mcp_tool_version_id=version.id,
+                sequence_hint=1,
+                status="SUCCEEDED",
+                step_snapshot={},
+                result_inline={
+                    # Exact Factory Runtime MCP projection (runtime_mcp.py).
+                    "content": [{"type": "text", "text": "HTTP 200"}],
+                    "structured_content": {
+                        "ok": True,
+                        "http_status": 200,
+                        "latency_ms": 18,
+                        "protocol_version": "2026-07-28",
+                        "body": {
+                            "pets": [
+                                {"id": 1, "name": "Alpha", "status": "available"},
+                                {"id": 2, "name": "Beta", "status": "pending"},
+                            ]
+                        },
+                    },
+                    "metadata": {},
+                    "result_type": None,
+                    "duration_ms": 18,
+                },
+                attempt_count=1,
+                finished_at=now,
+                lock_version=1,
+            )
+        )
+        await session.commit()
+
+    response = await authenticated_db_client.get(
+        f"/api/v1/agent-requests/{request_id}/chat-result"
+    )
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["available"] is True
+    assert [(i["name"], i["status"]) for i in payload["display_items"]] == [
+        ("Alpha", "available"),
+        ("Beta", "pending"),
+    ]
+    assert "Alpha" in response.text and "available" in response.text
+    assert "Beta" in response.text and "pending" in response.text
+    # Transport status text must not become the business answer.
+    assert payload["summary_text"] is not None
+    assert "HTTP 200" not in payload["summary_text"]
+    assert "2건" in payload["summary_text"]
+
+
+@pytest.mark.asyncio
+async def test_chat_result_rejects_http_200_content_without_pets_projection(
+    authenticated_db_client: AsyncClient,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Content-only 'HTTP 200' without pets must not be treated as the result."""
+    session_info = await authenticated_db_client.get("/api/v1/auth/session")
+    owner_id = uuid.UUID(session_info.json()["user"]["id"])
+    agent_id, _ = await _seed_runnable(db_session_factory)
+    created = await authenticated_db_client.post(
+        "/api/v1/agent-requests",
+        json={"agent_id": str(agent_id), "request_text": "조회"},
+    )
+    request_id = uuid.UUID(created.json()["id"])
+
+    async with db_session_factory() as session:
+        server = await MCPServerRepository(session).create(
+            code=f"srv-{uuid.uuid4().hex[:8]}",
+            name="Http Only Server",
+            transport_type="STREAMABLE_HTTP",
+            endpoint_url="http://127.0.0.1:8091",
+            status="ACTIVE",
+        )
+        tools = MCPToolRepository(session)
+        tool = await tools.create_tool(
+            mcp_server_id=server.id,
+            remote_name=f"http.only.{uuid.uuid4().hex[:6]}",
+            display_name="Opaque Tool",
+            status="ACTIVE",
+        )
+        version = await tools.create_version(
+            mcp_tool_id=tool.id,
+            version_no=1,
+            content_hash=uuid.uuid4().hex + uuid.uuid4().hex,
+            validation_status="VALID",
+            input_schema={"type": "object"},
+            output_schema=None,
+        )
+        now = datetime.now(UTC)
+        execution = Execution(
+            id=uuid.uuid4(),
+            source_type="AGENT_REQUEST",
+            trigger_type="USER",
+            requester_id=owner_id,
+            agent_request_id=request_id,
+            status="SUCCEEDED",
+            plan_schema_version="1.0",
+            plan_snapshot={"steps": []},
+            plan_hash="b" * 64,
+            input_snapshot={},
+            policy_snapshot={},
+            requested_at=now,
+            finished_at=now,
+            lock_version=1,
+        )
+        session.add(execution)
+        await session.flush()
+        session.add(
+            ExecutionStep(
+                id=uuid.uuid4(),
+                execution_id=execution.id,
+                step_key="opaque",
+                step_type="TOOL",
+                mcp_tool_version_id=version.id,
+                sequence_hint=1,
+                status="SUCCEEDED",
+                step_snapshot={},
+                result_inline={
+                    "content": [{"type": "text", "text": "HTTP 200"}],
+                    "structured_content": {
+                        "ok": True,
+                        "http_status": 200,
+                        "body": {"message": "no pets here"},
+                    },
+                    "metadata": {},
+                    "duration_ms": 3,
+                },
+                attempt_count=1,
+                finished_at=now,
+                lock_version=1,
+            )
+        )
+        await session.commit()
+
+    response = await authenticated_db_client.get(
+        f"/api/v1/agent-requests/{request_id}/chat-result"
+    )
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["available"] is False
+    assert payload["unavailable_reason"] == "NO_SAFE_PROJECTION"
+    assert payload["display_items"] == []
+    assert payload["summary_text"] is not None
+    assert "HTTP 200" not in payload["summary_text"]
+    assert "no pets here" not in response.text

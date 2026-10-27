@@ -44,9 +44,24 @@ vi.mock('@/api/executions', () => ({
   getExecution: mocks.getExecution,
 }));
 
+const sseMocks = vi.hoisted(() => ({
+  onEvent: null as null | ((message: {
+    sseId: string;
+    envelope: { event_type: string; event_id: string; execution_id: string; step_execution_id: null; payload: Record<string, never>; payload_version: number; occurred_at: string };
+  }) => void),
+  available: false,
+}));
+
 vi.mock('@/api/executionEvents', () => ({
-  isEventSourceAvailable: () => false,
-  openExecutionEventsStream: () => ({ close: () => undefined }),
+  isEventSourceAvailable: () => sseMocks.available,
+  openExecutionEventsStream: (options: { onEvent: typeof sseMocks.onEvent }) => {
+    sseMocks.onEvent = options.onEvent;
+    return {
+      close: () => {
+        sseMocks.onEvent = null;
+      },
+    };
+  },
 }));
 
 const conversationId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
@@ -108,6 +123,8 @@ function renderLive(path = '/run') {
 describe('AgentRunLive — chat phase 1', () => {
   beforeEach(() => {
     vi.resetAllMocks();
+    sseMocks.available = false;
+    sseMocks.onEvent = null;
     mocks.list.mockResolvedValue({
       items: [{ id: agentId, agent_version_id: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd', name: '실제 Agent', description: null, version_no: 2 }],
     });
@@ -301,7 +318,49 @@ describe('AgentRunLive — chat phase 1', () => {
       expect(screen.getByText('Alpha / available')).toBeTruthy();
       expect(screen.getByText('Beta / pending')).toBeTruthy();
     });
+    // F5 restore announces the final answer once (card + one assistant bubble).
+    expect(screen.getAllByText(/결과 2건을 가져왔습니다/).length).toBe(1);
     expect(mocks.createExecution).not.toHaveBeenCalled();
+  });
+
+  it('does not duplicate the final answer when SSE and polling both complete', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    sseMocks.available = true;
+    mocks.latest.mockResolvedValue(row('READY'));
+    mocks.getSelection.mockResolvedValue({ request: row('READY'), selection: selection() });
+    mocks.progress.mockResolvedValue(stage('READY', { safe_auto_execute: true }));
+    mocks.listExecutions.mockResolvedValue({
+      items: [{ id: executionId, status: 'RUNNING', agent_request_id: requestId }],
+      page: 1, page_size: 1, total: 1,
+    });
+    mocks.getExecution.mockResolvedValue({
+      id: executionId, status: 'SUCCEEDED', agent_request_id: requestId,
+    });
+    renderLive(`/run/${conversationId}`);
+    await waitFor(() => expect(sseMocks.onEvent).toBeTruthy());
+
+    sseMocks.onEvent?.({
+      sseId: '1',
+      envelope: {
+        event_id: 'evt-1',
+        execution_id: executionId,
+        step_execution_id: null,
+        event_type: 'execution.succeeded',
+        payload: {},
+        payload_version: 1,
+        occurred_at: '2026-10-23T10:06:00Z',
+      },
+    });
+    // Polling fallback also observes SUCCEEDED for the same execution.
+    await vi.advanceTimersByTimeAsync(2600);
+
+    await waitFor(() => {
+      expect(screen.getByText('Alpha / available')).toBeTruthy();
+      expect(screen.getByText('Beta / pending')).toBeTruthy();
+    });
+    expect(screen.getAllByText(/결과 2건을 가져왔습니다/).length).toBe(1);
+    expect(mocks.chatResult.mock.calls.length).toBeGreaterThanOrEqual(1);
+    vi.useRealTimers();
   });
 
   it('does not auto-retry ambiguous Execution creation errors', async () => {
