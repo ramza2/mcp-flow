@@ -45,8 +45,7 @@ class OutboxIterationResult:
 async def run_iteration(*, settings: Settings | None = None) -> OutboxIterationResult:
     cfg = settings or get_settings()
 
-    # Stage/relay/recovery first so AGENT_SCHEDULE_PLAN LLM work cannot starve
-    # Execution dispatch, approval expiry, or recovery.
+    # Stage/relay/recovery only — AGENT_SCHEDULE_PLAN runs in agent-schedule-planner.
     async with session_scope() as session:
         stager = ExecutionQueueService(session)
         staged = await stager.stage_created_batch(limit=cfg.outbox_batch_size)
@@ -182,22 +181,8 @@ async def run_iteration(*, settings: Settings | None = None) -> OutboxIterationR
                 exc_info=True,
             )
 
-    # AGENT_VERSION Schedule ONCE planning — isolated so LLM/provider/DB errors
-    # never abort staging, relay, approval expiry, or recovery above.
-    # Bounded batch keeps a plan backlog from blocking the next outbox tick.
-    try:
-        from app.services.agent_schedule_execution import AgentScheduleExecutionService
-
-        await AgentScheduleExecutionService.process_isolated_batch(
-            limit=min(cfg.outbox_batch_size, 5),
-            lease_seconds=cfg.execution_lease_seconds,
-        )
-    except Exception:
-        logger.warning(
-            "AGENT_SCHEDULE_PLAN isolated batch failed; continuing outbox loop",
-            exc_info=True,
-        )
-
+    # AGENT_SCHEDULE_PLAN is consumed by app.entrypoints.agent_schedule_planner
+    # so long LLM planning never delays stage/relay/recovery polling here.
     return OutboxIterationResult(
         staged=staged,
         selected=result.selected,

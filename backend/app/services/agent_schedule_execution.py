@@ -1,11 +1,12 @@
 """AGENT_VERSION Schedule ONCE → AgentRequest pipeline → SCHEDULE_OCCURRENCE Execution.
 
 Scheduler Schedule FOR UPDATE must never call LLM/MCP. This service is invoked
-from the outbox process after a durable ``AGENT_SCHEDULE_PLAN`` row is created
-under the Schedule lock.
+from the dedicated ``agent-schedule-planner`` process after a durable
+``AGENT_SCHEDULE_PLAN`` row is created under the Schedule lock.
 
 Reprocessing is lease-safe and idempotent:
-* short claim TX writes a durable lease + attempt count before any LLM work
+* each event is claimed individually (fresh lease) immediately before LLM work
+* claim carries ``worker_id`` + ``claim_token``; lost ownership cannot mutate
 * ``agent_request_id`` on the Outbox payload resumes interrupted pipelines
 * at most one Execution per ``schedule_occurrence_id``
 * exhausted attempts fail-close the Occurrence and publish the Outbox row
@@ -71,6 +72,20 @@ _DEFAULT_MAX_ATTEMPTS = 8
 _DEFAULT_LEASE_SECONDS = 120
 _DEFAULT_PLAN_BATCH_LIMIT = 5
 _CLAIM_KEY = "claim"
+
+
+class ClaimLostError(RuntimeError):
+    """Active Outbox claim no longer belongs to this worker/token."""
+
+
+@dataclass(frozen=True, slots=True)
+class AgentScheduleClaim:
+    event_id: uuid.UUID
+    worker_id: uuid.UUID
+    claim_token: uuid.UUID
+    lease_expires_at: datetime
+
+
 _UNSAFE_TERMINAL = frozenset(
     {
         AgentRequestStatus.WAITING_INPUT.value,
@@ -217,56 +232,66 @@ class AgentScheduleExecutionService:
         max_attempts: int = _DEFAULT_MAX_ATTEMPTS,
         session_scope_factory: Callable[[], Any] | None = None,
     ) -> AgentSchedulePlanBatchResult:
-        """Claim then process each event in its own session (outbox isolation)."""
+        """Claim **one event at a time**, then process (dedicated planner).
+
+        Never pre-claims a multi-event batch: each LLM run starts with a fresh
+        lease so later events cannot expire while earlier ones are planning.
+        """
         from app.db.session import session_scope as default_scope
 
         scope = session_scope_factory or default_scope
-        ts = now or datetime.now(UTC)
         wid = worker_id or uuid.uuid4()
         bounded = max(1, min(int(limit), _DEFAULT_PLAN_BATCH_LIMIT))
-
-        async with scope() as session:
-            claimed_rows = await cls(session).claim_lease_batch(
-                limit=bounded,
-                now=ts,
-                worker_id=wid,
-                lease_seconds=lease_seconds,
-                max_attempts=max_attempts,
-            )
-            claimed_ids = [row.id for row in claimed_rows]
-            await session.commit()
 
         executed = 0
         failed = 0
         skipped = 0
-        for event_id in claimed_ids:
+        selected = 0
+        for _ in range(bounded):
+            ts = now or datetime.now(UTC)
+            async with scope() as session:
+                claim = await cls(session).claim_next(
+                    now=ts,
+                    worker_id=wid,
+                    lease_seconds=lease_seconds,
+                    max_attempts=max_attempts,
+                )
+                await session.commit()
+            if claim is None:
+                break
+            selected += 1
             try:
                 async with scope() as session:
                     outcome = await cls(session).process_claimed(
-                        event_id,
+                        claim.event_id,
                         now=ts,
-                        worker_id=wid,
+                        worker_id=claim.worker_id,
+                        claim_token=claim.claim_token,
+                        lease_seconds=lease_seconds,
                         max_attempts=max_attempts,
                     )
                     await session.commit()
             except Exception:
                 logger.warning(
                     "AGENT_SCHEDULE_PLAN process failed event_id=%s",
-                    event_id,
+                    claim.event_id,
                     exc_info=True,
                 )
+                # Keep lease until expiry so this tick cannot thrash-reclaim.
                 try:
                     async with scope() as session:
-                        await cls(session).clear_claim_after_failure(
-                            event_id,
+                        await cls(session).record_transient_failure(
+                            claim.event_id,
                             now=datetime.now(UTC),
+                            worker_id=claim.worker_id,
+                            claim_token=claim.claim_token,
                             error_code="PLAN_TRANSIENT_FAILURE",
                         )
                         await session.commit()
                 except Exception:
                     logger.warning(
-                        "AGENT_SCHEDULE_PLAN claim clear failed event_id=%s",
-                        event_id,
+                        "AGENT_SCHEDULE_PLAN transient record failed event_id=%s",
+                        claim.event_id,
                         exc_info=True,
                     )
                 failed += 1
@@ -278,7 +303,7 @@ class AgentScheduleExecutionService:
             else:
                 skipped += 1
         return AgentSchedulePlanBatchResult(
-            selected=len(claimed_ids),
+            selected=selected,
             executed=executed,
             failed=failed,
             skipped=skipped,
@@ -293,39 +318,44 @@ class AgentScheduleExecutionService:
         lease_seconds: int = _DEFAULT_LEASE_SECONDS,
         max_attempts: int = _DEFAULT_MAX_ATTEMPTS,
     ) -> AgentSchedulePlanBatchResult:
-        """Claim+lease then process (same session; for tests / single-worker).
-
-        Lease is flushed before pipeline so Analyzer/Selector ``commit()`` does
-        not leave the row unlockable by concurrent workers.
-        """
-        ts = now or datetime.now(UTC)
+        """Per-event claim+process in one session (unit tests / single worker)."""
         wid = worker_id or uuid.uuid4()
-        claimed = await self.claim_lease_batch(
-            limit=max(1, min(int(limit), 200)),
-            now=ts,
-            worker_id=wid,
-            lease_seconds=lease_seconds,
-            max_attempts=max_attempts,
-        )
-        await self._session.flush()
-
+        bounded = max(1, min(int(limit), 200))
         executed = 0
         failed = 0
         skipped = 0
-        for row in claimed:
+        selected = 0
+        for _ in range(bounded):
+            ts = now or datetime.now(UTC)
+            claim = await self.claim_next(
+                now=ts,
+                worker_id=wid,
+                lease_seconds=lease_seconds,
+                max_attempts=max_attempts,
+            )
+            if claim is None:
+                break
+            selected += 1
             try:
-                outcome = await self._process_one(
-                    row, now=ts, worker_id=wid, max_attempts=max_attempts
+                outcome = await self.process_claimed(
+                    claim.event_id,
+                    now=ts,
+                    worker_id=claim.worker_id,
+                    claim_token=claim.claim_token,
+                    lease_seconds=lease_seconds,
+                    max_attempts=max_attempts,
                 )
             except Exception:
                 logger.warning(
                     "AGENT_SCHEDULE_PLAN process failed event_id=%s",
-                    row.id,
+                    claim.event_id,
                     exc_info=True,
                 )
-                await self.clear_claim_after_failure(
-                    row.id,
+                await self.record_transient_failure(
+                    claim.event_id,
                     now=datetime.now(UTC),
+                    worker_id=claim.worker_id,
+                    claim_token=claim.claim_token,
                     error_code="PLAN_TRANSIENT_FAILURE",
                 )
                 failed += 1
@@ -337,10 +367,43 @@ class AgentScheduleExecutionService:
             else:
                 skipped += 1
         return AgentSchedulePlanBatchResult(
-            selected=len(claimed),
+            selected=selected,
             executed=executed,
             failed=failed,
             skipped=skipped,
+        )
+
+    async def claim_next(
+        self,
+        *,
+        now: datetime,
+        worker_id: uuid.UUID,
+        lease_seconds: int = _DEFAULT_LEASE_SECONDS,
+        max_attempts: int = _DEFAULT_MAX_ATTEMPTS,
+    ) -> AgentScheduleClaim | None:
+        """Claim at most one unpublished AGENT_SCHEDULE_PLAN with a fresh lease."""
+        claimed = await self.claim_lease_batch(
+            limit=1,
+            now=now,
+            worker_id=worker_id,
+            lease_seconds=lease_seconds,
+            max_attempts=max_attempts,
+        )
+        if not claimed:
+            return None
+        row = claimed[0]
+        payload = dict(row.payload) if isinstance(row.payload, dict) else {}
+        claim = payload.get(_CLAIM_KEY)
+        if not isinstance(claim, dict):
+            return None
+        token = uuid.UUID(str(claim["claim_token"]))
+        expires = self._parse_lease_expiry(claim.get("lease_expires_at"))
+        assert expires is not None
+        return AgentScheduleClaim(
+            event_id=row.id,
+            worker_id=worker_id,
+            claim_token=token,
+            lease_expires_at=expires,
         )
 
     async def claim_lease_batch(
@@ -352,8 +415,9 @@ class AgentScheduleExecutionService:
         lease_seconds: int = _DEFAULT_LEASE_SECONDS,
         max_attempts: int = _DEFAULT_MAX_ATTEMPTS,
     ) -> list[OutboxEvent]:
-        """Durable claim under FOR UPDATE; returns leased rows."""
+        """Durable claim under FOR UPDATE; prefer ``claim_next`` for planners."""
         bounded = max(1, min(int(limit), 200))
+        # Over-fetch so active foreign leases / exhaustions can be skipped.
         stmt = (
             select(OutboxEvent)
             .where(
@@ -361,25 +425,31 @@ class AgentScheduleExecutionService:
                 OutboxEvent.published_at.is_(None),
             )
             .order_by(OutboxEvent.created_at.asc(), OutboxEvent.id.asc())
-            .limit(bounded)
+            .limit(max(bounded * 3, bounded))
             .with_for_update(skip_locked=True)
         )
         rows = list((await self._session.execute(stmt)).scalars().all())
         claimed: list[OutboxEvent] = []
         for row in rows:
+            if len(claimed) >= bounded:
+                break
             payload = dict(row.payload) if isinstance(row.payload, dict) else {}
-            if self._has_active_foreign_lease(payload, worker_id=worker_id, now=now):
+            # Any active lease (including this worker) blocks reclaim — prevents
+            # same-tick thrash after transient failure while lease still holds.
+            if self._has_active_lease(payload, now=now):
                 continue
             if int(row.publish_attempt_count or 0) >= max_attempts:
                 await self._exhaust_attempts(row, payload=payload, now=now)
                 continue
+            claim_token = uuid.uuid4()
+            expires = now + timedelta(seconds=max(1, int(lease_seconds)))
             row.publish_attempt_count = int(row.publish_attempt_count or 0) + 1
             row.last_attempt_at = now
             row.last_error_code = None
             payload[_CLAIM_KEY] = {
                 "worker_id": str(worker_id),
-                "lease_expires_at": (now + timedelta(seconds=max(1, int(lease_seconds))))
-                .astimezone(UTC)
+                "claim_token": str(claim_token),
+                "lease_expires_at": expires.astimezone(UTC)
                 .isoformat()
                 .replace("+00:00", "Z"),
             }
@@ -395,20 +465,35 @@ class AgentScheduleExecutionService:
         *,
         now: datetime,
         worker_id: uuid.UUID,
+        claim_token: uuid.UUID,
+        lease_seconds: int = _DEFAULT_LEASE_SECONDS,
         max_attempts: int = _DEFAULT_MAX_ATTEMPTS,
     ) -> str:
-        row = (
-            await self._session.execute(
-                select(OutboxEvent).where(OutboxEvent.id == event_id).with_for_update()
+        row = await self._lock_owned_outbox(
+            event_id,
+            worker_id=worker_id,
+            claim_token=claim_token,
+            now=now,
+            renew_lease_seconds=lease_seconds,
+        )
+        if row is None:
+            return "SKIPPED"
+        try:
+            return await self._process_one(
+                row,
+                now=now,
+                worker_id=worker_id,
+                claim_token=claim_token,
+                lease_seconds=lease_seconds,
+                max_attempts=max_attempts,
             )
-        ).scalar_one_or_none()
-        if row is None or row.published_at is not None:
+        except ClaimLostError:
+            logger.info(
+                "AGENT_SCHEDULE_PLAN claim lost event_id=%s worker_id=%s",
+                event_id,
+                worker_id,
+            )
             return "SKIPPED"
-        payload = dict(row.payload) if isinstance(row.payload, dict) else {}
-        claim = payload.get(_CLAIM_KEY)
-        if not isinstance(claim, dict) or claim.get("worker_id") != str(worker_id):
-            return "SKIPPED"
-        return await self._process_one(row, now=now, worker_id=worker_id, max_attempts=max_attempts)
 
     async def clear_claim_after_failure(
         self,
@@ -416,17 +501,57 @@ class AgentScheduleExecutionService:
         *,
         now: datetime,
         error_code: str,
-    ) -> None:
-        row = await self._outbox.get(event_id)
+        worker_id: uuid.UUID,
+        claim_token: uuid.UUID,
+    ) -> bool:
+        """Clear claim only when worker_id + claim_token still own the row."""
+        row = (
+            await self._session.execute(
+                select(OutboxEvent).where(OutboxEvent.id == event_id).with_for_update()
+            )
+        ).scalar_one_or_none()
         if row is None or row.published_at is not None:
-            return
+            return False
         payload = dict(row.payload) if isinstance(row.payload, dict) else {}
+        if not self._owns_claim(
+            payload, worker_id=worker_id, claim_token=claim_token, now=now
+        ):
+            return False
         payload.pop(_CLAIM_KEY, None)
         row.payload = payload
         row.last_attempt_at = now
         row.last_error_code = error_code
         row.lock_version = int(row.lock_version or 1) + 1
         await self._session.flush()
+        return True
+
+    async def record_transient_failure(
+        self,
+        event_id: uuid.UUID,
+        *,
+        now: datetime,
+        worker_id: uuid.UUID,
+        claim_token: uuid.UUID,
+        error_code: str,
+    ) -> bool:
+        """Record error without releasing lease (owner+token required)."""
+        row = (
+            await self._session.execute(
+                select(OutboxEvent).where(OutboxEvent.id == event_id).with_for_update()
+            )
+        ).scalar_one_or_none()
+        if row is None or row.published_at is not None:
+            return False
+        payload = dict(row.payload) if isinstance(row.payload, dict) else {}
+        if not self._owns_claim(
+            payload, worker_id=worker_id, claim_token=claim_token, now=now
+        ):
+            return False
+        row.last_attempt_at = now
+        row.last_error_code = error_code
+        row.lock_version = int(row.lock_version or 1) + 1
+        await self._session.flush()
+        return True
 
     async def _exhaust_attempts(
         self,
@@ -463,9 +588,11 @@ class AgentScheduleExecutionService:
         *,
         now: datetime,
         worker_id: uuid.UUID,
+        claim_token: uuid.UUID,
+        lease_seconds: int,
         max_attempts: int,
     ) -> str:
-        del worker_id, max_attempts  # ownership already validated by claim
+        del max_attempts  # attempt budget enforced at claim time
         payload = row.payload if isinstance(row.payload, dict) else {}
         try:
             occurrence_id = uuid.UUID(str(payload["schedule_occurrence_id"]))
@@ -475,17 +602,20 @@ class AgentScheduleExecutionService:
             request_text = str(payload["request_text"])
             trigger_type = str(payload.get("trigger_type") or _TRIGGER_SCHEDULE)
         except (KeyError, ValueError, TypeError):
-            await self._mark_published(
-                row,
+            await self._owned_mark_published(
+                row.id,
                 now=now,
-                bump_attempt=False,
+                worker_id=worker_id,
+                claim_token=claim_token,
                 last_error_code="PAYLOAD_INVALID",
             )
             return "FAILED"
 
         existing_exec = await self._execution_for_occurrence(occurrence_id)
         if existing_exec is not None:
-            await self._mark_published(row, now=now, bump_attempt=False)
+            await self._owned_mark_published(
+                row.id, now=now, worker_id=worker_id, claim_token=claim_token
+            )
             return "SKIPPED"
 
         occurrence = (
@@ -496,12 +626,16 @@ class AgentScheduleExecutionService:
             )
         ).scalar_one_or_none()
         if occurrence is None:
-            await self._mark_published(row, now=now, bump_attempt=False)
+            await self._owned_mark_published(
+                row.id, now=now, worker_id=worker_id, claim_token=claim_token
+            )
             return "SKIPPED"
         if occurrence.status not in {
             OccurrenceStatus.PLANNED.value,
         }:
-            await self._mark_published(row, now=now, bump_attempt=False)
+            await self._owned_mark_published(
+                row.id, now=now, worker_id=worker_id, claim_token=claim_token
+            )
             return "SKIPPED"
 
         # Read Schedule without FOR UPDATE — planning must not invert
@@ -513,12 +647,14 @@ class AgentScheduleExecutionService:
             or schedule.agent_version_id != agent_version_id
             or schedule.owner_id != requester_id
         ):
-            await self._fail_occurrence(
+            await self._owned_fail_and_publish(
                 occurrence,
+                outbox_id=row.id,
                 reason=reasons.TARGET_PRECONDITION_FAILED,
                 now=now,
+                worker_id=worker_id,
+                claim_token=claim_token,
             )
-            await self._mark_published(row, now=now, bump_attempt=False)
             return "FAILED"
 
         try:
@@ -529,9 +665,14 @@ class AgentScheduleExecutionService:
                 requester_id=requester_id,
                 request_text=request_text,
                 trigger_type=trigger_type,
-                outbox_row=row,
+                outbox_id=row.id,
                 now=now,
+                worker_id=worker_id,
+                claim_token=claim_token,
+                lease_seconds=lease_seconds,
             )
+        except ClaimLostError:
+            raise
         except AppError as exc:
             logger.info(
                 "agent schedule plan failed occurrence_id=%s code=%s",
@@ -543,22 +684,30 @@ class AgentScheduleExecutionService:
                 if exc.code in {"FORBIDDEN", "AUTH_FORBIDDEN"}
                 else reasons.TARGET_PRECONDITION_FAILED
             )
-            await self._fail_occurrence(occurrence, reason=reason, now=now)
-            await self._mark_published(row, now=now, bump_attempt=False)
+            await self._owned_fail_and_publish(
+                occurrence,
+                outbox_id=row.id,
+                reason=reason,
+                now=now,
+                worker_id=worker_id,
+                claim_token=claim_token,
+            )
             return "FAILED"
         except Exception:
-            # Leave outbox unpublished for durable retry (transient LLM/infra).
-            # Attempt was already counted at claim time.
-            row.last_error_code = "PLAN_TRANSIENT_FAILURE"
-            row.lock_version = int(row.lock_version or 1) + 1
-            payload_mut = dict(row.payload) if isinstance(row.payload, dict) else {}
-            payload_mut.pop(_CLAIM_KEY, None)
-            row.payload = payload_mut
-            await self._session.flush()
+            # Leave unpublished + keep lease until expiry (no same-tick reclaim).
+            await self.record_transient_failure(
+                row.id,
+                now=datetime.now(UTC),
+                worker_id=worker_id,
+                claim_token=claim_token,
+                error_code="PLAN_TRANSIENT_FAILURE",
+            )
             raise
 
         assert execution is not None
-        await self._mark_published(row, now=now, bump_attempt=False)
+        await self._owned_mark_published(
+            row.id, now=now, worker_id=worker_id, claim_token=claim_token
+        )
         return "EXECUTED"
 
     async def _plan_and_materialize(
@@ -570,8 +719,11 @@ class AgentScheduleExecutionService:
         requester_id: uuid.UUID,
         request_text: str,
         trigger_type: str,
-        outbox_row: OutboxEvent,
+        outbox_id: uuid.UUID,
         now: datetime,
+        worker_id: uuid.UUID,
+        claim_token: uuid.UUID,
+        lease_seconds: int,
     ) -> Execution:
         version = await self._agents_versions.get(agent_version_id)
         if version is None or version.status != AgentVersionStatus.PUBLISHED.value:
@@ -596,6 +748,13 @@ class AgentScheduleExecutionService:
                 status_code=409,
             )
 
+        outbox_row = await self._require_owned_outbox(
+            outbox_id,
+            worker_id=worker_id,
+            claim_token=claim_token,
+            now=now,
+            renew_lease_seconds=lease_seconds,
+        )
         agent_request_id = self._payload_uuid(outbox_row.payload, "agent_request_id")
         if agent_request_id is None:
             conversation = await self._conversations.create_conversation(
@@ -617,11 +776,18 @@ class AgentScheduleExecutionService:
                 source_message_id=message.id,
             )
             agent_request_id = request.id
+            # Re-lock after writes; Analyzer may commit and release earlier locks.
+            outbox_row = await self._require_owned_outbox(
+                outbox_id,
+                worker_id=worker_id,
+                claim_token=claim_token,
+                now=datetime.now(UTC),
+                renew_lease_seconds=lease_seconds,
+            )
             payload = dict(outbox_row.payload or {})
             payload["agent_request_id"] = str(agent_request_id)
             outbox_row.payload = payload
             outbox_row.lock_version = int(outbox_row.lock_version or 1) + 1
-            # Flush before Analyzer/Selector commit so re-entry can resume.
             await self._session.flush()
         else:
             request = await self._requests.get(agent_request_id)
@@ -645,6 +811,14 @@ class AgentScheduleExecutionService:
                 )
 
         await self._advance_pipeline(request.id)
+        # Pipeline services commit internally — re-assert claim before side effects.
+        await self._require_owned_outbox(
+            outbox_id,
+            worker_id=worker_id,
+            claim_token=claim_token,
+            now=datetime.now(UTC),
+            renew_lease_seconds=lease_seconds,
+        )
         request = await self._requests.get(request.id)
         assert request is not None
 
@@ -701,6 +875,15 @@ class AgentScheduleExecutionService:
         if raced is not None:
             return raced
 
+        # Final ownership gate immediately before Execution create.
+        await self._require_owned_outbox(
+            outbox_id,
+            worker_id=worker_id,
+            claim_token=claim_token,
+            now=datetime.now(UTC),
+            renew_lease_seconds=lease_seconds,
+        )
+
         materialized = await ExecutionPlanMaterializer(self._session).materialize(
             ExecutionMaterializeParams(
                 source_type=ExecutionSourceType.SCHEDULE_OCCURRENCE.value,
@@ -724,7 +907,8 @@ class AgentScheduleExecutionService:
             raise AppError(
                 code="RESOURCE_CONFLICT",
                 message=(
-                    "Created Execution.agent_version_id must equal Schedule.agent_version_id."
+                    "Created Execution.agent_version_id must equal "
+                    "Schedule.agent_version_id."
                 ),
                 status_code=409,
             )
@@ -759,38 +943,52 @@ class AgentScheduleExecutionService:
         request = await self._requests.get(agent_request_id)
         assert request is not None
         if request.status == AgentRequestStatus.RECEIVED.value:
-            await RequestAnalyzerService(self._session).analyze(agent_request_id=agent_request_id)
+            await RequestAnalyzerService(self._session).analyze(
+                agent_request_id=agent_request_id
+            )
             request = await self._requests.get(agent_request_id)
             assert request is not None
             if request.status != AgentRequestStatus.RETRIEVING.value:
                 return
 
         if request.status == AgentRequestStatus.RETRIEVING.value:
-            await ToolSelectorService(self._session).select(agent_request_id=agent_request_id)
+            await ToolSelectorService(self._session).select(
+                agent_request_id=agent_request_id
+            )
             request = await self._requests.get(agent_request_id)
             assert request is not None
             if request.status != AgentRequestStatus.BUILDING_PARAMETERS.value:
                 return
 
         if request.status == AgentRequestStatus.BUILDING_PARAMETERS.value:
-            await ParameterBuilderService(self._session).build(agent_request_id=agent_request_id)
+            await ParameterBuilderService(self._session).build(
+                agent_request_id=agent_request_id
+            )
             request = await self._requests.get(agent_request_id)
             assert request is not None
             if request.status != AgentRequestStatus.PLANNING.value:
                 return
 
         if request.status == AgentRequestStatus.PLANNING.value:
-            await PlanGeneratorService(self._session).generate(agent_request_id=agent_request_id)
+            await PlanGeneratorService(self._session).generate(
+                agent_request_id=agent_request_id
+            )
             request = await self._requests.get(agent_request_id)
             assert request is not None
             if request.status != AgentRequestStatus.VALIDATING.value:
                 return
 
         if request.status == AgentRequestStatus.VALIDATING.value:
-            await PlanValidatorService(self._session).validate(agent_request_id=agent_request_id)
+            await PlanValidatorService(self._session).validate(
+                agent_request_id=agent_request_id
+            )
 
-    async def _execution_for_occurrence(self, occurrence_id: uuid.UUID) -> Execution | None:
-        stmt = select(Execution).where(Execution.schedule_occurrence_id == occurrence_id)
+    async def _execution_for_occurrence(
+        self, occurrence_id: uuid.UUID
+    ) -> Execution | None:
+        stmt = select(Execution).where(
+            Execution.schedule_occurrence_id == occurrence_id
+        )
         return (await self._session.execute(stmt)).scalar_one_or_none()
 
     async def _fail_occurrence(
@@ -811,6 +1009,40 @@ class AgentScheduleExecutionService:
         occurrence.finished_at = now
         await self._session.flush()
 
+    async def _owned_fail_and_publish(
+        self,
+        occurrence: ScheduleOccurrence,
+        *,
+        outbox_id: uuid.UUID,
+        reason: str,
+        now: datetime,
+        worker_id: uuid.UUID,
+        claim_token: uuid.UUID,
+    ) -> None:
+        await self._require_owned_outbox(
+            outbox_id, worker_id=worker_id, claim_token=claim_token, now=now
+        )
+        await self._fail_occurrence(occurrence, reason=reason, now=now)
+        await self._owned_mark_published(
+            outbox_id, now=now, worker_id=worker_id, claim_token=claim_token
+        )
+
+    async def _owned_mark_published(
+        self,
+        outbox_id: uuid.UUID,
+        *,
+        now: datetime,
+        worker_id: uuid.UUID,
+        claim_token: uuid.UUID,
+        last_error_code: str | None = None,
+    ) -> None:
+        row = await self._require_owned_outbox(
+            outbox_id, worker_id=worker_id, claim_token=claim_token, now=now
+        )
+        await self._mark_published(
+            row, now=now, bump_attempt=False, last_error_code=last_error_code
+        )
+
     async def _mark_published(
         self,
         row: OutboxEvent,
@@ -830,6 +1062,109 @@ class AgentScheduleExecutionService:
         row.lock_version = int(row.lock_version or 1) + 1
         await self._session.flush()
 
+    async def _lock_owned_outbox(
+        self,
+        event_id: uuid.UUID,
+        *,
+        worker_id: uuid.UUID,
+        claim_token: uuid.UUID,
+        now: datetime,
+        renew_lease_seconds: int | None = None,
+    ) -> OutboxEvent | None:
+        try:
+            return await self._require_owned_outbox(
+                event_id,
+                worker_id=worker_id,
+                claim_token=claim_token,
+                now=now,
+                renew_lease_seconds=renew_lease_seconds,
+            )
+        except ClaimLostError:
+            return None
+
+    async def _require_owned_outbox(
+        self,
+        event_id: uuid.UUID,
+        *,
+        worker_id: uuid.UUID,
+        claim_token: uuid.UUID,
+        now: datetime,
+        renew_lease_seconds: int | None = None,
+    ) -> OutboxEvent:
+        row = (
+            await self._session.execute(
+                select(OutboxEvent).where(OutboxEvent.id == event_id).with_for_update()
+            )
+        ).scalar_one_or_none()
+        if row is None or row.published_at is not None:
+            raise ClaimLostError(f"outbox {event_id} missing or published")
+        payload = dict(row.payload) if isinstance(row.payload, dict) else {}
+        if not self._owns_claim(
+            payload, worker_id=worker_id, claim_token=claim_token, now=now
+        ):
+            raise ClaimLostError(f"outbox {event_id} claim lost")
+        if renew_lease_seconds is not None:
+            expires = now + timedelta(seconds=max(1, int(renew_lease_seconds)))
+            claim = dict(payload.get(_CLAIM_KEY) or {})
+            claim["worker_id"] = str(worker_id)
+            claim["claim_token"] = str(claim_token)
+            claim["lease_expires_at"] = (
+                expires.astimezone(UTC).isoformat().replace("+00:00", "Z")
+            )
+            payload[_CLAIM_KEY] = claim
+            row.payload = payload
+            row.last_attempt_at = now
+            row.lock_version = int(row.lock_version or 1) + 1
+            await self._session.flush()
+        return row
+
+    @classmethod
+    def _owns_claim(
+        cls,
+        payload: dict[str, Any],
+        *,
+        worker_id: uuid.UUID,
+        claim_token: uuid.UUID,
+        now: datetime,
+    ) -> bool:
+        claim = payload.get(_CLAIM_KEY)
+        if not isinstance(claim, dict):
+            return False
+        if claim.get("worker_id") != str(worker_id):
+            return False
+        if claim.get("claim_token") != str(claim_token):
+            return False
+        expires = cls._parse_lease_expiry(claim.get("lease_expires_at"))
+        if expires is None:
+            return False
+        return expires > now
+
+    @staticmethod
+    def _parse_lease_expiry(raw: Any) -> datetime | None:
+        if raw is None:
+            return None
+        try:
+            expires = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if expires.tzinfo is None:
+            expires = expires.replace(tzinfo=UTC)
+        return expires
+
+    @staticmethod
+    def _has_active_lease(payload: dict[str, Any], *, now: datetime) -> bool:
+        claim = payload.get(_CLAIM_KEY)
+        if not isinstance(claim, dict):
+            return False
+        if not claim.get("worker_id") or not claim.get("claim_token"):
+            return False
+        expires = AgentScheduleExecutionService._parse_lease_expiry(
+            claim.get("lease_expires_at")
+        )
+        if expires is None:
+            return False
+        return expires > now
+
     @staticmethod
     def _has_active_foreign_lease(
         payload: dict[str, Any],
@@ -841,17 +1176,13 @@ class AgentScheduleExecutionService:
         if not isinstance(claim, dict):
             return False
         claim_worker = claim.get("worker_id")
-        expires_raw = claim.get("lease_expires_at")
-        if not claim_worker or not expires_raw:
+        expires = AgentScheduleExecutionService._parse_lease_expiry(
+            claim.get("lease_expires_at")
+        )
+        if not claim_worker or expires is None:
             return False
         if str(claim_worker) == str(worker_id):
             return False
-        try:
-            expires = datetime.fromisoformat(str(expires_raw).replace("Z", "+00:00"))
-        except ValueError:
-            return False
-        if expires.tzinfo is None:
-            expires = expires.replace(tzinfo=UTC)
         return expires > now
 
     @staticmethod
