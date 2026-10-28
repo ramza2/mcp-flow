@@ -47,6 +47,11 @@ def _pointer_paths(errors: list[Any], *, root: str = "") -> list[str]:
     return paths
 
 
+def _is_http_success_status(value: Any) -> bool:
+    """True for integer HTTP 2xx; rejects bool (bool is a Python int subclass)."""
+    return type(value) is int and 200 <= value <= 299
+
+
 def _factory_http_body_payload(
     structured_content: Any,
 ) -> tuple[Any, ResultValidationOutcome | None]:
@@ -60,6 +65,11 @@ def _factory_http_body_payload(
     the HTTP body (OpenAPI response), not the MCP envelope. Callers must pass
     ``factory_imported=True`` from ``is_factory_imported(server)`` — do not
     invent Factory provenance from shape alone.
+
+    Envelope gates (fail closed): ``ok is True`` and non-bool integer
+    ``http_status`` in 200..299. ``body`` may be any JSON value (object, array,
+    or scalar) — schema validation decides acceptance; ``body`` key missing /
+    ``body_text``-only still fails.
     """
     if not isinstance(structured_content, dict):
         return None, ResultValidationOutcome(
@@ -70,15 +80,23 @@ def _factory_http_body_payload(
                 "with HTTP body for output_schema validation."
             ),
         )
-    if not isinstance(structured_content.get("ok"), bool) or not isinstance(
-        structured_content.get("http_status"), int
-    ):
+    if structured_content.get("ok") is not True:
         return None, ResultValidationOutcome(
             ok=False,
             error_code="RESULT_SCHEMA_INVALID",
             error_message=(
-                "Factory Tool structuredContent is missing the Runtime "
-                "envelope (ok, http_status) required for body validation."
+                "Factory Tool structuredContent.ok must be true before "
+                "output_schema body validation."
+            ),
+        )
+    http_status = structured_content.get("http_status")
+    if not _is_http_success_status(http_status):
+        return None, ResultValidationOutcome(
+            ok=False,
+            error_code="RESULT_SCHEMA_INVALID",
+            error_message=(
+                "Factory Tool structuredContent.http_status must be an integer "
+                "HTTP 2xx before output_schema body validation."
             ),
         )
     if "body" not in structured_content:
@@ -90,17 +108,8 @@ def _factory_http_body_payload(
                 "against output_schema (body_text-only results fail closed)."
             ),
         )
-    body = structured_content.get("body")
-    if not isinstance(body, (dict, list)):
-        return None, ResultValidationOutcome(
-            ok=False,
-            error_code="RESULT_SCHEMA_INVALID",
-            error_message=(
-                "Factory Tool HTTP body must be a JSON object or array for "
-                "output_schema validation."
-            ),
-        )
-    return body, None
+    # Any JSON value is eligible; output_schema decides (scalars allowed).
+    return structured_content.get("body"), None
 
 
 def validate_tool_result(
@@ -117,9 +126,11 @@ def validate_tool_result(
     - ``tool_error`` (MCP ``isError``) fails closed with ``RESULT_TOOL_ERROR``.
     - When ``output_schema`` is present, ``structured_content`` must exist and
       validate against it, else ``RESULT_SCHEMA_INVALID``.
-    - When ``factory_imported`` is True (``is_factory_imported``), validate the
-      HTTP ``body`` field against ``output_schema`` — not the Runtime envelope.
-      Envelope / ``result_inline`` shape is unchanged for STEP_OUTPUT paths.
+    - When ``factory_imported`` is True (``is_factory_imported``), require
+      envelope ``ok is True`` and integer HTTP 2xx ``http_status``, then
+      validate HTTP ``body`` (any JSON value, including scalars) against
+      ``output_schema`` — not the Runtime envelope. Envelope /
+      ``result_inline`` shape is unchanged for STEP_OUTPUT paths.
     """
     if not result.protocol_success:
         return ResultValidationOutcome(

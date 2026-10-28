@@ -112,6 +112,117 @@ def test_factory_missing_envelope_markers_fail_closed() -> None:
     assert outcome.error_code == "RESULT_SCHEMA_INVALID"
 
 
+def test_factory_ok_false_fail_closed_even_with_2xx_body() -> None:
+    envelope = {
+        "ok": False,
+        "http_status": 200,
+        "body": {"pets": []},
+    }
+    outcome = validate_tool_result(
+        _result(structured=envelope),
+        output_schema=_PETS_SCHEMA,
+        factory_imported=True,
+    )
+    assert outcome.ok is False
+    assert outcome.error_code == "RESULT_SCHEMA_INVALID"
+    assert outcome.error_message is not None
+    assert "ok" in outcome.error_message
+
+
+def test_factory_http_status_non_2xx_fail_closed() -> None:
+    envelope = {
+        "ok": True,
+        "http_status": 500,
+        "body": {"pets": []},
+    }
+    outcome = validate_tool_result(
+        _result(structured=envelope),
+        output_schema=_PETS_SCHEMA,
+        factory_imported=True,
+    )
+    assert outcome.ok is False
+    assert outcome.error_code == "RESULT_SCHEMA_INVALID"
+    assert outcome.error_message is not None
+    assert "http_status" in outcome.error_message
+
+
+def test_factory_http_status_bool_true_rejected() -> None:
+    """bool is a Python int subclass; must not count as HTTP status."""
+    envelope = {
+        "ok": True,
+        "http_status": True,
+        "body": {"pets": [{"id": 1, "name": "Alpha", "status": "available"}]},
+    }
+    outcome = validate_tool_result(
+        _result(structured=envelope),
+        output_schema=_PETS_SCHEMA,
+        factory_imported=True,
+    )
+    assert outcome.ok is False
+    assert outcome.error_code == "RESULT_SCHEMA_INVALID"
+
+
+def test_factory_scalar_body_allowed_when_schema_matches() -> None:
+    envelope = {
+        "ok": True,
+        "http_status": 200,
+        "body": 42,
+    }
+    outcome = validate_tool_result(
+        _result(structured=envelope),
+        output_schema={"type": "integer"},
+        factory_imported=True,
+    )
+    assert outcome.ok is True
+
+
+def test_factory_scalar_body_rejected_when_schema_mismatches() -> None:
+    envelope = {
+        "ok": True,
+        "http_status": 200,
+        "body": 42,
+    }
+    outcome = validate_tool_result(
+        _result(structured=envelope),
+        output_schema=_PETS_SCHEMA,
+        factory_imported=True,
+    )
+    assert outcome.ok is False
+    assert outcome.error_code == "RESULT_SCHEMA_INVALID"
+    assert outcome.error_message is not None
+    assert "/body" in outcome.error_message
+
+
+def test_factory_string_body_allowed_when_schema_matches() -> None:
+    envelope = {
+        "ok": True,
+        "http_status": 204,
+        "body": "pong",
+    }
+    outcome = validate_tool_result(
+        _result(structured=envelope),
+        output_schema={"type": "string"},
+        factory_imported=True,
+    )
+    assert outcome.ok is True
+
+
+def test_tool_error_priority_over_ok_false_envelope() -> None:
+    """isError / tool_error is classified before Factory envelope gates."""
+    envelope = {
+        "ok": False,
+        "http_status": 500,
+        "body": {"detail": "upstream"},
+    }
+    outcome = validate_tool_result(
+        _result(structured=envelope, tool_error=True),
+        output_schema=_PETS_SCHEMA,
+        factory_imported=True,
+    )
+    assert outcome.ok is False
+    assert outcome.error_code == "RESULT_TOOL_ERROR"
+
+
 def test_factory_body_schema_mismatch_reports_body_path() -> None:
     envelope = {
         "ok": True,
