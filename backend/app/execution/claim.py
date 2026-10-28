@@ -112,10 +112,7 @@ class ExecutionClaimService:
                 ),
                 status_code=409,
             )
-        if execution.source_type in {
-            ExecutionSourceType.WORKFLOW_VERSION.value,
-            ExecutionSourceType.SCHEDULE_OCCURRENCE.value,
-        }:
+        if execution.source_type == ExecutionSourceType.WORKFLOW_VERSION.value:
             if (
                 execution.workflow_version_id is None
                 or execution.agent_request_id is not None
@@ -126,17 +123,6 @@ class ExecutionClaimService:
                     message=(
                         f"{execution.source_type} Execution source lineage "
                         "is inconsistent."
-                    ),
-                    status_code=409,
-                )
-            if (
-                execution.source_type == ExecutionSourceType.SCHEDULE_OCCURRENCE.value
-                and execution.schedule_occurrence_id is None
-            ):
-                raise AppError(
-                    code="RESOURCE_CONFLICT",
-                    message=(
-                        "SCHEDULE_OCCURRENCE Execution requires schedule_occurrence_id."
                     ),
                     status_code=409,
                 )
@@ -158,6 +144,48 @@ class ExecutionClaimService:
                     message=(
                         f"{execution.source_type} Execution plan.source.type "
                         "must be WORKFLOW."
+                    ),
+                    status_code=409,
+                )
+        elif execution.source_type == ExecutionSourceType.SCHEDULE_OCCURRENCE.value:
+            from app.execution.schedule_lineage import (
+                is_agent_schedule_occurrence,
+                is_workflow_schedule_occurrence,
+            )
+
+            if not (
+                is_workflow_schedule_occurrence(execution)
+                or is_agent_schedule_occurrence(execution)
+            ):
+                raise AppError(
+                    code="RESOURCE_CONFLICT",
+                    message=(
+                        "SCHEDULE_OCCURRENCE Execution source lineage "
+                        "is inconsistent."
+                    ),
+                    status_code=409,
+                )
+            try:
+                from app.schemas.execution_plan import ExecutionPlanV1
+
+                plan = ExecutionPlanV1.model_validate(execution.plan_snapshot)
+            except Exception as exc:
+                raise AppError(
+                    code="RESOURCE_CONFLICT",
+                    message=(
+                        "SCHEDULE_OCCURRENCE Execution plan_snapshot is invalid."
+                    ),
+                    status_code=409,
+                ) from exc
+            expected_source = (
+                "AGENT" if is_agent_schedule_occurrence(execution) else "WORKFLOW"
+            )
+            if plan.source.type != expected_source:
+                raise AppError(
+                    code="RESOURCE_CONFLICT",
+                    message=(
+                        "SCHEDULE_OCCURRENCE Execution plan.source.type "
+                        f"must be {expected_source}."
                     ),
                     status_code=409,
                 )
@@ -310,6 +338,10 @@ class ExecutionClaimService:
         Never ``Execution → Schedule FOR UPDATE``.
         """
         from app.domain.enums import OccurrenceStatus
+        from app.execution.schedule_lineage import (
+            is_agent_schedule_occurrence,
+            is_workflow_schedule_occurrence,
+        )
         from app.models.schedule import Schedule, ScheduleOccurrence
 
         if execution.schedule_occurrence_id is None:
@@ -318,11 +350,9 @@ class ExecutionClaimService:
                 message="SCHEDULE_OCCURRENCE Execution requires schedule_occurrence_id.",
                 status_code=409,
             )
-        if (
-            execution.workflow_version_id is None
-            or execution.agent_request_id is not None
-            or execution.agent_version_id is not None
-            or execution.plan_validation_run_id is not None
+        if not (
+            is_workflow_schedule_occurrence(execution)
+            or is_agent_schedule_occurrence(execution)
         ):
             raise AppError(
                 code="RESOURCE_CONFLICT",

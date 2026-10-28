@@ -1668,6 +1668,9 @@ Unique `(schedule_id, scheduled_for)`로 중복 occurrence를 차단한다.
 - Partial index `ix_schedules_active_next_run_at`는 `status='ACTIVE'` 행만 대상 (scheduler due scan).
 - Permission bootstrap: `schedule.manage` (migration `20261002_0021`).
 - `executions.schedule_occurrence_id` → `schedule_occurrences.id` FK + unique partial index (migration `20261002_0023`). At most one Execution per Occurrence.
+- `ck_executions_schedule_occurrence_lineage` (migration `20261028_0038`): `SCHEDULE_OCCURRENCE` XOR
+  - Workflow: `workflow_version_id NOT NULL` + agent/plan_validation NULL
+  - Agent (ONCE vertical): `agent_version_id` + `agent_request_id` + `plan_validation_run_id` NOT NULL + `workflow_version_id` NULL
 
 ---
 

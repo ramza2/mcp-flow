@@ -976,7 +976,26 @@ agent_request_id / agent_version_id = null
 requester_id = Schedule.owner_id
 ```
 
-Manual `POST /trigger`는 동일 lineage에 `trigger_type=USER`만 다르다. AGENT_VERSION Schedule 실행은 이 슬라이스에서 unsupported.
+Manual `POST /trigger`는 동일 lineage에 `trigger_type=USER`만 다르다.
+
+AGENT_VERSION Schedule 자동 발사 (ONCE vertical):
+
+```text
+source_type = SCHEDULE_OCCURRENCE
+trigger_type = SCHEDULE
+schedule_occurrence_id != null
+agent_version_id = Schedule pin (exact; current/latest 재선택 금지)
+agent_request_id / plan_validation_run_id != null
+workflow_version_id = null
+requester_id = Schedule.owner_id
+inputs.request_text = 비어 있지 않은 문자열 (≤4000)
+```
+
+제약 (이 슬라이스):
+- `schedule_type=ONCE`만 지원. CRON/INTERVAL 생성·발사·수동 `POST /trigger`는 fail-closed.
+- Scheduler DB lock/TX 안에서 LLM·원격 MCP 호출 금지. durable Outbox `AGENT_SCHEDULE_PLAN`으로 비동기 계획 후 Execution 생성.
+- READY + 모든 Tool `READ_ONLY` + 확인/승인 불필요일 때만 자동 실행. WAITING_INPUT / WAITING_CONFIRMATION / REJECTED / FAILED 및 쓰기·파괴·UNKNOWN 위험은 실행 없이 fail-closed.
+- 동일 Occurrence 재처리 시 AgentRequest/Execution 중복 생성 금지 (occurrence당 Execution 최대 1).
 
 ---
 

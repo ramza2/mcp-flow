@@ -45,6 +45,16 @@ class OutboxIterationResult:
 async def run_iteration(*, settings: Settings | None = None) -> OutboxIterationResult:
     cfg = settings or get_settings()
 
+    # AGENT_VERSION Schedule ONCE: consume AGENT_SCHEDULE_PLAN before staging
+    # CREATED Executions (LLM/planning OK here; Schedule FOR UPDATE is not held).
+    async with session_scope() as session:
+        from app.services.agent_schedule_execution import AgentScheduleExecutionService
+
+        await AgentScheduleExecutionService(session).process_unpublished_batch(
+            limit=cfg.outbox_batch_size
+        )
+        await session.commit()
+
     async with session_scope() as session:
         stager = ExecutionQueueService(session)
         staged = await stager.stage_created_batch(limit=cfg.outbox_batch_size)

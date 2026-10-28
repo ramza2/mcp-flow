@@ -391,10 +391,7 @@ class ToolStepAttemptService:
                 ),
                 status_code=409,
             )
-        if execution.source_type in {
-            ExecutionSourceType.WORKFLOW_VERSION.value,
-            ExecutionSourceType.SCHEDULE_OCCURRENCE.value,
-        }:
+        if execution.source_type == ExecutionSourceType.WORKFLOW_VERSION.value:
             if (
                 execution.workflow_version_id is None
                 or execution.agent_version_id is not None
@@ -408,14 +405,20 @@ class ToolStepAttemptService:
                     ),
                     status_code=409,
                 )
-            if (
-                execution.source_type == ExecutionSourceType.SCHEDULE_OCCURRENCE.value
-                and execution.schedule_occurrence_id is None
+        elif execution.source_type == ExecutionSourceType.SCHEDULE_OCCURRENCE.value:
+            from app.execution.schedule_lineage import (
+                is_agent_schedule_occurrence,
+                is_workflow_schedule_occurrence,
+            )
+
+            if not (
+                is_workflow_schedule_occurrence(execution)
+                or is_agent_schedule_occurrence(execution)
             ):
                 raise AppError(
                     code="RESOURCE_CONFLICT",
                     message=(
-                        "SCHEDULE_OCCURRENCE Attempt requires schedule_occurrence_id."
+                        "SCHEDULE_OCCURRENCE Attempt source lineage is inconsistent."
                     ),
                     status_code=409,
                 )

@@ -119,13 +119,23 @@ async def assert_source_tool_executable(
     plan_timeout_seconds: int | None = None,
 ) -> RuntimeToolAuthorization:
     """Dispatch current-Tool authorization by Execution.source_type."""
-    if execution.source_type == ExecutionSourceType.AGENT_REQUEST.value:
+    from app.execution.schedule_lineage import (
+        is_agent_schedule_occurrence,
+        is_workflow_schedule_occurrence,
+    )
+
+    if execution.source_type == ExecutionSourceType.AGENT_REQUEST.value or (
+        execution.source_type == ExecutionSourceType.SCHEDULE_OCCURRENCE.value
+        and is_agent_schedule_occurrence(execution)
+    ):
         if execution.agent_version_id is None:
             raise AppError(
                 code="EXECUTION_PRECONDITION_FAILED",
                 message="Execution.agent_version_id is required.",
                 status_code=409,
             )
+        if execution.source_type == ExecutionSourceType.SCHEDULE_OCCURRENCE.value:
+            await _assert_schedule_occurrence_lineage(session, execution)
         return await assert_current_agent_tool_executable(
             session,
             requester_id=execution.requester_id,
@@ -134,10 +144,10 @@ async def assert_source_tool_executable(
             expected_policy_snapshot=expected_policy_snapshot,
             plan_timeout_seconds=plan_timeout_seconds,
         )
-    if execution.source_type in {
-        ExecutionSourceType.WORKFLOW_VERSION.value,
-        ExecutionSourceType.SCHEDULE_OCCURRENCE.value,
-    }:
+    if execution.source_type == ExecutionSourceType.WORKFLOW_VERSION.value or (
+        execution.source_type == ExecutionSourceType.SCHEDULE_OCCURRENCE.value
+        and is_workflow_schedule_occurrence(execution)
+    ):
         await assert_current_workflow_execution_authorized(session, execution)
         core = await _assert_common_tool_executable(
             session,
@@ -155,6 +165,12 @@ async def assert_source_tool_executable(
             agent_grant=None,
             confirmation_required=bool(core.tool_policy.requires_confirmation),
             policy_snapshot=core.policy_snapshot,
+        )
+    if execution.source_type == ExecutionSourceType.SCHEDULE_OCCURRENCE.value:
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message="SCHEDULE_OCCURRENCE Execution source lineage is inconsistent.",
+            status_code=409,
         )
     if execution.source_type == ExecutionSourceType.MANUAL_TOOL_TEST.value:
         # FNC-TOOL-005: admin Test Call uses mcp.tool.execute + MCP_TOOL grant
@@ -342,14 +358,15 @@ async def _assert_schedule_occurrence_lineage(
     """
     from sqlalchemy import select
 
+    from app.execution.schedule_lineage import (
+        is_agent_schedule_occurrence,
+        is_workflow_schedule_occurrence,
+    )
     from app.models.schedule import Schedule, ScheduleOccurrence
 
-    if (
-        execution.schedule_occurrence_id is None
-        or execution.workflow_version_id is None
-        or execution.agent_request_id is not None
-        or execution.agent_version_id is not None
-        or execution.plan_validation_run_id is not None
+    if not (
+        is_workflow_schedule_occurrence(execution)
+        or is_agent_schedule_occurrence(execution)
     ):
         raise AppError(
             code="RESOURCE_CONFLICT",
