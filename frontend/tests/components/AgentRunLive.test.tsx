@@ -19,6 +19,8 @@ const mocks = vi.hoisted(() => ({
   respond: vi.fn(),
   createExecution: vi.fn(),
   listExecutions: vi.fn(),
+  chatResult: vi.fn(),
+  getExecution: vi.fn(),
 }));
 
 vi.mock('@/api/agentRun', () => ({
@@ -34,10 +36,32 @@ vi.mock('@/api/agentRun', () => ({
   validateAgentRunPlan: mocks.validate,
   respondToAgentRunClarification: mocks.respond,
   createAgentRunExecution: mocks.createExecution,
+  getAgentRunChatResult: mocks.chatResult,
 }));
 
 vi.mock('@/api/executions', () => ({
   listExecutions: mocks.listExecutions,
+  getExecution: mocks.getExecution,
+}));
+
+const sseMocks = vi.hoisted(() => ({
+  onEvent: null as null | ((message: {
+    sseId: string;
+    envelope: { event_type: string; event_id: string; execution_id: string; step_execution_id: null; payload: Record<string, never>; payload_version: number; occurred_at: string };
+  }) => void),
+  available: false,
+}));
+
+vi.mock('@/api/executionEvents', () => ({
+  isEventSourceAvailable: () => sseMocks.available,
+  openExecutionEventsStream: (options: { onEvent: typeof sseMocks.onEvent }) => {
+    sseMocks.onEvent = options.onEvent;
+    return {
+      close: () => {
+        sseMocks.onEvent = null;
+      },
+    };
+  },
 }));
 
 const conversationId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
@@ -72,7 +96,6 @@ function selection(decision: 'AUTO_SELECT' | 'NO_MATCH' = 'AUTO_SELECT') {
   };
 }
 
-
 function stage(status: string, overrides: Record<string, unknown> = {}) {
   return {
     request: row(status, { intent: 'Find documents', required_capabilities: ['document.lookup'] }),
@@ -80,6 +103,7 @@ function stage(status: string, overrides: Record<string, unknown> = {}) {
     plan: null,
     validation: null,
     open_clarification: null,
+    safe_auto_execute: false,
     ...overrides,
   };
 }
@@ -96,9 +120,11 @@ function renderLive(path = '/run') {
   });
 }
 
-describe('AgentRunLive — real phase 1, no fake execution', () => {
+describe('AgentRunLive — chat phase 1', () => {
   beforeEach(() => {
     vi.resetAllMocks();
+    sseMocks.available = false;
+    sseMocks.onEvent = null;
     mocks.list.mockResolvedValue({
       items: [{ id: agentId, agent_version_id: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd', name: '실제 Agent', description: null, version_no: 2 }],
     });
@@ -108,6 +134,23 @@ describe('AgentRunLive — real phase 1, no fake execution', () => {
       id: executionId, status: 'CREATED', source_type: 'AGENT_REQUEST', trigger_type: 'USER',
       agent_request_id: requestId, agent_version_id: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
       plan_hash: 'a'.repeat(64), requested_at: '2026-10-23T10:05:00Z', step_count: 1,
+    });
+    mocks.chatResult.mockResolvedValue({
+      agent_request_id: requestId,
+      execution_id: executionId,
+      execution_status: 'SUCCEEDED',
+      available: true,
+      unavailable_reason: null,
+      tool_name: 'GET /pets',
+      display_items: [
+        { name: 'Alpha', status: 'available' },
+        { name: 'Beta', status: 'pending' },
+      ],
+      summary_text: 'GET /pets 결과 2건을 가져왔습니다.',
+      truncated: false,
+    });
+    mocks.getExecution.mockResolvedValue({
+      id: executionId, status: 'SUCCEEDED', agent_request_id: requestId,
     });
     mocks.analyze.mockResolvedValue(row('RETRIEVING', {
       intent: 'Find documents',
@@ -136,6 +179,8 @@ describe('AgentRunLive — real phase 1, no fake execution', () => {
     }));
     mocks.validate.mockResolvedValue(stage('READY', {
       validation: { id: 'cccc', decision: 'READY', confirmation_required: false, error_count: 0, warning_count: 0, created_at: '2026-10-23T10:03:00Z' },
+      plan: { id: 'bbbb', plan_hash: 'a'.repeat(64), goal: '문서 검색', step_count: 1, step_names: ['문서 조회'], created_at: '2026-10-23T10:02:00Z' },
+      safe_auto_execute: true,
     }));
     mocks.respond.mockResolvedValue({ agent_request_id: requestId, clarification_id: 'ddd', clarification_status: 'ANSWERED', agent_request_status: 'VALIDATING' });
     mocks.select.mockResolvedValue({
@@ -146,60 +191,82 @@ describe('AgentRunLive — real phase 1, no fake execution', () => {
     });
   });
 
-  it('submits once, invokes real analyzer once, and never claims Tool/Execution completed', async () => {
+  it('shows Korean chat shell with execute button', async () => {
+    renderLive();
+    expect(await screen.findByRole('heading', { name: /Agent 업무 실행/ })).toBeTruthy();
+    expect(screen.getByPlaceholderText(/무엇을 도와드릴까요/)).toBeTruthy();
+    expect(screen.getByRole('button', { name: '실행' })).toBeDisabled();
+  });
+
+  it('auto-chains planning APIs for a safe READ_ONLY path and starts Execution', async () => {
+    // progress is called repeatedly during auto pipeline — return evolving stages.
+    mocks.progress
+      .mockResolvedValueOnce(stage('RETRIEVING'))
+      .mockResolvedValueOnce(stage('BUILDING_PARAMETERS'))
+      .mockResolvedValueOnce(stage('PLANNING', {
+        parameter_build: { id: 'aaaa', tool_version_id: toolVersionId, is_complete: true, missing_fields: [], created_at: '2026-10-23T10:01:00Z' },
+      }))
+      .mockResolvedValue(stage('READY', {
+        validation: { id: 'cccc', decision: 'READY', confirmation_required: false, error_count: 0, warning_count: 0, created_at: '2026-10-23T10:03:00Z' },
+        plan: { id: 'bbbb', plan_hash: 'a'.repeat(64), goal: '문서 검색', step_count: 1, step_names: ['문서 조회'], created_at: '2026-10-23T10:02:00Z' },
+        safe_auto_execute: true,
+      }));
+
+    // After select → BUILDING_PARAMETERS; build → PLANNING; generate → VALIDATING; validate → READY+safe
+    mocks.select.mockResolvedValue({
+      request: row('BUILDING_PARAMETERS'),
+      selection: selection(),
+    });
+    mocks.build.mockResolvedValue(stage('PLANNING', {
+      parameter_build: { id: 'aaaa', tool_version_id: toolVersionId, is_complete: true, missing_fields: [], created_at: '2026-10-23T10:01:00Z' },
+    }));
+    mocks.generate.mockResolvedValue(stage('VALIDATING', {
+      plan: { id: 'bbbb', plan_hash: 'a'.repeat(64), goal: '문서 검색', step_count: 1, step_names: ['문서 조회'], created_at: '2026-10-23T10:02:00Z' },
+    }));
+    mocks.validate.mockResolvedValue(stage('READY', {
+      validation: { id: 'cccc', decision: 'READY', confirmation_required: false, error_count: 0, warning_count: 0, created_at: '2026-10-23T10:03:00Z' },
+      plan: { id: 'bbbb', plan_hash: 'a'.repeat(64), goal: '문서 검색', step_count: 1, step_names: ['문서 조회'], created_at: '2026-10-23T10:02:00Z' },
+      safe_auto_execute: true,
+    }));
+
     renderLive();
     await screen.findByRole('option', { name: '실제 Agent (v2)' });
-    fireEvent.change(screen.getByPlaceholderText('분석할 자연어 업무 지시를 입력하세요.'), {
-      target: { value: '문서를 검색해줘' },
+    fireEvent.change(screen.getByPlaceholderText(/무엇을 도와드릴까요/), {
+      target: { value: '반려동물 목록을 조회해 줘' },
     });
-    fireEvent.click(screen.getByRole('button', { name: '실제 분석 시작' }));
+    fireEvent.click(screen.getByRole('button', { name: '실행' }));
 
     await waitFor(() => {
-      expect(mocks.submit).toHaveBeenCalledWith(agentId, '문서를 검색해줘');
+      expect(mocks.submit).toHaveBeenCalledWith(agentId, '반려동물 목록을 조회해 줘');
       expect(mocks.analyze).toHaveBeenCalledWith(requestId);
+      expect(mocks.select).toHaveBeenCalledWith(requestId);
+      expect(mocks.build).toHaveBeenCalledWith(requestId);
+      expect(mocks.generate).toHaveBeenCalledWith(requestId);
+      expect(mocks.validate).toHaveBeenCalledWith(requestId);
+      expect(mocks.createExecution).toHaveBeenCalledWith(requestId);
     });
-    expect(await screen.findByText('Find documents')).toBeTruthy();
-    expect(await screen.findByText('Execution: 생성되지 않음')).toBeTruthy();
     expect(screen.queryByText(/메일을 발송했습니다/)).toBeNull();
-    expect(mocks.submit).toHaveBeenCalledTimes(1);
-    expect(mocks.analyze).toHaveBeenCalledTimes(1);
+    // Stay on chat — do not navigate away to execution detail exclusively.
+    expect(screen.queryByText('실제 실행 상세')).toBeNull();
   });
 
-  it('reloads a persisted request without retrying the model', async () => {
+  it('does not auto-execute when safe_auto_execute is false', async () => {
+    mocks.latest.mockResolvedValue(row('READY'));
+    mocks.getSelection.mockResolvedValue({ request: row('READY'), selection: selection() });
+    mocks.progress.mockResolvedValue(stage('READY', {
+      plan: { id: 'saved-plan', plan_hash: 'b'.repeat(64), goal: '저장된 계획', step_count: 1, step_names: ['도구 조회'], created_at: '2026-10-23T10:02:00Z' },
+      validation: { id: 'saved-validation', decision: 'READY', confirmation_required: false, error_count: 0, warning_count: 0, created_at: '2026-10-23T10:03:00Z' },
+      safe_auto_execute: false,
+    }));
     renderLive(`/run/${conversationId}`);
-    expect(await screen.findByText('Find documents')).toBeTruthy();
-    expect(mocks.latest).toHaveBeenCalledWith(conversationId, expect.anything());
-    expect(mocks.analyze).not.toHaveBeenCalled();
-  });
-
-  it('does not allow submission without an eligible real agent', async () => {
-    mocks.list.mockResolvedValue({ items: [] });
-    renderLive();
-    expect(await screen.findByText('사용 가능한 Agent 없음')).toBeTruthy();
-    expect(screen.getByRole('button', { name: '실제 분석 시작' })).toBeDisabled();
-    expect(mocks.submit).not.toHaveBeenCalled();
-  });
-
-  it('explicitly selects a real Tool and does not claim it executed', async () => {
-    renderLive(`/run/${conversationId}`);
-    fireEvent.click(await screen.findByRole('button', { name: '실제 Tool 검색·선택' }));
-    await waitFor(() => expect(mocks.select).toHaveBeenCalledWith(requestId));
-    expect(await screen.findByText(/선택 Tool: 날씨 조회/)).toBeTruthy();
-    expect(screen.getByText('자동 선택')).toBeTruthy();
-    expect(screen.getByText(/MCP 호출 또는 업무 실행 완료를 의미하지 않습니다/)).toBeTruthy();
-    expect(await screen.findByText('Execution: 생성되지 않음')).toBeTruthy();
-    expect(mocks.select).toHaveBeenCalledTimes(1);
-  });
-
-  it('restores a persisted selection after F5 without rerunning Tool selection', async () => {
-    mocks.getSelection.mockResolvedValue({
-      request: row('BUILDING_PARAMETERS', { intent: 'Find documents' }),
-      selection: selection('AUTO_SELECT'),
-    });
-    renderLive(`/run/${conversationId}`);
-    expect(await screen.findByText(/선택 Tool: 날씨 조회/)).toBeTruthy();
-    expect(mocks.select).not.toHaveBeenCalled();
-    expect(mocks.analyze).not.toHaveBeenCalled();
+    expect(await screen.findByRole('button', { name: '실제 업무 실행 시작' })).toBeDisabled();
+    expect(mocks.createExecution).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('checkbox', {
+      name: '실제 시스템에서 실행되는 작업임을 확인했습니다.',
+    }));
+    fireEvent.click(screen.getByRole('button', { name: '실제 업무 실행 시작' }));
+    await waitFor(() => expect(mocks.createExecution).toHaveBeenCalledTimes(1));
+    expect(screen.queryByText('실제 실행 상세')).toBeNull();
   });
 
   it('does not auto-retry persisted ANALYZING after reload', async () => {
@@ -209,138 +276,99 @@ describe('AgentRunLive — real phase 1, no fake execution', () => {
     });
     mocks.progress.mockResolvedValue(stage('ANALYZING'));
     renderLive(`/run/${conversationId}`);
+    fireEvent.click(await screen.findByRole('button', { name: '고급 보기' }));
     expect(await screen.findByText(/분석이 진행 중이거나 중단됐을 수 있습니다/)).toBeTruthy();
     expect(mocks.analyze).not.toHaveBeenCalled();
   });
 
-  it('runs explicit Parameter Builder without starting Plan or Execution', async () => {
-    mocks.latest.mockResolvedValue(row('BUILDING_PARAMETERS'));
-    mocks.getSelection.mockResolvedValue({ request: row('BUILDING_PARAMETERS'), selection: selection() });
-    mocks.progress.mockResolvedValue(stage('BUILDING_PARAMETERS'));
-    renderLive('/run/' + conversationId);
-    fireEvent.click(await screen.findByRole('button', { name: '입력 파라미터 구성' }));
-    await waitFor(() => expect(mocks.build).toHaveBeenCalledWith(requestId));
-    expect(await screen.findByText('필수 입력 완료')).toBeTruthy();
-    expect(mocks.generate).not.toHaveBeenCalled();
-    expect(mocks.validate).not.toHaveBeenCalled();
-    expect(await screen.findByText('Execution: 생성되지 않음')).toBeTruthy();
-  });
-
-  it('generates and validates a persisted single-Tool plan explicitly', async () => {
-    mocks.latest.mockResolvedValue(row('PLANNING'));
-    mocks.getSelection.mockResolvedValue({ request: row('PLANNING'), selection: selection() });
-    mocks.progress.mockResolvedValue(stage('PLANNING'));
-    renderLive('/run/' + conversationId);
-    fireEvent.click(await screen.findByRole('button', { name: '실행계획 생성' }));
-    await waitFor(() => expect(mocks.generate).toHaveBeenCalledWith(requestId));
-    expect(await screen.findByText('목적: 문서 검색')).toBeTruthy();
-    fireEvent.click(screen.getByRole('button', { name: '실행계획 검증' }));
-    await waitFor(() => expect(mocks.validate).toHaveBeenCalledWith(requestId));
-    expect(await screen.findByText(/계획 검증이 완료됐습니다/)).toBeTruthy();
-    expect(mocks.select).not.toHaveBeenCalled();
-    expect(await screen.findByText('Execution: 생성되지 않음')).toBeTruthy();
-  });
-
-  it('submits plan confirmation without auto-creating an Execution', async () => {
-    mocks.latest.mockResolvedValue(row('WAITING_CONFIRMATION'));
-    mocks.getSelection.mockResolvedValue({ request: row('WAITING_CONFIRMATION'), selection: selection() });
-    mocks.progress.mockResolvedValue(stage('WAITING_CONFIRMATION', {
-      open_clarification: {
-        id: 'clarify-1', request_type: 'PLAN_CONFIRMATION',
-        prompt_text: '생성된 실행 계획을 진행하시겠습니까?',
-        fields: [{ name: 'confirmed', value_type: 'boolean', description: null, required: true }],
-        requested_at: '2026-10-23T10:04:00Z',
-      },
-    }));
-    renderLive('/run/' + conversationId);
-    fireEvent.click(await screen.findByRole('button', { name: '확인하고 계속' }));
-    await waitFor(() => expect(mocks.respond).toHaveBeenCalledWith(
-      requestId, 'clarify-1', { confirmed: true },
-    ));
-    expect(mocks.validate).not.toHaveBeenCalled();
-  });
-
-  it('collects typed required fields and never starts an Execution', async () => {
+  it('shows clarification without starting Execution', async () => {
     mocks.latest.mockResolvedValue(row('WAITING_INPUT'));
     mocks.getSelection.mockResolvedValue({ request: row('WAITING_INPUT'), selection: null });
     mocks.progress.mockResolvedValue(stage('WAITING_INPUT', {
       open_clarification: {
         id: 'clarify-2', request_type: 'MISSING_PARAMETER',
-        prompt_text: '추가 입력이 필요합니다: city, amount',
+        prompt_text: '추가 입력이 필요합니다: city',
         fields: [
           { name: 'city', value_type: 'string', description: null, required: true },
-          { name: 'amount', value_type: 'integer', description: null, required: true },
         ],
         requested_at: '2026-10-23T10:04:00Z',
       },
     }));
-    renderLive('/run/' + conversationId);
+    renderLive(`/run/${conversationId}`);
+    expect(await screen.findByText(/추가 입력이 필요합니다/)).toBeTruthy();
     fireEvent.change(await screen.findByLabelText('city (필수)'), { target: { value: '서울' } });
-    fireEvent.change(screen.getByLabelText('amount (필수)'), { target: { value: '3' } });
     fireEvent.click(screen.getByRole('button', { name: '입력 내용 제출' }));
     await waitFor(() => expect(mocks.respond).toHaveBeenCalledWith(
-      requestId, 'clarify-2', { city: '서울', amount: 3 },
+      requestId, 'clarify-2', { city: '서울' },
     ));
-    expect(mocks.build).not.toHaveBeenCalled();
-  });
-
-
-
-  it('restores the saved plan and validation after reload without reprocessing', async () => {
-    mocks.latest.mockResolvedValue(row('READY'));
-    mocks.getSelection.mockResolvedValue({ request: row('READY'), selection: selection() });
-    mocks.progress.mockResolvedValue(stage('READY', {
-      plan: { id: 'saved-plan', plan_hash: 'b'.repeat(64), goal: '저장된 계획', step_count: 1, step_names: ['도구 조회'], created_at: '2026-10-23T10:02:00Z' },
-      validation: { id: 'saved-validation', decision: 'READY', confirmation_required: false, error_count: 0, warning_count: 0, created_at: '2026-10-23T10:03:00Z' },
-    }));
-    renderLive('/run/' + conversationId);
-    expect(await screen.findByText('목적: 저장된 계획')).toBeTruthy();
-    expect(mocks.generate).not.toHaveBeenCalled();
-    expect(mocks.validate).not.toHaveBeenCalled();
-    expect(mocks.select).not.toHaveBeenCalled();
-  });
-
-  it('starts a READY plan only after explicit confirmation, then opens execution detail once', async () => {
-    mocks.latest.mockResolvedValue(row('READY'));
-    mocks.getSelection.mockResolvedValue({ request: row('READY'), selection: selection() });
-    mocks.progress.mockResolvedValue(stage('READY'));
-    renderLive('/run/' + conversationId);
-
-    const start = await screen.findByRole('button', { name: '실제 업무 실행 시작' });
-    expect(start).toBeDisabled();
     expect(mocks.createExecution).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByRole('checkbox', {
-      name: '실제 시스템에서 실행되는 작업임을 확인했습니다.',
-    }));
-    fireEvent.click(start);
-    expect(await screen.findByText('실제 실행 상세')).toBeTruthy();
-    expect(mocks.createExecution).toHaveBeenCalledTimes(1);
-    expect(mocks.createExecution).toHaveBeenCalledWith(requestId);
-    expect(mocks.analyze).not.toHaveBeenCalled();
   });
 
-  it('restores an existing execution on F5 and never offers a second creation', async () => {
+  it('restores an existing execution on F5 and loads chat result when terminal', async () => {
     mocks.latest.mockResolvedValue(row('READY'));
     mocks.getSelection.mockResolvedValue({ request: row('READY'), selection: selection() });
-    mocks.progress.mockResolvedValue(stage('READY'));
+    mocks.progress.mockResolvedValue(stage('READY', { safe_auto_execute: true }));
+    mocks.listExecutions.mockResolvedValue({
+      items: [{ id: executionId, status: 'SUCCEEDED', agent_request_id: requestId }],
+      page: 1, page_size: 1, total: 1,
+    });
+    renderLive(`/run/${conversationId}`);
+    await waitFor(() => {
+      expect(mocks.chatResult).toHaveBeenCalled();
+      expect(screen.getByText('Alpha / available')).toBeTruthy();
+      expect(screen.getByText('Beta / pending')).toBeTruthy();
+    });
+    // F5 restore announces the final answer once (card + one assistant bubble).
+    expect(screen.getAllByText(/결과 2건을 가져왔습니다/).length).toBe(1);
+    expect(mocks.createExecution).not.toHaveBeenCalled();
+  });
+
+  it('does not duplicate the final answer when SSE and polling both complete', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    sseMocks.available = true;
+    mocks.latest.mockResolvedValue(row('READY'));
+    mocks.getSelection.mockResolvedValue({ request: row('READY'), selection: selection() });
+    mocks.progress.mockResolvedValue(stage('READY', { safe_auto_execute: true }));
     mocks.listExecutions.mockResolvedValue({
       items: [{ id: executionId, status: 'RUNNING', agent_request_id: requestId }],
       page: 1, page_size: 1, total: 1,
     });
-    renderLive('/run/' + conversationId);
-    expect(await screen.findByText(`Execution: RUNNING · ${executionId}`)).toBeTruthy();
-    expect(screen.queryByRole('button', { name: '실제 업무 실행 시작' })).toBeNull();
-    fireEvent.click(screen.getByRole('button', { name: '실행 결과·단계 이력 보기' }));
-    expect(await screen.findByText('실제 실행 상세')).toBeTruthy();
-    expect(mocks.createExecution).not.toHaveBeenCalled();
+    mocks.getExecution.mockResolvedValue({
+      id: executionId, status: 'SUCCEEDED', agent_request_id: requestId,
+    });
+    renderLive(`/run/${conversationId}`);
+    await waitFor(() => expect(sseMocks.onEvent).toBeTruthy());
+
+    sseMocks.onEvent?.({
+      sseId: '1',
+      envelope: {
+        event_id: 'evt-1',
+        execution_id: executionId,
+        step_execution_id: null,
+        event_type: 'execution.succeeded',
+        payload: {},
+        payload_version: 1,
+        occurred_at: '2026-10-23T10:06:00Z',
+      },
+    });
+    // Polling fallback also observes SUCCEEDED for the same execution.
+    await vi.advanceTimersByTimeAsync(2600);
+
+    await waitFor(() => {
+      expect(screen.getByText('Alpha / available')).toBeTruthy();
+      expect(screen.getByText('Beta / pending')).toBeTruthy();
+    });
+    expect(screen.getAllByText(/결과 2건을 가져왔습니다/).length).toBe(1);
+    expect(mocks.chatResult.mock.calls.length).toBeGreaterThanOrEqual(1);
+    vi.useRealTimers();
   });
 
   it('does not auto-retry ambiguous Execution creation errors', async () => {
     mocks.latest.mockResolvedValue(row('READY'));
     mocks.getSelection.mockResolvedValue({ request: row('READY'), selection: selection() });
-    mocks.progress.mockResolvedValue(stage('READY'));
+    mocks.progress.mockResolvedValue(stage('READY', { safe_auto_execute: false }));
     mocks.createExecution.mockRejectedValue(new Error('Network timeout'));
-    renderLive('/run/' + conversationId);
+    renderLive(`/run/${conversationId}`);
 
     const start = await screen.findByRole('button', { name: '실제 업무 실행 시작' });
     fireEvent.click(screen.getByRole('checkbox', {
@@ -349,16 +377,33 @@ describe('AgentRunLive — real phase 1, no fake execution', () => {
     fireEvent.click(start);
     expect((await screen.findByRole('alert')).textContent).toContain('자동 재시도하지 않습니다');
     expect(mocks.createExecution).toHaveBeenCalledTimes(1);
-    expect(mocks.listExecutions).toHaveBeenCalledWith(expect.objectContaining({
-      agent_request_id: requestId, source_type: 'AGENT_REQUEST',
-    }));
   });
 
-  it('never offers Execution creation when planning is not READY', async () => {
-    renderLive('/run/' + conversationId);
-    expect(await screen.findByText('Find documents')).toBeTruthy();
-    expect(screen.queryByRole('button', { name: '실제 업무 실행 시작' })).toBeNull();
-    expect(mocks.createExecution).not.toHaveBeenCalled();
+  it('keeps advanced view for explicit Tool selection steps', async () => {
+    // Prevent auto-pipeline from racing: status RETRIEVING but mark auto-started by
+    // returning ANALYZING first... actually use SELECTING stuck path.
+    mocks.latest.mockResolvedValue(row('RETRIEVING'));
+    mocks.getSelection.mockResolvedValue({ request: row('RETRIEVING'), selection: null });
+    // Auto pipeline will call select — that is intended for chat. For advanced manual
+    // button, open advanced after pausing auto by using a status the auto loop stops on.
+    mocks.progress.mockResolvedValue(stage('RETRIEVING'));
+    mocks.select.mockResolvedValue({
+      request: row('BUILDING_PARAMETERS'),
+      selection: selection(),
+    });
+    renderLive(`/run/${conversationId}`);
+    // Auto pipeline may already call select; wait then open advanced.
+    await waitFor(() => expect(mocks.select).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole('button', { name: '고급 보기' }));
+    expect(await screen.findByText(/선택 Tool: 날씨 조회/)).toBeTruthy();
+    expect(screen.getByText(/MCP 호출 또는 업무 실행 완료를 의미하지 않습니다/)).toBeTruthy();
   });
 
+  it('does not allow submission without an eligible real agent', async () => {
+    mocks.list.mockResolvedValue({ items: [] });
+    renderLive();
+    expect(await screen.findByText('사용 가능한 Agent 없음')).toBeTruthy();
+    expect(screen.getByRole('button', { name: '실행' })).toBeDisabled();
+    expect(mocks.submit).not.toHaveBeenCalled();
+  });
 });

@@ -709,6 +709,7 @@ POST /api/v1/agent-requests/{request_id}/build-parameters
 POST /api/v1/agent-requests/{request_id}/generate-plan
 POST /api/v1/agent-requests/{request_id}/validate-plan
 POST /api/v1/agent-requests/{request_id}/clarifications/{clarification_id}/responses
+GET  /api/v1/agent-requests/{request_id}/chat-result
 ```
 
 - `POST /agent-requests`는 `agent_id`, `request_text`로 Conversation·USER message·RECEIVED AgentRequest만 원자적으로 생성한다.
@@ -719,9 +720,11 @@ POST /api/v1/agent-requests/{request_id}/clarifications/{clarification_id}/respo
 - `build-parameters`는 BUILDING_PARAMETERS에서 기존 ParameterBuilder를 호출해 PLANNING 또는 WAITING_INPUT으로 전이한다.
 - `generate-plan`은 PLANNING에서 기존 deterministic 단일 TOOL PlanGenerator를 호출해 VALIDATING으로 전이한다. 복합 Plan 저작 기능을 새로 만들지 않는다.
 - `validate-plan`은 VALIDATING에서 기존 PlanValidator를 호출해 READY/WAITING_CONFIRMATION/REJECTED/FAILED로 전이한다.
-- `GET /progress`는 요청 소유자에게 최근 ParameterBuild/PlanGeneration/PlanValidation와 현재 OPEN Clarification의 제한된 요약을 반환한다. 원본 `bindings_snapshot`, `plan_snapshot`, secret·response payload·정책 상세는 내보내지 않는다.
+- `GET /progress`는 요청 소유자에게 최근 ParameterBuild/PlanGeneration/PlanValidation와 현재 OPEN Clarification의 제한된 요약을 반환한다. 원본 `bindings_snapshot`, `plan_snapshot`, secret·response payload·정책 상세는 내보내지 않는다. `safe_auto_execute`는 서버가 READY + 단일 TOOL + `READ_ONLY` + 확인/승인 불필요일 때만 true로 계산하며 `policy_snapshot` 자체는 노출하지 않는다.
 - 사용자 확인은 기존 `POST /clarifications/{id}/responses`의 `{"response_payload":{"confirmed":true|false}}`를 사용한다. 동의 후에는 계획을 다시 VALIDATING에서 검증하고, 거절은 CANCELLED로 종료한다.
-- 각 단계는 명시적 1회 호출이며 상태/CAS 충돌은 409로 거절한다. 외부 MCP Tool 실행 및 Execution 생성은 아직 Agent Run UI에서 시작하지 않는다.
+- 채팅형 Agent Run UI는 위 단계 API를 순서대로 자동 호출할 수 있다. Execution 생성은 `safe_auto_execute=true`일 때만 자동으로 `POST /executions`를 호출하고, 그 외(확인·승인·권한·검증 실패)는 채팅에 안내만 표시한다. Policy/승인 경계를 우회하지 않는다.
+- `GET /chat-result`는 **요청 소유자 전용** Tool 결과 표시 API다. Operations `GET /executions/{id}` safe detail을 확장하지 않는다. 소유권 불일치·타 사용자 추측 UUID는 404. 성공 단말 Execution의 TOOL `result_inline`만 민감키 마스킹·크기 제한·(있을 때) `output_schema` 재검증 후 `display_items`/`summary_text`로 투영한다. `requestState`·Secret·원본 binding은 노출하지 않는다.
+- 각 planning 단계는 명시적 1회 호출이며 상태/CAS 충돌은 409로 거절한다. 클라이언트는 모호한 네트워크 실패에 자동 재시도하지 않는다.
 
 ### 11.2 READY Response
 

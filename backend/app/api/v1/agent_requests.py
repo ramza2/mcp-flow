@@ -37,6 +37,7 @@ from app.schemas.clarification import (
 from app.schemas.execution import AgentRequestExecutionCreateResult
 from app.schemas.tool_selection import SelectionDecision
 from app.services.agent_request import AgentRequestService
+from app.services.agent_run_chat_result import AgentRunChatResultService
 from app.services.clarification_response import (
     ClarificationResponseService,
     to_api_result,
@@ -231,6 +232,53 @@ class AgentRunProgressResult(BaseModel):
     plan: AgentRunPlanView | None
     validation: AgentRunValidationView | None
     open_clarification: AgentRunClarificationView | None
+    # Server-computed: READY + single TOOL + READ_ONLY + no confirmation/approval.
+    # Clients must not invent eligibility; never exposes policy_snapshot itself.
+    safe_auto_execute: bool = False
+
+
+class AgentRunChatDisplayItemView(BaseModel):
+    name: str
+    status: str
+
+
+class AgentRunChatResultView(BaseModel):
+    agent_request_id: uuid.UUID
+    execution_id: uuid.UUID | None
+    execution_status: str | None
+    available: bool
+    unavailable_reason: str | None
+    tool_name: str | None
+    display_items: list[AgentRunChatDisplayItemView]
+    summary_text: str | None
+    truncated: bool
+
+
+def _safe_auto_execute(
+    request: AgentRequest,
+    plan_view: AgentRunPlanView | None,
+    validation: Any | None,
+) -> bool:
+    """True only for the phase-1 chat safe path (single READ_ONLY Tool)."""
+    if request.status != "READY":
+        return False
+    if validation is None or bool(validation.confirmation_required):
+        return False
+    if plan_view is None or plan_view.step_count != 1:
+        return False
+    snapshot = validation.policy_snapshot
+    if not isinstance(snapshot, dict):
+        return False
+    tool_policy = snapshot.get("tool_policy")
+    if not isinstance(tool_policy, dict):
+        return False
+    if tool_policy.get("risk_class") != "READ_ONLY":
+        return False
+    if tool_policy.get("requires_approval") is True:
+        return False
+    if tool_policy.get("requires_confirmation") is True:
+        return False
+    return True
 
 
 def _question_fields(question_schema: Any) -> list[AgentRunQuestionFieldView]:
@@ -293,6 +341,18 @@ async def _progress_result(
             step_count=len(step_items),
             created_at=plan.created_at,
         )
+    validation_view = (
+        AgentRunValidationView(
+            id=validation.id,
+            decision=validation.decision,
+            confirmation_required=validation.confirmation_required,
+            error_count=len(validation.errors or []),
+            warning_count=len(validation.warnings or []),
+            created_at=validation.created_at,
+        )
+        if validation is not None
+        else None
+    )
     return AgentRunProgressResult(
         request=_view(request),
         parameter_build=AgentRunParameterView(
@@ -303,14 +363,7 @@ async def _progress_result(
             created_at=parameter.created_at,
         ) if parameter is not None else None,
         plan=plan_view,
-        validation=AgentRunValidationView(
-            id=validation.id,
-            decision=validation.decision,
-            confirmation_required=validation.confirmation_required,
-            error_count=len(validation.errors or []),
-            warning_count=len(validation.warnings or []),
-            created_at=validation.created_at,
-        ) if validation is not None else None,
+        validation=validation_view,
         open_clarification=AgentRunClarificationView(
             id=clarification.id,
             request_type=clarification.request_type,
@@ -318,6 +371,7 @@ async def _progress_result(
             fields=_question_fields(clarification.question_schema),
             requested_at=clarification.requested_at,
         ) if clarification is not None else None,
+        safe_auto_execute=_safe_auto_execute(request, plan_view, validation),
     )
 
 
@@ -485,6 +539,33 @@ async def get_agent_run_progress(
 ) -> AgentRunProgressResult:
     request = await _owned_request(session, request_id, principal.user_id)
     return await _progress_result(session, request)
+
+
+@router.get("/{request_id}/chat-result", response_model=AgentRunChatResultView)
+async def get_agent_run_chat_result(
+    request_id: uuid.UUID,
+    session: DbSessionDep,
+    principal: CurrentPrincipalDep,
+) -> AgentRunChatResultView:
+    """Owner-only Tool result projection for Agent Run chat (not Ops safe detail)."""
+    result = await AgentRunChatResultService(session).get_for_owner(
+        agent_request_id=request_id,
+        requester_id=principal.user_id,
+    )
+    return AgentRunChatResultView(
+        agent_request_id=result.agent_request_id,
+        execution_id=result.execution_id,
+        execution_status=result.execution_status,
+        available=result.available,
+        unavailable_reason=result.unavailable_reason,
+        tool_name=result.tool_name,
+        display_items=[
+            AgentRunChatDisplayItemView(name=item.name, status=item.status)
+            for item in result.display_items
+        ],
+        summary_text=result.summary_text,
+        truncated=result.truncated,
+    )
 
 
 @router.post("/{request_id}/build-parameters", response_model=AgentRunProgressResult)

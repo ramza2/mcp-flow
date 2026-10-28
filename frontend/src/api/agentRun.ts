@@ -127,10 +127,36 @@ export interface AgentRunProgressDto {
   plan: AgentRunPlanDto | null;
   validation: AgentRunValidationDto | null;
   open_clarification: AgentRunClarificationDto | null;
+  /** Server-only: READY + single READ_ONLY Tool without confirmation/approval. */
+  safe_auto_execute?: boolean;
 }
 
 export function getAgentRunProgress(requestId: string, signal?: AbortSignal) {
   return apiRequest<AgentRunProgressDto>(`/agent-requests/${requestId}/progress`, { signal });
+}
+
+export interface AgentRunChatDisplayItemDto {
+  name: string;
+  status: string;
+}
+
+export interface AgentRunChatResultDto {
+  agent_request_id: string;
+  execution_id: string | null;
+  execution_status: string | null;
+  available: boolean;
+  unavailable_reason: string | null;
+  tool_name: string | null;
+  display_items: AgentRunChatDisplayItemDto[];
+  summary_text: string | null;
+  truncated: boolean;
+}
+
+export function getAgentRunChatResult(requestId: string, signal?: AbortSignal) {
+  return apiRequest<AgentRunChatResultDto>(
+    `/agent-requests/${requestId}/chat-result`,
+    { signal },
+  );
 }
 
 export function buildAgentRunParameters(requestId: string) {
