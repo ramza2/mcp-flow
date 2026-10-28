@@ -91,7 +91,9 @@ export MCPFLOW_MOCK_BASE_URL='http://factory-mock-upstream:8091'
 Query uses `SET TRANSACTION READ ONLY` and filters to that execution only.
 Prints PASS/FAIL plus non-sensitive ids/statuses only (no raw secret dump).
 
-Env (evidence): `MCPFLOW_COMPOSE_FILE` (default `compose.yaml`),
+Env (evidence; matches ops `deploy.sh`):
+`MCPFLOW_COMPOSE_ENV_FILE` (default `.env.server`),
+`MCPFLOW_COMPOSE_FILE` (default `compose.yaml,compose.server.yaml`),
 `MCPFLOW_POSTGRES_SERVICE` (default `postgres`), optional
 `--execution-id` / `MCPFLOW_EXECUTION_ID`.
 

@@ -27,7 +27,9 @@ Environment:
   MCPFLOW_STATE_PATH        default ./pets-sequential-e2e.state.json
   MCPFLOW_RUN_ID            default pets-seq-e2e-v1 (idempotency namespace)
   MCPFLOW_MOCK_BASE_URL     default http://factory-mock-upstream:8091
-  MCPFLOW_COMPOSE_FILE      default compose.yaml (evidence only)
+  MCPFLOW_COMPOSE_ENV_FILE  default .env.server (evidence only)
+  MCPFLOW_COMPOSE_FILE      default compose.yaml,compose.server.yaml
+                            (comma/space-separated; evidence only)
   MCPFLOW_POSTGRES_SERVICE  default postgres (evidence only)
   MCPFLOW_EVIDENCE_DOCKER_CMD  optional full argv override for evidence tests
 """
@@ -37,6 +39,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shlex
 import subprocess
 import time
@@ -58,7 +61,8 @@ DEFAULT_OPENAPI = Path("/tmp/mcpflow-pets-e2e-openapi.yaml")
 DEFAULT_STATE = Path("pets-sequential-e2e.state.json")
 DEFAULT_MOCK = "http://factory-mock-upstream:8091"
 DEFAULT_BASE = "http://127.0.0.1"
-DEFAULT_COMPOSE_FILE = "compose.yaml"
+DEFAULT_COMPOSE_ENV_FILE = ".env.server"
+DEFAULT_COMPOSE_FILES = ("compose.yaml", "compose.server.yaml")
 DEFAULT_POSTGRES_SERVICE = "postgres"
 LIST_OP = "GET /pets"
 DETAIL_OP = "GET /pets/{pet_id}"
@@ -596,10 +600,19 @@ def evaluate_step_output_evidence(
 
     Expects a read-only projection:
       {execution_id, status, steps:[{step_key,status,resolved_input,result_inline}]}
+
+    Failure messages include execution_id / step_key / statuses / field paths
+    and expected conditions only — never observed Tool payload values.
     """
     execution_id = payload.get("execution_id")
     exec_status = payload.get("status")
     steps = payload.get("steps")
+    if exec_status != "SUCCEEDED":
+        return (
+            False,
+            "FAIL: execution.status must be SUCCEEDED "
+            f"(execution.status={exec_status} execution_id={execution_id})",
+        )
     if not isinstance(steps, list):
         return False, f"FAIL: steps missing or not a list (execution_id={execution_id})"
     by_key = {
@@ -612,21 +625,22 @@ def evaluate_step_output_evidence(
     if tool_1 is None or tool_2 is None:
         return (
             False,
-            f"FAIL: need step_key tool_1 and tool_2; got={sorted(by_key)} "
-            f"execution_id={execution_id}",
+            "FAIL: need step_key tool_1 and tool_2; "
+            f"got_step_keys={sorted(by_key)} execution_id={execution_id}",
         )
     if len(steps) != 2:
         return (
             False,
-            f"FAIL: expected exactly 2 steps, got {len(steps)} "
+            f"FAIL: expected exactly 2 steps, got step_count={len(steps)} "
             f"execution_id={execution_id}",
         )
     if tool_1.get("status") != "SUCCEEDED" or tool_2.get("status") != "SUCCEEDED":
         return (
             False,
             "FAIL: both steps must be SUCCEEDED "
-            f"(tool_1={tool_1.get('status')} tool_2={tool_2.get('status')} "
-            f"execution={exec_status} execution_id={execution_id})",
+            f"(tool_1.status={tool_1.get('status')} "
+            f"tool_2.status={tool_2.get('status')} "
+            f"execution.status={exec_status} execution_id={execution_id})",
         )
 
     body1 = _factory_http_body(tool_1.get("result_inline"))
@@ -636,8 +650,8 @@ def evaluate_step_output_evidence(
     if first_id != 1:
         return (
             False,
-            f"FAIL: tool_1 pets[0].id expected 1, got {first_id!r} "
-            f"execution_id={execution_id}",
+            "FAIL: tool_1.result_inline.structured_content.body.pets[0].id "
+            f"must equal 1 (execution_id={execution_id})",
         )
 
     resolved = tool_2.get("resolved_input")
@@ -645,8 +659,8 @@ def evaluate_step_output_evidence(
     if pet_id != 1:
         return (
             False,
-            f"FAIL: tool_2 resolved_input.pet_id expected 1, got {pet_id!r} "
-            f"execution_id={execution_id}",
+            "FAIL: tool_2.resolved_input.pet_id must equal 1 "
+            f"(execution_id={execution_id})",
         )
 
     body2 = _factory_http_body(tool_2.get("result_inline"))
@@ -655,18 +669,16 @@ def evaluate_step_output_evidence(
     if detail_id != 1 or detail_name != "Alpha":
         return (
             False,
-            "FAIL: tool_2 result expected id=1 name=Alpha, "
-            f"got id={detail_id!r} name={detail_name!r} "
-            f"execution_id={execution_id}",
+            "FAIL: tool_2.result_inline.structured_content.body "
+            "must satisfy id=1 and name=Alpha "
+            f"(execution_id={execution_id})",
         )
 
     return (
         True,
-        "PASS: execution_id={eid} execution_status={st} "
+        f"PASS: execution_id={execution_id} execution_status={exec_status} "
         "tool_1.pets[0].id=1 tool_2.resolved_input.pet_id=1 "
-        "tool_2.result id=1 name=Alpha both_steps=SUCCEEDED".format(
-            eid=execution_id, st=exec_status
-        ),
+        "tool_2.result id=1 name=Alpha both_steps=SUCCEEDED",
     )
 
 
@@ -697,32 +709,47 @@ ROLLBACK;
 """
 
 
+def _parse_compose_files(raw: str | None) -> list[str]:
+    """Split MCPFLOW_COMPOSE_FILE into compose -f paths (comma/space)."""
+    if raw is None or not str(raw).strip():
+        return list(DEFAULT_COMPOSE_FILES)
+    parts = [p for p in re.split(r"[\s,]+", str(raw).strip()) if p]
+    return parts or list(DEFAULT_COMPOSE_FILES)
+
+
 def _evidence_docker_argv(sql: str) -> list[str]:
+    """Build docker compose argv matching ops deploy.sh defaults.
+
+    Ops host uses ``.env.server`` + ``compose.yaml`` + ``compose.server.yaml``.
+    """
     override = os.environ.get("MCPFLOW_EVIDENCE_DOCKER_CMD")
     if override:
         return shlex.split(override) + [sql]
-    compose_file = os.environ.get("MCPFLOW_COMPOSE_FILE") or DEFAULT_COMPOSE_FILE
+    env_file = os.environ.get("MCPFLOW_COMPOSE_ENV_FILE") or DEFAULT_COMPOSE_ENV_FILE
+    compose_files = _parse_compose_files(os.environ.get("MCPFLOW_COMPOSE_FILE"))
     service = os.environ.get("MCPFLOW_POSTGRES_SERVICE") or DEFAULT_POSTGRES_SERVICE
-    return [
-        "docker",
-        "compose",
-        "-f",
-        compose_file,
-        "exec",
-        "-T",
-        service,
-        "psql",
-        "-U",
-        "postgres",
-        "-d",
-        "mcpflow",
-        "-v",
-        "ON_ERROR_STOP=1",
-        "-t",
-        "-A",
-        "-c",
-        sql,
-    ]
+    argv: list[str] = ["docker", "compose", "--env-file", env_file]
+    for path in compose_files:
+        argv.extend(["-f", path])
+    argv.extend(
+        [
+            "exec",
+            "-T",
+            service,
+            "psql",
+            "-U",
+            "postgres",
+            "-d",
+            "mcpflow",
+            "-v",
+            "ON_ERROR_STOP=1",
+            "-t",
+            "-A",
+            "-c",
+            sql,
+        ]
+    )
+    return argv
 
 
 def fetch_execution_evidence(
@@ -748,9 +775,11 @@ def fetch_execution_evidence(
     except subprocess.TimeoutExpired as exc:
         raise ApiError("evidence docker query timed out") from exc
     if getattr(completed, "returncode", 1) != 0:
-        err = (getattr(completed, "stderr", None) or getattr(completed, "stdout", None) or "")
+        # Do not echo stdout/stderr — may contain Tool result_inline JSON.
         raise ApiError(
-            f"evidence query failed rc={completed.returncode}: {err.strip()[:500]}"
+            f"evidence query failed rc={completed.returncode} "
+            f"execution_id={eid} (docker compose/psql; "
+            "check .env.server + compose.yaml + compose.server.yaml)"
         )
     raw = (getattr(completed, "stdout", None) or "").strip()
     if not raw:
@@ -763,11 +792,15 @@ def fetch_execution_evidence(
             json_line = line
             break
     if not json_line:
-        raise ApiError(f"evidence query did not return JSON (raw={raw[:200]!r})")
+        raise ApiError(
+            f"evidence query did not return JSON for execution_id={eid}"
+        )
     try:
         payload = json.loads(json_line)
     except json.JSONDecodeError as exc:
-        raise ApiError(f"evidence JSON parse failed: {json_line[:200]!r}") from exc
+        raise ApiError(
+            f"evidence JSON parse failed for execution_id={eid}"
+        ) from exc
     if not isinstance(payload, dict) or payload.get("execution_id") is None:
         raise ApiError(f"execution_id={eid} not found or empty projection")
     return payload
