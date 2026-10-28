@@ -153,6 +153,16 @@ class ExecutionClaimService:
                 is_workflow_schedule_occurrence,
             )
 
+            # Null occurrence_id is a distinct fail-closed case (staging/claim).
+            if execution.schedule_occurrence_id is None:
+                raise AppError(
+                    code="RESOURCE_CONFLICT",
+                    message=(
+                        "SCHEDULE_OCCURRENCE Execution requires "
+                        "schedule_occurrence_id."
+                    ),
+                    status_code=409,
+                )
             if not (
                 is_workflow_schedule_occurrence(execution)
                 or is_agent_schedule_occurrence(execution)
