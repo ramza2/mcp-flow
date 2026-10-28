@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """Idempotent ops helper: Factory pets list+detail → Agent sequential pair E2E.
 
-Uses only the public /api/v1 surface (login + CSRF). Never touches DB SQL,
-never mutates existing Factory Import / List pets ToolVersions, never bypasses
+Uses the public /api/v1 surface (login + CSRF) for setup/verify. Optional
+``evidence`` is operator-only read-only Docker/Postgres confirmation of
+STEP_OUTPUT bindings (never mutates DB, never changes API contracts).
+
+Never mutates existing Factory Import / List pets ToolVersions, never bypasses
 Review → Publish → Runtime Binding → Connection Test → Discovery → Activate.
 
 Stdlib only so it can run on the ops host without installing backend deps.
@@ -10,7 +13,8 @@ Stdlib only so it can run on the ops host without installing backend deps.
 Commands:
   dry-run   Print planned HTTP sequence (no network).
   setup     OpenAPI → activate tools → new Agent grants/policy (idempotent).
-  verify    NL Agent Run expecting tool_1 list + tool_2 detail → Alpha.
+  verify    NL Agent Run expecting tool_1 list + tool_2 detail → Alpha (API).
+  evidence  Read-only Docker DB STEP_OUTPUT checks for last_execution_id.
   status    Show local state file.
 
 Environment:
@@ -23,6 +27,9 @@ Environment:
   MCPFLOW_STATE_PATH        default ./pets-sequential-e2e.state.json
   MCPFLOW_RUN_ID            default pets-seq-e2e-v1 (idempotency namespace)
   MCPFLOW_MOCK_BASE_URL     default http://factory-mock-upstream:8091
+  MCPFLOW_COMPOSE_FILE      default compose.yaml (evidence only)
+  MCPFLOW_POSTGRES_SERVICE  default postgres (evidence only)
+  MCPFLOW_EVIDENCE_DOCKER_CMD  optional full argv override for evidence tests
 """
 
 from __future__ import annotations
@@ -30,6 +37,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shlex
+import subprocess
 import time
 import uuid
 from http.cookiejar import CookieJar
@@ -49,10 +58,29 @@ DEFAULT_OPENAPI = Path("/tmp/mcpflow-pets-e2e-openapi.yaml")
 DEFAULT_STATE = Path("pets-sequential-e2e.state.json")
 DEFAULT_MOCK = "http://factory-mock-upstream:8091"
 DEFAULT_BASE = "http://127.0.0.1"
+DEFAULT_COMPOSE_FILE = "compose.yaml"
+DEFAULT_POSTGRES_SERVICE = "postgres"
 LIST_OP = "GET /pets"
 DETAIL_OP = "GET /pets/{pet_id}"
 NL_REQUEST = "첫 번째 반려동물의 상세 정보를 조회해 줘"
 AGENT_NAME = "Pets Sequential E2E"
+EMBEDDING_PROBE_SLEEP_S = 5.0
+# Analyze statuses that must not be soft-retried as "embedding not ready".
+_PROBE_ABORT_ANALYZE_STATUSES = frozenset(
+    {
+        "WAITING_INPUT",
+        "WAITING_CONFIRMATION",
+        "FAILED",
+        "REJECTED",
+        "CANCELLED",
+        "READY",
+        "ANALYZING",
+        "SELECTING",
+        "BUILDING_PARAMETERS",
+        "PLANNING",
+        "VALIDATING",
+    }
+)
 
 
 class ApiError(RuntimeError):
@@ -303,7 +331,8 @@ def cmd_dry_run(_: argparse.Namespace) -> int:
     _log("  - New Factory Publish → new MCP Server (fac-pub-*).")
     _log("  - Never PATCH the old List pets server / ToolVersions.")
     _log("  - New Agent 'Pets Sequential E2E' grants only new tool UUIDs.")
-    _log("  - No DB INSERT/UPDATE; no auth bypass; no Factory Mock UI.")
+    _log("  - setup/verify: no DB INSERT/UPDATE; no auth bypass; no Factory Mock UI.")
+    _log("  - evidence (optional): SET TRANSACTION READ ONLY on one execution_id.")
     _log(f"  - Runtime base_url default: {DEFAULT_MOCK}")
     _log(f"  - NL verify prompt: {NL_REQUEST!r}")
     return 0
@@ -452,9 +481,15 @@ def _wait_embeddings_via_select(
     detail_version_id: str,
     timeout_s: float,
 ) -> dict[str, Any]:
-    """Embedding READY is not a public HTTP field; probe via ToolSelector."""
+    """Embedding READY is not a public HTTP field; probe via ToolSelector.
+
+    Only ``NO_MATCH`` is treated as embedding/retrieval not ready.
+    HTTP 502/409 and non-RETRIEVING analyze statuses abort immediately.
+    """
     deadline = time.time() + timeout_s
-    last: dict[str, Any] | None = None
+    last_request_id: str | None = None
+    last_selection: dict[str, Any] | None = None
+    no_match_retries = 0
     while time.time() < deadline:
         created = client.request(
             "POST",
@@ -462,46 +497,280 @@ def _wait_embeddings_via_select(
             json_body={"agent_id": agent_id, "request_text": NL_REQUEST},
             expect={201},
         )
-        request_id = created["id"]
+        request_id = str(created["id"])
+        last_request_id = request_id
+        # expect={200} only: 502/409 surface as ApiError with status/body.
         analyzed = client.request(
             "POST",
             f"/api/v1/agent-requests/{request_id}/analyze",
-            expect={200, 502, 409},
+            expect={200},
         )
-        if isinstance(analyzed, dict) and analyzed.get("status") == "RETRIEVING":
-            selection = client.request(
-                "POST",
-                f"/api/v1/agent-requests/{request_id}/select-tool",
-                expect={200, 502, 409},
+        status = analyzed.get("status") if isinstance(analyzed, dict) else None
+        if status != "RETRIEVING":
+            raise ApiError(
+                "Embedding probe analyze stopped early: "
+                f"status={status} request_id={request_id} "
+                "(not treated as embedding-not-ready; "
+                f"abort_statuses={sorted(_PROBE_ABORT_ANALYZE_STATUSES)})"
             )
-            last = selection
-            sel = (selection or {}).get("selection") or {}
-            decision = sel.get("decision")
-            selected = str(sel.get("selected_tool_version_id") or "")
-            if decision == "AUTO_SELECT" and selected == list_version_id:
-                return {
-                    "request_id": request_id,
-                    "selection": sel,
-                    "probe": "ready_list_primary",
-                }
-            if decision == "AUTO_SELECT" and selected == detail_version_id:
-                return {
-                    "request_id": request_id,
-                    "selection": sel,
-                    "probe": "detail_selected_directly",
-                }
-            if decision == "NO_MATCH":
-                _log("  embedding/retrieval still NO_MATCH; waiting…")
-            else:
-                _log(
-                    f"  select decision={decision} selected={selected} "
-                    f"(want list_version={list_version_id}); waiting…"
-                )
-        time.sleep(5.0)
+        selection = client.request(
+            "POST",
+            f"/api/v1/agent-requests/{request_id}/select-tool",
+            expect={200},
+        )
+        sel = (selection or {}).get("selection") or {}
+        if not isinstance(sel, dict) or not sel:
+            raise ApiError(
+                "Embedding probe select returned empty selection "
+                f"request_id={request_id} body={selection}"
+            )
+        last_selection = sel
+        decision = sel.get("decision")
+        selected = str(sel.get("selected_tool_version_id") or "")
+        if decision == "AUTO_SELECT" and selected == list_version_id:
+            return {
+                "request_id": request_id,
+                "selection": sel,
+                "probe": "ready_list_primary",
+                "no_match_retries": no_match_retries,
+            }
+        if decision == "AUTO_SELECT" and selected == detail_version_id:
+            return {
+                "request_id": request_id,
+                "selection": sel,
+                "probe": "detail_selected_directly",
+                "no_match_retries": no_match_retries,
+            }
+        if decision == "NO_MATCH":
+            no_match_retries += 1
+            _log(
+                f"  embedding/retrieval still NO_MATCH "
+                f"(retry={no_match_retries} request_id={request_id}); waiting…"
+            )
+            time.sleep(EMBEDDING_PROBE_SLEEP_S)
+            continue
+        raise ApiError(
+            "Embedding probe select unexpected decision="
+            f"{decision} selected={selected} request_id={request_id} "
+            f"selection={sel} no_match_retries={no_match_retries} "
+            "(not retried as embedding-not-ready)"
+        )
     raise ApiError(
-        "Timed out waiting for ToolSelector to AUTO_SELECT list primary "
-        f"(last={last})"
+        "Timed out waiting for ToolSelector AUTO_SELECT list primary "
+        f"after {no_match_retries} NO_MATCH retries "
+        f"(last_request_id={last_request_id}, last_selection={last_selection})"
     )
+
+
+def _require_uuid(value: str, *, field: str) -> str:
+    try:
+        return str(uuid.UUID(str(value)))
+    except (ValueError, AttributeError, TypeError) as exc:
+        raise ApiError(f"Invalid {field}: {value!r}") from exc
+
+
+def _factory_http_body(result_inline: Any) -> Any:
+    """Extract Factory Runtime HTTP body from persisted result_inline envelope."""
+    if not isinstance(result_inline, dict):
+        return None
+    structured = result_inline.get("structured_content")
+    if not isinstance(structured, dict):
+        return None
+    return structured.get("body")
+
+
+def _as_int(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.strip().isdigit():
+        return int(value.strip())
+    return None
+
+
+def evaluate_step_output_evidence(
+    payload: dict[str, Any],
+) -> tuple[bool, str]:
+    """Pure PASS/FAIL checks for pets sequential STEP_OUTPUT evidence.
+
+    Expects a read-only projection:
+      {execution_id, status, steps:[{step_key,status,resolved_input,result_inline}]}
+    """
+    execution_id = payload.get("execution_id")
+    exec_status = payload.get("status")
+    steps = payload.get("steps")
+    if not isinstance(steps, list):
+        return False, f"FAIL: steps missing or not a list (execution_id={execution_id})"
+    by_key = {
+        str(s.get("step_key")): s
+        for s in steps
+        if isinstance(s, dict) and s.get("step_key")
+    }
+    tool_1 = by_key.get("tool_1")
+    tool_2 = by_key.get("tool_2")
+    if tool_1 is None or tool_2 is None:
+        return (
+            False,
+            f"FAIL: need step_key tool_1 and tool_2; got={sorted(by_key)} "
+            f"execution_id={execution_id}",
+        )
+    if len(steps) != 2:
+        return (
+            False,
+            f"FAIL: expected exactly 2 steps, got {len(steps)} "
+            f"execution_id={execution_id}",
+        )
+    if tool_1.get("status") != "SUCCEEDED" or tool_2.get("status") != "SUCCEEDED":
+        return (
+            False,
+            "FAIL: both steps must be SUCCEEDED "
+            f"(tool_1={tool_1.get('status')} tool_2={tool_2.get('status')} "
+            f"execution={exec_status} execution_id={execution_id})",
+        )
+
+    body1 = _factory_http_body(tool_1.get("result_inline"))
+    pets = body1.get("pets") if isinstance(body1, dict) else None
+    first = pets[0] if isinstance(pets, list) and pets else None
+    first_id = _as_int(first.get("id")) if isinstance(first, dict) else None
+    if first_id != 1:
+        return (
+            False,
+            f"FAIL: tool_1 pets[0].id expected 1, got {first_id!r} "
+            f"execution_id={execution_id}",
+        )
+
+    resolved = tool_2.get("resolved_input")
+    pet_id = _as_int(resolved.get("pet_id")) if isinstance(resolved, dict) else None
+    if pet_id != 1:
+        return (
+            False,
+            f"FAIL: tool_2 resolved_input.pet_id expected 1, got {pet_id!r} "
+            f"execution_id={execution_id}",
+        )
+
+    body2 = _factory_http_body(tool_2.get("result_inline"))
+    detail_id = _as_int(body2.get("id")) if isinstance(body2, dict) else None
+    detail_name = body2.get("name") if isinstance(body2, dict) else None
+    if detail_id != 1 or detail_name != "Alpha":
+        return (
+            False,
+            "FAIL: tool_2 result expected id=1 name=Alpha, "
+            f"got id={detail_id!r} name={detail_name!r} "
+            f"execution_id={execution_id}",
+        )
+
+    return (
+        True,
+        "PASS: execution_id={eid} execution_status={st} "
+        "tool_1.pets[0].id=1 tool_2.resolved_input.pet_id=1 "
+        "tool_2.result id=1 name=Alpha both_steps=SUCCEEDED".format(
+            eid=execution_id, st=exec_status
+        ),
+    )
+
+
+_EVIDENCE_SQL = """\
+BEGIN;
+SET TRANSACTION READ ONLY;
+SELECT json_build_object(
+  'execution_id', e.id::text,
+  'status', e.status,
+  'steps', COALESCE((
+    SELECT json_agg(
+      json_build_object(
+        'step_key', s.step_key,
+        'status', s.status,
+        'sequence_hint', s.sequence_hint,
+        'resolved_input', s.resolved_input,
+        'result_inline', s.result_inline
+      )
+      ORDER BY s.sequence_hint ASC, s.step_key ASC
+    )
+    FROM execution_steps s
+    WHERE s.execution_id = e.id
+  ), '[]'::json)
+)
+FROM executions e
+WHERE e.id = '{execution_id}'::uuid;
+ROLLBACK;
+"""
+
+
+def _evidence_docker_argv(sql: str) -> list[str]:
+    override = os.environ.get("MCPFLOW_EVIDENCE_DOCKER_CMD")
+    if override:
+        return shlex.split(override) + [sql]
+    compose_file = os.environ.get("MCPFLOW_COMPOSE_FILE") or DEFAULT_COMPOSE_FILE
+    service = os.environ.get("MCPFLOW_POSTGRES_SERVICE") or DEFAULT_POSTGRES_SERVICE
+    return [
+        "docker",
+        "compose",
+        "-f",
+        compose_file,
+        "exec",
+        "-T",
+        service,
+        "psql",
+        "-U",
+        "postgres",
+        "-d",
+        "mcpflow",
+        "-v",
+        "ON_ERROR_STOP=1",
+        "-t",
+        "-A",
+        "-c",
+        sql,
+    ]
+
+
+def fetch_execution_evidence(
+    execution_id: str,
+    *,
+    runner: Any | None = None,
+) -> dict[str, Any]:
+    """Read-only Docker/Postgres projection for one Execution (ops only)."""
+    eid = _require_uuid(execution_id, field="execution_id")
+    sql = _EVIDENCE_SQL.format(execution_id=eid)
+    argv = _evidence_docker_argv(sql)
+    run = runner or subprocess.run
+    try:
+        completed = run(
+            argv,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except FileNotFoundError as exc:
+        raise ApiError(f"evidence docker command not found: {argv[0]}") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise ApiError("evidence docker query timed out") from exc
+    if getattr(completed, "returncode", 1) != 0:
+        err = (getattr(completed, "stderr", None) or getattr(completed, "stdout", None) or "")
+        raise ApiError(
+            f"evidence query failed rc={completed.returncode}: {err.strip()[:500]}"
+        )
+    raw = (getattr(completed, "stdout", None) or "").strip()
+    if not raw:
+        raise ApiError(f"evidence query returned no row for execution_id={eid}")
+    # psql -t -A may emit multiple lines (BEGIN notices suppressed; JSON then ROLLBACK ok).
+    json_line = ""
+    for line in raw.splitlines():
+        line = line.strip()
+        if line.startswith("{"):
+            json_line = line
+            break
+    if not json_line:
+        raise ApiError(f"evidence query did not return JSON (raw={raw[:200]!r})")
+    try:
+        payload = json.loads(json_line)
+    except json.JSONDecodeError as exc:
+        raise ApiError(f"evidence JSON parse failed: {json_line[:200]!r}") from exc
+    if not isinstance(payload, dict) or payload.get("execution_id") is None:
+        raise ApiError(f"execution_id={eid} not found or empty projection")
+    return payload
 
 
 def cmd_setup(args: argparse.Namespace) -> int:
@@ -1100,10 +1369,44 @@ def cmd_verify(args: argparse.Namespace) -> int:
     )
     _log(
         "VERIFY NOT CHECKED by this script: tool_2 STEP_OUTPUT resolved_input "
-        "(e.g. pet_id=1). chat-result does not expose bindings — inspect ops "
-        "Execution/Step detail separately if you need that proof."
+        "(e.g. pet_id=1). chat-result does not expose bindings — run optional "
+        "`evidence` (read-only Docker DB) when that proof is required."
     )
     return 0
+
+
+def cmd_evidence(args: argparse.Namespace) -> int:
+    """Operator-only read-only STEP_OUTPUT confirmation via Docker Postgres."""
+    state_path = Path(os.environ.get("MCPFLOW_STATE_PATH") or args.state_path)
+    state = _load_state(state_path)
+    execution_id = (
+        os.environ.get("MCPFLOW_EXECUTION_ID")
+        or getattr(args, "execution_id", None)
+        or state.get("last_execution_id")
+    )
+    if not execution_id:
+        raise SystemExit(
+            "No execution_id: set state.last_execution_id (run verify) "
+            "or pass --execution-id / MCPFLOW_EXECUTION_ID"
+        )
+    _log(
+        f"evidence read-only query execution_id={execution_id} "
+        f"(SET TRANSACTION READ ONLY; no API contract change)"
+    )
+    payload = fetch_execution_evidence(str(execution_id))
+    ok, message = evaluate_step_output_evidence(payload)
+    _log(message)
+    if ok:
+        # Non-sensitive summary only — never dump raw result_inline secrets.
+        steps = payload.get("steps") or []
+        _log(
+            "evidence summary: "
+            f"execution_status={payload.get('status')} "
+            f"step_count={len(steps)} "
+            f"step_keys={[s.get('step_key') for s in steps if isinstance(s, dict)]}"
+        )
+        return 0
+    return 1
 
 
 def cmd_status(args: argparse.Namespace) -> int:
@@ -1133,10 +1436,19 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="setup only through Agent ACTIVE (skip select probe)",
     )
+    p.add_argument(
+        "--execution-id",
+        default=None,
+        help="evidence: override state.last_execution_id",
+    )
     sub = p.add_subparsers(dest="command", required=True)
     sub.add_parser("dry-run", help="Print planned steps")
     sub.add_parser("setup", help="Idempotent Factory+Agent setup")
-    sub.add_parser("verify", help="Run NL sequential pair verification")
+    sub.add_parser("verify", help="Run NL sequential pair verification (API)")
+    sub.add_parser(
+        "evidence",
+        help="Read-only Docker DB STEP_OUTPUT checks for last_execution_id",
+    )
     sub.add_parser("status", help="Show local state file")
     return p
 
@@ -1150,6 +1462,8 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_setup(args)
         if args.command == "verify":
             return cmd_verify(args)
+        if args.command == "evidence":
+            return cmd_evidence(args)
         if args.command == "status":
             return cmd_status(args)
         raise SystemExit(f"unknown command {args.command}")

@@ -1,11 +1,13 @@
-# Pets Sequential E2E (ops setup / verify)
+# Pets Sequential E2E (ops setup / verify / evidence)
 
-Idempotent **API-only** helper for MCPFlow `main` sequential READ_ONLY
+Idempotent helper for MCPFlow `main` sequential READ_ONLY
 `tool_1` (GET /pets) → `tool_2` (GET /pets/{pet_id}) Agent Run against
 `factory-mock-upstream:8091`.
 
 Does **not** use the Tool Factory frontend Mock UI. Does **not** DELETE or
-PATCH existing Factory Import / List pets assets. Does **not** run SQL.
+PATCH existing Factory Import / List pets assets. `setup` / `verify` are
+API-only. Optional `evidence` is operator-only **read-only** Docker/Postgres
+confirmation of STEP_OUTPUT fields the public Execution API does not expose.
 
 ## Prerequisites (ops host `~/mcp-flow`)
 
@@ -53,14 +55,18 @@ export MCPFLOW_MOCK_BASE_URL='http://factory-mock-upstream:8091'
 
 ./scripts/ops/pets-sequential-e2e/run.sh setup
 
-# 2) Verify NL sequential pair (after setup)
+# 2) Verify NL sequential pair (API chat-result; after setup)
 ./scripts/ops/pets-sequential-e2e/run.sh verify
 
-# 3) Inspect local state
+# 3) Optional: read-only STEP_OUTPUT evidence (Docker Postgres, ops only)
+#    Uses state.last_execution_id from verify. Does not change API contracts.
+./scripts/ops/pets-sequential-e2e/run.sh evidence
+
+# 4) Inspect local state
 ./scripts/ops/pets-sequential-e2e/run.sh status
 ```
 
-### Expected verify outcome
+### Expected verify outcome (API)
 
 **Confirmed by `verify` (chat-result / progress APIs):**
 
@@ -71,20 +77,38 @@ export MCPFLOW_MOCK_BASE_URL='http://factory-mock-upstream:8091'
 
 **Not checked by `verify`:**
 
-- `tool_2` STEP_OUTPUT `resolved_input` (e.g. `pet_id=1`). The chat-result
-  API does not echo bindings; confirm on ops Execution/Step detail if required.
+- `tool_2` STEP_OUTPUT `resolved_input` (e.g. `pet_id=1`). Use `evidence`.
+
+### Expected evidence outcome (optional, read-only DB)
+
+**PASS when all hold for `state.last_execution_id`:**
+
+- Exactly two steps `tool_1` / `tool_2`, both `SUCCEEDED`.
+- `tool_1` Factory body `pets[0].id == 1`.
+- `tool_2` `resolved_input.pet_id == 1`.
+- `tool_2` Factory body `id == 1` and `name == Alpha`.
+
+Query uses `SET TRANSACTION READ ONLY` and filters to that execution only.
+Prints PASS/FAIL plus non-sensitive ids/statuses only (no raw secret dump).
+
+Env (evidence): `MCPFLOW_COMPOSE_FILE` (default `compose.yaml`),
+`MCPFLOW_POSTGRES_SERVICE` (default `postgres`), optional
+`--execution-id` / `MCPFLOW_EXECUTION_ID`.
 
 Local state JSON is written mode `0600` (atomic replace) and never stores
 password, session cookies, or CSRF tokens.
 
-### Failure diagnosis (item 6)
+### Failure diagnosis
 
 | Symptom | Likely cause |
 |---------|----------------|
-| `NO_MATCH` | Embedding not READY, missing ResourceGrant / AgentToolGrant, tools not ACTIVE |
+| Probe HTTP 502/409 | Analyzer/select unavailable or conflict — setup aborts (not soft-wait) |
+| Probe `WAITING_INPUT` / `WAITING_CONFIRMATION` / `FAILED` | Not embedding lag — setup aborts with request id |
+| Probe `NO_MATCH` then timeout | Embedding not READY / missing grants; error includes request id + retry count |
 | Detail selected as primary | Summaries/embeddings rank get-by-id above list; sequential pair will not emit |
 | `step_count=1` after list select | StructuredRequest lacked clear detail intent, or companion ≠ exactly 1 / schema mismatch |
 | List `output_schema` null | Wrong server/tools (legacy Import) — script refuses |
+| `evidence` FAIL on pet_id | STEP_OUTPUT binding did not resolve list→detail; inspect that execution only |
 
 ## Boundary checklist
 
@@ -95,9 +119,11 @@ password, session cookies, or CSRF tokens.
 5. Discovery preview+apply require `success=true` **and** `factory_diff.status=CLEAN` → Server/Tool Activate
 6. ToolPolicy READ_ONLY + ResourceGrant + Agent grants → Agent ACTIVE  
 7. Wait embedding ensure (outbox/maintenance) before verify  
+8. Optional `evidence` after verify for STEP_OUTPUT proof  
 
 ## Out of scope
 
 - Merge / deploy / changing live ops from this PR alone  
 - Generic Factory UI work  
-- Editing the pre-existing List pets ToolVersion
+- Editing the pre-existing List pets ToolVersion  
+- Changing Execution API to expose `resolved_input` / `result_inline`

@@ -218,3 +218,352 @@ def test_discovery_mismatch_blocks_setup_gate(e2e: Any) -> None:
     with pytest.raises(e2e.ApiError) as exc:
         e2e._require_clean_discovery(preview, phase="preview")
     assert "CLEAN" in str(exc.value)
+
+
+class _FakeProbeClient:
+    """Minimal Client stand-in for embedding probe unit tests."""
+
+    def __init__(
+        self,
+        *,
+        api_error: type[Exception],
+        analyze_status: int = 200,
+        analyze_body: dict[str, Any] | None = None,
+        select_status: int = 200,
+        select_bodies: list[dict[str, Any]] | None = None,
+    ) -> None:
+        self.api_error = api_error
+        self.analyze_status = analyze_status
+        self.analyze_body = analyze_body or {"status": "RETRIEVING"}
+        self.select_status = select_status
+        self.select_bodies = list(select_bodies or [])
+        self.select_calls = 0
+        self.created = 0
+
+    def request(
+        self,
+        method: str,
+        path: str,
+        *,
+        json_body: Any | None = None,  # noqa: ARG002
+        expect: set[int] | None = None,
+        **_kwargs: Any,
+    ) -> Any:
+        if method.upper() == "POST" and path == "/api/v1/agent-requests":
+            self.created += 1
+            if expect is not None and 201 not in expect:
+                raise self.api_error("create unexpected", status=201)
+            return {"id": f"req-{self.created}"}
+        if method.upper() == "POST" and path.endswith("/analyze"):
+            if expect is not None and self.analyze_status not in expect:
+                raise self.api_error(
+                    f"analyze HTTP {self.analyze_status}",
+                    status=self.analyze_status,
+                    body={"error": {"code": "UPSTREAM"}},
+                )
+            if self.analyze_status != 200:
+                return {"_status": self.analyze_status, "_body": self.analyze_body}
+            return dict(self.analyze_body)
+        if method.upper() == "POST" and path.endswith("/select-tool"):
+            self.select_calls += 1
+            if expect is not None and self.select_status not in expect:
+                raise self.api_error(
+                    f"select HTTP {self.select_status}",
+                    status=self.select_status,
+                    body={"error": {"code": "CONFLICT"}},
+                )
+            if self.select_status != 200:
+                return {"_status": self.select_status, "_body": {}}
+            idx = min(self.select_calls - 1, len(self.select_bodies) - 1)
+            return dict(self.select_bodies[idx])
+        raise AssertionError(f"unexpected {method} {path}")
+
+
+def test_embedding_probe_aborts_on_analyze_502(e2e: Any) -> None:
+    client = _FakeProbeClient(api_error=e2e.ApiError, analyze_status=502)
+    with pytest.raises(e2e.ApiError) as exc:
+        e2e._wait_embeddings_via_select(
+            client,
+            agent_id="agent-1",
+            list_version_id="list-v",
+            detail_version_id="detail-v",
+            timeout_s=30.0,
+        )
+    assert exc.value.status == 502
+    assert client.created == 1
+    assert client.select_calls == 0
+
+
+def test_embedding_probe_aborts_on_select_409(e2e: Any) -> None:
+    client = _FakeProbeClient(
+        api_error=e2e.ApiError,
+        analyze_status=200,
+        select_status=409,
+        select_bodies=[{"selection": {"decision": "NO_MATCH"}}],
+    )
+    with pytest.raises(e2e.ApiError) as exc:
+        e2e._wait_embeddings_via_select(
+            client,
+            agent_id="agent-1",
+            list_version_id="list-v",
+            detail_version_id="detail-v",
+            timeout_s=30.0,
+        )
+    assert exc.value.status == 409
+
+
+@pytest.mark.parametrize(
+    "status",
+    ["WAITING_INPUT", "WAITING_CONFIRMATION", "FAILED", "REJECTED", "CANCELLED"],
+)
+def test_embedding_probe_aborts_non_retrieving_analyze(
+    e2e: Any, status: str
+) -> None:
+    client = _FakeProbeClient(
+        api_error=e2e.ApiError,
+        analyze_body={"status": status},
+    )
+    with pytest.raises(e2e.ApiError) as exc:
+        e2e._wait_embeddings_via_select(
+            client,
+            agent_id="agent-1",
+            list_version_id="list-v",
+            detail_version_id="detail-v",
+            timeout_s=30.0,
+        )
+    assert status in str(exc.value)
+    assert "not treated as embedding-not-ready" in str(exc.value)
+    assert client.select_calls == 0
+
+
+def test_embedding_probe_retries_no_match_then_auto_select(
+    e2e: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sleeps: list[float] = []
+    monkeypatch.setattr(e2e.time, "sleep", lambda s: sleeps.append(s))
+    list_v = "list-version"
+    client = _FakeProbeClient(
+        api_error=e2e.ApiError,
+        select_bodies=[
+            {"selection": {"decision": "NO_MATCH", "selected_tool_version_id": None}},
+            {
+                "selection": {
+                    "decision": "AUTO_SELECT",
+                    "selected_tool_version_id": list_v,
+                    "selected_tool_name": "GET /pets",
+                }
+            },
+        ],
+    )
+    result = e2e._wait_embeddings_via_select(
+        client,
+        agent_id="agent-1",
+        list_version_id=list_v,
+        detail_version_id="detail-v",
+        timeout_s=60.0,
+    )
+    assert result["probe"] == "ready_list_primary"
+    assert result["no_match_retries"] == 1
+    assert result["request_id"] == "req-2"
+    assert sleeps == [e2e.EMBEDDING_PROBE_SLEEP_S]
+    assert client.select_calls == 2
+
+
+def test_embedding_probe_no_match_timeout_records_retries(
+    e2e: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(e2e.time, "sleep", lambda _s: None)
+    # Force a single loop iteration then deadline expiry.
+    times = iter([100.0, 100.1, 999.0])
+    monkeypatch.setattr(e2e.time, "time", lambda: next(times, 999.0))
+    client = _FakeProbeClient(
+        api_error=e2e.ApiError,
+        select_bodies=[
+            {
+                "selection": {
+                    "decision": "NO_MATCH",
+                    "reason_summary": "no candidates",
+                }
+            }
+        ],
+    )
+    with pytest.raises(e2e.ApiError) as exc:
+        e2e._wait_embeddings_via_select(
+            client,
+            agent_id="agent-1",
+            list_version_id="list-v",
+            detail_version_id="detail-v",
+            timeout_s=1.0,
+        )
+    msg = str(exc.value)
+    assert "NO_MATCH retries" in msg
+    assert "last_request_id=" in msg
+    assert "last_selection=" in msg
+
+
+def test_embedding_probe_aborts_unexpected_select_decision(
+    e2e: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(e2e.time, "sleep", lambda _s: None)
+    client = _FakeProbeClient(
+        api_error=e2e.ApiError,
+        select_bodies=[
+            {
+                "selection": {
+                    "decision": "NEED_CONFIRMATION",
+                    "selected_tool_version_id": "x",
+                }
+            }
+        ],
+    )
+    with pytest.raises(e2e.ApiError) as exc:
+        e2e._wait_embeddings_via_select(
+            client,
+            agent_id="agent-1",
+            list_version_id="list-v",
+            detail_version_id="detail-v",
+            timeout_s=30.0,
+        )
+    assert "NEED_CONFIRMATION" in str(exc.value)
+    assert "not retried as embedding-not-ready" in str(exc.value)
+
+
+def _ok_evidence_payload() -> dict[str, Any]:
+    return {
+        "execution_id": "cddf58fb-a650-4d6c-8ac4-09de794ecf59",
+        "status": "SUCCEEDED",
+        "steps": [
+            {
+                "step_key": "tool_1",
+                "status": "SUCCEEDED",
+                "sequence_hint": 1,
+                "resolved_input": {},
+                "result_inline": {
+                    "structured_content": {
+                        "ok": True,
+                        "http_status": 200,
+                        "body": {
+                            "pets": [
+                                {"id": 1, "name": "Alpha", "status": "available"},
+                                {"id": 2, "name": "Beta", "status": "pending"},
+                            ]
+                        },
+                    }
+                },
+            },
+            {
+                "step_key": "tool_2",
+                "status": "SUCCEEDED",
+                "sequence_hint": 2,
+                "resolved_input": {"pet_id": 1},
+                "result_inline": {
+                    "structured_content": {
+                        "ok": True,
+                        "http_status": 200,
+                        "body": {
+                            "id": 1,
+                            "name": "Alpha",
+                            "status": "available",
+                        },
+                    }
+                },
+            },
+        ],
+    }
+
+
+def test_evaluate_step_output_evidence_pass(e2e: Any) -> None:
+    ok, message = e2e.evaluate_step_output_evidence(_ok_evidence_payload())
+    assert ok is True
+    assert message.startswith("PASS:")
+    assert "pet_id=1" in message
+    assert "Alpha" in message
+
+
+def test_evaluate_step_output_evidence_fail_wrong_pet_id(e2e: Any) -> None:
+    payload = _ok_evidence_payload()
+    payload["steps"][1]["resolved_input"] = {"pet_id": 99}
+    ok, message = e2e.evaluate_step_output_evidence(payload)
+    assert ok is False
+    assert message.startswith("FAIL:")
+    assert "resolved_input.pet_id" in message
+
+
+def test_evaluate_step_output_evidence_fail_step_status(e2e: Any) -> None:
+    payload = _ok_evidence_payload()
+    payload["steps"][0]["status"] = "FAILED"
+    ok, message = e2e.evaluate_step_output_evidence(payload)
+    assert ok is False
+    assert "SUCCEEDED" in message
+
+
+def test_evaluate_step_output_evidence_fail_list_first_id(e2e: Any) -> None:
+    payload = _ok_evidence_payload()
+    payload["steps"][0]["result_inline"]["structured_content"]["body"]["pets"][0][
+        "id"
+    ] = 7
+    ok, message = e2e.evaluate_step_output_evidence(payload)
+    assert ok is False
+    assert "pets[0].id" in message
+
+
+def test_fetch_execution_evidence_uses_readonly_sql_and_runner(e2e: Any) -> None:
+    captured: dict[str, Any] = {}
+    payload = _ok_evidence_payload()
+
+    class _Completed:
+        returncode = 0
+        stdout = json.dumps(payload)
+        stderr = ""
+
+    def _runner(argv: list[str], **kwargs: Any) -> _Completed:
+        captured["argv"] = argv
+        captured["kwargs"] = kwargs
+        return _Completed()
+
+    got = e2e.fetch_execution_evidence(
+        "cddf58fb-a650-4d6c-8ac4-09de794ecf59",
+        runner=_runner,
+    )
+    assert got["execution_id"] == payload["execution_id"]
+    sql = captured["argv"][-1]
+    assert "SET TRANSACTION READ ONLY" in sql
+    assert "cddf58fb-a650-4d6c-8ac4-09de794ecf59" in sql
+    assert "FROM executions e" in sql
+    assert "WHERE e.id =" in sql
+    assert captured["argv"][:3] == ["docker", "compose", "-f"]
+
+
+def test_cmd_evidence_pass_with_state(
+    e2e: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state_path = tmp_path / "state.json"
+    eid = "cddf58fb-a650-4d6c-8ac4-09de794ecf59"
+    e2e._save_state(state_path, {"run_id": "pets-seq-e2e-v1", "last_execution_id": eid})
+    monkeypatch.setenv("MCPFLOW_STATE_PATH", str(state_path))
+    monkeypatch.setattr(
+        e2e,
+        "fetch_execution_evidence",
+        lambda _eid, runner=None: _ok_evidence_payload(),
+    )
+    args = e2e.build_parser().parse_args(
+        ["--state-path", str(state_path), "evidence"]
+    )
+    assert e2e.cmd_evidence(args) == 0
+
+
+def test_cmd_evidence_fail_returns_one(
+    e2e: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state_path = tmp_path / "state.json"
+    eid = "cddf58fb-a650-4d6c-8ac4-09de794ecf59"
+    e2e._save_state(state_path, {"last_execution_id": eid})
+    bad = _ok_evidence_payload()
+    bad["steps"][1]["resolved_input"] = {"pet_id": 2}
+    monkeypatch.setattr(
+        e2e, "fetch_execution_evidence", lambda _eid, runner=None: bad
+    )
+    args = e2e.build_parser().parse_args(
+        ["--state-path", str(state_path), "evidence"]
+    )
+    assert e2e.cmd_evidence(args) == 1
