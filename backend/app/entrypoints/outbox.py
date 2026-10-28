@@ -45,16 +45,8 @@ class OutboxIterationResult:
 async def run_iteration(*, settings: Settings | None = None) -> OutboxIterationResult:
     cfg = settings or get_settings()
 
-    # AGENT_VERSION Schedule ONCE: consume AGENT_SCHEDULE_PLAN before staging
-    # CREATED Executions (LLM/planning OK here; Schedule FOR UPDATE is not held).
-    async with session_scope() as session:
-        from app.services.agent_schedule_execution import AgentScheduleExecutionService
-
-        await AgentScheduleExecutionService(session).process_unpublished_batch(
-            limit=cfg.outbox_batch_size
-        )
-        await session.commit()
-
+    # Stage/relay/recovery first so AGENT_SCHEDULE_PLAN LLM work cannot starve
+    # Execution dispatch, approval expiry, or recovery.
     async with session_scope() as session:
         stager = ExecutionQueueService(session)
         staged = await stager.stage_created_batch(limit=cfg.outbox_batch_size)
@@ -63,9 +55,7 @@ async def run_iteration(*, settings: Settings | None = None) -> OutboxIterationR
     approval_expiry_selected = 0
     approval_expiry_expired = 0
     async with session_scope() as session:
-        expiry = await ApprovalExpiryService(session).expire_due_batch(
-            limit=cfg.outbox_batch_size
-        )
+        expiry = await ApprovalExpiryService(session).expire_due_batch(limit=cfg.outbox_batch_size)
         await session.commit()
         approval_expiry_selected = expiry.selected
         approval_expiry_expired = expiry.expired
@@ -77,9 +67,7 @@ async def run_iteration(*, settings: Settings | None = None) -> OutboxIterationR
     tool_embedding_recovery_failed = 0
     async with session_scope() as session:
         try:
-            emb_recovery = await ToolEmbeddingRecoveryService(
-                session
-            ).enqueue_recoverable(
+            emb_recovery = await ToolEmbeddingRecoveryService(session).enqueue_recoverable(
                 limit=cfg.outbox_batch_size,
                 min_age_seconds=cfg.tool_embedding_republish_age_seconds,
             )
@@ -104,17 +92,11 @@ async def run_iteration(*, settings: Settings | None = None) -> OutboxIterationR
     recovery_published = 0
     recovery_failed = 0
     async with session_scope() as session:
-        recovery = ExecutionRecoveryService(
-            session, lease_seconds=cfg.execution_lease_seconds
-        )
+        recovery = ExecutionRecoveryService(session, lease_seconds=cfg.execution_lease_seconds)
         # Keep expired RUNNING AgentRequest scan; also publish expired
         # CANCEL_REQUESTED for cancellation-only reconciliation (no MCP).
-        running_ids = await recovery.list_expired_running_ids(
-            limit=cfg.outbox_batch_size
-        )
-        cancel_ids = await recovery.list_expired_cancel_requested_ids(
-            limit=cfg.outbox_batch_size
-        )
+        running_ids = await recovery.list_expired_running_ids(limit=cfg.outbox_batch_size)
+        cancel_ids = await recovery.list_expired_cancel_requested_ids(limit=cfg.outbox_batch_size)
         seen: set[uuid.UUID] = set()
         recovery_ids: list[uuid.UUID] = []
         for execution_id in (*running_ids, *cancel_ids):
@@ -199,6 +181,22 @@ async def run_iteration(*, settings: Settings | None = None) -> OutboxIterationR
                 test_run_id,
                 exc_info=True,
             )
+
+    # AGENT_VERSION Schedule ONCE planning — isolated so LLM/provider/DB errors
+    # never abort staging, relay, approval expiry, or recovery above.
+    # Bounded batch keeps a plan backlog from blocking the next outbox tick.
+    try:
+        from app.services.agent_schedule_execution import AgentScheduleExecutionService
+
+        await AgentScheduleExecutionService.process_isolated_batch(
+            limit=min(cfg.outbox_batch_size, 5),
+            lease_seconds=cfg.execution_lease_seconds,
+        )
+    except Exception:
+        logger.warning(
+            "AGENT_SCHEDULE_PLAN isolated batch failed; continuing outbox loop",
+            exc_info=True,
+        )
 
     return OutboxIterationResult(
         staged=staged,

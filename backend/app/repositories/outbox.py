@@ -51,9 +51,7 @@ class OutboxRepository:
             event_type="EXECUTION_APPROVAL_RESUME",
             aggregate_type="EXECUTION",
             aggregate_id=execution_id,
-            dedupe_key=(
-                f"execution:{execution_id}:approval:{approval_request_id}:resume"
-            ),
+            dedupe_key=(f"execution:{execution_id}:approval:{approval_request_id}:resume"),
             payload={
                 "execution_id": str(execution_id),
                 "approval_request_id": str(approval_request_id),
@@ -81,9 +79,7 @@ class OutboxRepository:
             event_type="EXECUTION_MRTR_RESUME",
             aggregate_type="EXECUTION",
             aggregate_id=execution_id,
-            dedupe_key=(
-                f"execution:{execution_id}:mrtr:{input_request_id}:resume"
-            ),
+            dedupe_key=(f"execution:{execution_id}:mrtr:{input_request_id}:resume"),
             payload={
                 "execution_id": str(execution_id),
                 "input_request_id": str(input_request_id),
@@ -162,8 +158,7 @@ class OutboxRepository:
             aggregate_type="MCP_TOOL_VERSION",
             aggregate_id=tool_version_id,
             dedupe_key=(
-                f"tool_embedding:{tool_version_id}:{embedding_profile_id}"
-                f":ensure:{occurrence_id}"
+                f"tool_embedding:{tool_version_id}:{embedding_profile_id}:ensure:{occurrence_id}"
             ),
             payload={
                 "tool_version_id": str(tool_version_id),
@@ -228,9 +223,14 @@ class OutboxRepository:
         return None
 
     async def claim_unpublished_batch(self, *, limit: int) -> list[OutboxEvent]:
+        # AGENT_SCHEDULE_PLAN is consumed in-process by AgentScheduleExecutionService.
+        # Exclude it in SQL so plan backlog cannot starve EXECUTION_DISPATCH relay.
         stmt = (
             select(OutboxEvent)
-            .where(OutboxEvent.published_at.is_(None))
+            .where(
+                OutboxEvent.published_at.is_(None),
+                OutboxEvent.event_type != "AGENT_SCHEDULE_PLAN",
+            )
             .order_by(OutboxEvent.created_at.asc(), OutboxEvent.id.asc())
             .limit(limit)
             .with_for_update(skip_locked=True)

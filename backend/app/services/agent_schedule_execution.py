@@ -2,17 +2,22 @@
 
 Scheduler Schedule FOR UPDATE must never call LLM/MCP. This service is invoked
 from the outbox process after a durable ``AGENT_SCHEDULE_PLAN`` row is created
-under the Schedule lock. Reprocessing the same occurrence is idempotent:
-at most one Execution per ``schedule_occurrence_id``; AgentRequest id is
-persisted on the Outbox payload after first create.
+under the Schedule lock.
+
+Reprocessing is lease-safe and idempotent:
+* short claim TX writes a durable lease + attempt count before any LLM work
+* ``agent_request_id`` on the Outbox payload resumes interrupted pipelines
+* at most one Execution per ``schedule_occurrence_id``
+* exhausted attempts fail-close the Occurrence and publish the Outbox row
 """
 
 from __future__ import annotations
 
 import logging
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import select
@@ -62,6 +67,10 @@ _EVENT_TYPE = "AGENT_SCHEDULE_PLAN"
 _AGGREGATE_TYPE = "SCHEDULE_OCCURRENCE"
 _TRIGGER_SCHEDULE = "SCHEDULE"
 _REQUEST_TEXT_MAX = 4000
+_DEFAULT_MAX_ATTEMPTS = 8
+_DEFAULT_LEASE_SECONDS = 120
+_DEFAULT_PLAN_BATCH_LIMIT = 5
+_CLAIM_KEY = "claim"
 _UNSAFE_TERMINAL = frozenset(
     {
         AgentRequestStatus.WAITING_INPUT.value,
@@ -180,11 +189,11 @@ class AgentScheduleExecutionService:
             last_error_code=None,
             lock_version=1,
         )
-        self._session.add(row)
         try:
-            await self._session.flush()
+            async with self._session.begin_nested():
+                self._session.add(row)
+                await self._session.flush()
         except IntegrityError:
-            await self._session.flush()
             existing = (
                 await self._session.execute(
                     select(OutboxEvent).where(OutboxEvent.dedupe_key == dedupe_key)
@@ -192,18 +201,158 @@ class AgentScheduleExecutionService:
             ).scalar_one_or_none()
             if existing is None:
                 raise
+            occurrence.decision_reason = reasons.AGENT_PLAN_QUEUED
             return existing
         occurrence.decision_reason = reasons.AGENT_PLAN_QUEUED
         return row
+
+    @classmethod
+    async def process_isolated_batch(
+        cls,
+        *,
+        limit: int = _DEFAULT_PLAN_BATCH_LIMIT,
+        now: datetime | None = None,
+        worker_id: uuid.UUID | None = None,
+        lease_seconds: int = _DEFAULT_LEASE_SECONDS,
+        max_attempts: int = _DEFAULT_MAX_ATTEMPTS,
+        session_scope_factory: Callable[[], Any] | None = None,
+    ) -> AgentSchedulePlanBatchResult:
+        """Claim then process each event in its own session (outbox isolation)."""
+        from app.db.session import session_scope as default_scope
+
+        scope = session_scope_factory or default_scope
+        ts = now or datetime.now(UTC)
+        wid = worker_id or uuid.uuid4()
+        bounded = max(1, min(int(limit), _DEFAULT_PLAN_BATCH_LIMIT))
+
+        async with scope() as session:
+            claimed_rows = await cls(session).claim_lease_batch(
+                limit=bounded,
+                now=ts,
+                worker_id=wid,
+                lease_seconds=lease_seconds,
+                max_attempts=max_attempts,
+            )
+            claimed_ids = [row.id for row in claimed_rows]
+            await session.commit()
+
+        executed = 0
+        failed = 0
+        skipped = 0
+        for event_id in claimed_ids:
+            try:
+                async with scope() as session:
+                    outcome = await cls(session).process_claimed(
+                        event_id,
+                        now=ts,
+                        worker_id=wid,
+                        max_attempts=max_attempts,
+                    )
+                    await session.commit()
+            except Exception:
+                logger.warning(
+                    "AGENT_SCHEDULE_PLAN process failed event_id=%s",
+                    event_id,
+                    exc_info=True,
+                )
+                try:
+                    async with scope() as session:
+                        await cls(session).clear_claim_after_failure(
+                            event_id,
+                            now=datetime.now(UTC),
+                            error_code="PLAN_TRANSIENT_FAILURE",
+                        )
+                        await session.commit()
+                except Exception:
+                    logger.warning(
+                        "AGENT_SCHEDULE_PLAN claim clear failed event_id=%s",
+                        event_id,
+                        exc_info=True,
+                    )
+                failed += 1
+                continue
+            if outcome == "EXECUTED":
+                executed += 1
+            elif outcome == "FAILED":
+                failed += 1
+            else:
+                skipped += 1
+        return AgentSchedulePlanBatchResult(
+            selected=len(claimed_ids),
+            executed=executed,
+            failed=failed,
+            skipped=skipped,
+        )
 
     async def process_unpublished_batch(
         self,
         *,
         limit: int = 20,
         now: datetime | None = None,
+        worker_id: uuid.UUID | None = None,
+        lease_seconds: int = _DEFAULT_LEASE_SECONDS,
+        max_attempts: int = _DEFAULT_MAX_ATTEMPTS,
     ) -> AgentSchedulePlanBatchResult:
-        """Consume AGENT_SCHEDULE_PLAN outbox rows (LLM OK; no Schedule FOR UPDATE)."""
+        """Claim+lease then process (same session; for tests / single-worker).
+
+        Lease is flushed before pipeline so Analyzer/Selector ``commit()`` does
+        not leave the row unlockable by concurrent workers.
+        """
         ts = now or datetime.now(UTC)
+        wid = worker_id or uuid.uuid4()
+        claimed = await self.claim_lease_batch(
+            limit=max(1, min(int(limit), 200)),
+            now=ts,
+            worker_id=wid,
+            lease_seconds=lease_seconds,
+            max_attempts=max_attempts,
+        )
+        await self._session.flush()
+
+        executed = 0
+        failed = 0
+        skipped = 0
+        for row in claimed:
+            try:
+                outcome = await self._process_one(
+                    row, now=ts, worker_id=wid, max_attempts=max_attempts
+                )
+            except Exception:
+                logger.warning(
+                    "AGENT_SCHEDULE_PLAN process failed event_id=%s",
+                    row.id,
+                    exc_info=True,
+                )
+                await self.clear_claim_after_failure(
+                    row.id,
+                    now=datetime.now(UTC),
+                    error_code="PLAN_TRANSIENT_FAILURE",
+                )
+                failed += 1
+                continue
+            if outcome == "EXECUTED":
+                executed += 1
+            elif outcome == "FAILED":
+                failed += 1
+            else:
+                skipped += 1
+        return AgentSchedulePlanBatchResult(
+            selected=len(claimed),
+            executed=executed,
+            failed=failed,
+            skipped=skipped,
+        )
+
+    async def claim_lease_batch(
+        self,
+        *,
+        limit: int,
+        now: datetime,
+        worker_id: uuid.UUID,
+        lease_seconds: int = _DEFAULT_LEASE_SECONDS,
+        max_attempts: int = _DEFAULT_MAX_ATTEMPTS,
+    ) -> list[OutboxEvent]:
+        """Durable claim under FOR UPDATE; returns leased rows."""
         bounded = max(1, min(int(limit), 200))
         stmt = (
             select(OutboxEvent)
@@ -216,25 +365,107 @@ class AgentScheduleExecutionService:
             .with_for_update(skip_locked=True)
         )
         rows = list((await self._session.execute(stmt)).scalars().all())
-        executed = 0
-        failed = 0
-        skipped = 0
+        claimed: list[OutboxEvent] = []
         for row in rows:
-            outcome = await self._process_one(row, now=ts)
-            if outcome == "EXECUTED":
-                executed += 1
-            elif outcome == "FAILED":
-                failed += 1
-            else:
-                skipped += 1
-        return AgentSchedulePlanBatchResult(
-            selected=len(rows),
-            executed=executed,
-            failed=failed,
-            skipped=skipped,
+            payload = dict(row.payload) if isinstance(row.payload, dict) else {}
+            if self._has_active_foreign_lease(payload, worker_id=worker_id, now=now):
+                continue
+            if int(row.publish_attempt_count or 0) >= max_attempts:
+                await self._exhaust_attempts(row, payload=payload, now=now)
+                continue
+            row.publish_attempt_count = int(row.publish_attempt_count or 0) + 1
+            row.last_attempt_at = now
+            row.last_error_code = None
+            payload[_CLAIM_KEY] = {
+                "worker_id": str(worker_id),
+                "lease_expires_at": (now + timedelta(seconds=max(1, int(lease_seconds))))
+                .astimezone(UTC)
+                .isoformat()
+                .replace("+00:00", "Z"),
+            }
+            row.payload = payload
+            row.lock_version = int(row.lock_version or 1) + 1
+            claimed.append(row)
+        await self._session.flush()
+        return claimed
+
+    async def process_claimed(
+        self,
+        event_id: uuid.UUID,
+        *,
+        now: datetime,
+        worker_id: uuid.UUID,
+        max_attempts: int = _DEFAULT_MAX_ATTEMPTS,
+    ) -> str:
+        row = (
+            await self._session.execute(
+                select(OutboxEvent).where(OutboxEvent.id == event_id).with_for_update()
+            )
+        ).scalar_one_or_none()
+        if row is None or row.published_at is not None:
+            return "SKIPPED"
+        payload = dict(row.payload) if isinstance(row.payload, dict) else {}
+        claim = payload.get(_CLAIM_KEY)
+        if not isinstance(claim, dict) or claim.get("worker_id") != str(worker_id):
+            return "SKIPPED"
+        return await self._process_one(row, now=now, worker_id=worker_id, max_attempts=max_attempts)
+
+    async def clear_claim_after_failure(
+        self,
+        event_id: uuid.UUID,
+        *,
+        now: datetime,
+        error_code: str,
+    ) -> None:
+        row = await self._outbox.get(event_id)
+        if row is None or row.published_at is not None:
+            return
+        payload = dict(row.payload) if isinstance(row.payload, dict) else {}
+        payload.pop(_CLAIM_KEY, None)
+        row.payload = payload
+        row.last_attempt_at = now
+        row.last_error_code = error_code
+        row.lock_version = int(row.lock_version or 1) + 1
+        await self._session.flush()
+
+    async def _exhaust_attempts(
+        self,
+        row: OutboxEvent,
+        *,
+        payload: dict[str, Any],
+        now: datetime,
+    ) -> None:
+        occurrence_id = self._payload_uuid(payload, "schedule_occurrence_id")
+        if occurrence_id is not None:
+            occurrence = (
+                await self._session.execute(
+                    select(ScheduleOccurrence)
+                    .where(ScheduleOccurrence.id == occurrence_id)
+                    .with_for_update()
+                )
+            ).scalar_one_or_none()
+            if occurrence is not None:
+                await self._fail_occurrence(
+                    occurrence,
+                    reason=reasons.TARGET_PRECONDITION_FAILED,
+                    now=now,
+                )
+        await self._mark_published(
+            row,
+            now=now,
+            bump_attempt=False,
+            last_error_code="PLAN_ATTEMPTS_EXHAUSTED",
         )
 
-    async def _process_one(self, row: OutboxEvent, *, now: datetime) -> str:
+    async def _process_one(
+        self,
+        row: OutboxEvent,
+        *,
+        now: datetime,
+        worker_id: uuid.UUID,
+        max_attempts: int,
+    ) -> str:
+        del worker_id, max_attempts  # ownership already validated by claim
         payload = row.payload if isinstance(row.payload, dict) else {}
         try:
             occurrence_id = uuid.UUID(str(payload["schedule_occurrence_id"]))
@@ -243,21 +474,18 @@ class AgentScheduleExecutionService:
             requester_id = uuid.UUID(str(payload["requester_id"]))
             request_text = str(payload["request_text"])
             trigger_type = str(payload.get("trigger_type") or _TRIGGER_SCHEDULE)
-        except (KeyError, ValueError, TypeError) as exc:
-            row.publish_attempt_count += 1
-            row.last_attempt_at = now
-            row.last_error_code = "PAYLOAD_INVALID"
-            row.lock_version += 1
-            await self._session.flush()
-            raise AppError(
-                code="RESOURCE_CONFLICT",
-                message="AGENT_SCHEDULE_PLAN payload is invalid.",
-                status_code=409,
-            ) from exc
+        except (KeyError, ValueError, TypeError):
+            await self._mark_published(
+                row,
+                now=now,
+                bump_attempt=False,
+                last_error_code="PAYLOAD_INVALID",
+            )
+            return "FAILED"
 
         existing_exec = await self._execution_for_occurrence(occurrence_id)
         if existing_exec is not None:
-            await self._mark_published(row, now=now)
+            await self._mark_published(row, now=now, bump_attempt=False)
             return "SKIPPED"
 
         occurrence = (
@@ -268,12 +496,12 @@ class AgentScheduleExecutionService:
             )
         ).scalar_one_or_none()
         if occurrence is None:
-            await self._mark_published(row, now=now)
+            await self._mark_published(row, now=now, bump_attempt=False)
             return "SKIPPED"
         if occurrence.status not in {
             OccurrenceStatus.PLANNED.value,
         }:
-            await self._mark_published(row, now=now)
+            await self._mark_published(row, now=now, bump_attempt=False)
             return "SKIPPED"
 
         # Read Schedule without FOR UPDATE — planning must not invert
@@ -290,7 +518,7 @@ class AgentScheduleExecutionService:
                 reason=reasons.TARGET_PRECONDITION_FAILED,
                 now=now,
             )
-            await self._mark_published(row, now=now)
+            await self._mark_published(row, now=now, bump_attempt=False)
             return "FAILED"
 
         try:
@@ -316,19 +544,21 @@ class AgentScheduleExecutionService:
                 else reasons.TARGET_PRECONDITION_FAILED
             )
             await self._fail_occurrence(occurrence, reason=reason, now=now)
-            await self._mark_published(row, now=now)
+            await self._mark_published(row, now=now, bump_attempt=False)
             return "FAILED"
         except Exception:
             # Leave outbox unpublished for durable retry (transient LLM/infra).
-            row.publish_attempt_count += 1
-            row.last_attempt_at = now
+            # Attempt was already counted at claim time.
             row.last_error_code = "PLAN_TRANSIENT_FAILURE"
-            row.lock_version += 1
+            row.lock_version = int(row.lock_version or 1) + 1
+            payload_mut = dict(row.payload) if isinstance(row.payload, dict) else {}
+            payload_mut.pop(_CLAIM_KEY, None)
+            row.payload = payload_mut
             await self._session.flush()
             raise
 
         assert execution is not None
-        await self._mark_published(row, now=now)
+        await self._mark_published(row, now=now, bump_attempt=False)
         return "EXECUTED"
 
     async def _plan_and_materialize(
@@ -390,7 +620,8 @@ class AgentScheduleExecutionService:
             payload = dict(outbox_row.payload or {})
             payload["agent_request_id"] = str(agent_request_id)
             outbox_row.payload = payload
-            outbox_row.lock_version += 1
+            outbox_row.lock_version = int(outbox_row.lock_version or 1) + 1
+            # Flush before Analyzer/Selector commit so re-entry can resume.
             await self._session.flush()
         else:
             request = await self._requests.get(agent_request_id)
@@ -449,9 +680,7 @@ class AgentScheduleExecutionService:
             confirmation_required=(
                 None if validation is None else bool(validation.confirmation_required)
             ),
-            policy_snapshot=(
-                None if validation is None else validation.policy_snapshot
-            ),
+            policy_snapshot=(None if validation is None else validation.policy_snapshot),
         ):
             raise AppError(
                 code="EXECUTION_NOT_READY",
@@ -495,8 +724,7 @@ class AgentScheduleExecutionService:
             raise AppError(
                 code="RESOURCE_CONFLICT",
                 message=(
-                    "Created Execution.agent_version_id must equal "
-                    "Schedule.agent_version_id."
+                    "Created Execution.agent_version_id must equal Schedule.agent_version_id."
                 ),
                 status_code=409,
             )
@@ -531,52 +759,38 @@ class AgentScheduleExecutionService:
         request = await self._requests.get(agent_request_id)
         assert request is not None
         if request.status == AgentRequestStatus.RECEIVED.value:
-            await RequestAnalyzerService(self._session).analyze(
-                agent_request_id=agent_request_id
-            )
+            await RequestAnalyzerService(self._session).analyze(agent_request_id=agent_request_id)
             request = await self._requests.get(agent_request_id)
             assert request is not None
             if request.status != AgentRequestStatus.RETRIEVING.value:
                 return
 
         if request.status == AgentRequestStatus.RETRIEVING.value:
-            await ToolSelectorService(self._session).select(
-                agent_request_id=agent_request_id
-            )
+            await ToolSelectorService(self._session).select(agent_request_id=agent_request_id)
             request = await self._requests.get(agent_request_id)
             assert request is not None
             if request.status != AgentRequestStatus.BUILDING_PARAMETERS.value:
                 return
 
         if request.status == AgentRequestStatus.BUILDING_PARAMETERS.value:
-            await ParameterBuilderService(self._session).build(
-                agent_request_id=agent_request_id
-            )
+            await ParameterBuilderService(self._session).build(agent_request_id=agent_request_id)
             request = await self._requests.get(agent_request_id)
             assert request is not None
             if request.status != AgentRequestStatus.PLANNING.value:
                 return
 
         if request.status == AgentRequestStatus.PLANNING.value:
-            await PlanGeneratorService(self._session).generate(
-                agent_request_id=agent_request_id
-            )
+            await PlanGeneratorService(self._session).generate(agent_request_id=agent_request_id)
             request = await self._requests.get(agent_request_id)
             assert request is not None
             if request.status != AgentRequestStatus.VALIDATING.value:
                 return
 
         if request.status == AgentRequestStatus.VALIDATING.value:
-            await PlanValidatorService(self._session).validate(
-                agent_request_id=agent_request_id
-            )
+            await PlanValidatorService(self._session).validate(agent_request_id=agent_request_id)
 
-    async def _execution_for_occurrence(
-        self, occurrence_id: uuid.UUID
-    ) -> Execution | None:
-        stmt = select(Execution).where(
-            Execution.schedule_occurrence_id == occurrence_id
-        )
+    async def _execution_for_occurrence(self, occurrence_id: uuid.UUID) -> Execution | None:
+        stmt = select(Execution).where(Execution.schedule_occurrence_id == occurrence_id)
         return (await self._session.execute(stmt)).scalar_one_or_none()
 
     async def _fail_occurrence(
@@ -597,13 +811,48 @@ class AgentScheduleExecutionService:
         occurrence.finished_at = now
         await self._session.flush()
 
-    async def _mark_published(self, row: OutboxEvent, *, now: datetime) -> None:
-        row.publish_attempt_count += 1
+    async def _mark_published(
+        self,
+        row: OutboxEvent,
+        *,
+        now: datetime,
+        bump_attempt: bool = True,
+        last_error_code: str | None = None,
+    ) -> None:
+        if bump_attempt:
+            row.publish_attempt_count = int(row.publish_attempt_count or 0) + 1
         row.last_attempt_at = now
         row.published_at = now
-        row.last_error_code = None
-        row.lock_version += 1
+        row.last_error_code = last_error_code
+        payload = dict(row.payload) if isinstance(row.payload, dict) else {}
+        payload.pop(_CLAIM_KEY, None)
+        row.payload = payload
+        row.lock_version = int(row.lock_version or 1) + 1
         await self._session.flush()
+
+    @staticmethod
+    def _has_active_foreign_lease(
+        payload: dict[str, Any],
+        *,
+        worker_id: uuid.UUID,
+        now: datetime,
+    ) -> bool:
+        claim = payload.get(_CLAIM_KEY)
+        if not isinstance(claim, dict):
+            return False
+        claim_worker = claim.get("worker_id")
+        expires_raw = claim.get("lease_expires_at")
+        if not claim_worker or not expires_raw:
+            return False
+        if str(claim_worker) == str(worker_id):
+            return False
+        try:
+            expires = datetime.fromisoformat(str(expires_raw).replace("Z", "+00:00"))
+        except ValueError:
+            return False
+        if expires.tzinfo is None:
+            expires = expires.replace(tzinfo=UTC)
+        return expires > now
 
     @staticmethod
     def _payload_uuid(payload: Any, key: str) -> uuid.UUID | None:

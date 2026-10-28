@@ -467,9 +467,6 @@ class OutboxRelayService:
     ) -> PublishBatchResult:
         bounded = _validate_limit(limit)
         rows = await self._outbox.claim_unpublished_batch(limit=bounded)
-        # AGENT_SCHEDULE_PLAN is consumed in-process by AgentScheduleExecutionService;
-        # never broker-publish those rows (leave unpublished for planner retry).
-        rows = [row for row in rows if getattr(row, "event_type", None) != "AGENT_SCHEDULE_PLAN"]
         published = 0
         failed = 0
         for row in rows:
