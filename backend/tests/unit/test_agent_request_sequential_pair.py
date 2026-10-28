@@ -37,8 +37,8 @@ from app.repositories.mcp_tool import MCPToolRepository
 from app.repositories.mcp_tool_policy import MCPToolPolicyRepository
 from app.repositories.plan_generation import PlanGenerationRepository
 from app.repositories.plan_validation import PlanValidationRepository
+from app.repositories.role import PermissionRepository
 from app.repositories.tool_selection import ToolSelectionRepository
-from app.repositories.permission import PermissionRepository
 from app.repositories.user import UserRepository
 from app.schemas.auth import (
     ResourceGrantCreate,

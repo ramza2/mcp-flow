@@ -16,6 +16,11 @@ from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agent.sequential_readonly_pair import (
+    DETERMINISTIC_TOOL_STEP_ID_2,
+    build_agent_request_sequential_policy_snapshot,
+    is_safe_readonly_policy,
+)
 from app.core.errors import AppError
 from app.domain.enums import (
     AgentRequestStatus,
@@ -52,11 +57,6 @@ from app.repositories.parameter_build import ParameterBuildRepository
 from app.repositories.plan_generation import PlanGenerationRepository
 from app.repositories.plan_validation import PlanValidationRepository
 from app.schemas.agent import CANONICAL_PLAN_SCHEMA_VERSION
-from app.agent.sequential_readonly_pair import (
-    DETERMINISTIC_TOOL_STEP_ID_2,
-    build_agent_request_sequential_policy_snapshot,
-    is_safe_readonly_policy,
-)
 from app.schemas.clarification import (
     CONFIRMATION_QUESTION_SCHEMA,
     PLAN_CONFIRMATION_PROMPT_TEXT,
@@ -671,55 +671,67 @@ class PlanValidatorService:
                     )
                 )
 
-        if step.type == AuthorableStepType.TOOL:
-            try:
-                cfg = ToolStepConfigV1.model_validate(step.config)
-            except Exception:
-                acc.failed.append(
-                    _issue(
-                        "PLAN_SCHEMA_INVALID",
-                        "ToolStepConfigV1 검증에 실패했습니다.",
-                        step_id=step.id,
-                    )
+        expected_refs = 2 if len(plan.steps) == 2 else 1
+        if len(tool_refs) != expected_refs or len(tool_step_ids) != expected_refs:
+            acc.failed.append(
+                _issue(
+                    "PLAN_SCHEMA_INVALID",
+                    "AgentRequest foundation ToolRef 개수가 step 수와 일치하지 "
+                    "않습니다.",
                 )
-                return
+            )
 
-            ref = ref_by_step.get(step.id)
-            if ref is not None and ref.mcp_tool_version_id != cfg.tool_version_id:
-                acc.failed.append(
-                    _issue(
-                        "PLAN_SCHEMA_INVALID",
-                        "ToolRef.mcp_tool_version_id가 step config와 불일치합니다.",
-                        step_id=step.id,
+        if len(plan.steps) == 1:
+            step = plan.steps[0]
+            if step.type == AuthorableStepType.TOOL:
+                try:
+                    cfg = ToolStepConfigV1.model_validate(step.config)
+                except Exception:
+                    acc.failed.append(
+                        _issue(
+                            "PLAN_SCHEMA_INVALID",
+                            "ToolStepConfigV1 검증에 실패했습니다.",
+                            step_id=step.id,
+                        )
                     )
-                )
+                    return
 
-            expected_refs = 2 if len(plan.steps) == 2 else 1
-            if len(tool_refs) != expected_refs or len(tool_step_ids) != expected_refs:
-                acc.failed.append(
-                    _issue(
-                        "PLAN_SCHEMA_INVALID",
-                        "AgentRequest foundation ToolRef 개수가 step 수와 일치하지 "
-                        "않습니다.",
+                ref = ref_by_step.get(step.id)
+                if ref is not None and ref.mcp_tool_version_id != cfg.tool_version_id:
+                    acc.failed.append(
+                        _issue(
+                            "PLAN_SCHEMA_INVALID",
+                            "ToolRef.mcp_tool_version_id가 step config와 불일치합니다.",
+                            step_id=step.id,
+                        )
                     )
-                )
 
-            if step.timeout_seconds > plan.limits.max_duration_seconds:
-                acc.rejected.append(
-                    _issue(
-                        "PLAN_LIMIT_EXCEEDED",
-                        "step timeout_seconds가 max_duration_seconds를 초과합니다.",
-                        step_id=step.id,
+                if step.timeout_seconds > plan.limits.max_duration_seconds:
+                    acc.rejected.append(
+                        _issue(
+                            "PLAN_LIMIT_EXCEEDED",
+                            "step timeout_seconds가 max_duration_seconds를 초과합니다.",
+                            step_id=step.id,
+                        )
                     )
-                )
+        else:
+            for s in plan.steps:
+                if s.timeout_seconds > plan.limits.max_duration_seconds:
+                    acc.rejected.append(
+                        _issue(
+                            "PLAN_LIMIT_EXCEEDED",
+                            "step timeout_seconds가 max_duration_seconds를 초과합니다.",
+                            step_id=s.id,
+                        )
+                    )
 
-            if len(plan.steps) > plan.limits.max_steps:
-                acc.rejected.append(
-                    _issue(
-                        "PLAN_LIMIT_EXCEEDED",
-                        "step count가 max_steps를 초과합니다.",
-                    )
+        if len(plan.steps) > plan.limits.max_steps:
+            acc.rejected.append(
+                _issue(
+                    "PLAN_LIMIT_EXCEEDED",
+                    "step count가 max_steps를 초과합니다.",
                 )
+            )
 
     def _validate_binding_projection(
         self,
@@ -1302,7 +1314,7 @@ class PlanValidatorService:
                         step_id=step_id,
                     )
                 )
-        for key, binding in cfg.bindings.items():
+        for _key, binding in cfg.bindings.items():
             if binding.kind != BindingKind.STEP_OUTPUT:
                 acc.failed.append(
                     _issue(

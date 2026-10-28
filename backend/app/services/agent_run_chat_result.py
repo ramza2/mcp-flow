@@ -149,9 +149,9 @@ def _project_pets(structured: Any) -> list[ChatDisplayItem] | None:
         if not isinstance(name, str) or not name.strip():
             continue
         if not isinstance(status, str) or not status.strip():
-            status = "unknown"
+            continue
         items.append(
-            ChatDisplayItem(name=name.strip()[:200], status=str(status).strip()[:64])
+            ChatDisplayItem(name=name.strip()[:200], status=status.strip()[:64])
         )
     return items or None
 
