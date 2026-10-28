@@ -1,0 +1,89 @@
+openapi: 3.0.3
+info:
+  title: MCPFlow Pets Sequential E2E
+  version: "1.0.0"
+  description: >
+    Isolated Factory package for AgentRequest sequential READ_ONLY pair E2E.
+    Primary list + companion detail against factory-mock-upstream:8091.
+    Do not reuse for the legacy List pets Factory Import (output_schema=null).
+paths:
+  /pets:
+    get:
+      operationId: listPetsSequentialE2E
+      summary: List pets (sequential E2E primary)
+      description: >
+        Returns the pet collection used as tool_1 for sequential detail lookup.
+        Prefer this Tool when the user wants a list first, then the first item.
+      tags:
+        - pets-sequential-e2e
+      parameters:
+        - name: status
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Pet list envelope
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - pets
+                properties:
+                  pets:
+                    type: array
+                    items:
+                      type: object
+                      required:
+                        - id
+                        - name
+                        - status
+                      properties:
+                        id:
+                          type: integer
+                        name:
+                          type: string
+                        status:
+                          type: string
+  /pets/{pet_id}:
+    get:
+      operationId: getPetByIdSequentialE2E
+      summary: Get pet by pet_id (sequential E2E companion detail)
+      description: >
+        Returns one pet by integer pet_id. Prefer as tool_2 companion after
+        listing when the user asks for the first pet's detail.
+      tags:
+        - pets-sequential-e2e
+      parameters:
+        - name: pet_id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Single pet
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - id
+                  - name
+                  - status
+                properties:
+                  id:
+                    type: integer
+                  name:
+                    type: string
+                  status:
+                    type: string
+        "404":
+          description: Pet not found
