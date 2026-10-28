@@ -18,6 +18,11 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent.plan_validator import _literal_matches_type
+from app.agent.sequential_readonly_pair import (
+    AGENT_REQUEST_SEQUENTIAL_POLICY_SCHEMA,
+    DETERMINISTIC_TOOL_STEP_ID_2,
+    is_safe_readonly_policy,
+)
 from app.core.errors import AppError
 from app.domain.enums import (
     AgentRequestStatus,
@@ -48,8 +53,10 @@ from app.schemas.execution_plan import (
     ExecutionPlanV1,
     ToolStepConfigV1,
     compute_plan_hash,
+    parse_complex_tool_step_config,
 )
 from app.schemas.parameter_binding import ParameterBuildSnapshot
+from app.schemas.plan_binding import PlanStepOutputBinding
 
 logger = logging.getLogger(__name__)
 
@@ -362,10 +369,10 @@ class ExecutionCreationService:
                 message="AgentRequest foundation Plan inputs는 {}만 허용.",
                 status_code=409,
             )
-        if len(plan.steps) != 1:
+        if len(plan.steps) not in (1, 2):
             raise AppError(
                 code="EXECUTION_PRECONDITION_FAILED",
-                message="single TOOL step foundation만 지원.",
+                message="TOOL 1개 또는 순차 READ_ONLY pair(2개)만 지원.",
                 status_code=409,
             )
         step = plan.steps[0]
@@ -374,6 +381,13 @@ class ExecutionCreationService:
                 code="EXECUTION_PRECONDITION_FAILED",
                 message="tool_1 TOOL step이 필요합니다.",
                 status_code=409,
+            )
+        if len(plan.steps) == 2:
+            return await self._preflight_sequential_pair(
+                request=request,
+                validation=validation,
+                plan_run=plan_run,
+                plan=plan,
             )
 
         build_run = await self._builds.get_by_id(plan_run.parameter_build_run_id)
@@ -486,6 +500,242 @@ class ExecutionCreationService:
             "policy_snapshot": authz.policy_snapshot,
         }
 
+    async def _preflight_sequential_pair(
+        self,
+        *,
+        request: Any,
+        validation: Any,
+        plan_run: Any,
+        plan: ExecutionPlanV1,
+    ) -> dict[str, Any]:
+        """READY create gate for tool_1 → tool_2 READ_ONLY STEP_OUTPUT plans."""
+        first, second = plan.steps[0], plan.steps[1]
+        if (
+            first.id != DETERMINISTIC_TOOL_STEP_ID
+            or second.id != DETERMINISTIC_TOOL_STEP_ID_2
+            or first.type != AuthorableStepType.TOOL
+            or second.type != AuthorableStepType.TOOL
+            or list(first.depends_on) != []
+            or list(second.depends_on) != [DETERMINISTIC_TOOL_STEP_ID]
+            or plan.completion.response_step_ids != [DETERMINISTIC_TOOL_STEP_ID_2]
+        ):
+            raise AppError(
+                code="EXECUTION_PRECONDITION_FAILED",
+                message="순차 READ_ONLY pair Plan shape이 올바르지 않습니다.",
+                status_code=409,
+            )
+
+        snapshot = validation.policy_snapshot
+        if (
+            not isinstance(snapshot, dict)
+            or snapshot.get("schema_version") != AGENT_REQUEST_SEQUENTIAL_POLICY_SCHEMA
+        ):
+            raise AppError(
+                code="EXECUTION_PRECONDITION_FAILED",
+                message="순차 pair policy_snapshot schema mismatch.",
+                status_code=409,
+            )
+        tool_steps = snapshot.get("tool_steps")
+        if not isinstance(tool_steps, dict):
+            raise AppError(
+                code="EXECUTION_PRECONDITION_FAILED",
+                message="순차 pair policy_snapshot.tool_steps 없음.",
+                status_code=409,
+            )
+
+        build_run = await self._builds.get_by_id(plan_run.parameter_build_run_id)
+        if build_run is None:
+            raise AppError(
+                code="EXECUTION_PRECONDITION_FAILED",
+                message="ParameterBuildRun 없음.",
+                status_code=409,
+            )
+        if (
+            build_run.agent_request_id != request.id
+            or not build_run.is_complete
+            or list(build_run.missing_fields) != []
+            or build_run.parameter_constraints_snapshot is not None
+        ):
+            raise AppError(
+                code="EXECUTION_PRECONDITION_FAILED",
+                message="ParameterBuildRun lineage precondition 실패.",
+                status_code=409,
+            )
+        try:
+            build_snapshot = ParameterBuildSnapshot.model_validate(
+                build_run.bindings_snapshot
+            )
+        except Exception as exc:
+            raise AppError(
+                code="EXECUTION_PRECONDITION_FAILED",
+                message="ParameterBuildSnapshot 재검증 실패.",
+                status_code=409,
+            ) from exc
+        try:
+            cfg1 = ToolStepConfigV1.model_validate(first.config)
+            cfg2 = parse_complex_tool_step_config(second.config)
+        except Exception as exc:
+            raise AppError(
+                code="EXECUTION_PRECONDITION_FAILED",
+                message="순차 pair TOOL config 재검증 실패.",
+                status_code=409,
+            ) from exc
+
+        refs = await self._plans.get_tool_refs_for_run(plan_run.id)
+        ref_by_key = {r.step_key: r for r in refs}
+        ref1 = ref_by_key.get(DETERMINISTIC_TOOL_STEP_ID)
+        ref2 = ref_by_key.get(DETERMINISTIC_TOOL_STEP_ID_2)
+        if (
+            len(refs) != 2
+            or ref1 is None
+            or ref2 is None
+            or ref1.mcp_tool_version_id != cfg1.tool_version_id
+            or ref2.mcp_tool_version_id != cfg2.tool_version_id
+            or build_run.tool_version_id != cfg1.tool_version_id
+        ):
+            raise AppError(
+                code="EXECUTION_PRECONDITION_FAILED",
+                message="순차 pair ToolVersion / ToolRef invariant 실패.",
+                status_code=409,
+            )
+
+        tv1 = await self._tools.get_version(cfg1.tool_version_id)
+        tv2 = await self._tools.get_version(cfg2.tool_version_id)
+        if tv1 is None or tv2 is None:
+            raise AppError(
+                code="EXECUTION_PRECONDITION_FAILED",
+                message="ToolVersion 없음.",
+                status_code=409,
+            )
+        if build_run.input_schema_snapshot != tv1.input_schema:
+            raise AppError(
+                code="EXECUTION_PRECONDITION_FAILED",
+                message="input_schema evidence mismatch.",
+                status_code=409,
+            )
+
+        projected = {
+            k: b.binding.model_dump(mode="json") for k, b in build_snapshot.root.items()
+        }
+        plan_bindings = {
+            k: v.model_dump(mode="json") for k, v in cfg1.bindings.items()
+        }
+        if projected != plan_bindings:
+            raise AppError(
+                code="EXECUTION_PRECONDITION_FAILED",
+                message="binding projection mismatch.",
+                status_code=409,
+            )
+        self._validate_bindings(tv1.input_schema, cfg1.bindings)
+        self._validate_step_output_bindings(tv2.input_schema, cfg2.bindings)
+
+        # Per-step authz against pinned sequential policy entries (no bypass).
+        for step, tool_version in ((first, tv1), (second, tv2)):
+            entry = tool_steps.get(step.id)
+            if not isinstance(entry, dict):
+                raise AppError(
+                    code="EXECUTION_PRECONDITION_FAILED",
+                    message=f"순차 pair policy entry 없음: {step.id}",
+                    status_code=409,
+                )
+            expected = entry.get("policy")
+            if not isinstance(expected, dict):
+                raise AppError(
+                    code="EXECUTION_PRECONDITION_FAILED",
+                    message=f"순차 pair policy 없음: {step.id}",
+                    status_code=409,
+                )
+            if str(entry.get("tool_version_id")) != str(tool_version.id):
+                raise AppError(
+                    code="EXECUTION_PRECONDITION_FAILED",
+                    message=f"순차 pair policy tool_version mismatch: {step.id}",
+                    status_code=409,
+                )
+            authz = await assert_current_tool_executable(
+                self._session,
+                requester_id=request.requester_id,
+                agent_version_id=request.agent_version_id,
+                tool_version_id=tool_version.id,
+                expected_policy_snapshot=dict(expected),
+                plan_timeout_seconds=step.timeout_seconds,
+            )
+            if authz.confirmation_required or not is_safe_readonly_policy(
+                authz.tool_policy
+            ):
+                raise AppError(
+                    code="EXECUTION_PRECONDITION_FAILED",
+                    message=(
+                        "순차 READ_ONLY pair는 confirmation/approval 없는 "
+                        "READ_ONLY Tool만 허용합니다."
+                    ),
+                    status_code=409,
+                )
+
+        return {
+            "validation": validation,
+            "plan_run": plan_run,
+            "plan": plan,
+            "tool_version": tv1,
+            "policy_snapshot": dict(snapshot),
+        }
+
+    def _validate_step_output_bindings(
+        self, input_schema: Any, bindings: dict[str, Any]
+    ) -> None:
+        if not isinstance(input_schema, dict) or input_schema.get("type") != "object":
+            raise AppError(
+                code="EXECUTION_PRECONDITION_FAILED",
+                message="tool_2 input_schema.type must be object.",
+                status_code=409,
+            )
+        properties = input_schema.get("properties")
+        if not isinstance(properties, dict):
+            raise AppError(
+                code="EXECUTION_PRECONDITION_FAILED",
+                message="tool_2 input_schema.properties must be object.",
+                status_code=409,
+            )
+        required = input_schema.get("required", [])
+        if not isinstance(required, list) or not all(isinstance(x, str) for x in required):
+            raise AppError(
+                code="EXECUTION_PRECONDITION_FAILED",
+                message="tool_2 input_schema.required must be string[].",
+                status_code=409,
+            )
+        for key in bindings:
+            if key not in properties:
+                raise AppError(
+                    code="EXECUTION_PRECONDITION_FAILED",
+                    message=f"unknown tool_2 binding key={key!r}",
+                    status_code=409,
+                )
+        for req in required:
+            if req not in bindings:
+                raise AppError(
+                    code="EXECUTION_PRECONDITION_FAILED",
+                    message=f"missing required tool_2 binding={req!r}",
+                    status_code=409,
+                )
+        for key, binding in bindings.items():
+            if not isinstance(binding, PlanStepOutputBinding):
+                raise AppError(
+                    code="EXECUTION_PRECONDITION_FAILED",
+                    message=f"tool_2 binding {key!r} must be STEP_OUTPUT.",
+                    status_code=409,
+                )
+            if binding.step_id != DETERMINISTIC_TOOL_STEP_ID:
+                raise AppError(
+                    code="EXECUTION_PRECONDITION_FAILED",
+                    message="tool_2 STEP_OUTPUT.step_id는 tool_1이어야 합니다.",
+                    status_code=409,
+                )
+            if not isinstance(binding.path, str) or not binding.path.startswith("/"):
+                raise AppError(
+                    code="EXECUTION_PRECONDITION_FAILED",
+                    message=f"invalid STEP_OUTPUT.path for {key!r}",
+                    status_code=409,
+                )
+
     def _validate_bindings(self, input_schema: Any, bindings: dict[str, Any]) -> None:
         if not isinstance(input_schema, dict) or input_schema.get("type") != "object":
             raise AppError(
@@ -580,8 +830,7 @@ class ExecutionCreationService:
             )
         )
         execution = materialized.execution
-        # AgentRequest foundation preflight still requires single TOOL; keep
-        # response step_count aligned with materialized rows.
+        # Keep response step_count aligned with materialized rows (1 or 2 TOOL).
         assert len(materialized.steps) == len(plan.steps)
         result = AgentRequestExecutionCreateResult(
             id=execution.id,

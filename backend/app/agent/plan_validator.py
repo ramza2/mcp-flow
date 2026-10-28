@@ -52,6 +52,11 @@ from app.repositories.parameter_build import ParameterBuildRepository
 from app.repositories.plan_generation import PlanGenerationRepository
 from app.repositories.plan_validation import PlanValidationRepository
 from app.schemas.agent import CANONICAL_PLAN_SCHEMA_VERSION
+from app.agent.sequential_readonly_pair import (
+    DETERMINISTIC_TOOL_STEP_ID_2,
+    build_agent_request_sequential_policy_snapshot,
+    is_safe_readonly_policy,
+)
 from app.schemas.clarification import (
     CONFIRMATION_QUESTION_SCHEMA,
     PLAN_CONFIRMATION_PROMPT_TEXT,
@@ -59,10 +64,12 @@ from app.schemas.clarification import (
 from app.schemas.execution_plan import (
     DETERMINISTIC_TOOL_STEP_ID,
     EXECUTION_PLAN_SCHEMA_VERSION,
+    ComplexToolStepConfigV1,
     ExecutionPlanV1,
     ToolStepConfigV1,
     compute_plan_hash,
     default_plan_limits,
+    parse_complex_tool_step_config,
 )
 from app.schemas.parameter_binding import ParameterBuildSnapshot
 from app.schemas.plan_validation import (
@@ -320,6 +327,25 @@ class PlanValidatorService:
         tool_refs = await self._plan_generations.get_tool_refs_for_run(plan_run.id)
         self._validate_plan_structure(plan, tool_refs, acc)
 
+        if (
+            not acc.failed
+            and len(plan.steps) == 2
+            and build_run is not None
+            and param_snapshot is not None
+        ):
+            await self._validate_sequential_pair_tools(
+                request=request,
+                plan=plan,
+                plan_run=plan_run,
+                build_run=build_run,
+                param_snapshot=param_snapshot,
+                tool_refs=tool_refs,
+                acc=acc,
+            )
+            return await self._finalize(
+                request, plan_run, acc, plan_hash=plan_run.plan_hash
+            )
+
         tool_version: MCPToolVersion | None = None
         logical_tool: MCPTool | None = None
         server: MCPServer | None = None
@@ -529,30 +555,36 @@ class PlanValidatorService:
                 )
             )
 
-        if len(plan.steps) != 1:
+        if len(plan.steps) not in (1, 2):
             acc.failed.append(
                 _issue(
                     "PLAN_SCHEMA_INVALID",
-                    "AgentRequest foundation Plan은 single TOOL step만 허용합니다.",
+                    "AgentRequest foundation Plan은 TOOL 1개 또는 "
+                    "순차 READ_ONLY pair(2개)만 허용합니다.",
                 )
             )
             return
 
-        step = plan.steps[0]
-        if step.type != AuthorableStepType.TOOL:
-            acc.failed.append(
-                _issue(
-                    "PLAN_SCHEMA_INVALID",
-                    f"AgentRequest foundation step type={step.type!r}은 허용되지 않습니다.",
+        if len(plan.steps) == 2:
+            self._validate_sequential_pair_shape(plan, tool_refs, acc)
+        else:
+            step = plan.steps[0]
+            if step.type != AuthorableStepType.TOOL:
+                acc.failed.append(
+                    _issue(
+                        "PLAN_SCHEMA_INVALID",
+                        f"AgentRequest foundation step type={step.type!r}은 "
+                        f"허용되지 않습니다.",
+                    )
                 )
-            )
-        if step.id != DETERMINISTIC_TOOL_STEP_ID:
-            acc.failed.append(
-                _issue(
-                    "PLAN_SCHEMA_INVALID",
-                    f"AgentRequest foundation step id={step.id!r}은 허용되지 않습니다.",
+            if step.id != DETERMINISTIC_TOOL_STEP_ID:
+                acc.failed.append(
+                    _issue(
+                        "PLAN_SCHEMA_INVALID",
+                        f"AgentRequest foundation step id={step.id!r}은 "
+                        f"허용되지 않습니다.",
+                    )
                 )
-            )
 
         step_ids = [s.id for s in plan.steps]
         if len(set(step_ids)) != len(step_ids):
@@ -662,11 +694,13 @@ class PlanValidatorService:
                     )
                 )
 
-            if len(tool_refs) != 1 or len(tool_step_ids) != 1:
+            expected_refs = 2 if len(plan.steps) == 2 else 1
+            if len(tool_refs) != expected_refs or len(tool_step_ids) != expected_refs:
                 acc.failed.append(
                     _issue(
                         "PLAN_SCHEMA_INVALID",
-                        "AgentRequest foundation는 정확히 1개의 ToolRef만 허용합니다.",
+                        "AgentRequest foundation ToolRef 개수가 step 수와 일치하지 "
+                        "않습니다.",
                     )
                 )
 
@@ -959,6 +993,8 @@ class PlanValidatorService:
         plan: ExecutionPlanV1,
         policy: MCPToolPolicy | None,
         acc: _ValidationAccumulator,
+        *,
+        step_id: str | None = None,
     ) -> None:
         if policy is None:
             acc.rejected.append(
@@ -990,15 +1026,20 @@ class PlanValidatorService:
                 )
             )
 
-        if plan.steps:
+        check_step = None
+        if step_id is not None:
+            check_step = next((s for s in plan.steps if s.id == step_id), None)
+        elif plan.steps:
+            check_step = plan.steps[0]
+        if check_step is not None and policy.timeout_ms > 0:
             expected_timeout = max(1, math.ceil(policy.timeout_ms / 1000))
-            if plan.steps[0].timeout_seconds != expected_timeout:
+            if check_step.timeout_seconds != expected_timeout:
                 acc.rejected.append(
                     _issue(
                         "PLAN_POLICY_INVALID",
                         "Plan step timeout_seconds가 current ToolPolicy와 "
                         "일치하지 않습니다.",
-                        step_id=plan.steps[0].id,
+                        step_id=check_step.id,
                     )
                 )
 
@@ -1040,6 +1081,316 @@ class PlanValidatorService:
                 _issue(
                     "PLAN_APPROVAL_REQUIRED",
                     "default_expiry_seconds는 0보다 커야 합니다.",
+                )
+            )
+
+    async def _validate_sequential_pair_tools(
+        self,
+        *,
+        request: AgentRequest,
+        plan: ExecutionPlanV1,
+        plan_run: PlanGenerationRun,
+        build_run: ParameterBuildRun,
+        param_snapshot: ParameterBuildSnapshot,
+        tool_refs: list[PlanGenerationToolRef],
+        acc: _ValidationAccumulator,
+    ) -> None:
+        """Per-step authz/policy for sequential READ_ONLY pair + STEP_OUTPUT."""
+        ref_by_step = {r.step_key: r for r in tool_refs}
+        try:
+            cfg1 = ToolStepConfigV1.model_validate(plan.steps[0].config)
+            cfg2 = parse_complex_tool_step_config(plan.steps[1].config)
+        except Exception:
+            acc.failed.append(
+                _issue(
+                    "PLAN_SCHEMA_INVALID",
+                    "순차 pair TOOL config 검증에 실패했습니다.",
+                )
+            )
+            return
+
+        if build_run.tool_version_id != cfg1.tool_version_id:
+            acc.failed.append(
+                _issue(
+                    "PLAN_SCHEMA_INVALID",
+                    "ParameterBuildRun.tool_version_id가 tool_1과 불일치합니다.",
+                )
+            )
+        ref1 = ref_by_step.get(DETERMINISTIC_TOOL_STEP_ID)
+        ref2 = ref_by_step.get(DETERMINISTIC_TOOL_STEP_ID_2)
+        if ref1 is None or ref1.mcp_tool_version_id != cfg1.tool_version_id:
+            acc.failed.append(
+                _issue(
+                    "PLAN_SCHEMA_INVALID",
+                    "tool_1 ToolRef가 config와 불일치합니다.",
+                )
+            )
+        if ref2 is None or ref2.mcp_tool_version_id != cfg2.tool_version_id:
+            acc.failed.append(
+                _issue(
+                    "PLAN_SCHEMA_INVALID",
+                    "tool_2 ToolRef가 config와 불일치합니다.",
+                )
+            )
+        if acc.failed:
+            return
+
+        tv1 = await self._tools.get_version(cfg1.tool_version_id)
+        tv2 = await self._tools.get_version(cfg2.tool_version_id)
+        if tv1 is None or tv2 is None:
+            acc.rejected.append(
+                _issue("PLAN_TOOL_UNAVAILABLE", "ToolVersion을 찾을 수 없습니다.")
+            )
+            return
+        # tool_1 bindings must match ParameterBuild projection (LITERAL/SECRET_REF).
+        self._validate_binding_projection(
+            plan,
+            param_snapshot,
+            build_run,
+            acc,
+            input_schema=tv1.input_schema,
+        )
+        if build_run.input_schema_snapshot != tv1.input_schema:
+            acc.failed.append(
+                _issue(
+                    "PLAN_SCHEMA_INVALID",
+                    "ParameterBuildRun.input_schema_snapshot이 tool_1과 불일치합니다.",
+                )
+            )
+
+        # tool_2: only STEP_OUTPUT from tool_1; cover required inputs.
+        self._validate_step_output_bindings(
+            step_id=DETERMINISTIC_TOOL_STEP_ID_2,
+            cfg=cfg2,
+            input_schema=tv2.input_schema,
+            source_step_id=DETERMINISTIC_TOOL_STEP_ID,
+            acc=acc,
+        )
+
+        tool_steps_policy: dict[str, dict[str, Any]] = {}
+        confirmation_needed = False
+        for step_id, version in (
+            (DETERMINISTIC_TOOL_STEP_ID, tv1),
+            (DETERMINISTIC_TOOL_STEP_ID_2, tv2),
+        ):
+            logical = await self._tools.get(version.mcp_tool_id)
+            if logical is None:
+                acc.rejected.append(
+                    _issue(
+                        "PLAN_TOOL_UNAVAILABLE",
+                        "logical Tool을 찾을 수 없습니다.",
+                        step_id=step_id,
+                    )
+                )
+                continue
+            server = await self._servers.get(logical.mcp_server_id)
+            self._validate_tool_availability(version, logical, server, acc)
+            grants = await self._grants.list_for_version(request.agent_version_id)
+            grant = next(
+                (g for g in grants if g.mcp_tool_id == logical.id),
+                None,
+            )
+            self._validate_agent_tool_grant(grant, acc)
+            await self._validate_authorization(request, logical, acc)
+            policy = await self._policies.get_by_tool_id(logical.id)
+            self._validate_tool_policy(plan, policy, acc, step_id=step_id)
+            if policy is None:
+                continue
+            if not is_safe_readonly_policy(policy):
+                # Pair generator only emits safe pairs; fail closed if drift.
+                if policy.risk_class != RiskClass.READ_ONLY.value:
+                    acc.rejected.append(
+                        _issue(
+                            "PLAN_POLICY_INVALID",
+                            "순차 pair는 READ_ONLY Tool만 허용합니다.",
+                            step_id=step_id,
+                        )
+                    )
+                if policy.requires_confirmation or policy.requires_approval:
+                    acc.rejected.append(
+                        _issue(
+                            "PLAN_POLICY_INVALID",
+                            "순차 pair는 confirmation/approval 없는 "
+                            "READ_ONLY Tool만 허용합니다.",
+                            step_id=step_id,
+                        )
+                    )
+            approval_policy: ApprovalPolicy | None = None
+            if policy.requires_approval:
+                if policy.approval_policy_id is None:
+                    acc.rejected.append(
+                        _issue(
+                            "PLAN_APPROVAL_REQUIRED",
+                            "requires_approval=true이지만 approval_policy_id가 없습니다.",
+                            step_id=step_id,
+                        )
+                    )
+                else:
+                    approval_policy = await self._approval_policies.get(
+                        policy.approval_policy_id
+                    )
+                    self._validate_approval_policy(approval_policy, acc)
+            if grant is not None and (
+                grant.requires_confirmation or policy.requires_confirmation
+            ):
+                confirmation_needed = True
+            tool_steps_policy[step_id] = {
+                "tool_version_id": str(version.id),
+                "policy": build_safe_tool_policy_snapshot(policy, approval_policy),
+            }
+
+        if not acc.has_blocking_errors() and len(tool_steps_policy) == 2:
+            acc.policy_snapshot = build_agent_request_sequential_policy_snapshot(
+                agent_version_id=request.agent_version_id,
+                tool_steps=tool_steps_policy,
+            )
+            if confirmation_needed:
+                if await self._has_satisfied_plan_confirmation(
+                    request=request,
+                    plan_run=plan_run,
+                    policy_snapshot=acc.policy_snapshot,
+                ):
+                    acc.confirmation_required = False
+                else:
+                    acc.confirmation_required = True
+
+    def _validate_step_output_bindings(
+        self,
+        *,
+        step_id: str,
+        cfg: ComplexToolStepConfigV1,
+        input_schema: Any,
+        source_step_id: str,
+        acc: _ValidationAccumulator,
+    ) -> None:
+        if not isinstance(input_schema, dict) or input_schema.get("type") != "object":
+            acc.failed.append(
+                _issue(
+                    "PLAN_BINDING_INVALID",
+                    "tool_2 input_schema.type must be object.",
+                    step_id=step_id,
+                )
+            )
+            return
+        properties = input_schema.get("properties")
+        if not isinstance(properties, dict):
+            acc.failed.append(
+                _issue(
+                    "PLAN_BINDING_INVALID",
+                    "tool_2 input_schema.properties must be object.",
+                    step_id=step_id,
+                )
+            )
+            return
+        required = input_schema.get("required")
+        required_names = required if isinstance(required, list) else []
+        for key in cfg.bindings:
+            if key not in properties:
+                acc.failed.append(
+                    _issue(
+                        "PLAN_BINDING_INVALID",
+                        f"unknown binding key={key!r}",
+                        step_id=step_id,
+                    )
+                )
+        for req in required_names:
+            if isinstance(req, str) and req not in cfg.bindings:
+                acc.failed.append(
+                    _issue(
+                        "PLAN_BINDING_INVALID",
+                        f"required field={req!r} binding이 없습니다.",
+                        step_id=step_id,
+                    )
+                )
+        for key, binding in cfg.bindings.items():
+            if binding.kind != BindingKind.STEP_OUTPUT:
+                acc.failed.append(
+                    _issue(
+                        "PLAN_BINDING_INVALID",
+                        f"순차 pair tool_2 binding kind={binding.kind!r}은 "
+                        f"STEP_OUTPUT만 허용합니다.",
+                        step_id=step_id,
+                    )
+                )
+                continue
+            if binding.step_id != source_step_id:
+                acc.failed.append(
+                    _issue(
+                        "PLAN_BINDING_INVALID",
+                        "tool_2 STEP_OUTPUT.step_id는 tool_1이어야 합니다.",
+                        step_id=step_id,
+                    )
+                )
+            if not isinstance(binding.path, str) or not binding.path.startswith("/"):
+                acc.failed.append(
+                    _issue(
+                        "PLAN_BINDING_INVALID",
+                        "STEP_OUTPUT.path가 유효한 JSON Pointer가 아닙니다.",
+                        step_id=step_id,
+                    )
+                )
+
+    def _validate_sequential_pair_shape(
+        self,
+        plan: ExecutionPlanV1,
+        tool_refs: list[PlanGenerationToolRef],
+        acc: _ValidationAccumulator,
+    ) -> None:
+        """tool_1 → tool_2 linear chain with STEP_OUTPUT handoffs only."""
+        first, second = plan.steps[0], plan.steps[1]
+        if first.id != DETERMINISTIC_TOOL_STEP_ID or second.id != DETERMINISTIC_TOOL_STEP_ID_2:
+            acc.failed.append(
+                _issue(
+                    "PLAN_SCHEMA_INVALID",
+                    "순차 pair step id는 tool_1, tool_2 이어야 합니다.",
+                )
+            )
+        if first.type != AuthorableStepType.TOOL or second.type != AuthorableStepType.TOOL:
+            acc.failed.append(
+                _issue(
+                    "PLAN_SCHEMA_INVALID",
+                    "순차 pair는 TOOL step만 허용합니다.",
+                )
+            )
+        if list(first.depends_on) != []:
+            acc.failed.append(
+                _issue(
+                    "PLAN_SCHEMA_INVALID",
+                    "tool_1 depends_on은 [] 이어야 합니다.",
+                    step_id=first.id,
+                )
+            )
+        if list(second.depends_on) != [DETERMINISTIC_TOOL_STEP_ID]:
+            acc.failed.append(
+                _issue(
+                    "PLAN_SCHEMA_INVALID",
+                    "tool_2 depends_on은 [tool_1] 이어야 합니다.",
+                    step_id=second.id,
+                )
+            )
+        if plan.completion.response_step_ids != [DETERMINISTIC_TOOL_STEP_ID_2]:
+            acc.failed.append(
+                _issue(
+                    "PLAN_SCHEMA_INVALID",
+                    "순차 pair response_step_ids는 [tool_2] 이어야 합니다.",
+                )
+            )
+        ref_keys = {r.step_key for r in tool_refs}
+        if ref_keys != {DETERMINISTIC_TOOL_STEP_ID, DETERMINISTIC_TOOL_STEP_ID_2}:
+            acc.failed.append(
+                _issue(
+                    "PLAN_SCHEMA_INVALID",
+                    "순차 pair ToolRef는 tool_1과 tool_2여야 합니다.",
+                )
+            )
+        try:
+            parse_complex_tool_step_config(second.config)
+        except Exception:
+            acc.failed.append(
+                _issue(
+                    "PLAN_SCHEMA_INVALID",
+                    "tool_2 ComplexToolStepConfigV1 검증에 실패했습니다.",
+                    step_id=second.id,
                 )
             )
 

@@ -78,6 +78,24 @@ def test_project_pets_rejects_non_pets_shape() -> None:
     assert _project_pets({"items": [{"name": "Alpha", "status": "available"}]}) is None
     assert _project_pets(None) is None
     assert _project_pets({"pets": "nope"}) is None
+
+
+def test_project_single_pet_direct() -> None:
+    items = _project_pets({"id": 1, "name": "Alpha", "status": "available"})
+    assert items is not None
+    assert [(i.name, i.status) for i in items] == [("Alpha", "available")]
+
+
+def test_project_single_pet_factory_body() -> None:
+    items = _project_pets(
+        {
+            "ok": True,
+            "http_status": 200,
+            "body": {"id": 1, "name": "Alpha", "status": "available"},
+        }
+    )
+    assert items is not None
+    assert [(i.name, i.status) for i in items] == [("Alpha", "available")]
     assert _project_pets({"ok": True, "http_status": 200, "body": {"items": []}}) is None
 
 

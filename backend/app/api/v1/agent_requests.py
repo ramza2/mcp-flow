@@ -232,14 +232,21 @@ class AgentRunProgressResult(BaseModel):
     plan: AgentRunPlanView | None
     validation: AgentRunValidationView | None
     open_clarification: AgentRunClarificationView | None
-    # Server-computed: READY + single TOOL + READ_ONLY + no confirmation/approval.
-    # Clients must not invent eligibility; never exposes policy_snapshot itself.
+    # Server-computed: READY + (1 TOOL or sequential 2 READ_ONLY) + no
+    # confirmation/approval. Clients must not invent eligibility; never exposes
+    # policy_snapshot itself.
     safe_auto_execute: bool = False
 
 
 class AgentRunChatDisplayItemView(BaseModel):
     name: str
     status: str
+
+
+class AgentRunChatStepView(BaseModel):
+    step_key: str
+    status: str
+    tool_name: str | None = None
 
 
 class AgentRunChatResultView(BaseModel):
@@ -252,24 +259,10 @@ class AgentRunChatResultView(BaseModel):
     display_items: list[AgentRunChatDisplayItemView]
     summary_text: str | None
     truncated: bool
+    steps: list[AgentRunChatStepView] = []
 
 
-def _safe_auto_execute(
-    request: AgentRequest,
-    plan_view: AgentRunPlanView | None,
-    validation: Any | None,
-) -> bool:
-    """True only for the phase-1 chat safe path (single READ_ONLY Tool)."""
-    if request.status != "READY":
-        return False
-    if validation is None or bool(validation.confirmation_required):
-        return False
-    if plan_view is None or plan_view.step_count != 1:
-        return False
-    snapshot = validation.policy_snapshot
-    if not isinstance(snapshot, dict):
-        return False
-    tool_policy = snapshot.get("tool_policy")
+def _tool_policy_is_safe_readonly(tool_policy: Any) -> bool:
     if not isinstance(tool_policy, dict):
         return False
     if tool_policy.get("risk_class") != "READ_ONLY":
@@ -278,6 +271,40 @@ def _safe_auto_execute(
         return False
     if tool_policy.get("requires_confirmation") is True:
         return False
+    return True
+
+
+def _safe_auto_execute(
+    request: AgentRequest,
+    plan_view: AgentRunPlanView | None,
+    validation: Any | None,
+) -> bool:
+    """True for chat safe path: single or sequential READ_ONLY Tools."""
+    if request.status != "READY":
+        return False
+    if validation is None or bool(validation.confirmation_required):
+        return False
+    if plan_view is None or plan_view.step_count not in (1, 2):
+        return False
+    snapshot = validation.policy_snapshot
+    if not isinstance(snapshot, dict):
+        return False
+    if plan_view.step_count == 1:
+        return _tool_policy_is_safe_readonly(snapshot.get("tool_policy"))
+    # Sequential pair: agent_request_sequential_policy.v1
+    if snapshot.get("schema_version") != "agent_request_sequential_policy.v1":
+        return False
+    tool_steps = snapshot.get("tool_steps")
+    if not isinstance(tool_steps, dict) or len(tool_steps) != 2:
+        return False
+    for entry in tool_steps.values():
+        if not isinstance(entry, dict):
+            return False
+        policy_obj = entry.get("policy")
+        if not isinstance(policy_obj, dict):
+            return False
+        if not _tool_policy_is_safe_readonly(policy_obj.get("tool_policy")):
+            return False
     return True
 
 
@@ -565,6 +592,14 @@ async def get_agent_run_chat_result(
         ],
         summary_text=result.summary_text,
         truncated=result.truncated,
+        steps=[
+            AgentRunChatStepView(
+                step_key=step.step_key,
+                status=step.status,
+                tool_name=step.tool_name,
+            )
+            for step in result.steps
+        ],
     )
 
 

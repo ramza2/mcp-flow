@@ -4,7 +4,9 @@ Internal Agent Runtime only. Does not call Plan Validator, Execution,
 MCP tools/call, LLM, or SecretResolver.
 
 AgentRequest foundation produces a single TOOL step from durable
-ParameterBuildRun evidence (docs/04 §9).
+ParameterBuildRun evidence (docs/04 §9), or an optional sequential
+READ_ONLY Tool pair (tool_1 → tool_2 with STEP_OUTPUT) when a unique
+safe companion candidate exists (chat phase-2).
 """
 
 from __future__ import annotations
@@ -18,6 +20,12 @@ from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agent.sequential_readonly_pair import (
+    DETERMINISTIC_TOOL_STEP_ID_2,
+    build_sequential_pair_steps,
+    discover_id_handoffs,
+    is_safe_readonly_policy,
+)
 from app.core.errors import AppError
 from app.domain.enums import (
     AgentRequestStatus,
@@ -29,6 +37,7 @@ from app.models.conversation import AgentRequest
 from app.repositories.agent_request import AgentRequestRepository
 from app.repositories.agent_tool_grant import AgentToolGrantRepository
 from app.repositories.agent_version import AgentVersionRepository
+from app.repositories.mcp_server import MCPServerRepository
 from app.repositories.mcp_tool import MCPToolRepository
 from app.repositories.mcp_tool_policy import MCPToolPolicyRepository
 from app.repositories.parameter_build import ParameterBuildRepository
@@ -54,6 +63,7 @@ from app.schemas.structured_request import (
     StructuredRequestV1,
 )
 from app.services.agent_request import AgentRequestService
+from app.services.mcp_server import is_factory_imported
 
 logger = logging.getLogger(__name__)
 
@@ -69,7 +79,7 @@ class PlanGenerationOutcome:
 
 
 class PlanGeneratorService:
-    """PLANNING → VALIDATING | FAILED (deterministic single-TOOL draft)."""
+    """PLANNING → VALIDATING | FAILED (single TOOL or sequential READ_ONLY pair)."""
 
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
@@ -78,6 +88,7 @@ class PlanGeneratorService:
         self._parameter_builds = ParameterBuildRepository(session)
         self._selections = ToolSelectionRepository(session)
         self._tools = MCPToolRepository(session)
+        self._servers = MCPServerRepository(session)
         self._policies = MCPToolPolicyRepository(session)
         self._grants = AgentToolGrantRepository(session)
         self._versions = AgentVersionRepository(session)
@@ -237,14 +248,63 @@ class PlanGeneratorService:
         for name, parameter_binding in snapshot.root.items():
             bindings_config[name] = parameter_binding.binding.model_dump(mode="json")
 
-        try:
-            tool_config = ToolStepConfigV1.model_validate(
+        pair_refs: list[dict[str, Any]] = [
+            {
+                "step_key": DETERMINISTIC_TOOL_STEP_ID,
+                "mcp_tool_version_id": tool_version.id,
+            }
+        ]
+        response_step_ids = [DETERMINISTIC_TOOL_STEP_ID]
+        steps_payload: list[dict[str, Any]]
+
+        sequential = await self._try_sequential_readonly_pair(
+            request=request,
+            selection=selection,
+            primary_version=tool_version,
+            primary_policy=policy,
+            primary_bindings=bindings_config,
+            primary_timeout_seconds=timeout_seconds,
+            grants=grants,
+        )
+        if sequential is not None:
+            steps_payload, companion_version_id, companion_timeout = sequential
+            pair_refs.append(
                 {
-                    "tool_version_id": tool_version.id,
-                    "bindings": bindings_config,
+                    "step_key": DETERMINISTIC_TOOL_STEP_ID_2,
+                    "mcp_tool_version_id": companion_version_id,
                 }
             )
-            tool_config_dump = tool_config.model_dump(mode="json")
+            response_step_ids = [DETERMINISTIC_TOOL_STEP_ID_2]
+            _ = companion_timeout
+        else:
+            try:
+                tool_config = ToolStepConfigV1.model_validate(
+                    {
+                        "tool_version_id": tool_version.id,
+                        "bindings": bindings_config,
+                    }
+                )
+                tool_config_dump = tool_config.model_dump(mode="json")
+            except Exception:
+                await self._fail_and_raise(
+                    request.id,
+                    message="ExecutionPlanV1 생성/검증에 실패했습니다.",
+                )
+            steps_payload = [
+                ExecutionPlanStep(
+                    id=DETERMINISTIC_TOOL_STEP_ID,
+                    name=DETERMINISTIC_TOOL_STEP_NAME,
+                    type=AuthorableStepType.TOOL,
+                    required=True,
+                    depends_on=[],
+                    when=None,
+                    timeout_seconds=timeout_seconds,
+                    on_error="FAIL_EXECUTION",
+                    config=tool_config_dump,
+                ).model_dump(mode="json")
+            ]
+
+        try:
             plan = ExecutionPlanV1.model_validate(
                 {
                     "schema_version": EXECUTION_PLAN_SCHEMA_VERSION,
@@ -255,22 +315,10 @@ class PlanGeneratorService:
                     ).model_dump(mode="json"),
                     "inputs": {},
                     "limits": default_plan_limits().model_dump(mode="json"),
-                    "steps": [
-                        ExecutionPlanStep(
-                            id=DETERMINISTIC_TOOL_STEP_ID,
-                            name=DETERMINISTIC_TOOL_STEP_NAME,
-                            type=AuthorableStepType.TOOL,
-                            required=True,
-                            depends_on=[],
-                            when=None,
-                            timeout_seconds=timeout_seconds,
-                            on_error="FAIL_EXECUTION",
-                            config=tool_config_dump,
-                        ).model_dump(mode="json")
-                    ],
+                    "steps": steps_payload,
                     "completion": PlanCompletion(
                         success_policy="ALL_REQUIRED",
-                        response_step_ids=[DETERMINISTIC_TOOL_STEP_ID],
+                        response_step_ids=response_step_ids,
                     ).model_dump(mode="json"),
                 }
             )
@@ -295,12 +343,7 @@ class PlanGeneratorService:
             )
             await self._plans.add_tool_refs(
                 plan_generation_run_id=run.id,
-                refs=[
-                    {
-                        "step_key": DETERMINISTIC_TOOL_STEP_ID,
-                        "mcp_tool_version_id": tool_version.id,
-                    }
-                ],
+                refs=pair_refs,
             )
             await self._request_service.compare_and_set_status(
                 agent_request_id,
@@ -335,6 +378,81 @@ class PlanGeneratorService:
         except Exception:
             await self._session.rollback()
             raise
+
+    async def _try_sequential_readonly_pair(
+        self,
+        *,
+        request: AgentRequest,
+        selection: Any,
+        primary_version: Any,
+        primary_policy: Any,
+        primary_bindings: dict[str, Any],
+        primary_timeout_seconds: int,
+        grants: list[Any],
+    ) -> tuple[list[dict[str, Any]], UUID, int] | None:
+        """Optionally build tool_1 → tool_2 when a unique safe companion exists."""
+        if selection.decision != "AUTO_SELECT":
+            return None
+        if not is_safe_readonly_policy(primary_policy):
+            return None
+
+        primary_tool = await self._tools.get(primary_version.mcp_tool_id)
+        if primary_tool is None:
+            return None
+        server = await self._servers.get(primary_tool.mcp_server_id)
+        uses_factory = bool(server is not None and is_factory_imported(server))
+
+        candidates = await self._selections.list_candidates_for_run(selection.id)
+        allow_ids = {
+            g.mcp_tool_id
+            for g in grants
+            if g.effect == AgentToolGrantEffect.ALLOW.value
+        }
+
+        for candidate in candidates:
+            if candidate.tool_version_id == primary_version.id:
+                continue
+            if candidate.risk_class != "READ_ONLY":
+                continue
+            companion = await self._tools.get_version(candidate.tool_version_id)
+            if companion is None:
+                continue
+            if companion.validation_status != ToolVersionValidationStatus.VALID.value:
+                continue
+            if companion.mcp_tool_id not in allow_ids:
+                continue
+            companion_policy = await self._policies.get_by_tool_id(companion.mcp_tool_id)
+            if not is_safe_readonly_policy(companion_policy):
+                continue
+            handoffs = discover_id_handoffs(
+                primary_output_schema=primary_version.output_schema,
+                companion_input_schema=companion.input_schema,
+                uses_factory_envelope=uses_factory,
+            )
+            if not handoffs:
+                continue
+            if companion_policy is not None and companion_policy.timeout_ms > 0:
+                companion_timeout = max(1, math.ceil(companion_policy.timeout_ms / 1000))
+            else:
+                companion_timeout = DEFAULT_TOOL_TIMEOUT_SECONDS
+            steps = build_sequential_pair_steps(
+                primary_tool_version_id=primary_version.id,
+                primary_bindings=primary_bindings,
+                primary_timeout_seconds=primary_timeout_seconds,
+                companion_tool_version_id=companion.id,
+                companion_timeout_seconds=companion_timeout,
+                handoffs=handoffs,
+            )
+            logger.info(
+                "plan_generator sequential_pair agent_request_id=%s "
+                "primary=%s companion=%s handoffs=%s",
+                request.id,
+                primary_version.id,
+                companion.id,
+                [h.target_param for h in handoffs],
+            )
+            return steps, companion.id, companion_timeout
+        return None
 
     def _load_structured_request(self, request: AgentRequest) -> StructuredRequestV1:
         if request.structured_request_version != STRUCTURED_REQUEST_SCHEMA_VERSION:

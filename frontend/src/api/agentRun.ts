@@ -127,7 +127,7 @@ export interface AgentRunProgressDto {
   plan: AgentRunPlanDto | null;
   validation: AgentRunValidationDto | null;
   open_clarification: AgentRunClarificationDto | null;
-  /** Server-only: READY + single READ_ONLY Tool without confirmation/approval. */
+  /** Server-only: READY + 1 or sequential 2 READ_ONLY Tools, no confirmation/approval. */
   safe_auto_execute?: boolean;
 }
 
@@ -140,6 +140,12 @@ export interface AgentRunChatDisplayItemDto {
   status: string;
 }
 
+export interface AgentRunChatStepDto {
+  step_key: string;
+  status: string;
+  tool_name: string | null;
+}
+
 export interface AgentRunChatResultDto {
   agent_request_id: string;
   execution_id: string | null;
@@ -150,6 +156,7 @@ export interface AgentRunChatResultDto {
   display_items: AgentRunChatDisplayItemDto[];
   summary_text: string | null;
   truncated: boolean;
+  steps?: AgentRunChatStepDto[];
 }
 
 export function getAgentRunChatResult(requestId: string, signal?: AbortSignal) {

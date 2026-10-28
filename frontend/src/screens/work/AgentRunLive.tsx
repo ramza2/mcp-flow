@@ -27,7 +27,9 @@ import {
 } from '../../api/agentRun';
 import {
   getExecution,
+  listExecutionSteps,
   listExecutions,
+  type ExecutionStepListItemDto,
 } from '../../api/executions';
 import {
   isEventSourceAvailable,
@@ -140,6 +142,7 @@ export default function AgentRunLive() {
   const [executionLoadedForRequest, setExecutionLoadedForRequest] = useState('');
   const [executionConfirmed, setExecutionConfirmed] = useState(false);
   const [chatResult, setChatResult] = useState<AgentRunChatResultDto | null>(null);
+  const [executionSteps, setExecutionSteps] = useState<ExecutionStepListItemDto[]>([]);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [questionValues, setQuestionValues] = useState<Record<string, string>>({});
   const [loadingAgents, setLoadingAgents] = useState(true);
@@ -153,6 +156,16 @@ export default function AgentRunLive() {
   /** Dedupes final chat answer when SSE + polling both observe terminal. */
   const chatResultAnnouncedFor = useRef<string>('');
   const messagesEndRef = useRef<HTMLDivElement>(null);
+
+  const refreshExecutionSteps = useCallback(async (executionId: string, signal?: AbortSignal) => {
+    try {
+      const listed = await listExecutionSteps(executionId, signal);
+      if (signal?.aborted) return;
+      setExecutionSteps(listed.items);
+    } catch {
+      // Keep prior step snapshot; chat-result also carries terminal steps.
+    }
+  }, []);
 
   const pushMessage = useCallback((role: ChatRole, text: string) => {
     const trimmed = text.trim();
@@ -199,13 +212,40 @@ export default function AgentRunLive() {
       if (!shouldAnnounce) return;
       if (chatResultAnnouncedFor.current === announceKey) return;
       chatResultAnnouncedFor.current = announceKey;
+      if (result.steps && result.steps.length > 0) {
+        setExecutionSteps((prev) => {
+          if (prev.length > 0) return prev;
+          return result.steps!.map((step, index) => ({
+            id: `${result.execution_id ?? requestId}-${step.step_key}`,
+            execution_id: result.execution_id ?? '',
+            step_key: step.step_key,
+            step_type: 'TOOL',
+            parent_step_id: null,
+            sequence_hint: index,
+            mcp_tool_version_id: null,
+            iteration_no: null,
+            status: step.status,
+            attempt_count: 0,
+            condition_result: null,
+            ready_at: null,
+            started_at: null,
+            finished_at: null,
+            error_code: null,
+            error_category: null,
+            duration_ms: null,
+          }));
+        });
+      }
       if (result.available && result.display_items.length > 0) {
+        const stepLine = (result.steps && result.steps.length > 1)
+          ? `\n단계: ${result.steps.map((s) => `${s.tool_name ?? s.step_key}(${s.status})`).join(' → ')}`
+          : '';
         const lines = result.display_items.map(
           (item) => `· ${item.name} / ${item.status}`,
         );
         pushMessage(
           'assistant',
-          `${result.summary_text ?? '조회 결과입니다.'}\n${lines.join('\n')}`,
+          `${result.summary_text ?? '조회 결과입니다.'}${stepLine}\n${lines.join('\n')}`,
         );
       } else if (result.summary_text) {
         pushMessage('assistant', result.summary_text);
@@ -259,6 +299,7 @@ export default function AgentRunLive() {
       setExecution(null);
       setExecutionLoadedForRequest('');
       setChatResult(null);
+      setExecutionSteps([]);
       return;
     }
     const controller = new AbortController();
@@ -274,6 +315,7 @@ export default function AgentRunLive() {
     setExecutionConfirmed(false);
     autoExecAttemptedFor.current = '';
     chatResultAnnouncedFor.current = '';
+    setExecutionSteps([]);
   }, [request?.id]);
 
   // Execution SSE / polling while non-terminal.
@@ -305,6 +347,7 @@ export default function AgentRunLive() {
             if (mapped === 'STARTED') next = 'RUNNING';
             else if (known.includes(mapped)) next = mapped;
             setExecution((prev) => (prev ? { ...prev, status: next } : prev));
+            void refreshExecutionSteps(execution.id);
             pushMessage('system', statusPlainKorean(next));
             if (TERMINAL_EXECUTION.has(next) && request) {
               void loadChatResult(request.id);
@@ -319,6 +362,7 @@ export default function AgentRunLive() {
         const detail = await getExecution(execution.id);
         if (cancelled) return;
         setExecution({ id: detail.id, status: detail.status });
+        await refreshExecutionSteps(execution.id);
         if (TERMINAL_EXECUTION.has(detail.status) && request) {
           pushMessage('system', statusPlainKorean(detail.status));
           await loadChatResult(request.id);
@@ -342,7 +386,7 @@ export default function AgentRunLive() {
       stream?.close();
       if (pollTimer) clearInterval(pollTimer);
     };
-  }, [execution?.id, execution?.status, request, loadChatResult, pushMessage]);
+  }, [execution?.id, execution?.status, request, loadChatResult, pushMessage, refreshExecutionSteps]);
 
   const startAnalysis = async (requestId: string) => {
     try {
@@ -443,7 +487,6 @@ export default function AgentRunLive() {
           break;
         }
         if (status === 'READY') {
-          pushMessage('system', statusPlainKorean('READY'));
           if (stage.safe_auto_execute) {
             const historyChecked = executionLoadedForRequest === requestId;
             const canCreate = Boolean(
@@ -451,11 +494,14 @@ export default function AgentRunLive() {
             );
             if (autoExecAttemptedFor.current !== requestId && canCreate) {
               autoExecAttemptedFor.current = requestId;
-              pushMessage('system', '안전한 조회 작업이라 바로 실행합니다…');
+              const stepHint = stage.plan && stage.plan.step_count > 1
+                ? ` (${stage.plan.step_count}단계 조회)`
+                : '';
+              pushMessage('system', `안전한 조회 작업이라 바로 실행합니다${stepHint}…`);
               try {
                 const created = await createAgentRunExecution(requestId);
                 setExecution({ id: created.id, status: created.status });
-                pushMessage('system', statusPlainKorean(created.status));
+                void refreshExecutionSteps(created.id);
               } catch (err: unknown) {
                 setError(
                   `실행 생성 결과 확인 필요: ${failureMessage(err)}. 상태 새로고침으로 확인하세요. 자동 재시도하지 않습니다.`,
@@ -807,18 +853,17 @@ export default function AgentRunLive() {
           </div>
         )}
 
-        {chatResult?.available && chatResult.display_items.length > 0 && (
-          <div className="mr-4 rounded-lg border border-emerald-200 bg-emerald-50 p-3 space-y-2">
-            <h3 className="text-sm font-semibold text-emerald-900">
-              {chatResult.tool_name ? `${chatResult.tool_name} 결과` : '조회 결과'}
-            </h3>
-            <ul className="text-sm text-emerald-900 space-y-1">
-              {chatResult.display_items.map((item) => (
-                <li key={`${item.name}-${item.status}`}>
-                  {item.name} / {item.status}
+        {executionSteps.length > 0 && (
+          <div className="mr-4 rounded-lg border border-slate-200 bg-slate-50 p-3 space-y-2">
+            <h3 className="text-sm font-semibold text-slate-800">실행 단계</h3>
+            <ol className="text-sm text-slate-700 space-y-1 list-decimal list-inside">
+              {executionSteps.map((step) => (
+                <li key={step.id}>
+                  {step.step_key}
+                  <span className="ml-2 text-xs text-slate-500">{step.status}</span>
                 </li>
               ))}
-            </ul>
+            </ol>
           </div>
         )}
 
