@@ -118,6 +118,7 @@ from app.repositories.mcp_server import MCPServerRepository
 from app.repositories.mcp_tool import MCPToolRepository
 from app.repositories.mcp_tool_policy import MCPToolPolicyRepository
 from app.repositories.plan_validation import PlanValidationRepository
+from app.services.mcp_server import is_factory_imported
 
 logger = logging.getLogger(__name__)
 
@@ -205,6 +206,8 @@ class _PreparedCall:
     max_result_bytes: int
     worker_id: str
     lease_token: uuid.UUID
+    # Factory Publish/Import servers wrap HTTP JSON under structuredContent.body.
+    factory_imported: bool = False
     # MRTR resume (PR #41): durable ANSWERED response + exact opaque requestState.
     # None means initial tools/call (no inputResponses / requestState).
     mrtr_input_request_id: uuid.UUID | None = None
@@ -1555,6 +1558,7 @@ class McpToolRunner:
                     started_at=now,
                 )
 
+                factory_server = is_factory_imported(server)
                 if pre_send_failure is not None:
                     terminal, disposition = await _apply_terminal_transition(
                         session,
@@ -1571,6 +1575,7 @@ class McpToolRunner:
                         result_inline_max_bytes=self._result_inline_max_bytes,
                         now=now,
                         defer_execution_terminalization=defer,
+                        factory_imported=factory_server,
                     )
                     return _PrepareResult(
                         outcome=ToolRunOutcome(
@@ -1607,6 +1612,7 @@ class McpToolRunner:
                     max_result_bytes=tool_policy.max_result_bytes,
                     worker_id=worker,
                     lease_token=lease_token,
+                    factory_imported=factory_server,
                     mrtr_input_request_id=(
                         mrtr_resume[0] if mrtr_resume is not None else None
                     ),
@@ -2277,6 +2283,7 @@ class McpToolRunner:
                     defer_execution_terminalization=(
                         prepared.defer_execution_terminalization
                     ),
+                    factory_imported=prepared.factory_imported,
                 )
                 mcp_called = not isinstance(call_error, _PreSendFailClosed)
 
@@ -2459,6 +2466,7 @@ async def _apply_terminal_transition(
     now: datetime,
     protected: tuple[str, ...] = (),
     defer_execution_terminalization: bool = False,
+    factory_imported: bool = False,
 ) -> tuple[str, str]:
     """Terminalize ToolCall/Attempt/Step; Execution only for fatal dispositions.
 
@@ -2490,7 +2498,11 @@ async def _apply_terminal_transition(
         result_inline: dict[str, Any] | None = None
     else:
         assert result is not None
-        validation = validate_tool_result(result, output_schema=output_schema)
+        validation = validate_tool_result(
+            result,
+            output_schema=output_schema,
+            factory_imported=factory_imported,
+        )
         response_bytes = result.raw_size_bytes
         if validation.ok:
             serialized = _serialize_result_inline(result)

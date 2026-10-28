@@ -33,10 +33,81 @@ def _validator_class_for(schema: dict[str, Any]) -> type[jsonschema.protocols.Va
         return jsonschema.Draft202012Validator
 
 
+def _pointer_paths(errors: list[Any], *, root: str = "") -> list[str]:
+    paths: list[str] = []
+    for err in errors[:_MAX_REPORTED_PATHS]:
+        parts = [str(part) for part in err.absolute_path]
+        if root:
+            if parts:
+                paths.append(root.rstrip("/") + "/" + "/".join(parts))
+            else:
+                paths.append(root if root != "" else "/")
+        else:
+            paths.append("/" + "/".join(parts))
+    return paths
+
+
+def _factory_http_body_payload(
+    structured_content: Any,
+) -> tuple[Any, ResultValidationOutcome | None]:
+    """Extract Factory Runtime HTTP ``body`` for output_schema validation.
+
+    Factory Runtime ``tools/call`` wraps upstream JSON as::
+
+        {ok, http_status, latency_ms, protocol_version, body: <http json>}
+
+    while ``ToolVersion.output_schema`` / ``tools/list`` ``outputSchema`` describe
+    the HTTP body (OpenAPI response), not the MCP envelope. Callers must pass
+    ``factory_imported=True`` from ``is_factory_imported(server)`` — do not
+    invent Factory provenance from shape alone.
+    """
+    if not isinstance(structured_content, dict):
+        return None, ResultValidationOutcome(
+            ok=False,
+            error_code="RESULT_SCHEMA_INVALID",
+            error_message=(
+                "Factory Tool structuredContent must be an object envelope "
+                "with HTTP body for output_schema validation."
+            ),
+        )
+    if not isinstance(structured_content.get("ok"), bool) or not isinstance(
+        structured_content.get("http_status"), int
+    ):
+        return None, ResultValidationOutcome(
+            ok=False,
+            error_code="RESULT_SCHEMA_INVALID",
+            error_message=(
+                "Factory Tool structuredContent is missing the Runtime "
+                "envelope (ok, http_status) required for body validation."
+            ),
+        )
+    if "body" not in structured_content:
+        return None, ResultValidationOutcome(
+            ok=False,
+            error_code="RESULT_SCHEMA_INVALID",
+            error_message=(
+                "Factory Tool structuredContent has no JSON body to validate "
+                "against output_schema (body_text-only results fail closed)."
+            ),
+        )
+    body = structured_content.get("body")
+    if not isinstance(body, (dict, list)):
+        return None, ResultValidationOutcome(
+            ok=False,
+            error_code="RESULT_SCHEMA_INVALID",
+            error_message=(
+                "Factory Tool HTTP body must be a JSON object or array for "
+                "output_schema validation."
+            ),
+        )
+    return body, None
+
+
 def validate_tool_result(
     result: NormalizedToolResult,
     *,
     output_schema: Any,
+    factory_imported: bool = False,
 ) -> ResultValidationOutcome:
     """Apply the canonical result acceptance rules.
 
@@ -46,6 +117,9 @@ def validate_tool_result(
     - ``tool_error`` (MCP ``isError``) fails closed with ``RESULT_TOOL_ERROR``.
     - When ``output_schema`` is present, ``structured_content`` must exist and
       validate against it, else ``RESULT_SCHEMA_INVALID``.
+    - When ``factory_imported`` is True (``is_factory_imported``), validate the
+      HTTP ``body`` field against ``output_schema`` — not the Runtime envelope.
+      Envelope / ``result_inline`` shape is unchanged for STEP_OUTPUT paths.
     """
     if not result.protocol_success:
         return ResultValidationOutcome(
@@ -88,19 +162,30 @@ def validate_tool_result(
             error_message="ToolVersion.output_schema failed schema self-validation.",
         )
 
+    instance: Any = result.structured_content
+    path_root = ""
+    if factory_imported:
+        body, body_error = _factory_http_body_payload(result.structured_content)
+        if body_error is not None:
+            return body_error
+        instance = body
+        path_root = "/body"
+
     validator = validator_cls(output_schema)
-    errors = sorted(validator.iter_errors(result.structured_content), key=str)
+    errors = sorted(validator.iter_errors(instance), key=str)
     if errors:
-        paths = [
-            "/" + "/".join(str(part) for part in err.absolute_path)
-            for err in errors[:_MAX_REPORTED_PATHS]
-        ]
+        paths = _pointer_paths(errors, root=path_root)
+        subject = (
+            "Factory Tool HTTP body"
+            if factory_imported
+            else "Tool structuredContent"
+        )
         return ResultValidationOutcome(
             ok=False,
             error_code="RESULT_SCHEMA_INVALID",
             error_message=(
-                "Tool structuredContent did not satisfy output_schema at: "
-                + ", ".join(paths or ["/"])
+                f"{subject} did not satisfy output_schema at: "
+                + ", ".join(paths or ([path_root] if path_root else ["/"]))
             ),
         )
     return ResultValidationOutcome(ok=True)
