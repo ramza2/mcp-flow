@@ -62,12 +62,20 @@ export MCPFLOW_MOCK_BASE_URL='http://factory-mock-upstream:8091'
 
 ### Expected verify outcome
 
+**Confirmed by `verify` (chat-result / progress APIs):**
+
 - ToolSelector `AUTO_SELECT` on **list** ToolVersion (not detail-first).
 - Plan `step_count=2`, `safe_auto_execute=true`.
 - Execution `SUCCEEDED` with two SUCCEEDED steps.
-- Chat result shows **Alpha** (pet id 1 from mock).
-- STEP_OUTPUT `pet_id=1` is on Execution `tool_2` resolved_input (ops detail);
-  chat-result does not echo bindings.
+- Chat result shows **Alpha** in `display_items` / `summary_text`.
+
+**Not checked by `verify`:**
+
+- `tool_2` STEP_OUTPUT `resolved_input` (e.g. `pet_id=1`). The chat-result
+  API does not echo bindings; confirm on ops Execution/Step detail if required.
+
+Local state JSON is written mode `0600` (atomic replace) and never stores
+password, session cookies, or CSRF tokens.
 
 ### Failure diagnosis (item 6)
 
@@ -84,7 +92,7 @@ export MCPFLOW_MOCK_BASE_URL='http://factory-mock-upstream:8091'
 2. Review APPROVE → Publish/Import (new DRAFT server)  
 3. Runtime Binding DRAFT → PATCH mock URL → READY  
 4. PATCH server `endpoint_url` → Connection Test SUCCEEDED  
-5. Discovery preview CLEAN → apply → Server Activate → Tool Activate  
+5. Discovery preview+apply require `success=true` **and** `factory_diff.status=CLEAN` → Server/Tool Activate
 6. ToolPolicy READ_ONLY + ResourceGrant + Agent grants → Agent ACTIVE  
 7. Wait embedding ensure (outbox/maintenance) before verify  
 

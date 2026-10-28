@@ -165,6 +165,33 @@ def _log(msg: str) -> None:
     print(msg, flush=True)
 
 
+# Never persist credentials / session material in the local state file.
+_STATE_FORBIDDEN_KEYS = frozenset(
+    {
+        "password",
+        "mcpflow_password",
+        "csrf",
+        "csrf_token",
+        "session",
+        "session_token",
+        "raw_session_token",
+        "cookie",
+        "cookies",
+        "authorization",
+        "auth_header",
+    }
+)
+
+
+def _scrub_state(state: dict[str, Any]) -> dict[str, Any]:
+    """Return a copy without credential/session keys (defense in depth)."""
+    return {
+        key: value
+        for key, value in state.items()
+        if str(key).lower() not in _STATE_FORBIDDEN_KEYS
+    }
+
+
 def _load_state(path: Path) -> dict[str, Any]:
     if not path.exists():
         return {}
@@ -172,10 +199,52 @@ def _load_state(path: Path) -> dict[str, Any]:
 
 
 def _save_state(path: Path, state: dict[str, Any]) -> None:
+    """Atomically replace state JSON as mode 0600 (no secrets)."""
     path.parent.mkdir(parents=True, exist_ok=True)
+    cleaned = _scrub_state(state)
+    payload = json.dumps(cleaned, indent=2, sort_keys=True) + "\n"
     tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    tmp.replace(path)
+    fd = os.open(
+        tmp,
+        os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
+        0o600,
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+    except Exception:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+    os.replace(tmp, path)
+    os.chmod(path, 0o600)
+
+
+def _require_clean_discovery(payload: dict[str, Any], *, phase: str) -> None:
+    """Fail closed unless success=true and factory_diff.status=CLEAN."""
+    if not isinstance(payload, dict):
+        raise ApiError(f"Discovery {phase}: response is not an object: {payload!r}")
+    if payload.get("success") is not True:
+        raise ApiError(
+            f"Discovery {phase}: success must be true "
+            f"(got success={payload.get('success')!r}): {payload}"
+        )
+    factory_diff = payload.get("factory_diff")
+    if not isinstance(factory_diff, dict):
+        raise ApiError(
+            f"Discovery {phase}: factory_diff missing or invalid "
+            f"(got {factory_diff!r}): {payload}"
+        )
+    status = factory_diff.get("status")
+    if status != "CLEAN":
+        raise ApiError(
+            f"Discovery {phase}: factory_diff.status must be CLEAN "
+            f"(got {status!r}; MISMATCHED/AMBIGUOUS/missing fail-closed): {payload}"
+        )
 
 
 def _idem(run_id: str, step: str) -> str:
@@ -213,7 +282,7 @@ def planned_steps() -> list[str]:
         "POST runtime-binding/ready → mcp_endpoint_url",
         "PATCH /mcp/servers/{id} endpoint_url=<mcp_endpoint_url>",
         "POST /mcp/servers/{id}/connection-tests → SUCCEEDED",
-        "POST discoveries apply_changes=false then true (factory_diff CLEAN)",
+        "POST discoveries preview+apply (success=true AND factory_diff.status=CLEAN)",
         "POST /mcp/servers/{id}/activate",
         "POST /mcp/tools/{id}/activate (both; If-Match)",
         "PUT /mcp/tools/{id}/policy READ_ONLY allow_auto_select (both)",
@@ -327,24 +396,52 @@ def _ensure_policy(client: Client, tool_id: str) -> dict[str, Any]:
     )
 
 
+def _iter_user_resource_grants(
+    client: Client, user_id: str, *, page_size: int = 100
+) -> list[dict[str, Any]]:
+    """Page through all user ResourceGrants (page_size capped at 100)."""
+    size = max(1, min(int(page_size), 100))
+    page = 1
+    items: list[dict[str, Any]] = []
+    while True:
+        listed = client.request(
+            "GET",
+            f"/api/v1/users/{user_id}/resource-grants?page={page}&page_size={size}",
+            expect={200},
+        )
+        batch = listed.get("items") or []
+        if not isinstance(batch, list):
+            raise ApiError(f"resource-grants page {page} items invalid: {listed}")
+        items.extend(item for item in batch if isinstance(item, dict))
+        if not listed.get("has_next"):
+            break
+        if not batch:
+            break
+        page += 1
+        if page > 10_000:
+            raise ApiError("resource-grants pagination exceeded safety limit")
+    return items
+
+
 def _ensure_resource_grant(client: Client, user_id: str, tool_id: str) -> None:
-    listed = client.request(
-        "GET",
-        f"/api/v1/users/{user_id}/resource-grants?page=1&page_size=100",
-        expect={200},
-    )
-    for item in listed.get("items") or []:
+    for item in _iter_user_resource_grants(client, user_id):
         if (
             item.get("resource_type") == "MCP_TOOL"
             and str(item.get("resource_id")) == tool_id
         ):
             return
-    client.request(
-        "POST",
-        f"/api/v1/users/{user_id}/resource-grants",
-        json_body={"resource_type": "MCP_TOOL", "resource_id": tool_id},
-        expect={200, 201},
-    )
+    try:
+        client.request(
+            "POST",
+            f"/api/v1/users/{user_id}/resource-grants",
+            json_body={"resource_type": "MCP_TOOL", "resource_id": tool_id},
+            expect={200, 201},
+        )
+    except ApiError as exc:
+        # Race / concurrent create: treat conflict as already granted.
+        if exc.status == 409:
+            return
+        raise
 
 
 def _wait_embeddings_via_select(
@@ -439,11 +536,15 @@ def cmd_setup(args: argparse.Namespace) -> int:
     state["user_id"] = user_id
 
     # --- Factory analyze -------------------------------------------------
+    # Resume: existing job_id skips a new analyze (Factory Idempotency-Key
+    # still safe if callers force recreate with a new run_id/state path).
     if "job_id" not in state:
         _log(f"factory analyze ← {openapi}")
         job = client.multipart_job(openapi, _idem(run_id, "analyze"))
         state["job_id"] = str(job["id"])
         _save_state(state_path, state)
+    else:
+        _log(f"resume analyze job_id={state['job_id']}")
     job = _poll_job(client, state["job_id"])
     if job.get("status") != "SUCCEEDED":
         raise ApiError(f"Analyze job failed: {job}")
@@ -633,19 +734,14 @@ def cmd_setup(args: argparse.Namespace) -> int:
             json_body={"mode": "FULL", "apply_changes": False},
             expect={201},
         )
-        factory_diff = preview.get("factory_diff") or {}
-        if factory_diff.get("status") not in {None, "CLEAN"} and not preview.get(
-            "success"
-        ):
-            raise ApiError(f"Discovery preview not clean: {preview}")
+        _require_clean_discovery(preview, phase="preview")
         applied = client.request(
             "POST",
             f"/api/v1/mcp/servers/{state['mcp_server_id']}/discoveries",
             json_body={"mode": "FULL", "apply_changes": True},
             expect={201},
         )
-        if not applied.get("success"):
-            raise ApiError(f"Discovery apply failed: {applied}")
+        _require_clean_discovery(applied, phase="apply")
         server = client.request(
             "POST",
             f"/api/v1/mcp/servers/{state['mcp_server_id']}/activate",
@@ -998,10 +1094,14 @@ def cmd_verify(args: argparse.Namespace) -> int:
         )
     state["phase"] = "verify_passed"
     _save_state(state_path, state)
-    _log("VERIFY PASS: 2-step SUCCEEDED with Alpha")
     _log(
-        "NOTE: STEP_OUTPUT pet_id=1 is pinned in Execution step resolved_input; "
-        "confirm via ops Execution detail if needed (chat-result does not echo bindings)."
+        "VERIFY PASS (confirmed via chat-result): "
+        "execution SUCCEEDED, 2 steps SUCCEEDED, Alpha present in display/summary."
+    )
+    _log(
+        "VERIFY NOT CHECKED by this script: tool_2 STEP_OUTPUT resolved_input "
+        "(e.g. pet_id=1). chat-result does not expose bindings — inspect ops "
+        "Execution/Step detail separately if you need that proof."
     )
     return 0
 
