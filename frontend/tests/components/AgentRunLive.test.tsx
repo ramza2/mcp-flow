@@ -21,6 +21,7 @@ const mocks = vi.hoisted(() => ({
   listExecutions: vi.fn(),
   chatResult: vi.fn(),
   getExecution: vi.fn(),
+  listExecutionSteps: vi.fn(),
 }));
 
 vi.mock('@/api/agentRun', () => ({
@@ -42,6 +43,7 @@ vi.mock('@/api/agentRun', () => ({
 vi.mock('@/api/executions', () => ({
   listExecutions: mocks.listExecutions,
   getExecution: mocks.getExecution,
+  listExecutionSteps: mocks.listExecutionSteps,
 }));
 
 const sseMocks = vi.hoisted(() => ({
@@ -148,6 +150,32 @@ describe('AgentRunLive — chat phase 1', () => {
       ],
       summary_text: 'GET /pets 결과 2건을 가져왔습니다.',
       truncated: false,
+      steps: [
+        { step_key: 'tool_1', status: 'SUCCEEDED', tool_name: 'GET /pets' },
+      ],
+    });
+    mocks.listExecutionSteps.mockResolvedValue({
+      items: [
+        {
+          id: 'step-1',
+          execution_id: executionId,
+          step_key: 'tool_1',
+          step_type: 'TOOL',
+          parent_step_id: null,
+          sequence_hint: 0,
+          mcp_tool_version_id: toolVersionId,
+          iteration_no: null,
+          status: 'SUCCEEDED',
+          attempt_count: 1,
+          condition_result: null,
+          ready_at: null,
+          started_at: null,
+          finished_at: null,
+          error_code: null,
+          error_category: null,
+          duration_ms: null,
+        },
+      ],
     });
     mocks.getExecution.mockResolvedValue({
       id: executionId, status: 'SUCCEEDED', agent_request_id: requestId,
@@ -315,10 +343,10 @@ describe('AgentRunLive — chat phase 1', () => {
     renderLive(`/run/${conversationId}`);
     await waitFor(() => {
       expect(mocks.chatResult).toHaveBeenCalled();
-      expect(screen.getByText('Alpha / available')).toBeTruthy();
-      expect(screen.getByText('Beta / pending')).toBeTruthy();
+      // Results are announced once in chat (no duplicate result card).
+      expect(screen.getByText(/· Alpha \/ available/)).toBeTruthy();
+      expect(screen.getByText(/· Beta \/ pending/)).toBeTruthy();
     });
-    // F5 restore announces the final answer once (card + one assistant bubble).
     expect(screen.getAllByText(/결과 2건을 가져왔습니다/).length).toBe(1);
     expect(mocks.createExecution).not.toHaveBeenCalled();
   });
@@ -355,8 +383,8 @@ describe('AgentRunLive — chat phase 1', () => {
     await vi.advanceTimersByTimeAsync(2600);
 
     await waitFor(() => {
-      expect(screen.getByText('Alpha / available')).toBeTruthy();
-      expect(screen.getByText('Beta / pending')).toBeTruthy();
+      expect(screen.getByText(/· Alpha \/ available/)).toBeTruthy();
+      expect(screen.getByText(/· Beta \/ pending/)).toBeTruthy();
     });
     expect(screen.getAllByText(/결과 2건을 가져왔습니다/).length).toBe(1);
     expect(mocks.chatResult.mock.calls.length).toBeGreaterThanOrEqual(1);

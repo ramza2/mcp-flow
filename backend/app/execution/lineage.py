@@ -224,31 +224,64 @@ def _assert_top_level_tool_step_lineage(
             status_code=409,
         )
 
-    agent_request_static_only = (
-        execution.source_type == ExecutionSourceType.AGENT_REQUEST.value
-    )
-    if agent_request_static_only:
+    if execution.source_type == ExecutionSourceType.AGENT_REQUEST.value:
+        # Single-TOOL (and sequential tool_1): LITERAL/SECRET_REF only.
+        # Sequential tool_2 may use STEP_OUTPUT via ComplexToolStepConfigV1.
         try:
             tool_config = ToolStepConfigV1.model_validate(expected.config)
+        except Exception:
+            tool_config = None
+        if tool_config is not None:
+            if step.mcp_tool_version_id != tool_config.tool_version_id:
+                raise AppError(
+                    code="RESOURCE_CONFLICT",
+                    message="TOOL Step foundation lineage is inconsistent.",
+                    status_code=409,
+                )
+            bindings = _agent_bindings_as_plan(tool_config.bindings)
+            return ToolStepLineage(
+                tool_version_id=tool_config.tool_version_id,
+                bindings=bindings,
+                plan=plan,
+                plan_step=plan_step,
+                agent_request_static_only=True,
+            )
+        if len(plan.steps) != 2:
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message="Execution TOOL Step config is invalid.",
+                status_code=409,
+            )
+        try:
+            complex_cfg = ComplexToolStepConfigV1.model_validate(expected.config)
         except Exception as exc:
             raise AppError(
                 code="RESOURCE_CONFLICT",
                 message="Execution TOOL Step config is invalid.",
                 status_code=409,
             ) from exc
-        if step.mcp_tool_version_id != tool_config.tool_version_id:
+        if step.mcp_tool_version_id != complex_cfg.tool_version_id:
             raise AppError(
                 code="RESOURCE_CONFLICT",
                 message="TOOL Step foundation lineage is inconsistent.",
                 status_code=409,
             )
-        bindings = _agent_bindings_as_plan(tool_config.bindings)
+        for binding in complex_cfg.bindings.values():
+            if getattr(binding, "kind", None) != BindingKind.STEP_OUTPUT:
+                raise AppError(
+                    code="RESOURCE_CONFLICT",
+                    message=(
+                        "AgentRequest sequential companion TOOL bindings must be "
+                        "STEP_OUTPUT only."
+                    ),
+                    status_code=409,
+                )
         return ToolStepLineage(
-            tool_version_id=tool_config.tool_version_id,
-            bindings=bindings,
+            tool_version_id=complex_cfg.tool_version_id,
+            bindings=dict(complex_cfg.bindings),
             plan=plan,
             plan_step=plan_step,
-            agent_request_static_only=True,
+            agent_request_static_only=False,
         )
 
     try:

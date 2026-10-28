@@ -16,10 +16,15 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agent.sequential_readonly_pair import (
+    DETERMINISTIC_TOOL_STEP_ID_2,
+    assert_usable_sequential_handoff_values,
+)
 from app.approval.evidence import find_valid_approved_evidence
 from app.approval.wait import ApprovalWaitOutcome, ApprovalWaitService
 from app.core.errors import AppError
 from app.domain.enums import (
+    BindingKind,
     ExecutionSourceType,
     ExecutionStatus,
     StepAttemptStatus,
@@ -185,6 +190,21 @@ class ToolStepAttemptService:
             bindings=lineage.bindings,
             plan=lineage.plan,
         )
+        # AgentRequest sequential tool_2: do not call MCP with empty/null id
+        # handoffs (e.g. empty pets list → missing/null pets[0].id).
+        if (
+            execution.source_type == ExecutionSourceType.AGENT_REQUEST.value
+            and step.step_key == DETERMINISTIC_TOOL_STEP_ID_2
+            and len(lineage.plan.steps) == 2
+        ):
+            handoff_params = {
+                name
+                for name, binding in lineage.bindings.items()
+                if getattr(binding, "kind", None) == BindingKind.STEP_OUTPUT
+            }
+            assert_usable_sequential_handoff_values(
+                resolved_input, handoff_params=handoff_params
+            )
         # Retry/replay pinning: never silently rewrite resolved_input.
         if step.resolved_input is not None and step.resolved_input != resolved_input:
             raise AppError(

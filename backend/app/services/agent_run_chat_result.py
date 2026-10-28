@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from sqlalchemy import select
@@ -22,6 +22,7 @@ from app.mcp.contracts import NormalizedToolResult
 from app.models.execution import Execution, ExecutionStep
 from app.models.mcp import MCPTool, MCPToolVersion
 from app.repositories.agent_request import AgentRequestRepository
+from app.schemas.execution_plan import ExecutionPlanV1
 
 # Chat display budget — tighter than persistence result_inline_max_bytes.
 CHAT_RESULT_MAX_BYTES = 32_768
@@ -46,6 +47,13 @@ class ChatDisplayItem:
 
 
 @dataclass(frozen=True, slots=True)
+class ChatStepStatus:
+    step_key: str
+    status: str
+    tool_name: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class AgentRunChatResult:
     agent_request_id: uuid.UUID
     execution_id: uuid.UUID | None
@@ -56,6 +64,7 @@ class AgentRunChatResult:
     display_items: list[ChatDisplayItem]
     summary_text: str | None
     truncated: bool
+    steps: list[ChatStepStatus] = field(default_factory=list)
 
 
 def _utf8_json_size(value: Any) -> int:
@@ -99,11 +108,36 @@ def _extract_pets_list(structured: dict[str, Any]) -> list[Any] | None:
     return nested
 
 
+def _extract_single_pet(structured: dict[str, Any]) -> dict[str, Any] | None:
+    """Return a single pet object from direct or Factory body shapes."""
+    if _is_factory_runtime_wrapper(structured):
+        if structured.get("ok") is not True:
+            return None
+        http_status = structured.get("http_status")
+        if isinstance(http_status, int) and not (200 <= http_status < 300):
+            return None
+        body = structured.get("body")
+        if isinstance(body, dict) and isinstance(body.get("name"), str):
+            return body
+        return None
+    if isinstance(structured.get("name"), str) and (
+        "status" in structured or "id" in structured
+    ):
+        return structured
+    pet = structured.get("pet")
+    if isinstance(pet, dict) and isinstance(pet.get("name"), str):
+        return pet
+    return None
+
+
 def _project_pets(structured: Any) -> list[ChatDisplayItem] | None:
-    """Allowlisted name/status rows from direct pets or Factory body.pets."""
+    """Allowlisted name/status rows from pets list or a single pet object."""
     if not isinstance(structured, dict):
         return None
     pets = _extract_pets_list(structured)
+    if pets is None:
+        single = _extract_single_pet(structured)
+        pets = [single] if single is not None else None
     if pets is None:
         return None
     items: list[ChatDisplayItem] = []
@@ -119,7 +153,7 @@ def _project_pets(structured: Any) -> list[ChatDisplayItem] | None:
         items.append(
             ChatDisplayItem(name=name.strip()[:200], status=status.strip()[:64])
         )
-    return items
+    return items or None
 
 
 def _schema_validation_payload(structured: Any) -> Any:
@@ -175,6 +209,8 @@ class AgentRunChatResultService:
                 truncated=False,
             )
 
+        step_statuses = await self._tool_step_statuses(execution)
+
         if execution.status not in _TERMINAL_STATUSES:
             return AgentRunChatResult(
                 agent_request_id=request.id,
@@ -186,6 +222,7 @@ class AgentRunChatResultService:
                 display_items=[],
                 summary_text=self._status_summary(execution.status),
                 truncated=False,
+                steps=step_statuses,
             )
 
         if execution.status not in _SUCCESS_STATUSES:
@@ -199,9 +236,10 @@ class AgentRunChatResultService:
                 display_items=[],
                 summary_text=self._failure_summary(execution),
                 truncated=False,
+                steps=step_statuses,
             )
 
-        step = await self._primary_tool_step(execution.id)
+        step = await self._response_tool_step(execution)
         if step is None:
             return AgentRunChatResult(
                 agent_request_id=request.id,
@@ -213,6 +251,7 @@ class AgentRunChatResultService:
                 display_items=[],
                 summary_text="실행은 끝났지만 표시할 Tool 결과가 없습니다.",
                 truncated=False,
+                steps=step_statuses,
             )
 
         tool_name = await self._tool_display_name(step.mcp_tool_version_id)
@@ -228,6 +267,7 @@ class AgentRunChatResultService:
                 display_items=[],
                 summary_text="Tool 응답이 비어 있습니다.",
                 truncated=False,
+                steps=step_statuses,
             )
 
         if not isinstance(inline, dict):
@@ -241,6 +281,7 @@ class AgentRunChatResultService:
                 display_items=[],
                 summary_text="Tool 응답 형식을 확인할 수 없습니다.",
                 truncated=False,
+                steps=step_statuses,
             )
 
         # Mask sensitive keys before any further projection / size checks.
@@ -256,6 +297,7 @@ class AgentRunChatResultService:
                 display_items=[],
                 summary_text="결과를 안전하게 표시할 수 없습니다.",
                 truncated=False,
+                steps=step_statuses,
             )
 
         if _utf8_json_size(sanitized) > CHAT_RESULT_MAX_BYTES:
@@ -272,6 +314,7 @@ class AgentRunChatResultService:
                     "실행 상세에서 요약을 확인하세요."
                 ),
                 truncated=True,
+                steps=step_statuses,
             )
 
         structured = sanitized.get("structured_content")
@@ -289,6 +332,7 @@ class AgentRunChatResultService:
                     display_items=[],
                     summary_text="외부 조회가 실패하여 결과를 표시하지 않습니다.",
                     truncated=False,
+                    steps=step_statuses,
                 )
 
         output_schema = await self._output_schema(step.mcp_tool_version_id)
@@ -316,6 +360,7 @@ class AgentRunChatResultService:
                     display_items=[],
                     summary_text="Tool 응답이 스키마와 맞지 않아 표시하지 않습니다.",
                     truncated=False,
+                    steps=step_statuses,
                 )
 
         pets = _project_pets(structured)
@@ -333,6 +378,7 @@ class AgentRunChatResultService:
                     "조회 항목이 없습니다."
                 ),
                 truncated=False,
+                steps=step_statuses,
             )
 
         return AgentRunChatResult(
@@ -345,6 +391,7 @@ class AgentRunChatResultService:
             display_items=pets,
             summary_text=f"{tool_name or '조회'} 결과 {len(pets)}건을 가져왔습니다.",
             truncated=False,
+            steps=step_statuses,
         )
 
     async def _latest_owned_execution(
@@ -364,7 +411,28 @@ class AgentRunChatResultService:
         )
         return (await self._session.execute(stmt)).scalar_one_or_none()
 
-    async def _primary_tool_step(self, execution_id: uuid.UUID) -> ExecutionStep | None:
+    async def _response_tool_step(self, execution: Execution) -> ExecutionStep | None:
+        """Prefer Plan completion.response_step_ids; else first TOOL by sequence."""
+        preferred_keys: list[str] = []
+        try:
+            plan = ExecutionPlanV1.model_validate(execution.plan_snapshot)
+            preferred_keys = [
+                sid for sid in plan.completion.response_step_ids if isinstance(sid, str)
+            ]
+        except Exception:
+            preferred_keys = []
+
+        steps = await self._list_tool_steps(execution.id)
+        if not steps:
+            return None
+        by_key = {s.step_key: s for s in steps}
+        for key in preferred_keys:
+            step = by_key.get(key)
+            if step is not None:
+                return step
+        return steps[0]
+
+    async def _list_tool_steps(self, execution_id: uuid.UUID) -> list[ExecutionStep]:
         stmt = (
             select(ExecutionStep)
             .where(
@@ -372,9 +440,24 @@ class AgentRunChatResultService:
                 ExecutionStep.step_type == "TOOL",
             )
             .order_by(ExecutionStep.sequence_hint.asc(), ExecutionStep.step_key.asc())
-            .limit(1)
         )
-        return (await self._session.execute(stmt)).scalar_one_or_none()
+        return list((await self._session.execute(stmt)).scalars().all())
+
+    async def _tool_step_statuses(
+        self, execution: Execution
+    ) -> list[ChatStepStatus]:
+        steps = await self._list_tool_steps(execution.id)
+        out: list[ChatStepStatus] = []
+        for step in steps:
+            tool_name = await self._tool_display_name(step.mcp_tool_version_id)
+            out.append(
+                ChatStepStatus(
+                    step_key=step.step_key,
+                    status=step.status,
+                    tool_name=tool_name,
+                )
+            )
+        return out
 
     async def _tool_display_name(
         self, tool_version_id: uuid.UUID | None

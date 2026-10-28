@@ -18,20 +18,32 @@ async def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+_PETS = [
+    {"id": 1, "name": "Alpha", "status": "available"},
+    {"id": 2, "name": "Beta", "status": "pending"},
+]
+
+
 @app.get("/pets")
 async def list_pets(
     status: str | None = Query(default=None),
     limit: int | None = Query(default=None),
 ) -> JSONResponse:
-    pets = [
-        {"id": 1, "name": "Alpha", "status": "available"},
-        {"id": 2, "name": "Beta", "status": "pending"},
-    ]
+    pets = list(_PETS)
     if status is not None:
         pets = [p for p in pets if p["status"] == status]
     if limit is not None:
         pets = pets[: max(0, int(limit))]
     return JSONResponse(content={"pets": pets})
+
+
+@app.get("/pets/{pet_id}")
+async def get_pet(pet_id: int) -> JSONResponse:
+    """READ_ONLY companion for sequential AgentRequest pair (list → detail)."""
+    for pet in _PETS:
+        if pet["id"] == pet_id:
+            return JSONResponse(content=pet)
+    return JSONResponse(status_code=404, content={"detail": "pet not found"})
 
 
 @app.post("/pets")

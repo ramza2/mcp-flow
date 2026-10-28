@@ -597,6 +597,7 @@ selected immutable ToolVersion
 +
 complete ParameterBuildRun bindings
 → deterministic single TOOL step Plan
+  (optional: sequential READ_ONLY tool_1 → tool_2 with STEP_OUTPUT)
 → durable plan_generation_runs / plan_generation_tool_refs
 → PLANNING → VALIDATING
 ```
@@ -608,9 +609,18 @@ complete ParameterBuildRun bindings
 - Canonical Step Type 집합(`TOOL`/`CONDITION`/`JOIN`/`APPROVAL`/`LOOP`)은 유지한다.
 - AgentRequest path의 `inputs`는 `{}`이다 (`PLAN_INPUT`을 새로 만들지 않는다).
 - TOOL Step `config`는 정확히 `tool_version_id` + `bindings`만 포함한다.
-- `bindings`는 executable `BindingValue`(`LITERAL` / `SECRET_REF`)만 포함하며
+- 기본 `tool_1` bindings는 executable `BindingValue`(`LITERAL` / `SECRET_REF`)만 포함하며
   Parameter provenance는 `PlanGenerationRun → ParameterBuildRun.bindings_snapshot`으로 추적한다.
 - step id는 deterministic `tool_1`, name은 `Tool Step 1`이다.
+- AUTO_SELECT + 양쪽 `READ_ONLY`(confirmation/approval 없음)이고
+  StructuredRequest가 후속 상세 조회 목적을 명확히 나타내며,
+  schema-compatible companion candidate가 **정확히 1개**이고
+  primary `pets.items.properties.id` 타입이 companion id 입력과 호환될 때만
+  optional `tool_2`(depends_on=`[tool_1]`, `STEP_OUTPUT` bindings only,
+  response_step_ids=`[tool_2]`)를 추가한다.
+  후보 0/복수·목록-only·타입 불일치·불명확 intent는 단일 TOOL로 fallback한다.
+  런타임 handoff id가 null/empty이면 tool_2 MCP 호출 전에 fail-closed한다.
+  이 경우 Execution.policy_snapshot은 `agent_request_sequential_policy.v1`이다.
 - Plan Validator / Execution / MCP Tool call / SecretResolver는 호출하지 않는다.
 
 ### 9.1.2 TOOL Step timeout draft fallback
@@ -1506,13 +1516,13 @@ Execution/ApprovalRequest 생성은 하지 않는다.
 PlanGenerationRun / plan_hash / ExecutionPlanV1 재검증
 → ParameterBuildRun / binding projection 정합성
 → ToolRef projection
-→ single-TOOL AgentRequest foundation shape
+→ single-TOOL 또는 sequential READ_ONLY pair(tool_1→tool_2) AgentRequest foundation shape
 → DAG / dependency / limits
 → ToolVersion / Tool / Server current availability
 → requester Permission + MCP_TOOL ResourceGrant
 → AgentToolGrant ALLOW
-→ MCPToolPolicy (필수) + timeout 정합성
-→ ApprovalPolicy (requires_approval=true일 때)
+→ MCPToolPolicy (필수) + timeout 정합성 (pair는 단계별)
+→ ApprovalPolicy (requires_approval=true일 때; pair는 safe READ_ONLY만 허용)
 ```
 
 decision precedence:

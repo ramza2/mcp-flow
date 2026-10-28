@@ -1,6 +1,8 @@
 """Source-aware pinned ToolPolicy snapshot selection.
 
-AGENT_REQUEST keeps the existing single-TOOL ``Execution.policy_snapshot``.
+AGENT_REQUEST single-TOOL keeps the flat ``Execution.policy_snapshot``.
+AGENT_REQUEST sequential READ_ONLY pairs use
+``agent_request_sequential_policy.v1`` keyed by Plan TOOL step id.
 WORKFLOW_VERSION and SCHEDULE_OCCURRENCE use ``workflow_execution_policy.v1``
 keyed by Plan TOOL template id (including LOOP body templates via
 ``lineage.plan_step.id``). Do not introduce a separate Schedule policy schema.
@@ -11,11 +13,14 @@ from __future__ import annotations
 import uuid
 from typing import Any
 
+from app.agent.sequential_readonly_pair import AGENT_REQUEST_SEQUENTIAL_POLICY_SCHEMA
 from app.core.errors import AppError
 from app.domain.enums import AuthorableStepType, ExecutionSourceType
 from app.models.execution import Execution
 from app.schemas.execution_plan import (
+    DETERMINISTIC_TOOL_STEP_ID,
     ExecutionPlanV1,
+    ToolStepConfigV1,
     parse_complex_tool_step_config,
 )
 
@@ -24,6 +29,10 @@ _WORKFLOW_TOP_LEVEL_KEYS = frozenset(
     {"schema_version", "workflow_id", "workflow_version_id", "tool_steps"}
 )
 _WORKFLOW_ENTRY_KEYS = frozenset({"tool_version_id", "policy"})
+_AGENT_SEQ_TOP_LEVEL_KEYS = frozenset(
+    {"schema_version", "agent_version_id", "tool_steps"}
+)
+_AGENT_SEQ_ENTRY_KEYS = frozenset({"tool_version_id", "policy"})
 
 
 def get_expected_tool_policy_snapshot(
@@ -47,6 +56,13 @@ def get_expected_tool_policy_snapshot(
         )
 
     if execution.source_type == ExecutionSourceType.AGENT_REQUEST.value:
+        if snapshot.get("schema_version") == AGENT_REQUEST_SEQUENTIAL_POLICY_SCHEMA:
+            return _agent_sequential_step_policy(
+                execution,
+                snapshot=snapshot,
+                plan_step_id=plan_step_id,
+                tool_version_id=tool_version_id,
+            )
         return dict(snapshot)
 
     if execution.source_type in {
@@ -85,7 +101,7 @@ def _canonical_uuid_str(value: Any, *, field: str) -> str:
     if not isinstance(value, str):
         raise AppError(
             code="RESOURCE_CONFLICT",
-            message=f"Workflow policy_snapshot.{field} must be a UUID string.",
+            message=f"policy_snapshot.{field} must be a UUID string.",
             status_code=409,
         )
     try:
@@ -93,17 +109,203 @@ def _canonical_uuid_str(value: Any, *, field: str) -> str:
     except (TypeError, ValueError) as exc:
         raise AppError(
             code="RESOURCE_CONFLICT",
-            message=f"Workflow policy_snapshot.{field} is not a valid UUID.",
+            message=f"policy_snapshot.{field} is not a valid UUID.",
             status_code=409,
         ) from exc
     canonical = str(parsed)
     if value != canonical:
         raise AppError(
             code="RESOURCE_CONFLICT",
-            message=f"Workflow policy_snapshot.{field} must be a canonical UUID.",
+            message=f"policy_snapshot.{field} must be a canonical UUID.",
             status_code=409,
         )
     return canonical
+
+
+def _assert_agent_sequential_policy_lineage(
+    execution: Execution,
+    *,
+    snapshot: dict[str, Any],
+) -> dict[str, Any]:
+    """Validate agent_request_sequential_policy.v1 shape + tool_1/tool_2 projection."""
+    if set(snapshot.keys()) != _AGENT_SEQ_TOP_LEVEL_KEYS:
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message=(
+                "Agent sequential policy_snapshot must contain exactly "
+                "schema_version, agent_version_id, tool_steps."
+            ),
+            status_code=409,
+        )
+    if snapshot.get("schema_version") != AGENT_REQUEST_SEQUENTIAL_POLICY_SCHEMA:
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message="Agent sequential policy_snapshot schema_version mismatch.",
+            status_code=409,
+        )
+    if execution.agent_version_id is None:
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message="Agent sequential Execution missing agent_version_id.",
+            status_code=409,
+        )
+
+    try:
+        plan = ExecutionPlanV1.model_validate(execution.plan_snapshot)
+    except Exception as exc:
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message="Execution.plan_snapshot is invalid for sequential policy lineage.",
+            status_code=409,
+        ) from exc
+    if plan.source.type != "AGENT":
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message="Agent sequential policy requires Plan source type AGENT.",
+            status_code=409,
+        )
+    if len(plan.steps) != 2:
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message="Agent sequential policy requires exactly 2 TOOL steps.",
+            status_code=409,
+        )
+
+    snap_version = _canonical_uuid_str(
+        snapshot.get("agent_version_id"), field="agent_version_id"
+    )
+    if snap_version != str(execution.agent_version_id):
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message="Agent sequential policy_snapshot.agent_version_id mismatch.",
+            status_code=409,
+        )
+    if snap_version != str(plan.source.agent_version_id):
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message="Agent sequential policy agent_version_id Plan mismatch.",
+            status_code=409,
+        )
+
+    tool_steps = snapshot.get("tool_steps")
+    if not isinstance(tool_steps, dict):
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message="Agent sequential policy_snapshot.tool_steps is malformed.",
+            status_code=409,
+        )
+
+    plan_tool_steps = [
+        step for step in plan.steps if step.type == AuthorableStepType.TOOL
+    ]
+    plan_ids = {step.id for step in plan_tool_steps}
+    snap_ids = set(tool_steps.keys())
+    if snap_ids != plan_ids:
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message=(
+                "Agent sequential policy_snapshot.tool_steps must exactly match "
+                "all Plan TOOL step ids."
+            ),
+            status_code=409,
+        )
+
+    for index, step in enumerate(plan_tool_steps):
+        entry = tool_steps.get(step.id)
+        if not isinstance(entry, dict):
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message=f"Agent sequential policy entry missing for {step.id!r}.",
+                status_code=409,
+            )
+        if set(entry.keys()) != _AGENT_SEQ_ENTRY_KEYS:
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message=(
+                    f"Agent sequential policy entry for {step.id!r} must contain "
+                    f"exactly tool_version_id and policy."
+                ),
+                status_code=409,
+            )
+        try:
+            if index == 0 and step.id == DETERMINISTIC_TOOL_STEP_ID:
+                cfg_tool_id = ToolStepConfigV1.model_validate(
+                    step.config
+                ).tool_version_id
+            else:
+                cfg_tool_id = parse_complex_tool_step_config(step.config).tool_version_id
+        except Exception as exc:
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message=f"Plan TOOL config invalid for plan_step_id={step.id!r}.",
+                status_code=409,
+            ) from exc
+        entry_tool = _canonical_uuid_str(
+            entry.get("tool_version_id"),
+            field=f"tool_steps[{step.id}].tool_version_id",
+        )
+        if entry_tool != str(cfg_tool_id):
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message=(
+                    f"Agent sequential policy tool_version_id mismatch for "
+                    f"plan_step_id={step.id!r}."
+                ),
+                status_code=409,
+            )
+        if not isinstance(entry.get("policy"), dict):
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message=(
+                    f"Agent sequential policy entry.policy missing for "
+                    f"plan_step_id={step.id!r}."
+                ),
+                status_code=409,
+            )
+
+    return tool_steps
+
+
+def _agent_sequential_step_policy(
+    execution: Execution,
+    *,
+    snapshot: dict[str, Any],
+    plan_step_id: str,
+    tool_version_id: uuid.UUID,
+) -> dict[str, Any]:
+    tool_steps = _assert_agent_sequential_policy_lineage(
+        execution, snapshot=snapshot
+    )
+    entry = tool_steps.get(plan_step_id)
+    if not isinstance(entry, dict):
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message=(
+                f"Agent sequential policy entry missing for "
+                f"plan_step_id={plan_step_id!r}."
+            ),
+            status_code=409,
+        )
+    if str(entry.get("tool_version_id")) != str(tool_version_id):
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message=(
+                f"Agent sequential policy tool_version_id mismatch for "
+                f"plan_step_id={plan_step_id!r}."
+            ),
+            status_code=409,
+        )
+    policy = entry.get("policy")
+    if not isinstance(policy, dict):
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message=(
+                f"Agent sequential policy entry.policy missing for "
+                f"plan_step_id={plan_step_id!r}."
+            ),
+            status_code=409,
+        )
+    return dict(policy)
 
 
 def _assert_workflow_policy_lineage(
