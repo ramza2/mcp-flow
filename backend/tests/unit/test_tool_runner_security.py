@@ -879,3 +879,180 @@ async def test_wrong_lease_token_never_calls_mcp(
     )
     assert outcome.mcp_called is False
     assert outcome.reason == "LEASE_MISMATCH"
+
+
+# ---------------------------------------------------------------------------
+# Factory Runtime envelope: validate HTTP body, keep result_inline wrapper
+# ---------------------------------------------------------------------------
+
+
+_PETS_OUTPUT_SCHEMA = {
+    "type": "object",
+    "required": ["pets"],
+    "properties": {
+        "pets": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "integer"},
+                    "name": {"type": "string"},
+                    "status": {"type": "string"},
+                },
+                "required": ["id", "name", "status"],
+            },
+        }
+    },
+}
+
+
+def _mark_factory_server(server: Any) -> None:
+    cfg = dict(server.transport_config or {})
+    cfg["factory_publish"] = True
+    cfg["source"] = "TOOL_FACTORY_PUBLISH"
+    server.transport_config = cfg
+
+
+@pytest.mark.asyncio
+async def test_factory_imported_envelope_body_validates_and_keeps_inline_path(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Factory tools/call wraps HTTP JSON under body; STEP_OUTPUT uses /body/…."""
+    _install_no_side_effects(monkeypatch)
+
+    def _set_pets_schema(tool_version: Any) -> None:
+        tool_version.output_schema = _PETS_OUTPUT_SCHEMA
+
+    execution_id, worker_id, lease_token = await _claim_ready_execution(
+        db_session_factory,
+        mutate_tool_version=_set_pets_schema,
+        mutate_server=_mark_factory_server,
+    )
+
+    envelope = {
+        "ok": True,
+        "http_status": 200,
+        "latency_ms": 5,
+        "protocol_version": "2026-07-28",
+        "body": {
+            "pets": [{"id": 1, "name": "Alpha", "status": "available"}],
+        },
+    }
+    client = _StubCurrentMCPClient(
+        result=NormalizedToolResult(
+            protocol_success=True,
+            tool_error=False,
+            structured_content=envelope,
+        )
+    )
+    runner = McpToolRunner(
+        session_factory=db_session_factory,
+        mcp_client=client,
+        secret_resolver_factory=_unimplemented_resolver_factory,
+        lease_seconds=60,
+        result_inline_max_bytes=256_000,
+    )
+    outcome = await runner.run_claimed_execution(
+        execution_id=execution_id, worker_id=worker_id, lease_token=lease_token
+    )
+    assert outcome.terminal_status == StepStatus.SUCCEEDED.value
+
+    async with db_session_factory() as session:
+        step = (await ExecutionRepository(session).list_steps(execution_id))[0]
+        assert step.status == StepStatus.SUCCEEDED.value
+        assert step.result_inline is not None
+        structured = step.result_inline.get("structured_content")
+        assert isinstance(structured, dict)
+        assert structured.get("ok") is True
+        assert structured["body"]["pets"][0]["id"] == 1
+        # Sequential pair Factory STEP_OUTPUT pointer target.
+        assert structured["body"]["pets"][0]["name"] == "Alpha"
+
+
+@pytest.mark.asyncio
+async def test_factory_imported_invalid_body_fails_closed(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_no_side_effects(monkeypatch)
+
+    def _set_pets_schema(tool_version: Any) -> None:
+        tool_version.output_schema = _PETS_OUTPUT_SCHEMA
+
+    execution_id, worker_id, lease_token = await _claim_ready_execution(
+        db_session_factory,
+        mutate_tool_version=_set_pets_schema,
+        mutate_server=_mark_factory_server,
+    )
+    client = _StubCurrentMCPClient(
+        result=NormalizedToolResult(
+            protocol_success=True,
+            tool_error=False,
+            structured_content={
+                "ok": True,
+                "http_status": 200,
+                "body": {"pets": "bad"},
+            },
+        )
+    )
+    runner = McpToolRunner(
+        session_factory=db_session_factory,
+        mcp_client=client,
+        secret_resolver_factory=_unimplemented_resolver_factory,
+        lease_seconds=60,
+        result_inline_max_bytes=256_000,
+    )
+    outcome = await runner.run_claimed_execution(
+        execution_id=execution_id, worker_id=worker_id, lease_token=lease_token
+    )
+    assert outcome.terminal_status == StepStatus.FAILED.value
+    async with db_session_factory() as session:
+        step = (await ExecutionRepository(session).list_steps(execution_id))[0]
+        assert step.error_code == "RESULT_SCHEMA_INVALID"
+        assert step.result_inline is None
+        assert "bad" not in (step.error_message or "")
+
+
+@pytest.mark.asyncio
+async def test_non_factory_envelope_still_schema_invalid(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without Factory provenance, envelope must not pass pets output_schema."""
+    _install_no_side_effects(monkeypatch)
+
+    def _set_pets_schema(tool_version: Any) -> None:
+        tool_version.output_schema = _PETS_OUTPUT_SCHEMA
+
+    execution_id, worker_id, lease_token = await _claim_ready_execution(
+        db_session_factory,
+        mutate_tool_version=_set_pets_schema,
+    )
+    client = _StubCurrentMCPClient(
+        result=NormalizedToolResult(
+            protocol_success=True,
+            tool_error=False,
+            structured_content={
+                "ok": True,
+                "http_status": 200,
+                "body": {
+                    "pets": [{"id": 1, "name": "Alpha", "status": "available"}],
+                },
+            },
+        )
+    )
+    runner = McpToolRunner(
+        session_factory=db_session_factory,
+        mcp_client=client,
+        secret_resolver_factory=_unimplemented_resolver_factory,
+        lease_seconds=60,
+        result_inline_max_bytes=256_000,
+    )
+    outcome = await runner.run_claimed_execution(
+        execution_id=execution_id, worker_id=worker_id, lease_token=lease_token
+    )
+    assert outcome.terminal_status == StepStatus.FAILED.value
+    async with db_session_factory() as session:
+        step = (await ExecutionRepository(session).list_steps(execution_id))[0]
+        assert step.error_code == "RESULT_SCHEMA_INVALID"
