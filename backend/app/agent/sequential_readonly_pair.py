@@ -3,6 +3,9 @@
 Builds an optional second TOOL step that depends on ``tool_1`` and receives
 inputs via ``STEP_OUTPUT`` bindings. Reuses Execution Plan v1 + runtime
 ``STEP_OUTPUT`` resolution; does not invent new Step Types or Binding kinds.
+
+Pair emission is opt-in only when StructuredRequest clearly asks for a
+follow-up detail lookup and exactly one schema-compatible companion exists.
 """
 
 from __future__ import annotations
@@ -11,11 +14,13 @@ from dataclasses import dataclass
 from typing import Any
 from uuid import UUID
 
+from app.core.errors import AppError
 from app.domain.enums import BindingKind, RiskClass
 from app.schemas.execution_plan import (
     DETERMINISTIC_TOOL_STEP_ID,
     DETERMINISTIC_TOOL_STEP_NAME,
 )
+from app.schemas.structured_request import StructuredRequestV1
 
 DETERMINISTIC_TOOL_STEP_ID_2 = "tool_2"
 DETERMINISTIC_TOOL_STEP_NAME_2 = "Tool Step 2"
@@ -37,6 +42,42 @@ _ID_PARAM_NAMES = frozenset(
     }
 )
 
+# Explicit follow-up detail signals (StructuredRequest fields + request_text).
+_DETAIL_SIGNAL_TOKENS = (
+    "detail",
+    "details",
+    "상세",
+    "by_id",
+    "by-id",
+    "byid",
+    "get_by_id",
+    "getbyid",
+    "lookup_one",
+    "lookupone",
+    "first_item",
+    "first-item",
+    "첫 번째",
+    "첫번째",
+    "첫번",
+    "단건",
+    "pet.detail",
+    "pets.detail",
+    "item.detail",
+    "get_pet",
+    "getpet",
+)
+
+# Plural / list-only intent that must not alone trigger a pair.
+_LIST_ONLY_TOKENS = (
+    "list",
+    "lists",
+    "목록",
+    "리스트",
+    "find_all",
+    "findall",
+    "search_all",
+)
+
 
 @dataclass(frozen=True, slots=True)
 class SequentialHandoff:
@@ -44,6 +85,8 @@ class SequentialHandoff:
 
     target_param: str
     from_path: str  # JSON Pointer into Step.result_inline
+    source_json_type: str
+    target_json_type: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,12 +117,73 @@ def _schema_required(schema: Any) -> list[str]:
     return [name for name in required if isinstance(name, str)]
 
 
-def _has_pets_array(schema: Any) -> bool:
-    props = _schema_properties(schema)
+def _json_type(schema: Any) -> str | None:
+    if not isinstance(schema, dict):
+        return None
+    raw = schema.get("type")
+    if isinstance(raw, str) and raw.strip():
+        return raw.strip()
+    return None
+
+
+def _pets_item_id_schema(primary_output_schema: Any) -> dict[str, Any] | None:
+    """Return ``pets.items.properties.id`` schema object when present."""
+    props = _schema_properties(primary_output_schema)
     pets = props.get("pets")
-    if not isinstance(pets, dict):
+    if not isinstance(pets, dict) or pets.get("type") != "array":
+        return None
+    items = pets.get("items")
+    if not isinstance(items, dict):
+        return None
+    item_props = items.get("properties")
+    if not isinstance(item_props, dict):
+        return None
+    id_schema = item_props.get("id")
+    return id_schema if isinstance(id_schema, dict) else None
+
+
+def _types_compatible(source_type: str, target_type: str) -> bool:
+    if source_type == target_type:
+        return True
+    # JSON Schema number/integer widenings used by OpenAPI pets ids.
+    if source_type == "integer" and target_type == "number":
+        return True
+    if source_type == "number" and target_type == "integer":
+        # Narrowing is unsafe for auto-wiring without runtime coercion rules.
         return False
-    return pets.get("type") == "array"
+    return False
+
+
+def requests_sequential_detail_lookup(structured: StructuredRequestV1) -> bool:
+    """True only when StructuredRequest clearly asks for a follow-up detail.
+
+    Unclear / list-only / clarifying requests fall back to single TOOL.
+    Uses existing StructuredRequest fields only (no new schema keys).
+    Structured fields (intent / expected_outputs / capabilities) take priority
+    over free-form ``request_text`` alone.
+    """
+    if structured.needs_clarification or structured.ambiguities:
+        return False
+
+    structured_blob = " ".join(
+        [
+            structured.intent,
+            " ".join(structured.expected_outputs),
+            " ".join(structured.required_capabilities),
+            " ".join(structured.constraints),
+        ]
+    ).lower()
+    text_l = structured.request_text.lower()
+
+    if any(token in structured_blob for token in _DETAIL_SIGNAL_TOKENS):
+        return True
+
+    # List-classified structured signals never upgrade to a pair from text alone.
+    if any(token in structured_blob for token in _LIST_ONLY_TOKENS):
+        return False
+
+    # Neutral structured fields may still confirm via explicit first/detail text.
+    return any(token in text_l for token in _DETAIL_SIGNAL_TOKENS)
 
 
 def discover_id_handoffs(
@@ -90,12 +194,19 @@ def discover_id_handoffs(
 ) -> list[SequentialHandoff] | None:
     """Map companion required id-like params to primary pets[0].id output.
 
-    Returns None when the pair is not a unique, safe READ_ONLY handoff.
+    Returns None when the pair is not a unique, type-safe READ_ONLY handoff.
+    Requires ``pets.items.properties.id`` with a JSON type compatible with the
+    companion id input schema.
     """
     required = _schema_required(companion_input_schema)
     if not required:
         return None
-    if not _has_pets_array(primary_output_schema):
+
+    id_schema = _pets_item_id_schema(primary_output_schema)
+    if id_schema is None:
+        return None
+    source_type = _json_type(id_schema)
+    if source_type is None:
         return None
 
     id_params = [name for name in required if _normalize_param(name) in _ID_PARAM_NAMES]
@@ -106,11 +217,24 @@ def discover_id_handoffs(
     if set(required) != {id_params[0]}:
         return None
 
+    companion_props = _schema_properties(companion_input_schema)
+    target_schema = companion_props.get(id_params[0])
+    target_type = _json_type(target_schema)
+    if target_type is None or not _types_compatible(source_type, target_type):
+        return None
+
     if uses_factory_envelope:
         path = "/structured_content/body/pets/0/id"
     else:
         path = "/structured_content/pets/0/id"
-    return [SequentialHandoff(target_param=id_params[0], from_path=path)]
+    return [
+        SequentialHandoff(
+            target_param=id_params[0],
+            from_path=path,
+            source_json_type=source_type,
+            target_json_type=target_type,
+        )
+    ]
 
 
 def companion_step_bindings(
@@ -192,3 +316,54 @@ def build_agent_request_sequential_policy_snapshot(
         "agent_version_id": str(agent_version_id),
         "tool_steps": tool_steps,
     }
+
+
+def assert_usable_sequential_handoff_values(
+    resolved_input: dict[str, Any],
+    *,
+    handoff_params: set[str] | frozenset[str],
+) -> None:
+    """Fail closed before MCP when a STEP_OUTPUT id handoff is empty/null.
+
+    Missing JSON Pointer paths already fail in RuntimeBindingResolver; this
+    rejects null / blank / empty-collection values that would otherwise call
+    tool_2 with an unusable id.
+    """
+    for name in handoff_params:
+        if name not in resolved_input:
+            raise AppError(
+                code="EXECUTION_PRECONDITION_FAILED",
+                message=(
+                    f"순차 pair tool_2 handoff {name!r}가 해석되지 않아 "
+                    f"상세 조회를 시작하지 않습니다."
+                ),
+                status_code=409,
+            )
+        value = resolved_input[name]
+        if value is None:
+            raise AppError(
+                code="EXECUTION_PRECONDITION_FAILED",
+                message=(
+                    f"순차 pair tool_2 handoff {name!r}가 null이라 "
+                    f"상세 조회를 시작하지 않습니다."
+                ),
+                status_code=409,
+            )
+        if isinstance(value, str) and not value.strip():
+            raise AppError(
+                code="EXECUTION_PRECONDITION_FAILED",
+                message=(
+                    f"순차 pair tool_2 handoff {name!r}가 비어 있어 "
+                    f"상세 조회를 시작하지 않습니다."
+                ),
+                status_code=409,
+            )
+        if isinstance(value, (list, dict)) and len(value) == 0:
+            raise AppError(
+                code="EXECUTION_PRECONDITION_FAILED",
+                message=(
+                    f"순차 pair tool_2 handoff {name!r}가 비어 있어 "
+                    f"상세 조회를 시작하지 않습니다."
+                ),
+                status_code=409,
+            )

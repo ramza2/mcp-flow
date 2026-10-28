@@ -25,6 +25,7 @@ from app.agent.sequential_readonly_pair import (
     build_sequential_pair_steps,
     discover_id_handoffs,
     is_safe_readonly_policy,
+    requests_sequential_detail_lookup,
 )
 from app.core.errors import AppError
 from app.domain.enums import (
@@ -259,6 +260,7 @@ class PlanGeneratorService:
 
         sequential = await self._try_sequential_readonly_pair(
             request=request,
+            structured=structured,
             selection=selection,
             primary_version=tool_version,
             primary_policy=policy,
@@ -383,6 +385,7 @@ class PlanGeneratorService:
         self,
         *,
         request: AgentRequest,
+        structured: StructuredRequestV1,
         selection: Any,
         primary_version: Any,
         primary_policy: Any,
@@ -390,10 +393,14 @@ class PlanGeneratorService:
         primary_timeout_seconds: int,
         grants: list[Any],
     ) -> tuple[list[dict[str, Any]], UUID, int] | None:
-        """Optionally build tool_1 → tool_2 when a unique safe companion exists."""
+        """Optionally build tool_1 → tool_2 when detail intent + unique companion."""
         if selection.decision != "AUTO_SELECT":
             return None
         if not is_safe_readonly_policy(primary_policy):
+            return None
+        # Fail closed to single TOOL unless StructuredRequest clearly asks for
+        # a follow-up detail lookup (list-only requests stay 1-step).
+        if not requests_sequential_detail_lookup(structured):
             return None
 
         primary_tool = await self._tools.get(primary_version.mcp_tool_id)
@@ -409,6 +416,7 @@ class PlanGeneratorService:
             if g.effect == AgentToolGrantEffect.ALLOW.value
         }
 
+        matches: list[tuple[Any, Any, list[Any], int]] = []
         for candidate in candidates:
             if candidate.tool_version_id == primary_version.id:
                 continue
@@ -435,24 +443,37 @@ class PlanGeneratorService:
                 companion_timeout = max(1, math.ceil(companion_policy.timeout_ms / 1000))
             else:
                 companion_timeout = DEFAULT_TOOL_TIMEOUT_SECONDS
-            steps = build_sequential_pair_steps(
-                primary_tool_version_id=primary_version.id,
-                primary_bindings=primary_bindings,
-                primary_timeout_seconds=primary_timeout_seconds,
-                companion_tool_version_id=companion.id,
-                companion_timeout_seconds=companion_timeout,
-                handoffs=handoffs,
-            )
-            logger.info(
-                "plan_generator sequential_pair agent_request_id=%s "
-                "primary=%s companion=%s handoffs=%s",
-                request.id,
-                primary_version.id,
-                companion.id,
-                [h.target_param for h in handoffs],
-            )
-            return steps, companion.id, companion_timeout
-        return None
+            matches.append((companion, companion_policy, handoffs, companion_timeout))
+
+        # Exactly one compatible companion — never pick arbitrarily among many.
+        if len(matches) != 1:
+            if matches:
+                logger.info(
+                    "plan_generator sequential_pair skipped agent_request_id=%s "
+                    "reason=multiple_companions count=%s",
+                    request.id,
+                    len(matches),
+                )
+            return None
+
+        companion, _policy, handoffs, companion_timeout = matches[0]
+        steps = build_sequential_pair_steps(
+            primary_tool_version_id=primary_version.id,
+            primary_bindings=primary_bindings,
+            primary_timeout_seconds=primary_timeout_seconds,
+            companion_tool_version_id=companion.id,
+            companion_timeout_seconds=companion_timeout,
+            handoffs=handoffs,
+        )
+        logger.info(
+            "plan_generator sequential_pair agent_request_id=%s "
+            "primary=%s companion=%s handoffs=%s",
+            request.id,
+            primary_version.id,
+            companion.id,
+            [h.target_param for h in handoffs],
+        )
+        return steps, companion.id, companion_timeout
 
     def _load_structured_request(self, request: AgentRequest) -> StructuredRequestV1:
         if request.structured_request_version != STRUCTURED_REQUEST_SCHEMA_VERSION:

@@ -4,17 +4,22 @@ from __future__ import annotations
 
 import uuid
 
+import pytest
 from app.agent.sequential_readonly_pair import (
     AGENT_REQUEST_SEQUENTIAL_POLICY_SCHEMA,
     DETERMINISTIC_TOOL_STEP_ID_2,
+    assert_usable_sequential_handoff_values,
     build_agent_request_sequential_policy_snapshot,
     build_sequential_pair_steps,
     companion_step_bindings,
     discover_id_handoffs,
     is_safe_readonly_policy,
+    requests_sequential_detail_lookup,
 )
-from app.domain.enums import BindingKind, RiskClass
+from app.core.errors import AppError
+from app.domain.enums import BindingKind, ParameterProvenance, RiskClass
 from app.schemas.execution_plan import DETERMINISTIC_TOOL_STEP_ID
+from app.schemas.structured_request import StructuredRequestV1
 
 
 class _Policy:
@@ -30,13 +35,115 @@ class _Policy:
         self.requires_approval = requires_approval
 
 
+_PETS_OUTPUT = {
+    "type": "object",
+    "properties": {
+        "pets": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "integer"},
+                    "name": {"type": "string"},
+                    "status": {"type": "string"},
+                },
+            },
+        }
+    },
+    "required": ["pets"],
+}
+
+
+def _structured(
+    *,
+    request_text: str,
+    intent: str,
+    expected_outputs: list[str],
+    required_capabilities: list[str] | None = None,
+    ambiguities: list[str] | None = None,
+) -> StructuredRequestV1:
+    missing: list[str] = []
+    amb = list(ambiguities or [])
+    return StructuredRequestV1.model_validate(
+        {
+            "schema_version": "1.0",
+            "request_text": request_text,
+            "intent": intent,
+            "entities": [
+                {
+                    "name": "status",
+                    "value": "available",
+                    "source": ParameterProvenance.USER_EXPLICIT.value,
+                }
+            ],
+            "constraints": [],
+            "expected_outputs": expected_outputs,
+            "required_capabilities": required_capabilities or ["pets.lookup"],
+            "risk_hints": [RiskClass.READ_ONLY.value],
+            "missing_inputs": missing,
+            "ambiguities": amb,
+            "needs_clarification": bool(amb),
+        }
+    )
+
+
+def test_requests_detail_lookup_explicit_first_item() -> None:
+    assert (
+        requests_sequential_detail_lookup(
+            _structured(
+                request_text="첫 번째 반려동물 상세를 조회해 줘",
+                intent="pet.detail",
+                expected_outputs=["pet"],
+            )
+        )
+        is True
+    )
+
+
+def test_requests_detail_lookup_rejects_simple_list() -> None:
+    assert (
+        requests_sequential_detail_lookup(
+            _structured(
+                request_text="반려동물 목록을 조회해 줘",
+                intent="pet.list",
+                expected_outputs=["pets"],
+            )
+        )
+        is False
+    )
+
+
+def test_requests_detail_lookup_rejects_list_even_with_detailish_text() -> None:
+    # Structured list classification wins over free-form text alone.
+    assert (
+        requests_sequential_detail_lookup(
+            _structured(
+                request_text="목록 중 첫 번째 상세도 보고 싶어",
+                intent="pet.list",
+                expected_outputs=["pets"],
+            )
+        )
+        is False
+    )
+
+
+def test_requests_detail_lookup_rejects_ambiguities() -> None:
+    assert (
+        requests_sequential_detail_lookup(
+            _structured(
+                request_text="첫 번째 상세?",
+                intent="pet.detail",
+                expected_outputs=["pet"],
+                ambiguities=["어느 pet인지 불명확"],
+            )
+        )
+        is False
+    )
+
+
 def test_discover_id_handoffs_factory_envelope_path() -> None:
     handoffs = discover_id_handoffs(
-        primary_output_schema={
-            "type": "object",
-            "properties": {"pets": {"type": "array"}},
-            "required": ["pets"],
-        },
+        primary_output_schema=_PETS_OUTPUT,
         companion_input_schema={
             "type": "object",
             "properties": {"petId": {"type": "integer"}},
@@ -48,14 +155,13 @@ def test_discover_id_handoffs_factory_envelope_path() -> None:
     assert len(handoffs) == 1
     assert handoffs[0].target_param == "petId"
     assert handoffs[0].from_path == "/structured_content/body/pets/0/id"
+    assert handoffs[0].source_json_type == "integer"
+    assert handoffs[0].target_json_type == "integer"
 
 
 def test_discover_id_handoffs_direct_path() -> None:
     handoffs = discover_id_handoffs(
-        primary_output_schema={
-            "type": "object",
-            "properties": {"pets": {"type": "array"}},
-        },
+        primary_output_schema=_PETS_OUTPUT,
         companion_input_schema={
             "type": "object",
             "properties": {"id": {"type": "integer"}},
@@ -67,13 +173,43 @@ def test_discover_id_handoffs_direct_path() -> None:
     assert handoffs[0].from_path == "/structured_content/pets/0/id"
 
 
-def test_discover_id_handoffs_rejects_extra_required() -> None:
+def test_discover_id_handoffs_rejects_missing_items_id() -> None:
     assert (
         discover_id_handoffs(
             primary_output_schema={
                 "type": "object",
                 "properties": {"pets": {"type": "array"}},
             },
+            companion_input_schema={
+                "type": "object",
+                "properties": {"petId": {"type": "integer"}},
+                "required": ["petId"],
+            },
+            uses_factory_envelope=True,
+        )
+        is None
+    )
+
+
+def test_discover_id_handoffs_rejects_type_mismatch() -> None:
+    assert (
+        discover_id_handoffs(
+            primary_output_schema=_PETS_OUTPUT,
+            companion_input_schema={
+                "type": "object",
+                "properties": {"petId": {"type": "string"}},
+                "required": ["petId"],
+            },
+            uses_factory_envelope=True,
+        )
+        is None
+    )
+
+
+def test_discover_id_handoffs_rejects_extra_required() -> None:
+    assert (
+        discover_id_handoffs(
+            primary_output_schema=_PETS_OUTPUT,
             companion_input_schema={
                 "type": "object",
                 "properties": {
@@ -92,10 +228,7 @@ def test_build_sequential_pair_steps_shape() -> None:
     primary = uuid.uuid4()
     companion = uuid.uuid4()
     handoffs = discover_id_handoffs(
-        primary_output_schema={
-            "type": "object",
-            "properties": {"pets": {"type": "array"}},
-        },
+        primary_output_schema=_PETS_OUTPUT,
         companion_input_schema={
             "type": "object",
             "properties": {"petId": {"type": "integer"}},
@@ -106,7 +239,9 @@ def test_build_sequential_pair_steps_shape() -> None:
     assert handoffs is not None
     steps = build_sequential_pair_steps(
         primary_tool_version_id=primary,
-        primary_bindings={"status": {"kind": BindingKind.LITERAL.value, "value": "available"}},
+        primary_bindings={
+            "status": {"kind": BindingKind.LITERAL.value, "value": "available"}
+        },
         primary_timeout_seconds=30,
         companion_tool_version_id=companion,
         companion_timeout_seconds=15,
@@ -154,3 +289,16 @@ def test_sequential_policy_snapshot_schema() -> None:
         DETERMINISTIC_TOOL_STEP_ID,
         DETERMINISTIC_TOOL_STEP_ID_2,
     }
+
+
+def test_assert_usable_handoff_rejects_null_and_blank() -> None:
+    with pytest.raises(AppError) as null_exc:
+        assert_usable_sequential_handoff_values({"petId": None}, handoff_params={"petId"})
+    assert null_exc.value.status_code == 409
+    with pytest.raises(AppError) as blank_exc:
+        assert_usable_sequential_handoff_values({"petId": "  "}, handoff_params={"petId"})
+    assert blank_exc.value.status_code == 409
+
+
+def test_assert_usable_handoff_accepts_integer_id() -> None:
+    assert_usable_sequential_handoff_values({"petId": 1}, handoff_params={"petId"})

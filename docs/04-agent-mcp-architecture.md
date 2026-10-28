@@ -612,9 +612,14 @@ complete ParameterBuildRun bindings
 - 기본 `tool_1` bindings는 executable `BindingValue`(`LITERAL` / `SECRET_REF`)만 포함하며
   Parameter provenance는 `PlanGenerationRun → ParameterBuildRun.bindings_snapshot`으로 추적한다.
 - step id는 deterministic `tool_1`, name은 `Tool Step 1`이다.
-- AUTO_SELECT + 양쪽 `READ_ONLY`(confirmation/approval 없음)이고 selection candidate에서
-  unique id handoff가 가능할 때만 optional `tool_2`(depends_on=`[tool_1]`,
-  `STEP_OUTPUT` bindings only, response_step_ids=`[tool_2]`)를 추가한다.
+- AUTO_SELECT + 양쪽 `READ_ONLY`(confirmation/approval 없음)이고
+  StructuredRequest가 후속 상세 조회 목적을 명확히 나타내며,
+  schema-compatible companion candidate가 **정확히 1개**이고
+  primary `pets.items.properties.id` 타입이 companion id 입력과 호환될 때만
+  optional `tool_2`(depends_on=`[tool_1]`, `STEP_OUTPUT` bindings only,
+  response_step_ids=`[tool_2]`)를 추가한다.
+  후보 0/복수·목록-only·타입 불일치·불명확 intent는 단일 TOOL로 fallback한다.
+  런타임 handoff id가 null/empty이면 tool_2 MCP 호출 전에 fail-closed한다.
   이 경우 Execution.policy_snapshot은 `agent_request_sequential_policy.v1`이다.
 - Plan Validator / Execution / MCP Tool call / SecretResolver는 호출하지 않는다.
 

@@ -102,7 +102,18 @@ async def _authorize(
         )
 
 
-async def _seed_sequential_planning(session: AsyncSession) -> dict[str, Any]:
+async def _seed_sequential_planning(
+    session: AsyncSession,
+    *,
+    mode: str = "detail",
+    extra_companions: int = 0,
+) -> dict[str, Any]:
+    """Seed PLANNING with list primary + N detail companions.
+
+    mode:
+      - ``detail``: StructuredRequest asks for first-item detail (pair eligible)
+      - ``list``: simple list lookup (must stay single TOOL)
+    """
     user = await UserRepository(session).create(
         username=f"u-{uuid.uuid4().hex[:8]}",
         display_name="Owner",
@@ -215,8 +226,44 @@ async def _seed_sequential_planning(session: AsyncSession) -> dict[str, Any]:
     )
     list_tool.current_version_id = list_version.id
     get_tool.current_version_id = get_version.id
+    companion_tools = [get_tool]
+    companion_versions = [get_version]
+    for index in range(extra_companions):
+        extra_tool = await tools.create_tool(
+            mcp_server_id=server.id,
+            remote_name=f"get_pet_alt_{index}",
+            display_name=f"GET /pets/{{petId}} alt{index}",
+            tags=["pets"],
+            status="ACTIVE",
+        )
+        extra_version = await tools.create_version(
+            mcp_tool_id=extra_tool.id,
+            version_no=1,
+            content_hash=uuid.uuid4().hex,
+            validation_status=ToolVersionValidationStatus.VALID.value,
+            remote_description="Get pet by id (alt)",
+            input_schema={
+                "type": "object",
+                "properties": {"petId": {"type": "integer"}},
+                "required": ["petId"],
+                "additionalProperties": False,
+            },
+            output_schema={
+                "type": "object",
+                "properties": {
+                    "id": {"type": "integer"},
+                    "name": {"type": "string"},
+                    "status": {"type": "string"},
+                },
+                "required": ["id", "name", "status"],
+            },
+        )
+        extra_tool.current_version_id = extra_version.id
+        companion_tools.append(extra_tool)
+        companion_versions.append(extra_version)
+
     policies = MCPToolPolicyRepository(session)
-    for tool in (list_tool, get_tool):
+    for tool in [list_tool, *companion_tools]:
         await policies.create(
             mcp_tool_id=tool.id,
             risk_class=RiskClass.READ_ONLY.value,
@@ -235,10 +282,31 @@ async def _seed_sequential_planning(session: AsyncSession) -> dict[str, Any]:
         version.id,
         [
             {"mcp_tool_id": list_tool.id, "effect": AgentToolGrantEffect.ALLOW.value},
-            {"mcp_tool_id": get_tool.id, "effect": AgentToolGrantEffect.ALLOW.value},
+            *[
+                {
+                    "mcp_tool_id": tool.id,
+                    "effect": AgentToolGrantEffect.ALLOW.value,
+                }
+                for tool in companion_tools
+            ],
         ],
     )
-    await _authorize(session, user_id=user.id, tool_ids=[list_tool.id, get_tool.id])
+    await _authorize(
+        session,
+        user_id=user.id,
+        tool_ids=[list_tool.id, *[t.id for t in companion_tools]],
+    )
+
+    if mode == "list":
+        request_text = "반려동물 목록을 조회해 줘"
+        intent = "pet.list"
+        expected_outputs = ["pets"]
+        reason = "list only"
+    else:
+        request_text = "첫 번째 반려동물 상세를 조회해 줘"
+        intent = "pet.detail"
+        expected_outputs = ["pet"]
+        reason = "list then detail"
 
     conv = await ConversationService(session).create_conversation(
         owner_id=user.id, agent_id=agent.id, title="Pets"
@@ -247,8 +315,8 @@ async def _seed_sequential_planning(session: AsyncSession) -> dict[str, Any]:
         conversation_id=conv.id,
         owner_id=user.id,
         role=ConversationMessageRole.USER,
-        content={"text": "첫 번째 반려동물 상세를 조회해 줘"},
-        content_text="첫 번째 반려동물 상세를 조회해 줘",
+        content={"text": request_text},
+        content_text=request_text,
     )
     request = await AgentRequestService(session).create_received(
         conversation_id=conv.id,
@@ -259,8 +327,8 @@ async def _seed_sequential_planning(session: AsyncSession) -> dict[str, Any]:
     structured = StructuredRequestV1.model_validate(
         {
             "schema_version": "1.0",
-            "request_text": "첫 번째 반려동물 상세를 조회해 줘",
-            "intent": "pet.detail",
+            "request_text": request_text,
+            "intent": intent,
             "entities": [
                 {
                     "name": "status",
@@ -269,7 +337,7 @@ async def _seed_sequential_planning(session: AsyncSession) -> dict[str, Any]:
                 }
             ],
             "constraints": [],
-            "expected_outputs": ["pet"],
+            "expected_outputs": expected_outputs,
             "required_capabilities": ["pets.lookup"],
             "risk_hints": [RiskClass.READ_ONLY.value],
             "missing_inputs": [],
@@ -305,29 +373,33 @@ async def _seed_sequential_planning(session: AsyncSession) -> dict[str, Any]:
         confidence=0.95,
         candidate_margin=0.2,
         required_input_coverage=1.0,
-        reason_summary="list then detail",
+        reason_summary=reason,
         ambiguities=[],
     )
-    await ToolSelectionRepository(session).add_candidates(
-        tool_selection_run_id=run.id,
-        candidates=[
+    candidates = [
+        {
+            "tool_version_id": list_version.id,
+            "input_rank": 1,
+            "retrieval_score": 0.95,
+            "llm_fit_score": 0.96,
+            "reason_summary": "list",
+            "risk_class": RiskClass.READ_ONLY.value,
+        }
+    ]
+    for rank, companion_version in enumerate(companion_versions, start=2):
+        candidates.append(
             {
-                "tool_version_id": list_version.id,
-                "input_rank": 1,
-                "retrieval_score": 0.95,
-                "llm_fit_score": 0.96,
-                "reason_summary": "list",
-                "risk_class": RiskClass.READ_ONLY.value,
-            },
-            {
-                "tool_version_id": get_version.id,
-                "input_rank": 2,
+                "tool_version_id": companion_version.id,
+                "input_rank": rank,
                 "retrieval_score": 0.8,
                 "llm_fit_score": 0.85,
                 "reason_summary": "detail",
                 "risk_class": RiskClass.READ_ONLY.value,
-            },
-        ],
+            }
+        )
+    await ToolSelectionRepository(session).add_candidates(
+        tool_selection_run_id=run.id,
+        candidates=candidates,
     )
     await AgentRequestService(session).compare_and_set_status(
         request.id,
@@ -417,3 +489,44 @@ async def test_sequential_pair_generate_validate_create(
             tool_version_id=step.mcp_tool_version_id,
         )
         assert expected["tool_policy"]["risk_class"] == RiskClass.READ_ONLY.value
+
+
+@pytest.mark.asyncio
+async def test_list_only_request_stays_single_tool(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _install_no_side_effects(monkeypatch)
+    seeded = await _seed_sequential_planning(db_session, mode="list")
+    gen = await PlanGeneratorService(db_session).generate(
+        agent_request_id=seeded["request_id"]
+    )
+    plan_run = await PlanGenerationRepository(db_session).get_by_id(
+        gen.plan_generation_run_id
+    )
+    assert plan_run is not None
+    steps = plan_run.plan_snapshot["steps"]
+    assert len(steps) == 1
+    assert steps[0]["id"] == DETERMINISTIC_TOOL_STEP_ID
+    assert plan_run.plan_snapshot["completion"]["response_step_ids"] == [
+        DETERMINISTIC_TOOL_STEP_ID
+    ]
+
+
+@pytest.mark.asyncio
+async def test_multiple_companions_do_not_auto_link(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _install_no_side_effects(monkeypatch)
+    seeded = await _seed_sequential_planning(
+        db_session, mode="detail", extra_companions=1
+    )
+    gen = await PlanGeneratorService(db_session).generate(
+        agent_request_id=seeded["request_id"]
+    )
+    plan_run = await PlanGenerationRepository(db_session).get_by_id(
+        gen.plan_generation_run_id
+    )
+    assert plan_run is not None
+    steps = plan_run.plan_snapshot["steps"]
+    assert len(steps) == 1
+    assert steps[0]["id"] == DETERMINISTIC_TOOL_STEP_ID
