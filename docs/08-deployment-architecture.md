@@ -108,6 +108,7 @@ factory-worker
 factory-runtime
 scheduler
 outbox
+agent-schedule-planner
 postgres
 redis
 object-storage
@@ -134,6 +135,7 @@ upstream for Factory runtime E2E; not a product-facing public service).
 | `factory-runtime` | shared declarative OpenAPI→MCP adapter (`RuntimeBinding` routes) | 없음 |
 | `scheduler` | occurrence claim/Execution 생성 | 없음 |
 | `outbox` | CREATED staging + DB Outbox → Celery execution queue at-least-once publish | 없음 |
+| `agent-schedule-planner` | `AGENT_SCHEDULE_PLAN` LLM planning → SCHEDULE_OCCURRENCE Execution materialize (isolated from outbox poll) | 없음 |
 | `postgres` | 업무/실행/감사 원본 | 필수 |
 | `redis` | Celery broker/단기 coordination | 재생성 가능 |
 | `object-storage` | result/export/artifact/evidence | 필수 |
@@ -159,6 +161,7 @@ factory-worker -> celery -A app.infrastructure.celery_app:celery_app worker -Q f
 factory-runtime -> python -m app.entrypoints.factory_runtime
 scheduler      -> python -m app.entrypoints.scheduler
 outbox         -> python -m app.entrypoints.outbox
+agent-schedule-planner -> python -m app.entrypoints.agent_schedule_planner
 migration      -> alembic upgrade head
 ```
 
@@ -220,7 +223,7 @@ object-storage healthy
        ↓
 migration completed
        ↓
-api / worker / mcp-worker / scheduler / outbox
+api / worker / mcp-worker / scheduler / outbox / agent-schedule-planner
        ↓
 frontend / traefik routing
 ```
@@ -236,8 +239,8 @@ Factory는 별도 profile에서 기동할 수 있다.
 | Network | 서비스 | 목적 |
 |---|---|---|
 | `edge` | traefik, frontend, api | 사용자 ingress |
-| `app` | api, worker, scheduler, outbox, redis | 내부 application |
-| `data` | api, worker, scheduler, outbox, postgres, object-storage | 영속 데이터 |
+| `app` | api, worker, scheduler, outbox, agent-schedule-planner, redis | 내부 application |
+| `data` | api, worker, scheduler, outbox, agent-schedule-planner, postgres, object-storage | 영속 데이터 |
 | `mcp` | worker, mcp-worker | MCP outbound/local boundary |
 | `factory` | factory-worker, factory-runtime, factory-mock-upstream, object-storage | 생성코드/런타임 격리 |
 

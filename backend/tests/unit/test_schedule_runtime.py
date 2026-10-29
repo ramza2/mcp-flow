@@ -6,6 +6,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from app.core.errors import AppError
 from app.domain.enums import (
     ExecutionSourceType,
     ExecutionStatus,
@@ -475,7 +476,9 @@ async def test_replace_supersedes_older_replace_wait(
 
 
 @pytest.mark.asyncio
-async def test_agent_version_schedule_fail_closed(db_session: AsyncSession) -> None:
+async def test_agent_version_interval_create_fail_closed(
+    db_session: AsyncSession,
+) -> None:
     owner_id = await _seed_schedule_manager(db_session, with_workflow_execute=False)
     agent_version_id = await _seed_published_agent_version(db_session, owner_id)
     body = ScheduleCreate(
@@ -485,6 +488,33 @@ async def test_agent_version_schedule_fail_closed(db_session: AsyncSession) -> N
         schedule_type=ScheduleType.INTERVAL,
         schedule_expression="PT1H",
         timezone="UTC",
+        inputs={"request_text": "should not create"},
+        misfire_policy=ScheduleMisfirePolicy.RUN_ONCE,
+        overlap_policy=ScheduleOverlapPolicy.ALLOW,
+    )
+    with pytest.raises(AppError) as exc:
+        await ScheduleService(db_session).create(body, owner_id=owner_id)
+    assert exc.value.code == "VALIDATION_ERROR"
+    assert "ONCE" in str(exc.value)
+
+
+async def test_agent_version_once_enqueues_plan_outbox(
+    db_session: AsyncSession,
+) -> None:
+    from app.models.outbox import OutboxEvent
+
+    owner_id = await _seed_schedule_manager(db_session, with_workflow_execute=False)
+    agent_version_id = await _seed_published_agent_version(db_session, owner_id)
+    now = datetime.now(UTC).replace(microsecond=0)
+    # ONCE expression is timezone-local wall clock without Z.
+    body = ScheduleCreate(
+        name="agent-once",
+        target_type=ScheduleTargetType.AGENT_VERSION,
+        target_id=agent_version_id,
+        schedule_type=ScheduleType.ONCE,
+        schedule_expression=(now + timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%S"),
+        timezone="UTC",
+        inputs={"request_text": "read only probe"},
         misfire_policy=ScheduleMisfirePolicy.RUN_ONCE,
         overlap_policy=ScheduleOverlapPolicy.ALLOW,
     )
@@ -492,7 +522,6 @@ async def test_agent_version_schedule_fail_closed(db_session: AsyncSession) -> N
     await ScheduleService(db_session).activate(created.id, owner_id=owner_id)
     schedule = await ScheduleRepository(db_session).lock_for_update(created.id)
     assert schedule is not None
-    now = datetime.now(UTC).replace(microsecond=0)
     schedule.next_run_at = now - timedelta(minutes=5)
     schedule.lock_version = int(schedule.lock_version) + 1
     await db_session.commit()
@@ -501,21 +530,24 @@ async def test_agent_version_schedule_fail_closed(db_session: AsyncSession) -> N
         created.id, now=now
     )
     await db_session.commit()
-    assert result.executions_created == 0
-    assert result.occurrences_skipped >= 1
+    assert result.executions_created >= 1
     occs, _ = await ScheduleOccurrenceRepository(db_session).list_for_schedule(
         created.id
     )
     assert any(
-        o.status == OccurrenceStatus.FAILED.value
-        and o.decision_reason == reasons.AGENT_SCHEDULE_EXECUTION_UNSUPPORTED
+        o.status == OccurrenceStatus.PLANNED.value
+        and o.decision_reason == reasons.AGENT_PLAN_QUEUED
         for o in occs
     )
+    outbox = (
+        await db_session.execute(
+            select(OutboxEvent).where(OutboxEvent.event_type == "AGENT_SCHEDULE_PLAN")
+        )
+    ).scalars().all()
+    assert len(outbox) == 1
     from app.models.execution import Execution
 
-    exec_count = (
-        await db_session.execute(select(Execution.id))
-    ).scalars().all()
+    exec_count = (await db_session.execute(select(Execution.id))).scalars().all()
     assert exec_count == []
 
 
@@ -647,19 +679,23 @@ async def test_deploy_sh_includes_scheduler() -> None:
 
     for required in (
         "scheduler",
+        "agent-schedule-planner",
         "factory-runtime",
         "factory-mock-upstream",
         "migration",
         "factory-worker",
         "frontend",
+        "outbox",
     ):
         assert required in build_services, (required, build_line)
     for required in (
         "scheduler",
+        "agent-schedule-planner",
         "factory-runtime",
         "factory-mock-upstream",
         "factory-worker",
         "frontend",
+        "outbox",
     ):
         assert required in up_services, (required, up_line)
         assert required in wait_services, (required, wait_line)
@@ -668,9 +704,28 @@ async def test_deploy_sh_includes_scheduler() -> None:
     assert up_services.index("factory-mock-upstream") < up_services.index(
         "factory-runtime"
     ), up_line
+    # Planner is adjacent to outbox (docs/08 service name).
+    assert up_services.index("outbox") < up_services.index(
+        "agent-schedule-planner"
+    ), up_line
 
-    assert "compose logs -f --tail=200 api worker factory-worker outbox scheduler" in text
-    assert "compose restart api worker factory-worker outbox scheduler frontend" in text
+    assert (
+        "compose logs -f --tail=200 api worker factory-worker outbox "
+        "agent-schedule-planner scheduler" in text
+    )
+    assert (
+        "compose restart api worker factory-worker outbox "
+        "agent-schedule-planner scheduler frontend" in text
+    )
+
+    # Compose + docs/08 canonical name must match deploy targets.
+    compose_text = (repo_root / "compose.yaml").read_text(encoding="utf-8")
+    assert "agent-schedule-planner:" in compose_text
+    docs_text = (repo_root / "docs" / "08-deployment-architecture.md").read_text(
+        encoding="utf-8"
+    )
+    assert "`agent-schedule-planner`" in docs_text
+    assert "app.entrypoints.agent_schedule_planner" in docs_text
 
 
 @pytest.mark.asyncio

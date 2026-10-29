@@ -771,6 +771,26 @@ async def test_pg_migration_fk_and_check(
     async with integration_session_factory() as session:
         from sqlalchemy.exc import DBAPIError, IntegrityError
 
+        # Mixed agent+workflow lineage must fail closed.
+        with pytest.raises((IntegrityError, DBAPIError)):
+            await session.execute(
+                text(
+                    "INSERT INTO executions ("
+                    "id, source_type, trigger_type, requester_id, status, "
+                    "plan_schema_version, plan_snapshot, plan_hash, input_snapshot, "
+                    "policy_snapshot, schedule_occurrence_id, workflow_version_id, "
+                    "agent_version_id, requested_at, lock_version"
+                    ") VALUES ("
+                    "gen_random_uuid(), 'SCHEDULE_OCCURRENCE', 'SCHEDULE', "
+                    "(SELECT id FROM users LIMIT 1), 'CREATED', '1.0', '{}'::jsonb, "
+                    "repeat('m', 64), '{}'::jsonb, '{}'::jsonb, "
+                    "gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), "
+                    "now(), 1)"
+                )
+            )
+            await session.commit()
+        await session.rollback()
+
         with pytest.raises((IntegrityError, DBAPIError)):
             await session.execute(
                 text(

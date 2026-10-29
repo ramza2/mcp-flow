@@ -226,13 +226,21 @@ class ScheduleService:
             )
 
     async def _validate_agent_inputs(self, inputs: dict[str, Any]) -> dict[str, Any]:
+        from app.services.agent_schedule_execution import (
+            extract_agent_schedule_request_text,
+        )
+
         if not isinstance(inputs, dict):
             raise AppError(
                 code="VALIDATION_ERROR",
                 message="AGENT_VERSION Schedule inputs must be a JSON object.",
                 status_code=status.HTTP_400_BAD_REQUEST,
             )
-        return dict(inputs)
+        # ONCE vertical requires non-empty request_text; store normalized copy.
+        text = extract_agent_schedule_request_text(inputs)
+        normalized = dict(inputs)
+        normalized["request_text"] = text
+        return normalized
 
     async def _validate_workflow_inputs(
         self,
@@ -403,6 +411,18 @@ class ScheduleService:
             data.schedule_expression,
             data.timezone,
         )
+        if (
+            str(data.target_type) == ScheduleTargetType.AGENT_VERSION.value
+            and str(data.schedule_type) != ScheduleType.ONCE.value
+        ):
+            raise AppError(
+                code="VALIDATION_ERROR",
+                message=(
+                    "AGENT_VERSION Schedule supports schedule_type=ONCE only "
+                    "(CRON/INTERVAL remain fail-closed)."
+                ),
+                status_code=status.HTTP_400_BAD_REQUEST,
+            )
 
         agent_version_id, workflow_version_id, input_template = await self._validate_target(
             target_type=data.target_type,
@@ -527,6 +547,18 @@ class ScheduleService:
             self._assert_window(start_at, end_at)
 
             validate_schedule_expression(schedule_type, schedule_expression, timezone)
+            if (
+                str(target_type) == ScheduleTargetType.AGENT_VERSION.value
+                and schedule_type != ScheduleType.ONCE.value
+            ):
+                raise AppError(
+                    code="VALIDATION_ERROR",
+                    message=(
+                        "AGENT_VERSION Schedule supports schedule_type=ONCE only "
+                        "(CRON/INTERVAL remain fail-closed)."
+                    ),
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                )
 
             inputs = payload.get("inputs", schedule.input_template or {})
             agent_version_id, workflow_version_id, input_template = (

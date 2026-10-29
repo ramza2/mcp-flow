@@ -1214,6 +1214,7 @@ mcp-worker
 factory-worker
 scheduler
 outbox
+agent-schedule-planner
 postgres
 redis
 object-storage

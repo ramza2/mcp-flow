@@ -65,11 +65,24 @@ def _schedule_body(
         "name": f"Schedule {uuid.uuid4().hex[:6]}",
         "target_type": target_type,
         "target_id": target_id,
-        "schedule_type": ScheduleType.CRON,
-        "schedule_expression": "0 9 * * *",
         "timezone": "UTC",
         "inputs": {},
     }
+    if target_type == ScheduleTargetType.AGENT_VERSION:
+        defaults.update(
+            {
+                "schedule_type": ScheduleType.ONCE,
+                "schedule_expression": "2099-01-01T00:00:00",
+                "inputs": {"request_text": "schedule probe"},
+            }
+        )
+    else:
+        defaults.update(
+            {
+                "schedule_type": ScheduleType.CRON,
+                "schedule_expression": "0 9 * * *",
+            }
+        )
     defaults.update(overrides)
     return ScheduleCreate(**defaults)
 
@@ -436,7 +449,7 @@ async def test_paused_config_edit_clears_next_run_at(db_session: AsyncSession) -
     updated = await service.update(
         paused.id,
         ScheduleUpdate(
-            schedule_expression="0 11 * * *",
+            schedule_expression="2099-06-15T11:00:00",
             lock_version=paused.lock_version,
         ),
         owner_id=owner_id,

@@ -164,10 +164,18 @@ class ExecutionRecoveryService:
                     select(Execution.id, Execution.lease_expires_at)
                     .where(
                         Execution.status == ExecutionStatus.RUNNING.value,
-                        Execution.source_type
-                        == ExecutionSourceType.AGENT_REQUEST.value,
                         Execution.lease_expires_at.is_not(None),
                         Execution.lease_expires_at <= ts,
+                        or_(
+                            Execution.source_type
+                            == ExecutionSourceType.AGENT_REQUEST.value,
+                            and_(
+                                Execution.source_type
+                                == ExecutionSourceType.SCHEDULE_OCCURRENCE.value,
+                                Execution.agent_version_id.is_not(None),
+                                Execution.workflow_version_id.is_(None),
+                            ),
+                        ),
                     )
                     .order_by(
                         Execution.lease_expires_at.asc(),
@@ -221,8 +229,13 @@ class ExecutionRecoveryService:
             )
             if not page:
                 break
+            from app.execution.schedule_lineage import is_agent_schedule_occurrence
+
             for row in page:
                 if row.lease_expires_at is None:
+                    continue
+                # AGENT_VERSION schedule lineage uses AgentRequest recovery.
+                if is_agent_schedule_occurrence(row):
                     continue
                 if plan_supports_workflow_running_recovery(row.plan_snapshot):
                     wf_eligible.append((_as_utc(row.lease_expires_at), row.id))
@@ -337,11 +350,18 @@ class ExecutionRecoveryService:
                 reason="LEASE_NOT_EXPIRED",
             )
 
-        if execution.source_type in _WORKFLOW_RUNNING_RECOVERY_SOURCES:
+        from app.execution.schedule_lineage import is_agent_schedule_occurrence
+
+        if (
+            execution.source_type in _WORKFLOW_RUNNING_RECOVERY_SOURCES
+            and not is_agent_schedule_occurrence(execution)
+        ):
             return await self._recover_workflow_dag(
                 execution=execution, worker_id=worker, now=ts
             )
-        if execution.source_type != ExecutionSourceType.AGENT_REQUEST.value:
+        if execution.source_type != ExecutionSourceType.AGENT_REQUEST.value and (
+            not is_agent_schedule_occurrence(execution)
+        ):
             return RecoveryOutcome(
                 execution_id=execution.id,
                 decision=RecoveryDecision.NO_OP,

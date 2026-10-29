@@ -224,7 +224,11 @@ def _assert_top_level_tool_step_lineage(
             status_code=409,
         )
 
-    if execution.source_type == ExecutionSourceType.AGENT_REQUEST.value:
+    from app.execution.schedule_lineage import is_agent_schedule_occurrence
+
+    if execution.source_type == ExecutionSourceType.AGENT_REQUEST.value or (
+        is_agent_schedule_occurrence(execution)
+    ):
         # Single-TOOL (and sequential tool_1): LITERAL/SECRET_REF only.
         # Sequential tool_2 may use STEP_OUTPUT via ComplexToolStepConfigV1.
         try:

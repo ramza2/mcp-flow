@@ -52,6 +52,7 @@ from app.repositories.schedule_occurrence import ScheduleOccurrenceRepository
 from app.repositories.workflow_version import WorkflowVersionRepository
 from app.scheduler import decision_reasons as reasons
 from app.scheduler.recurrence import next_scheduled_at
+from app.services.agent_schedule_execution import AgentScheduleExecutionService
 from app.services.execution_cancellation import ExecutionCancellationService
 from app.services.workflow_execution_creation import WorkflowExecutionCreationService
 
@@ -143,6 +144,7 @@ class ScheduleRuntimeService:
         self._executions = ExecutionRepository(session)
         self._versions = WorkflowVersionRepository(session)
         self._workflow_exec = WorkflowExecutionCreationService(session)
+        self._agent_schedule = AgentScheduleExecutionService(session)
         self._cancel = ExecutionCancellationService(session)
 
     async def run_iteration(
@@ -477,13 +479,16 @@ class ScheduleRuntimeService:
             return "NOOP"
 
         if schedule.target_type == ScheduleTargetType.AGENT_VERSION.value:
-            self._fail_or_skip_occurrence(
-                occurrence,
-                status=OccurrenceStatus.FAILED.value,
-                reason=reasons.AGENT_SCHEDULE_EXECUTION_UNSUPPORTED,
-                now=now,
-            )
-            return "SKIPPED"
+            # ONCE + request_text only; CRON/INTERVAL stay fail-closed.
+            # Durable Outbox handoff — no LLM/MCP under Schedule FOR UPDATE.
+            if schedule.schedule_type != "ONCE":
+                self._fail_or_skip_occurrence(
+                    occurrence,
+                    status=OccurrenceStatus.FAILED.value,
+                    reason=reasons.AGENT_SCHEDULE_EXECUTION_UNSUPPORTED,
+                    now=now,
+                )
+                return "SKIPPED"
 
         overlap = await self._evaluate_overlap(schedule, occurrence, now=now)
         if overlap == "SKIP":
@@ -699,11 +704,34 @@ class ScheduleRuntimeService:
         *,
         now: datetime,
         trigger_type: str,
-    ) -> Execution:
+    ) -> Execution | None:
+        existing = await self._execution_for_occurrence(occurrence.id)
+        if existing is not None:
+            return existing
+
+        if schedule.target_type == ScheduleTargetType.AGENT_VERSION.value:
+            if trigger_type != "SCHEDULE":
+                raise AppError(
+                    code="EXECUTION_PRECONDITION_FAILED",
+                    message=(
+                        "AGENT_VERSION Schedule execution supports automatic "
+                        "SCHEDULE fire only (manual trigger remains fail-closed)."
+                    ),
+                    status_code=409,
+                )
+            # Durable Outbox handoff — Execution materializes in outbox process.
+            await self._agent_schedule.enqueue_plan_outbox(
+                schedule=schedule, occurrence=occurrence, now=now
+            )
+            schedule.last_run_at = occurrence.scheduled_for
+            schedule.lock_version = int(schedule.lock_version) + 1
+            await self._session.flush()
+            return await self._execution_for_occurrence(occurrence.id)
+
         if schedule.target_type != ScheduleTargetType.WORKFLOW_VERSION.value:
             raise AppError(
                 code="EXECUTION_PRECONDITION_FAILED",
-                message="Schedule target_type must be WORKFLOW_VERSION.",
+                message="Schedule target_type must be WORKFLOW_VERSION or AGENT_VERSION.",
                 status_code=409,
             )
         if schedule.workflow_version_id is None:
@@ -719,9 +747,6 @@ class ScheduleRuntimeService:
                 message="Pinned WorkflowVersion not found.",
                 status_code=409,
             )
-        existing = await self._execution_for_occurrence(occurrence.id)
-        if existing is not None:
-            return existing
 
         # Creation-time: Schedule target must equal the WorkflowVersion we pin.
         materialized = await self._workflow_exec.materialize_for_schedule_occurrence(

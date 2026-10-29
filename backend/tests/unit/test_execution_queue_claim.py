@@ -139,11 +139,55 @@ async def test_stager_ignores_non_created_execution(db_session: AsyncSession) ->
     assert await ExecutionQueueService(db_session).stage_created_batch(limit=10) == 0
     await db_session.commit()
     count = (
-        await db_session.execute(
-            select(OutboxEvent).where(OutboxEvent.aggregate_id == execution_id)
+        (
+            await db_session.execute(
+                select(OutboxEvent).where(OutboxEvent.aggregate_id == execution_id)
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     assert len(count) == 1
+
+
+@pytest.mark.asyncio
+async def test_claim_unpublished_batch_excludes_agent_schedule_plan_in_sql(
+    db_session: AsyncSession,
+) -> None:
+    """Plan backlog must not occupy claim slots for EXECUTION_DISPATCH."""
+    from app.repositories.outbox import OutboxRepository
+
+    now = datetime.now(UTC)
+    plan_occ = uuid.uuid4()
+    for i in range(5):
+        db_session.add(
+            OutboxEvent(
+                id=uuid.uuid4(),
+                event_type="AGENT_SCHEDULE_PLAN",
+                aggregate_type="SCHEDULE_OCCURRENCE",
+                aggregate_id=plan_occ,
+                dedupe_key=f"agent_schedule_plan_test:{plan_occ}:{i}",
+                payload={"schedule_occurrence_id": str(plan_occ)},
+                created_at=now,
+                last_attempt_at=None,
+                published_at=None,
+                publish_attempt_count=0,
+                last_error_code=None,
+                lock_version=1,
+            )
+        )
+    execution_id, _ = await _created_execution(db_session)
+    await ExecutionQueueService(db_session).stage_created_batch(limit=10)
+    await db_session.commit()
+
+    claimed = await OutboxRepository(db_session).claim_unpublished_batch(limit=3)
+    await db_session.commit()
+    assert claimed
+    assert all(row.event_type != "AGENT_SCHEDULE_PLAN" for row in claimed)
+    assert any(
+        row.event_type == "EXECUTION_DISPATCH" and row.aggregate_id == execution_id
+        for row in claimed
+    )
 
 
 @pytest.mark.asyncio
@@ -195,9 +239,7 @@ async def test_outbox_corrupt_payload_fails_closed_not_publish_retry(
     await db_session.commit()
 
     with pytest.raises(AppError) as exc_info:
-        await OutboxRelayService(db_session).publish_batch(
-            publisher=FakePublisher(), limit=10
-        )
+        await OutboxRelayService(db_session).publish_batch(publisher=FakePublisher(), limit=10)
     assert exc_info.value.code == "RESOURCE_CONFLICT"
     await db_session.rollback()
     row = await db_session.get(OutboxEvent, row_id)

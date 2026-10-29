@@ -55,7 +55,15 @@ def get_expected_tool_policy_snapshot(
             status_code=409,
         )
 
-    if execution.source_type == ExecutionSourceType.AGENT_REQUEST.value:
+    from app.execution.schedule_lineage import (
+        is_agent_schedule_occurrence,
+        is_workflow_schedule_occurrence,
+    )
+
+    if execution.source_type == ExecutionSourceType.AGENT_REQUEST.value or (
+        execution.source_type == ExecutionSourceType.SCHEDULE_OCCURRENCE.value
+        and is_agent_schedule_occurrence(execution)
+    ):
         if snapshot.get("schema_version") == AGENT_REQUEST_SEQUENTIAL_POLICY_SCHEMA:
             return _agent_sequential_step_policy(
                 execution,
@@ -65,10 +73,10 @@ def get_expected_tool_policy_snapshot(
             )
         return dict(snapshot)
 
-    if execution.source_type in {
-        ExecutionSourceType.WORKFLOW_VERSION.value,
-        ExecutionSourceType.SCHEDULE_OCCURRENCE.value,
-    }:
+    if execution.source_type == ExecutionSourceType.WORKFLOW_VERSION.value or (
+        execution.source_type == ExecutionSourceType.SCHEDULE_OCCURRENCE.value
+        and is_workflow_schedule_occurrence(execution)
+    ):
         return _workflow_step_policy(
             execution,
             snapshot=snapshot,

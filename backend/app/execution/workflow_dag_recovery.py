@@ -192,6 +192,17 @@ async def assert_workflow_schedule_recovery_source_lineage(
         return
 
     if execution.source_type == ExecutionSourceType.SCHEDULE_OCCURRENCE.value:
+        from app.execution.schedule_lineage import is_agent_schedule_occurrence
+
+        if is_agent_schedule_occurrence(execution):
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message=(
+                    "AGENT_VERSION SCHEDULE_OCCURRENCE uses AgentRequest "
+                    "RUNNING recovery, not Workflow DAG recovery."
+                ),
+                status_code=409,
+            )
         try:
             await _assert_schedule_occurrence_lineage(session, execution)
         except AppError as exc:

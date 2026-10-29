@@ -123,10 +123,10 @@ def _create_body(target_id: uuid.UUID, **overrides: Any) -> dict[str, Any]:
         "name": "Daily job",
         "target_type": "AGENT_VERSION",
         "target_id": str(target_id),
-        "schedule_type": "CRON",
-        "schedule_expression": "0 9 * * *",
+        "schedule_type": "ONCE",
+        "schedule_expression": "2099-01-01T09:00:00",
         "timezone": "UTC",
-        "inputs": {},
+        "inputs": {"request_text": "schedule probe"},
     }
     body.update(overrides)
     return body

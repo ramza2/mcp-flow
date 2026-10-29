@@ -83,6 +83,10 @@ class Settings(BaseSettings):
     execution_lease_seconds: int = Field(default=60, gt=0)
     outbox_poll_interval_seconds: float = Field(default=1.0, gt=0)
     outbox_batch_size: int = Field(default=50, ge=1, le=500)
+    # Dedicated AGENT_SCHEDULE_PLAN planner (not the shared outbox poller).
+    agent_schedule_plan_poll_interval_seconds: float = Field(default=1.0, gt=0)
+    agent_schedule_plan_batch_size: int = Field(default=1, ge=1, le=20)
+    agent_schedule_plan_lease_seconds: int = Field(default=120, gt=0)
     scheduler_poll_interval_seconds: float = Field(default=1.0, gt=0)
     scheduler_batch_size: int = Field(default=50, ge=1, le=500)
     scheduler_misfire_grace_seconds: int = Field(default=60, ge=0)

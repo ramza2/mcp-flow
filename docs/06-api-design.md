@@ -1252,7 +1252,12 @@ GET   /schedules/{schedule_id}/occurrences
 
 Manual trigger: `source_type=SCHEDULE_OCCURRENCE`, `trigger_type=USER`.
 Automatic fire: `source_type=SCHEDULE_OCCURRENCE`, `trigger_type=SCHEDULE`.
-AGENT_VERSION Schedule execution은 이 슬라이스에서 fail-closed.
+
+AGENT_VERSION Schedule (ONCE vertical):
+- Create/activate requires `schedule_type=ONCE` and `inputs.request_text` (non-empty, ≤4000).
+- Automatic due fire enqueues durable Outbox `AGENT_SCHEDULE_PLAN` (no LLM under Schedule lock), then AgentRequest pipeline → safe auto Execution.
+- Manual `POST /trigger` remains fail-closed for AGENT_VERSION.
+- CRON/INTERVAL AGENT_VERSION create/fire remain fail-closed.
 
 `POST` 생성 기본값: `status=PAUSED`, `next_run_at=null`, `overlap_policy=SKIP`, `misfire_policy=SKIP`, `max_catch_up=1`.
 

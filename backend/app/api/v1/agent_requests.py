@@ -262,50 +262,22 @@ class AgentRunChatResultView(BaseModel):
     steps: list[AgentRunChatStepView] = []
 
 
-def _tool_policy_is_safe_readonly(tool_policy: Any) -> bool:
-    if not isinstance(tool_policy, dict):
-        return False
-    if tool_policy.get("risk_class") != "READ_ONLY":
-        return False
-    if tool_policy.get("requires_approval") is True:
-        return False
-    if tool_policy.get("requires_confirmation") is True:
-        return False
-    return True
-
-
 def _safe_auto_execute(
     request: AgentRequest,
     plan_view: AgentRunPlanView | None,
     validation: Any | None,
 ) -> bool:
     """True for chat safe path: single or sequential READ_ONLY Tools."""
-    if request.status != "READY":
+    from app.agent.safe_auto_execute import is_safe_auto_execute
+
+    if validation is None or plan_view is None:
         return False
-    if validation is None or bool(validation.confirmation_required):
-        return False
-    if plan_view is None or plan_view.step_count not in (1, 2):
-        return False
-    snapshot = validation.policy_snapshot
-    if not isinstance(snapshot, dict):
-        return False
-    if plan_view.step_count == 1:
-        return _tool_policy_is_safe_readonly(snapshot.get("tool_policy"))
-    # Sequential pair: agent_request_sequential_policy.v1
-    if snapshot.get("schema_version") != "agent_request_sequential_policy.v1":
-        return False
-    tool_steps = snapshot.get("tool_steps")
-    if not isinstance(tool_steps, dict) or len(tool_steps) != 2:
-        return False
-    for entry in tool_steps.values():
-        if not isinstance(entry, dict):
-            return False
-        policy_obj = entry.get("policy")
-        if not isinstance(policy_obj, dict):
-            return False
-        if not _tool_policy_is_safe_readonly(policy_obj.get("tool_policy")):
-            return False
-    return True
+    return is_safe_auto_execute(
+        request_status=request.status,
+        plan_step_count=plan_view.step_count,
+        confirmation_required=bool(validation.confirmation_required),
+        policy_snapshot=validation.policy_snapshot,
+    )
 
 
 def _question_fields(question_schema: Any) -> list[AgentRunQuestionFieldView]:
