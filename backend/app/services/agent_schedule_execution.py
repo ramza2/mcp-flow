@@ -42,11 +42,11 @@ from app.domain.enums import (
     ScheduleTargetType,
     ScheduleType,
 )
-from app.model_provider.errors import ModelProviderError
 from app.execution.materialize import (
     ExecutionMaterializeParams,
     ExecutionPlanMaterializer,
 )
+from app.model_provider.errors import ModelProviderError
 from app.models.execution import Execution
 from app.models.outbox import OutboxEvent
 from app.models.schedule import Schedule, ScheduleOccurrence
