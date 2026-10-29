@@ -329,7 +329,7 @@ deploy_core() {
   preflight
 
   log "Building application images"
-  compose build api worker factory-worker factory-runtime factory-mock-upstream outbox scheduler migration frontend
+  compose build api worker factory-worker factory-runtime factory-mock-upstream outbox agent-schedule-planner scheduler migration frontend
 
   log "Starting stateful dependencies"
   compose up -d postgres redis object-storage
@@ -341,8 +341,8 @@ deploy_core() {
 
   log "Starting MCPFlow runtime"
   # factory-mock-upstream before factory-runtime (compose depends_on healthy).
-  compose up -d api worker factory-worker factory-mock-upstream factory-runtime outbox scheduler frontend
-  wait_services "runtime services" api worker factory-worker factory-mock-upstream factory-runtime outbox scheduler frontend postgres redis object-storage
+  compose up -d api worker factory-worker factory-mock-upstream factory-runtime outbox agent-schedule-planner scheduler frontend
+  wait_services "runtime services" api worker factory-worker factory-mock-upstream factory-runtime outbox agent-schedule-planner scheduler frontend postgres redis object-storage
   smoke_test
 
   log "Deployment complete"
@@ -361,14 +361,14 @@ status() {
 
 logs() {
   [[ -f "$ENV_FILE" ]] || fail "$ENV_FILE does not exist"
-  compose logs -f --tail=200 api worker factory-worker outbox scheduler migration postgres redis object-storage frontend
+  compose logs -f --tail=200 api worker factory-worker outbox agent-schedule-planner scheduler migration postgres redis object-storage frontend
 }
 
 restart_runtime() {
   [[ -f "$ENV_FILE" ]] || fail "$ENV_FILE does not exist"
   preflight
-  compose restart api worker factory-worker outbox scheduler frontend
-  wait_services "runtime services" api worker outbox scheduler frontend postgres redis object-storage
+  compose restart api worker factory-worker outbox agent-schedule-planner scheduler frontend
+  wait_services "runtime services" api worker outbox agent-schedule-planner scheduler frontend postgres redis object-storage
   smoke_test
 }
 

@@ -679,19 +679,23 @@ async def test_deploy_sh_includes_scheduler() -> None:
 
     for required in (
         "scheduler",
+        "agent-schedule-planner",
         "factory-runtime",
         "factory-mock-upstream",
         "migration",
         "factory-worker",
         "frontend",
+        "outbox",
     ):
         assert required in build_services, (required, build_line)
     for required in (
         "scheduler",
+        "agent-schedule-planner",
         "factory-runtime",
         "factory-mock-upstream",
         "factory-worker",
         "frontend",
+        "outbox",
     ):
         assert required in up_services, (required, up_line)
         assert required in wait_services, (required, wait_line)
@@ -700,9 +704,28 @@ async def test_deploy_sh_includes_scheduler() -> None:
     assert up_services.index("factory-mock-upstream") < up_services.index(
         "factory-runtime"
     ), up_line
+    # Planner is adjacent to outbox (docs/08 service name).
+    assert up_services.index("outbox") < up_services.index(
+        "agent-schedule-planner"
+    ), up_line
 
-    assert "compose logs -f --tail=200 api worker factory-worker outbox scheduler" in text
-    assert "compose restart api worker factory-worker outbox scheduler frontend" in text
+    assert (
+        "compose logs -f --tail=200 api worker factory-worker outbox "
+        "agent-schedule-planner scheduler" in text
+    )
+    assert (
+        "compose restart api worker factory-worker outbox "
+        "agent-schedule-planner scheduler frontend" in text
+    )
+
+    # Compose + docs/08 canonical name must match deploy targets.
+    compose_text = (repo_root / "compose.yaml").read_text(encoding="utf-8")
+    assert "agent-schedule-planner:" in compose_text
+    docs_text = (repo_root / "docs" / "08-deployment-architecture.md").read_text(
+        encoding="utf-8"
+    )
+    assert "`agent-schedule-planner`" in docs_text
+    assert "app.entrypoints.agent_schedule_planner" in docs_text
 
 
 @pytest.mark.asyncio
