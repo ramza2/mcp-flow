@@ -159,12 +159,19 @@ class RequestAnalyzerService:
         self._provider = model_provider
         self._owns_provider = model_provider is None
 
-    async def analyze(self, *, agent_request_id: uuid.UUID) -> StructuredRequestV1:
+    async def analyze(
+        self,
+        *,
+        agent_request_id: uuid.UUID,
+        allow_retryable_provider_retry: bool = False,
+    ) -> StructuredRequestV1:
         provider = self._provider or ModelProviderClient()
         owns_provider = self._owns_provider
         try:
             return await self._analyze(
-                agent_request_id=agent_request_id, provider=provider
+                agent_request_id=agent_request_id,
+                provider=provider,
+                allow_retryable_provider_retry=allow_retryable_provider_retry,
             )
         finally:
             if owns_provider:
@@ -175,6 +182,7 @@ class RequestAnalyzerService:
         *,
         agent_request_id: uuid.UUID,
         provider: ModelProviderClient,
+        allow_retryable_provider_retry: bool = False,
     ) -> StructuredRequestV1:
         request = await self._requests.get(agent_request_id)
         if request is None:
@@ -276,11 +284,18 @@ class RequestAnalyzerService:
             latency_ms = int((datetime.now(UTC) - started).total_seconds() * 1000)
             logger.info(
                 "request_analyzer provider_error agent_request_id=%s code=%s "
-                "latency_ms=%s",
+                "retryable=%s allow_retry=%s latency_ms=%s",
                 agent_request_id,
                 exc.error_code,
+                exc.retryable,
+                allow_retryable_provider_retry,
                 latency_ms,
             )
+            if allow_retryable_provider_retry and exc.retryable:
+                # Schedule Planner Outbox can re-enter RECEIVED → ANALYZING.
+                # Manual AgentRequest keeps default fail-closed contract.
+                await self._release_for_retry(agent_request_id)
+                raise
             await self._fail_closed(agent_request_id)
             raise
 
@@ -469,6 +484,36 @@ class RequestAnalyzerService:
             if exc.code == "RESOURCE_CONFLICT":
                 logger.info(
                     "request_analyzer fail_cas_miss agent_request_id=%s "
+                    "(cancelled or concurrent transition preserved)",
+                    agent_request_id,
+                )
+                await self._session.rollback()
+                return
+            raise
+
+    async def _release_for_retry(self, agent_request_id: uuid.UUID) -> None:
+        """ANALYZING → RECEIVED for schedule-safe provider retry.
+
+        Does not set completed_at. On CAS miss (CANCELLED / concurrent), leave
+        the current status untouched — never restore a cancelled request.
+        """
+
+        try:
+            await self._cas(
+                agent_request_id,
+                expected=[AgentRequestStatus.ANALYZING],
+                new_status=AgentRequestStatus.RECEIVED,
+            )
+            await self._session.commit()
+            logger.info(
+                "request_analyzer release_for_retry agent_request_id=%s",
+                agent_request_id,
+            )
+        except AppError as exc:
+            if exc.code == "RESOURCE_CONFLICT":
+                logger.info(
+                    "request_analyzer release_for_retry_cas_miss "
+                    "agent_request_id=%s "
                     "(cancelled or concurrent transition preserved)",
                     agent_request_id,
                 )

@@ -46,6 +46,7 @@ from app.execution.materialize import (
     ExecutionMaterializeParams,
     ExecutionPlanMaterializer,
 )
+from app.model_provider.errors import ModelProviderError
 from app.models.execution import Execution
 from app.models.outbox import OutboxEvent
 from app.models.schedule import Schedule, ScheduleOccurrence
@@ -943,9 +944,26 @@ class AgentScheduleExecutionService:
         request = await self._requests.get(agent_request_id)
         assert request is not None
         if request.status == AgentRequestStatus.RECEIVED.value:
-            await RequestAnalyzerService(self._session).analyze(
-                agent_request_id=agent_request_id
-            )
+            try:
+                await RequestAnalyzerService(self._session).analyze(
+                    agent_request_id=agent_request_id,
+                    allow_retryable_provider_retry=True,
+                )
+            except ModelProviderError as exc:
+                # Retryable provider errors release AgentRequest to RECEIVED
+                # so the same Outbox claim/retry can re-enter Analyzer. Non-
+                # retryable errors stay fail-closed (FAILED) and terminalize
+                # the Occurrence via AppError below.
+                if exc.retryable:
+                    raise
+                raise AppError(
+                    code="EXECUTION_PRECONDITION_FAILED",
+                    message=(
+                        "AGENT_VERSION Schedule Analyzer failed with a "
+                        f"non-retryable provider error ({exc.error_code})."
+                    ),
+                    status_code=409,
+                ) from exc
             request = await self._requests.get(agent_request_id)
             assert request is not None
             if request.status != AgentRequestStatus.RETRIEVING.value:
