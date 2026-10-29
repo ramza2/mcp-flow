@@ -219,6 +219,151 @@ async def test_analyzer_provider_timeout_failed(db_session: AsyncSession) -> Non
 
 
 @pytest.mark.asyncio
+async def test_analyzer_retryable_timeout_releases_to_received_when_allowed(
+    db_session: AsyncSession,
+) -> None:
+    """Schedule path may release ANALYZING → RECEIVED for Outbox retry."""
+    request_id, _, _ = await _seed_received(db_session)
+    provider = _MockProvider(
+        ModelProviderError(error_code=TIMEOUT, message="slow", retryable=True)
+    )
+    with pytest.raises(ModelProviderError) as exc:
+        await RequestAnalyzerService(
+            db_session, model_provider=provider  # type: ignore[arg-type]
+        ).analyze(
+            agent_request_id=request_id,
+            allow_retryable_provider_retry=True,
+        )
+    assert exc.value.error_code == TIMEOUT
+    assert exc.value.retryable is True
+
+    row = await AgentRequestRepository(db_session).get(request_id)
+    assert row is not None
+    assert row.status == AgentRequestStatus.RECEIVED.value
+    assert row.completed_at is None
+    assert row.structured_request is None
+    assert row.analyzed_at is None
+
+
+@pytest.mark.asyncio
+async def test_analyzer_non_retryable_still_failed_when_retry_allowed(
+    db_session: AsyncSession,
+) -> None:
+    request_id, _, _ = await _seed_received(db_session)
+    provider = _MockProvider(
+        ModelProviderError(error_code=PROTOCOL, message="bad", retryable=False)
+    )
+    with pytest.raises(ModelProviderError) as exc:
+        await RequestAnalyzerService(
+            db_session, model_provider=provider  # type: ignore[arg-type]
+        ).analyze(
+            agent_request_id=request_id,
+            allow_retryable_provider_retry=True,
+        )
+    assert exc.value.retryable is False
+
+    row = await AgentRequestRepository(db_session).get(request_id)
+    assert row is not None
+    assert row.status == AgentRequestStatus.FAILED.value
+    assert row.completed_at is not None
+
+
+@pytest.mark.asyncio
+async def test_analyzer_retryable_release_preserves_cancelled(
+    db_session_factory,
+) -> None:
+    async with db_session_factory() as session:
+        request_id, _, _ = await _seed_received(session)
+
+    started = asyncio.Event()
+    release = asyncio.Event()
+    provider = _MockProvider(
+        ModelProviderError(error_code=TIMEOUT, message="slow", retryable=True),
+        delay=started,
+        release=release,
+    )
+
+    async def analyze() -> Exception | None:
+        async with db_session_factory() as session:
+            try:
+                await RequestAnalyzerService(
+                    session, model_provider=provider  # type: ignore[arg-type]
+                ).analyze(
+                    agent_request_id=request_id,
+                    allow_retryable_provider_retry=True,
+                )
+                return None
+            except Exception as exc:  # noqa: BLE001
+                return exc
+
+    task = asyncio.create_task(analyze())
+    await started.wait()
+    async with db_session_factory() as session:
+        await AgentRequestService(session).compare_and_set_status(
+            request_id,
+            expected_statuses=[AgentRequestStatus.ANALYZING],
+            new_status=AgentRequestStatus.CANCELLED,
+            set_completed_at=True,
+        )
+        await session.commit()
+    release.set()
+    err = await task
+    assert isinstance(err, ModelProviderError)
+    assert err.retryable is True
+
+    async with db_session_factory() as session:
+        row = await AgentRequestRepository(session).get(request_id)
+        assert row is not None
+        assert row.status == AgentRequestStatus.CANCELLED.value
+        assert row.structured_request is None
+
+
+@pytest.mark.asyncio
+async def test_analyzer_retryable_release_then_succeeds_on_retry(
+    db_session: AsyncSession,
+) -> None:
+    request_id, _, _ = await _seed_received(db_session, raw_text="서울 날씨 알려줘")
+
+    class _Flaky:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.aclose = AsyncMock()
+
+        async def generate_json(self, target, *, messages, parameters=None):  # noqa: ANN001
+            del target, messages, parameters
+            self.calls += 1
+            if self.calls == 1:
+                raise ModelProviderError(
+                    error_code=TIMEOUT, message="slow", retryable=True
+                )
+            return _structured(request_text="ignored")
+
+    provider = _Flaky()
+    with pytest.raises(ModelProviderError):
+        await RequestAnalyzerService(
+            db_session, model_provider=provider  # type: ignore[arg-type]
+        ).analyze(
+            agent_request_id=request_id,
+            allow_retryable_provider_retry=True,
+        )
+    row = await AgentRequestRepository(db_session).get(request_id)
+    assert row is not None
+    assert row.status == AgentRequestStatus.RECEIVED.value
+
+    result = await RequestAnalyzerService(
+        db_session, model_provider=provider  # type: ignore[arg-type]
+    ).analyze(
+        agent_request_id=request_id,
+        allow_retryable_provider_retry=True,
+    )
+    assert result.needs_clarification is False
+    assert provider.calls == 2
+    row = await AgentRequestRepository(db_session).get(request_id)
+    assert row is not None
+    assert row.status == AgentRequestStatus.RETRIEVING.value
+
+
+@pytest.mark.asyncio
 async def test_analyzer_invalid_structured_request_failed(
     db_session: AsyncSession,
 ) -> None:
