@@ -11,10 +11,15 @@ from app.agent.sequential_readonly_pair import (
     assert_usable_sequential_handoff_values,
     build_agent_request_sequential_policy_snapshot,
     build_sequential_pair_steps,
+    companion_literal_matches_explicit_id,
     companion_step_bindings,
     discover_id_handoffs,
+    extract_explicit_id_entity_value,
     is_safe_readonly_policy,
+    requests_first_item_id_handoff,
     requests_sequential_detail_lookup,
+    requests_sequential_list_detail_pair,
+    resolve_companion_id_bindings,
 )
 from app.core.errors import AppError
 from app.domain.enums import BindingKind, ParameterProvenance, RiskClass
@@ -61,21 +66,23 @@ def _structured(
     expected_outputs: list[str],
     required_capabilities: list[str] | None = None,
     ambiguities: list[str] | None = None,
+    entities: list[dict[str, object]] | None = None,
 ) -> StructuredRequestV1:
     missing: list[str] = []
     amb = list(ambiguities or [])
+    default_entities: list[dict[str, object]] = [
+        {
+            "name": "status",
+            "value": "available",
+            "source": ParameterProvenance.USER_EXPLICIT.value,
+        }
+    ]
     return StructuredRequestV1.model_validate(
         {
             "schema_version": "1.0",
             "request_text": request_text,
             "intent": intent,
-            "entities": [
-                {
-                    "name": "status",
-                    "value": "available",
-                    "source": ParameterProvenance.USER_EXPLICIT.value,
-                }
-            ],
+            "entities": entities if entities is not None else default_entities,
             "constraints": [],
             "expected_outputs": expected_outputs,
             "required_capabilities": required_capabilities or ["pets.lookup"],
@@ -302,3 +309,148 @@ def test_assert_usable_handoff_rejects_null_and_blank() -> None:
 
 def test_assert_usable_handoff_accepts_integer_id() -> None:
     assert_usable_sequential_handoff_values({"petId": 1}, handoff_params={"petId"})
+
+
+def test_explicit_pet_id_entity_preferred_over_first_item() -> None:
+    structured = _structured(
+        request_text="ID 2 반려동물 상세와 목록을 조회해 줘",
+        intent="pet.list+pet.detail",
+        expected_outputs=["pets", "pet"],
+        required_capabilities=["pet.list", "pet.detail"],
+        entities=[
+            {
+                "name": "pet_id",
+                "value": 2,
+                "source": ParameterProvenance.USER_EXPLICIT.value,
+            }
+        ],
+    )
+    assert extract_explicit_id_entity_value(structured) == 2
+    assert requests_sequential_list_detail_pair(structured) is True
+    handoffs = discover_id_handoffs(
+        primary_output_schema=_PETS_OUTPUT,
+        companion_input_schema={
+            "type": "object",
+            "properties": {"petId": {"type": "integer"}},
+            "required": ["petId"],
+        },
+        uses_factory_envelope=True,
+    )
+    assert handoffs is not None
+    bindings = resolve_companion_id_bindings(structured=structured, handoffs=handoffs)
+    assert bindings == {
+        "petId": {"kind": BindingKind.LITERAL.value, "value": 2}
+    }
+
+
+def test_ops_shaped_id_string_entity_coerces_for_literal() -> None:
+    """Production Analyzer shape: name=id, value=\"1\", USER_EXPLICIT."""
+    structured = _structured(
+        request_text="ID 1 반려동물 상세와 목록을 조회해 줘",
+        intent="pet.list+pet.detail",
+        expected_outputs=["pets", "pet"],
+        required_capabilities=["pet.list", "pet.detail"],
+        entities=[
+            {
+                "name": "id",
+                "value": "1",
+                "source": ParameterProvenance.USER_EXPLICIT.value,
+            }
+        ],
+    )
+    assert extract_explicit_id_entity_value(structured) == "1"
+    handoffs = discover_id_handoffs(
+        primary_output_schema=_PETS_OUTPUT,
+        companion_input_schema={
+            "type": "object",
+            "properties": {"petId": {"type": "integer"}},
+            "required": ["petId"],
+        },
+        uses_factory_envelope=True,
+    )
+    assert handoffs is not None
+    bindings = resolve_companion_id_bindings(structured=structured, handoffs=handoffs)
+    assert bindings == {"petId": {"kind": BindingKind.LITERAL.value, "value": 1}}
+    assert (
+        companion_literal_matches_explicit_id(
+            structured,
+            param_name="petId",
+            literal_value=1,
+            target_json_type="integer",
+        )
+        is True
+    )
+    assert (
+        companion_literal_matches_explicit_id(
+            structured,
+            param_name="petId",
+            literal_value=99,
+            target_json_type="integer",
+        )
+        is False
+    )
+
+
+def test_detail_by_id_alone_is_not_sequential_pair() -> None:
+    structured = _structured(
+        request_text="ID 2 반려동물 상세정보",
+        intent="pet.detail",
+        expected_outputs=["pet"],
+        required_capabilities=["pet.detail"],
+        entities=[
+            {
+                "name": "id",
+                "value": "2",
+                "source": ParameterProvenance.USER_EXPLICIT.value,
+            }
+        ],
+    )
+    assert requests_sequential_detail_lookup(structured) is True
+    assert requests_sequential_list_detail_pair(structured) is False
+    assert requests_first_item_id_handoff(structured) is False
+
+
+def test_detail_without_id_or_first_item_does_not_guess() -> None:
+    structured = _structured(
+        request_text="반려동물 목록과 상세를 조회해 줘",
+        intent="pet.list+pet.detail",
+        expected_outputs=["pets", "pet"],
+        required_capabilities=["pet.list", "pet.detail"],
+        entities=[],
+    )
+    assert requests_sequential_list_detail_pair(structured) is True
+    assert requests_first_item_id_handoff(structured) is False
+    assert extract_explicit_id_entity_value(structured) is None
+    handoffs = discover_id_handoffs(
+        primary_output_schema=_PETS_OUTPUT,
+        companion_input_schema={
+            "type": "object",
+            "properties": {"pet_id": {"type": "integer"}},
+            "required": ["pet_id"],
+        },
+        uses_factory_envelope=True,
+    )
+    assert handoffs is not None
+    assert resolve_companion_id_bindings(structured=structured, handoffs=handoffs) is None
+
+
+def test_first_item_still_uses_step_output_pets_zero() -> None:
+    structured = _structured(
+        request_text="첫 번째 반려동물 상세를 조회해 줘",
+        intent="pet.detail",
+        expected_outputs=["pet"],
+    )
+    assert requests_first_item_id_handoff(structured) is True
+    assert requests_sequential_list_detail_pair(structured) is True
+    handoffs = discover_id_handoffs(
+        primary_output_schema=_PETS_OUTPUT,
+        companion_input_schema={
+            "type": "object",
+            "properties": {"petId": {"type": "integer"}},
+            "required": ["petId"],
+        },
+        uses_factory_envelope=True,
+    )
+    assert handoffs is not None
+    bindings = resolve_companion_id_bindings(structured=structured, handoffs=handoffs)
+    assert bindings == companion_step_bindings(handoffs)

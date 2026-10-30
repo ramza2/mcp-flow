@@ -107,12 +107,17 @@ async def _seed_sequential_planning(
     *,
     mode: str = "detail",
     extra_companions: int = 0,
+    selection_decision: str = "AUTO_SELECT",
+    explicit_pet_id: int | str | None = None,
+    explicit_id_entity_name: str = "pet_id",
 ) -> dict[str, Any]:
     """Seed PLANNING with list primary + N detail companions.
 
     mode:
       - ``detail``: StructuredRequest asks for first-item detail (pair eligible)
       - ``list``: simple list lookup (must stay single TOOL)
+      - ``composite``: pet.list+pet.detail without first-item (needs explicit id)
+      - ``detail_by_id``: single GET-by-id (explicit id, no list signal)
     """
     user = await UserRepository(session).create(
         username=f"u-{uuid.uuid4().hex[:8]}",
@@ -297,16 +302,73 @@ async def _seed_sequential_planning(
         tool_ids=[list_tool.id, *[t.id for t in companion_tools]],
     )
 
+    selected_version = list_version
     if mode == "list":
         request_text = "반려동물 목록을 조회해 줘"
         intent = "pet.list"
         expected_outputs = ["pets"]
+        required_capabilities = ["pets.lookup"]
         reason = "list only"
+        entities = [
+            {
+                "name": "status",
+                "value": "available",
+                "source": ParameterProvenance.USER_EXPLICIT.value,
+            }
+        ]
+    elif mode == "composite":
+        request_text = (
+            f"반려동물 목록과 ID {explicit_pet_id} 상세를 조회해 줘"
+            if explicit_pet_id is not None
+            else "반려동물 목록과 상세를 조회해 줘"
+        )
+        intent = "pet.list+pet.detail"
+        expected_outputs = ["pets", "pet"]
+        required_capabilities = ["pet.list", "pet.detail"]
+        reason = "list and detail"
+        entities = [
+            {
+                "name": "status",
+                "value": "available",
+                "source": ParameterProvenance.USER_EXPLICIT.value,
+            }
+        ]
+        if explicit_pet_id is not None:
+            entities.append(
+                {
+                    "name": explicit_id_entity_name,
+                    "value": explicit_pet_id,
+                    "source": ParameterProvenance.USER_EXPLICIT.value,
+                }
+            )
+    elif mode == "detail_by_id":
+        assert explicit_pet_id is not None
+        request_text = f"ID {explicit_pet_id} 반려동물 상세정보"
+        intent = "pet.detail"
+        expected_outputs = ["pet"]
+        required_capabilities = ["pet.detail"]
+        reason = "detail by id"
+        selected_version = get_version
+        entities = [
+            {
+                "name": explicit_id_entity_name,
+                "value": explicit_pet_id,
+                "source": ParameterProvenance.USER_EXPLICIT.value,
+            }
+        ]
     else:
         request_text = "첫 번째 반려동물 상세를 조회해 줘"
         intent = "pet.detail"
         expected_outputs = ["pet"]
+        required_capabilities = ["pets.lookup"]
         reason = "list then detail"
+        entities = [
+            {
+                "name": "status",
+                "value": "available",
+                "source": ParameterProvenance.USER_EXPLICIT.value,
+            }
+        ]
 
     conv = await ConversationService(session).create_conversation(
         owner_id=user.id, agent_id=agent.id, title="Pets"
@@ -329,16 +391,10 @@ async def _seed_sequential_planning(
             "schema_version": "1.0",
             "request_text": request_text,
             "intent": intent,
-            "entities": [
-                {
-                    "name": "status",
-                    "value": "available",
-                    "source": ParameterProvenance.USER_EXPLICIT.value,
-                }
-            ],
+            "entities": entities,
             "constraints": [],
             "expected_outputs": expected_outputs,
-            "required_capabilities": ["pets.lookup"],
+            "required_capabilities": required_capabilities,
             "risk_hints": [RiskClass.READ_ONLY.value],
             "missing_inputs": [],
             "ambiguities": [],
@@ -368,35 +424,55 @@ async def _seed_sequential_planning(
         registry_snapshot={},
         model_snapshot={},
         threshold_snapshot={},
-        decision="AUTO_SELECT",
-        selected_tool_version_id=list_version.id,
+        decision=selection_decision,
+        selected_tool_version_id=selected_version.id,
         confidence=0.95,
         candidate_margin=0.2,
         required_input_coverage=1.0,
         reason_summary=reason,
         ambiguities=[],
     )
-    candidates = [
-        {
-            "tool_version_id": list_version.id,
-            "input_rank": 1,
-            "retrieval_score": 0.95,
-            "llm_fit_score": 0.96,
-            "reason_summary": "list",
-            "risk_class": RiskClass.READ_ONLY.value,
-        }
-    ]
-    for rank, companion_version in enumerate(companion_versions, start=2):
-        candidates.append(
+    if mode == "detail_by_id":
+        candidates = [
             {
-                "tool_version_id": companion_version.id,
-                "input_rank": rank,
-                "retrieval_score": 0.8,
-                "llm_fit_score": 0.85,
+                "tool_version_id": get_version.id,
+                "input_rank": 1,
+                "retrieval_score": 0.95,
+                "llm_fit_score": 0.96,
                 "reason_summary": "detail",
                 "risk_class": RiskClass.READ_ONLY.value,
+            },
+            {
+                "tool_version_id": list_version.id,
+                "input_rank": 2,
+                "retrieval_score": 0.7,
+                "llm_fit_score": 0.7,
+                "reason_summary": "list",
+                "risk_class": RiskClass.READ_ONLY.value,
+            },
+        ]
+    else:
+        candidates = [
+            {
+                "tool_version_id": list_version.id,
+                "input_rank": 1,
+                "retrieval_score": 0.95,
+                "llm_fit_score": 0.96,
+                "reason_summary": "list",
+                "risk_class": RiskClass.READ_ONLY.value,
             }
-        )
+        ]
+        for rank, companion_version in enumerate(companion_versions, start=2):
+            candidates.append(
+                {
+                    "tool_version_id": companion_version.id,
+                    "input_rank": rank,
+                    "retrieval_score": 0.8,
+                    "llm_fit_score": 0.85,
+                    "reason_summary": "detail",
+                    "risk_class": RiskClass.READ_ONLY.value,
+                }
+            )
     await ToolSelectionRepository(session).add_candidates(
         tool_selection_run_id=run.id,
         candidates=candidates,
@@ -513,12 +589,254 @@ async def test_list_only_request_stays_single_tool(
 
 
 @pytest.mark.asyncio
-async def test_multiple_companions_do_not_auto_link(
+async def test_multiple_companions_fail_closed_for_detail_intent(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.core.errors import AppError
+
+    _install_no_side_effects(monkeypatch)
+    seeded = await _seed_sequential_planning(
+        db_session, mode="detail", extra_companions=1
+    )
+    with pytest.raises(AppError) as exc:
+        await PlanGeneratorService(db_session).generate(
+            agent_request_id=seeded["request_id"]
+        )
+    assert exc.value.code == "EXECUTION_PRECONDITION_FAILED"
+    request = await AgentRequestRepository(db_session).get(seeded["request_id"])
+    assert request is not None
+    assert request.status == AgentRequestStatus.FAILED.value
+
+
+@pytest.mark.asyncio
+async def test_confirm_with_answered_tool_confirmation_builds_pair(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from datetime import UTC, datetime
+
+    from app.domain.enums import ClarificationRequestStatus, ClarificationRequestType
+    from app.repositories.clarification_request import ClarificationRequestRepository
+    from app.schemas.clarification import CONFIRMATION_QUESTION_SCHEMA
+
+    _install_no_side_effects(monkeypatch)
+    seeded = await _seed_sequential_planning(
+        db_session, mode="detail", selection_decision="CONFIRM"
+    )
+    clar = await ClarificationRequestRepository(db_session).create_open(
+        agent_request_id=seeded["request_id"],
+        request_type=ClarificationRequestType.TOOL_CONFIRMATION.value,
+        question_schema=CONFIRMATION_QUESTION_SCHEMA,
+        prompt_text="confirm tool",
+    )
+    await ClarificationRequestRepository(db_session).answer_open(
+        clarification_id=clar.id,
+        agent_request_id=seeded["request_id"],
+        response_payload={"confirmed": True},
+        answered_by=seeded["requester_id"],
+        answered_at=datetime.now(UTC),
+    )
+    await db_session.commit()
+
+    gen = await PlanGeneratorService(db_session).generate(
+        agent_request_id=seeded["request_id"]
+    )
+    plan_run = await PlanGenerationRepository(db_session).get_by_id(
+        gen.plan_generation_run_id
+    )
+    assert plan_run is not None
+    assert len(plan_run.plan_snapshot["steps"]) == 2
+    assert clar.status == ClarificationRequestStatus.ANSWERED.value
+
+
+@pytest.mark.asyncio
+async def test_confirm_without_answered_confirmation_fail_closed(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.core.errors import AppError
+
+    _install_no_side_effects(monkeypatch)
+    seeded = await _seed_sequential_planning(
+        db_session, mode="detail", selection_decision="CONFIRM"
+    )
+    with pytest.raises(AppError) as exc:
+        await PlanGeneratorService(db_session).generate(
+            agent_request_id=seeded["request_id"]
+        )
+    assert exc.value.code == "EXECUTION_PRECONDITION_FAILED"
+    request = await AgentRequestRepository(db_session).get(seeded["request_id"])
+    assert request is not None
+    assert request.status == AgentRequestStatus.FAILED.value
+
+
+@pytest.mark.asyncio
+async def test_composite_with_explicit_pet_id_uses_literal_binding(
     db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _install_no_side_effects(monkeypatch)
     seeded = await _seed_sequential_planning(
-        db_session, mode="detail", extra_companions=1
+        db_session, mode="composite", explicit_pet_id=2
+    )
+    gen = await PlanGeneratorService(db_session).generate(
+        agent_request_id=seeded["request_id"]
+    )
+    plan_run = await PlanGenerationRepository(db_session).get_by_id(
+        gen.plan_generation_run_id
+    )
+    assert plan_run is not None
+    steps = plan_run.plan_snapshot["steps"]
+    assert len(steps) == 2
+    binding = steps[1]["config"]["bindings"]["petId"]
+    assert binding == {"kind": BindingKind.LITERAL.value, "value": 2}
+
+
+@pytest.mark.asyncio
+async def test_composite_ops_shaped_id_string_entity_literal(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _install_no_side_effects(monkeypatch)
+    seeded = await _seed_sequential_planning(
+        db_session,
+        mode="composite",
+        explicit_pet_id="1",
+        explicit_id_entity_name="id",
+    )
+    gen = await PlanGeneratorService(db_session).generate(
+        agent_request_id=seeded["request_id"]
+    )
+    plan_run = await PlanGenerationRepository(db_session).get_by_id(
+        gen.plan_generation_run_id
+    )
+    assert plan_run is not None
+    steps = plan_run.plan_snapshot["steps"]
+    assert len(steps) == 2
+    assert steps[1]["config"]["bindings"]["petId"] == {
+        "kind": BindingKind.LITERAL.value,
+        "value": 1,
+    }
+
+
+@pytest.mark.asyncio
+async def test_composite_ops_id_generate_validate_ready(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ops shape name=id value=\"1\" → PlanGenerator → PlanValidator → READY."""
+    _install_no_side_effects(monkeypatch)
+    seeded = await _seed_sequential_planning(
+        db_session,
+        mode="composite",
+        explicit_pet_id="1",
+        explicit_id_entity_name="id",
+    )
+    gen = await PlanGeneratorService(db_session).generate(
+        agent_request_id=seeded["request_id"]
+    )
+    plan_run = await PlanGenerationRepository(db_session).get_by_id(
+        gen.plan_generation_run_id
+    )
+    assert plan_run is not None
+    assert plan_run.plan_snapshot["steps"][1]["config"]["bindings"]["petId"] == {
+        "kind": BindingKind.LITERAL.value,
+        "value": 1,
+    }
+
+    outcome = await PlanValidatorService(db_session).validate(
+        agent_request_id=seeded["request_id"]
+    )
+    assert outcome.decision == "READY"
+    request = await AgentRequestRepository(db_session).get(seeded["request_id"])
+    assert request is not None
+    assert request.status == AgentRequestStatus.READY.value
+    validation = await PlanValidationRepository(db_session).get_latest_for_agent_request(
+        seeded["request_id"]
+    )
+    assert validation is not None
+    assert validation.decision == "READY"
+    assert validation.policy_snapshot["schema_version"] == (
+        AGENT_REQUEST_SEQUENTIAL_POLICY_SCHEMA
+    )
+
+    # Runtime lineage + Binding resolve must accept evidenced LITERAL on tool_2.
+    created = await ExecutionCreationService(db_session).create_from_agent_request(
+        agent_request_id=seeded["request_id"],
+        requester_id=seeded["requester_id"],
+        idempotency_key=_idem_key(),
+    )
+    assert created.result.step_count == 2
+    execution = await ExecutionRepository(db_session).get(created.result.id)
+    assert execution is not None
+    steps_rows = await ExecutionRepository(db_session).list_steps(execution.id)
+    tool2 = next(s for s in steps_rows if s.step_key == DETERMINISTIC_TOOL_STEP_ID_2)
+    from app.execution.binding_resolver import RuntimeBindingResolver
+    from app.execution.lineage import assert_tool_step_lineage
+
+    lineage = assert_tool_step_lineage(execution, tool2, steps=steps_rows)
+    pet_binding = lineage.bindings["petId"]
+    assert getattr(pet_binding, "kind", None) == BindingKind.LITERAL
+    assert getattr(pet_binding, "value", None) == 1
+    resolved = RuntimeBindingResolver().resolve(
+        execution=execution,
+        step=tool2,
+        steps=steps_rows,
+        bindings=lineage.bindings,
+        plan=lineage.plan,
+    )
+    assert resolved == {"petId": 1}
+
+
+@pytest.mark.asyncio
+async def test_composite_arbitrary_literal_rejected_by_validator(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _install_no_side_effects(monkeypatch)
+    seeded = await _seed_sequential_planning(
+        db_session,
+        mode="composite",
+        explicit_pet_id="1",
+        explicit_id_entity_name="id",
+    )
+    gen = await PlanGeneratorService(db_session).generate(
+        agent_request_id=seeded["request_id"]
+    )
+    plan_run = await PlanGenerationRepository(db_session).get_by_id(
+        gen.plan_generation_run_id
+    )
+    assert plan_run is not None
+    # Tamper: invent a LITERAL id that is not grounded in StructuredRequest.
+    snapshot = dict(plan_run.plan_snapshot)
+    steps = list(snapshot["steps"])
+    tool2 = dict(steps[1])
+    config = dict(tool2["config"])
+    bindings = dict(config["bindings"])
+    bindings["petId"] = {"kind": BindingKind.LITERAL.value, "value": 99}
+    config["bindings"] = bindings
+    tool2["config"] = config
+    steps[1] = tool2
+    snapshot["steps"] = steps
+    from app.schemas.execution_plan import compute_plan_hash
+
+    plan_run.plan_snapshot = snapshot
+    plan_run.plan_hash = compute_plan_hash(snapshot)
+    await db_session.commit()
+
+    outcome = await PlanValidatorService(db_session).validate(
+        agent_request_id=seeded["request_id"]
+    )
+    assert outcome.decision == "FAILED"
+    request = await AgentRequestRepository(db_session).get(seeded["request_id"])
+    assert request is not None
+    assert request.status == AgentRequestStatus.FAILED.value
+
+
+@pytest.mark.asyncio
+async def test_detail_by_id_stays_single_tool(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _install_no_side_effects(monkeypatch)
+    seeded = await _seed_sequential_planning(
+        db_session,
+        mode="detail_by_id",
+        explicit_pet_id="2",
+        explicit_id_entity_name="petId",
     )
     gen = await PlanGeneratorService(db_session).generate(
         agent_request_id=seeded["request_id"]
@@ -530,3 +848,169 @@ async def test_multiple_companions_do_not_auto_link(
     steps = plan_run.plan_snapshot["steps"]
     assert len(steps) == 1
     assert steps[0]["id"] == DETERMINISTIC_TOOL_STEP_ID
+    assert steps[0]["config"]["tool_version_id"] == str(seeded["get_version_id"])
+    binding = steps[0]["config"]["bindings"]["petId"]
+    assert binding["kind"] == BindingKind.LITERAL.value
+    assert binding["value"] in {2, "2"}
+
+
+@pytest.mark.asyncio
+async def test_composite_without_id_or_first_item_fail_closed(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.core.errors import AppError
+
+    _install_no_side_effects(monkeypatch)
+    seeded = await _seed_sequential_planning(db_session, mode="composite")
+    with pytest.raises(AppError) as exc:
+        await PlanGeneratorService(db_session).generate(
+            agent_request_id=seeded["request_id"]
+        )
+    assert exc.value.code == "EXECUTION_PRECONDITION_FAILED"
+    request = await AgentRequestRepository(db_session).get(seeded["request_id"])
+    assert request is not None
+    assert request.status == AgentRequestStatus.FAILED.value
+
+
+@pytest.mark.asyncio
+async def test_confirm_rejected_latest_blocks_pair(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from datetime import UTC, datetime, timedelta
+
+    from app.core.errors import AppError
+    from app.domain.enums import ClarificationRequestType
+    from app.repositories.clarification_request import ClarificationRequestRepository
+    from app.schemas.clarification import CONFIRMATION_QUESTION_SCHEMA
+
+    _install_no_side_effects(monkeypatch)
+    seeded = await _seed_sequential_planning(
+        db_session, mode="detail", selection_decision="CONFIRM"
+    )
+    clar_repo = ClarificationRequestRepository(db_session)
+    older = await clar_repo.create_open(
+        agent_request_id=seeded["request_id"],
+        request_type=ClarificationRequestType.TOOL_CONFIRMATION.value,
+        question_schema=CONFIRMATION_QUESTION_SCHEMA,
+        prompt_text="older approve",
+    )
+    older.requested_at = datetime.now(UTC) - timedelta(minutes=5)
+    await clar_repo.answer_open(
+        clarification_id=older.id,
+        agent_request_id=seeded["request_id"],
+        response_payload={"confirmed": True},
+        answered_by=seeded["requester_id"],
+        answered_at=datetime.now(UTC) - timedelta(minutes=4),
+    )
+    newer = await clar_repo.create_open(
+        agent_request_id=seeded["request_id"],
+        request_type=ClarificationRequestType.TOOL_CONFIRMATION.value,
+        question_schema=CONFIRMATION_QUESTION_SCHEMA,
+        prompt_text="newer reject",
+    )
+    await clar_repo.answer_open(
+        clarification_id=newer.id,
+        agent_request_id=seeded["request_id"],
+        response_payload={"confirmed": False},
+        answered_by=seeded["requester_id"],
+        answered_at=datetime.now(UTC),
+    )
+    await db_session.commit()
+
+    with pytest.raises(AppError) as exc:
+        await PlanGeneratorService(db_session).generate(
+            agent_request_id=seeded["request_id"]
+        )
+    assert exc.value.code == "EXECUTION_PRECONDITION_FAILED"
+
+
+@pytest.mark.asyncio
+async def test_confirm_newer_open_blocks_stale_answered(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from datetime import UTC, datetime, timedelta
+
+    from app.core.errors import AppError
+    from app.domain.enums import ClarificationRequestType
+    from app.repositories.clarification_request import ClarificationRequestRepository
+    from app.schemas.clarification import CONFIRMATION_QUESTION_SCHEMA
+
+    _install_no_side_effects(monkeypatch)
+    seeded = await _seed_sequential_planning(
+        db_session, mode="detail", selection_decision="CONFIRM"
+    )
+    clar_repo = ClarificationRequestRepository(db_session)
+    older = await clar_repo.create_open(
+        agent_request_id=seeded["request_id"],
+        request_type=ClarificationRequestType.TOOL_CONFIRMATION.value,
+        question_schema=CONFIRMATION_QUESTION_SCHEMA,
+        prompt_text="stale approve",
+    )
+    older.requested_at = datetime.now(UTC) - timedelta(minutes=5)
+    await clar_repo.answer_open(
+        clarification_id=older.id,
+        agent_request_id=seeded["request_id"],
+        response_payload={"confirmed": True},
+        answered_by=seeded["requester_id"],
+        answered_at=datetime.now(UTC) - timedelta(minutes=4),
+    )
+    await clar_repo.create_open(
+        agent_request_id=seeded["request_id"],
+        request_type=ClarificationRequestType.TOOL_CONFIRMATION.value,
+        question_schema=CONFIRMATION_QUESTION_SCHEMA,
+        prompt_text="newer open",
+    )
+    await db_session.commit()
+
+    with pytest.raises(AppError) as exc:
+        await PlanGeneratorService(db_session).generate(
+            agent_request_id=seeded["request_id"]
+        )
+    assert exc.value.code == "EXECUTION_PRECONDITION_FAILED"
+
+
+@pytest.mark.asyncio
+async def test_confirm_expired_latest_blocks_pair(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from datetime import UTC, datetime, timedelta
+
+    from app.core.errors import AppError
+    from app.domain.enums import ClarificationRequestStatus, ClarificationRequestType
+    from app.repositories.clarification_request import ClarificationRequestRepository
+    from app.schemas.clarification import CONFIRMATION_QUESTION_SCHEMA
+
+    _install_no_side_effects(monkeypatch)
+    seeded = await _seed_sequential_planning(
+        db_session, mode="detail", selection_decision="CONFIRM"
+    )
+    clar_repo = ClarificationRequestRepository(db_session)
+    older = await clar_repo.create_open(
+        agent_request_id=seeded["request_id"],
+        request_type=ClarificationRequestType.TOOL_CONFIRMATION.value,
+        question_schema=CONFIRMATION_QUESTION_SCHEMA,
+        prompt_text="stale approve",
+    )
+    older.requested_at = datetime.now(UTC) - timedelta(minutes=10)
+    await clar_repo.answer_open(
+        clarification_id=older.id,
+        agent_request_id=seeded["request_id"],
+        response_payload={"confirmed": True},
+        answered_by=seeded["requester_id"],
+        answered_at=datetime.now(UTC) - timedelta(minutes=9),
+    )
+    expired = await clar_repo.create_open(
+        agent_request_id=seeded["request_id"],
+        request_type=ClarificationRequestType.TOOL_CONFIRMATION.value,
+        question_schema=CONFIRMATION_QUESTION_SCHEMA,
+        prompt_text="expired",
+        expires_at=datetime.now(UTC) - timedelta(minutes=1),
+    )
+    expired.status = ClarificationRequestStatus.EXPIRED.value
+    await db_session.commit()
+
+    with pytest.raises(AppError) as exc:
+        await PlanGeneratorService(db_session).generate(
+            agent_request_id=seeded["request_id"]
+        )
+    assert exc.value.code == "EXECUTION_PRECONDITION_FAILED"

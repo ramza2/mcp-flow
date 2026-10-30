@@ -10,7 +10,7 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import AppError
-from app.domain.enums import ClarificationRequestStatus
+from app.domain.enums import ClarificationRequestStatus, ClarificationRequestType
 from app.models.tool_selection import ClarificationRequest
 
 
@@ -57,6 +57,25 @@ class ClarificationRequestRepository:
             .where(
                 ClarificationRequest.agent_request_id == agent_request_id,
                 ClarificationRequest.status == ClarificationRequestStatus.OPEN.value,
+            )
+            .order_by(
+                ClarificationRequest.requested_at.desc(),
+                ClarificationRequest.id.desc(),
+            )
+            .limit(1)
+        )
+        return (await self._session.execute(stmt)).scalar_one_or_none()
+
+    async def get_latest_tool_confirmation(
+        self, agent_request_id: uuid.UUID
+    ) -> ClarificationRequest | None:
+        """Most recent TOOL_CONFIRMATION for an AgentRequest (any status)."""
+        stmt = (
+            select(ClarificationRequest)
+            .where(
+                ClarificationRequest.agent_request_id == agent_request_id,
+                ClarificationRequest.request_type
+                == ClarificationRequestType.TOOL_CONFIRMATION.value,
             )
             .order_by(
                 ClarificationRequest.requested_at.desc(),

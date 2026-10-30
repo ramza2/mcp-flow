@@ -19,6 +19,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.agent.sequential_readonly_pair import (
     DETERMINISTIC_TOOL_STEP_ID_2,
     build_agent_request_sequential_policy_snapshot,
+    companion_literal_matches_explicit_id,
+    companion_param_json_type,
     is_safe_readonly_policy,
 )
 from app.core.errors import AppError
@@ -77,6 +79,10 @@ from app.schemas.plan_validation import (
     PlanValidationDecision,
     PlanValidationIssue,
     PlanValidationResult,
+)
+from app.schemas.structured_request import (
+    STRUCTURED_REQUEST_SCHEMA_VERSION,
+    StructuredRequestV1,
 )
 from app.services.agent_request import AgentRequestService
 from app.services.policy_snapshot import build_safe_tool_policy_snapshot
@@ -1107,7 +1113,7 @@ class PlanValidatorService:
         tool_refs: list[PlanGenerationToolRef],
         acc: _ValidationAccumulator,
     ) -> None:
-        """Per-step authz/policy for sequential READ_ONLY pair + STEP_OUTPUT."""
+        """Per-step authz/policy for sequential READ_ONLY pair bindings."""
         ref_by_step = {r.step_key: r for r in tool_refs}
         try:
             cfg1 = ToolStepConfigV1.model_validate(plan.steps[0].config)
@@ -1170,12 +1176,14 @@ class PlanValidatorService:
                 )
             )
 
-        # tool_2: only STEP_OUTPUT from tool_1; cover required inputs.
-        self._validate_step_output_bindings(
+        # tool_2: STEP_OUTPUT from tool_1, or evidenced USER_EXPLICIT LITERAL id.
+        structured = self._load_structured_request(request, acc)
+        self._validate_companion_bindings(
             step_id=DETERMINISTIC_TOOL_STEP_ID_2,
             cfg=cfg2,
             input_schema=tv2.input_schema,
             source_step_id=DETERMINISTIC_TOOL_STEP_ID,
+            structured=structured,
             acc=acc,
         )
 
@@ -1266,15 +1274,49 @@ class PlanValidatorService:
                 else:
                     acc.confirmation_required = True
 
-    def _validate_step_output_bindings(
+    def _load_structured_request(
+        self,
+        request: AgentRequest,
+        acc: _ValidationAccumulator,
+    ) -> StructuredRequestV1 | None:
+        if request.structured_request_version != STRUCTURED_REQUEST_SCHEMA_VERSION:
+            acc.failed.append(
+                _issue(
+                    "PLAN_SCHEMA_INVALID",
+                    "structured_request_version이 지원되지 않습니다.",
+                )
+            )
+            return None
+        if not isinstance(request.structured_request, dict):
+            acc.failed.append(
+                _issue(
+                    "PLAN_SCHEMA_INVALID",
+                    "structured_request가 없습니다.",
+                )
+            )
+            return None
+        try:
+            return StructuredRequestV1.model_validate(request.structured_request)
+        except Exception:
+            acc.failed.append(
+                _issue(
+                    "PLAN_SCHEMA_INVALID",
+                    "structured_request 재검증에 실패했습니다.",
+                )
+            )
+            return None
+
+    def _validate_companion_bindings(
         self,
         *,
         step_id: str,
         cfg: ComplexToolStepConfigV1,
         input_schema: Any,
         source_step_id: str,
+        structured: StructuredRequestV1 | None,
         acc: _ValidationAccumulator,
     ) -> None:
+        """tool_2 bindings: STEP_OUTPUT handoff or evidenced explicit-id LITERAL."""
         if not isinstance(input_schema, dict) or input_schema.get("type") != "object":
             acc.failed.append(
                 _issue(
@@ -1314,33 +1356,66 @@ class PlanValidatorService:
                         step_id=step_id,
                     )
                 )
-        for _key, binding in cfg.bindings.items():
-            if binding.kind != BindingKind.STEP_OUTPUT:
-                acc.failed.append(
-                    _issue(
-                        "PLAN_BINDING_INVALID",
-                        f"순차 pair tool_2 binding kind={binding.kind!r}은 "
-                        f"STEP_OUTPUT만 허용합니다.",
-                        step_id=step_id,
+        if structured is None:
+            # StructuredRequest load already recorded a blocking issue.
+            return
+        for key, binding in cfg.bindings.items():
+            if binding.kind == BindingKind.STEP_OUTPUT:
+                if binding.step_id != source_step_id:
+                    acc.failed.append(
+                        _issue(
+                            "PLAN_BINDING_INVALID",
+                            "tool_2 STEP_OUTPUT.step_id는 tool_1이어야 합니다.",
+                            step_id=step_id,
+                        )
                     )
-                )
+                if not isinstance(binding.path, str) or not binding.path.startswith(
+                    "/"
+                ):
+                    acc.failed.append(
+                        _issue(
+                            "PLAN_BINDING_INVALID",
+                            "STEP_OUTPUT.path가 유효한 JSON Pointer가 아닙니다.",
+                            step_id=step_id,
+                        )
+                    )
                 continue
-            if binding.step_id != source_step_id:
-                acc.failed.append(
-                    _issue(
-                        "PLAN_BINDING_INVALID",
-                        "tool_2 STEP_OUTPUT.step_id는 tool_1이어야 합니다.",
-                        step_id=step_id,
+            if binding.kind == BindingKind.LITERAL:
+                target_type = companion_param_json_type(input_schema, key)
+                if target_type is None:
+                    acc.failed.append(
+                        _issue(
+                            "PLAN_BINDING_INVALID",
+                            f"tool_2 LITERAL {key!r}의 JSON Schema type을 "
+                            f"확인할 수 없습니다.",
+                            step_id=step_id,
+                        )
                     )
-                )
-            if not isinstance(binding.path, str) or not binding.path.startswith("/"):
-                acc.failed.append(
-                    _issue(
-                        "PLAN_BINDING_INVALID",
-                        "STEP_OUTPUT.path가 유효한 JSON Pointer가 아닙니다.",
-                        step_id=step_id,
+                    continue
+                if not companion_literal_matches_explicit_id(
+                    structured,
+                    param_name=key,
+                    literal_value=binding.value,
+                    target_json_type=target_type,
+                ):
+                    acc.failed.append(
+                        _issue(
+                            "PLAN_BINDING_INVALID",
+                            "순차 pair tool_2 LITERAL은 StructuredRequest의 "
+                            "USER_EXPLICIT/CONVERSATION_CONFIRMED id entity와 "
+                            "일치해야 합니다.",
+                            step_id=step_id,
+                        )
                     )
+                continue
+            acc.failed.append(
+                _issue(
+                    "PLAN_BINDING_INVALID",
+                    f"순차 pair tool_2 binding kind={binding.kind!r}은 "
+                    f"STEP_OUTPUT 또는 근거 있는 LITERAL만 허용합니다.",
+                    step_id=step_id,
                 )
+            )
 
     def _validate_sequential_pair_shape(
         self,
@@ -1348,7 +1423,7 @@ class PlanValidatorService:
         tool_refs: list[PlanGenerationToolRef],
         acc: _ValidationAccumulator,
     ) -> None:
-        """tool_1 → tool_2 linear chain with STEP_OUTPUT handoffs only."""
+        """tool_1 → tool_2 linear chain; companion bindings validated separately."""
         first, second = plan.steps[0], plan.steps[1]
         if first.id != DETERMINISTIC_TOOL_STEP_ID or second.id != DETERMINISTIC_TOOL_STEP_ID_2:
             acc.failed.append(

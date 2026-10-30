@@ -271,12 +271,15 @@ def _assert_top_level_tool_step_lineage(
                 status_code=409,
             )
         for binding in complex_cfg.bindings.values():
-            if getattr(binding, "kind", None) != BindingKind.STEP_OUTPUT:
+            kind = getattr(binding, "kind", None)
+            # Plan Validator evidences USER_EXPLICIT LITERAL ids; first-item
+            # handoffs remain STEP_OUTPUT. Reject other kinds fail-closed.
+            if kind not in (BindingKind.STEP_OUTPUT, BindingKind.LITERAL):
                 raise AppError(
                     code="RESOURCE_CONFLICT",
                     message=(
                         "AgentRequest sequential companion TOOL bindings must be "
-                        "STEP_OUTPUT only."
+                        "STEP_OUTPUT or evidenced LITERAL."
                     ),
                     status_code=409,
                 )
