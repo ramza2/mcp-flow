@@ -5,6 +5,7 @@ from __future__ import annotations
 import socket
 
 import httpx
+import jsonschema
 import pytest
 from app.core.errors import AppError
 from app.core.url_validation import validate_outbound_base_url
@@ -291,6 +292,73 @@ async def test_mcp_handler_tools_list_exact_set() -> None:
     assert "result" in listed
     names = [t["name"] for t in listed["result"]["tools"]]
     assert names == ["GET /pets"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("body_schema", "http_body"),
+    [
+        (
+            {
+                "type": "object",
+                "properties": {"id": {"type": "integer"}},
+                "required": ["id"],
+            },
+            {"id": 7},
+        ),
+        ({"type": "array", "items": {"type": "integer"}}, [1, 2]),
+        ({"type": "integer"}, 42),
+    ],
+)
+async def test_factory_tools_list_output_schema_validates_call_envelope(
+    body_schema: dict, http_body: object
+) -> None:
+    contract = DeclarativeToolContract(
+        remote_name="GET /result",
+        method="GET",
+        path_template="/result",
+        input_schema={"type": "object", "properties": {}},
+        output_schema=body_schema,
+        description=None,
+        request_body_required=False,
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(200, json=http_body)
+        ),
+        follow_redirects=False,
+    ) as client:
+        handler = FactoryRuntimeMcpHandler(
+            binding_id=__import__("uuid").uuid4(),
+            status_value="READY",
+            base_url="https://api.example.com",
+            contracts_by_name={contract.remote_name: contract},
+            auth_headers=None,
+            connect_timeout_ms=1000,
+            call_timeout_ms=1000,
+            max_response_bytes=1000,
+            http_client=client,
+        )
+        listed = await handler.handle(
+            {"jsonrpc": "2.0", "id": "list", "method": "tools/list"}
+        )
+        advertised = listed["result"]["tools"][0]["outputSchema"]
+        assert advertised["type"] == "object"
+        assert advertised["properties"]["body"] == body_schema
+        jsonschema.Draft202012Validator.check_schema(advertised)
+
+        called = await handler.handle(
+            {
+                "jsonrpc": "2.0",
+                "id": "call",
+                "method": "tools/call",
+                "params": {"name": contract.remote_name, "arguments": {}},
+            }
+        )
+    assert called["result"]["isError"] is False
+    structured = called["result"]["structuredContent"]
+    assert structured["body"] == http_body
+    jsonschema.Draft202012Validator(advertised).validate(structured)
 
 
 @pytest.mark.asyncio

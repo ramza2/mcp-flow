@@ -61,8 +61,9 @@ def _factory_http_body_payload(
 
         {ok, http_status, latency_ms, protocol_version, body: <http json>}
 
-    while ``ToolVersion.output_schema`` / ``tools/list`` ``outputSchema`` describe
-    the HTTP body (OpenAPI response), not the MCP envelope. Callers must pass
+    while ``ToolVersion.output_schema`` describes the HTTP body (OpenAPI
+    response). Factory Runtime ``tools/list.outputSchema`` instead advertises
+    the MCP envelope around that body. Callers must pass
     ``factory_imported=True`` from ``is_factory_imported(server)`` — do not
     invent Factory provenance from shape alone.
 

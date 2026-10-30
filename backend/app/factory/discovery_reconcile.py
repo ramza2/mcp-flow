@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from app.core.canonical_hash import compute_canonical_json_hash
+from app.factory.mcp_output_schema import factory_mcp_output_schema
 from app.mcp.normalize import RemoteToolDescriptor, _json_safe, schema_for_storage
 
 FactoryClassification = Literal[
@@ -198,7 +199,9 @@ def build_factory_reconcile_plan(
     """Build fail-closed Factory reconciliation plan.
 
     ``expected_by_name`` maps remote_name →
-    ``{input_schema, output_schema}`` from imported ToolVersion.
+    ``{input_schema, output_schema}`` from imported ToolVersion (HTTP body).
+    Compare against the MCP envelope advertised by Factory Runtime, without
+    changing the persisted reviewed HTTP-body contract.
     """
 
     entries: list[FactoryReconcileEntry] = []
@@ -211,7 +214,7 @@ def build_factory_reconcile_plan(
         expected_fp = factory_contract_fingerprint(
             remote_name=name,
             input_schema=expected.get("input_schema"),
-            output_schema=expected.get("output_schema"),
+            output_schema=factory_mcp_output_schema(expected.get("output_schema")),
         )
         remote_fp = factory_contract_fingerprint(
             remote_name=remote.name,
@@ -246,7 +249,7 @@ def build_factory_reconcile_plan(
                 expected_contract_hash=factory_contract_fingerprint(
                     remote_name=name,
                     input_schema=expected.get("input_schema"),
-                    output_schema=expected.get("output_schema"),
+                    output_schema=factory_mcp_output_schema(expected.get("output_schema")),
                 ),
             )
         )

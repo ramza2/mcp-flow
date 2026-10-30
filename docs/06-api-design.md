@@ -1618,6 +1618,13 @@ POST /factory/runtime-bindings/{binding_id}/disable
   `PATCH /mcp/servers/{server_id}` (Issue #97 fingerprint lifecycle); RuntimeBinding
   READY alone does **not** Connection Test / Discovery / Activate
 - Responses never expose raw secrets, package bytes, or Object Storage keys
+- Factory Runtime `tools/list.outputSchema` describes its MCP
+  `tools/call.structuredContent` envelope
+  (`ok`, `http_status`, `latency_ms`, `protocol_version`, optional
+  `body`/`body_text`, error diagnostics). When a reviewed OpenAPI response
+  schema exists, it is nested under `body` in the advertised envelope.
+  `ToolVersion.output_schema` continues to store the reviewed HTTP body
+  schema for Factory-specific result validation, not the envelope.
 
 ### Factory connection configuration + Connection Test + Discovery (reuses MCP Server API)
 
@@ -1651,6 +1658,9 @@ POST  /mcp/servers/{server_id}/activate
 - Factory Activate requires Connection Test + Discovery fingerprints matching
   current connection config + latest Check `SUCCEEDED` (CLEAN preview alone
   does not satisfy Discovery evidence)
+- Factory Discovery compares the reviewed HTTP schema against the derived
+  wire-envelope schema; CLEAN Apply retains the reviewed HTTP body schema in
+  ToolVersion (even when a new remote descriptor version is recorded).
 - Non-Factory MCP Server routes keep prior semantics
 
 ### Aspirational (not implemented by this slice)
