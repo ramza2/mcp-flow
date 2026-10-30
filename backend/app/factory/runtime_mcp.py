@@ -15,6 +15,7 @@ from app.factory.errors import (
     FACTORY_RUNTIME_NOT_READY,
     FACTORY_RUNTIME_TOOL_UNKNOWN,
 )
+from app.factory.mcp_output_schema import factory_mcp_output_schema
 from app.factory.runtime_http_adapter import (
     DeclarativeToolContract,
     FactoryRuntimeAdapterError,
@@ -174,7 +175,7 @@ class FactoryRuntimeMcpHandler:
             if contract.description is not None:
                 item["description"] = contract.description
             if contract.output_schema is not None:
-                item["outputSchema"] = contract.output_schema
+                item["outputSchema"] = factory_mcp_output_schema(contract.output_schema)
             tools.append(item)
         logger.info(
             "factory_runtime_tools_list binding_id=%s count=%s",
