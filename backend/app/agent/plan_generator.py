@@ -26,18 +26,22 @@ from app.agent.sequential_readonly_pair import (
     discover_id_handoffs,
     is_safe_readonly_policy,
     requests_sequential_detail_lookup,
+    resolve_companion_id_bindings,
 )
 from app.core.errors import AppError
 from app.domain.enums import (
     AgentRequestStatus,
     AgentToolGrantEffect,
     AuthorableStepType,
+    ClarificationRequestStatus,
+    ClarificationRequestType,
     ToolVersionValidationStatus,
 )
 from app.models.conversation import AgentRequest
 from app.repositories.agent_request import AgentRequestRepository
 from app.repositories.agent_tool_grant import AgentToolGrantRepository
 from app.repositories.agent_version import AgentVersionRepository
+from app.repositories.clarification_request import ClarificationRequestRepository
 from app.repositories.mcp_server import MCPServerRepository
 from app.repositories.mcp_tool import MCPToolRepository
 from app.repositories.mcp_tool_policy import MCPToolPolicyRepository
@@ -94,6 +98,7 @@ class PlanGeneratorService:
         self._grants = AgentToolGrantRepository(session)
         self._versions = AgentVersionRepository(session)
         self._plans = PlanGenerationRepository(session)
+        self._clarifications = ClarificationRequestRepository(session)
 
     async def generate(self, *, agent_request_id: UUID) -> PlanGenerationOutcome:
         request = await self._requests.get(agent_request_id)
@@ -393,19 +398,59 @@ class PlanGeneratorService:
         primary_timeout_seconds: int,
         grants: list[Any],
     ) -> tuple[list[dict[str, Any]], UUID, int] | None:
-        """Optionally build tool_1 → tool_2 when detail intent + unique companion."""
-        if selection.decision != "AUTO_SELECT":
-            return None
-        if not is_safe_readonly_policy(primary_policy):
-            return None
-        # Fail closed to single TOOL unless StructuredRequest clearly asks for
-        # a follow-up detail lookup (list-only requests stay 1-step).
+        """Optionally build tool_1 → tool_2 when detail intent + unique companion.
+
+        List-only requests return None (single TOOL). Composite/detail intent that
+        cannot safely form a pair fail-closes — never silently shrinks to one TOOL.
+        """
+        # List-only / unclear: keep single TOOL.
         if not requests_sequential_detail_lookup(structured):
             return None
 
+        # Detail/composite requested — blockers fail closed (no silent shrink).
+        if selection.decision == "AUTO_SELECT":
+            pass
+        elif selection.decision == "CONFIRM":
+            if not await self._has_answered_tool_confirmation(request):
+                await self._fail_and_raise(
+                    request.id,
+                    code="EXECUTION_PRECONDITION_FAILED",
+                    status_code=409,
+                    message=(
+                        "순차 READ_ONLY pair는 CONFIRM selection에 대해 "
+                        "ANSWERED TOOL_CONFIRMATION confirmed=true가 필요합니다."
+                    ),
+                )
+        else:
+            await self._fail_and_raise(
+                request.id,
+                code="EXECUTION_PRECONDITION_FAILED",
+                status_code=409,
+                message=(
+                    "순차 READ_ONLY pair는 AUTO_SELECT 또는 확인된 CONFIRM "
+                    f"selection만 허용합니다 (decision={selection.decision!r})."
+                ),
+            )
+
+        if not is_safe_readonly_policy(primary_policy):
+            await self._fail_and_raise(
+                request.id,
+                code="EXECUTION_PRECONDITION_FAILED",
+                status_code=409,
+                message=(
+                    "순차 READ_ONLY pair primary ToolPolicy가 안전하지 않아 "
+                    "단일 TOOL로 축소하지 않습니다."
+                ),
+            )
+
         primary_tool = await self._tools.get(primary_version.mcp_tool_id)
         if primary_tool is None:
-            return None
+            await self._fail_and_raise(
+                request.id,
+                code="EXECUTION_PRECONDITION_FAILED",
+                status_code=409,
+                message="순차 pair primary Tool을 찾지 못했습니다.",
+            )
         server = await self._servers.get(primary_tool.mcp_server_id)
         uses_factory = bool(server is not None and is_factory_imported(server))
 
@@ -447,16 +492,38 @@ class PlanGeneratorService:
 
         # Exactly one compatible companion — never pick arbitrarily among many.
         if len(matches) != 1:
-            if matches:
-                logger.info(
-                    "plan_generator sequential_pair skipped agent_request_id=%s "
-                    "reason=multiple_companions count=%s",
-                    request.id,
-                    len(matches),
-                )
-            return None
+            logger.info(
+                "plan_generator sequential_pair fail_closed agent_request_id=%s "
+                "reason=companion_count count=%s",
+                request.id,
+                len(matches),
+            )
+            await self._fail_and_raise(
+                request.id,
+                code="EXECUTION_PRECONDITION_FAILED",
+                status_code=409,
+                message=(
+                    "상세/복합 요청에 대해 schema-compatible companion이 "
+                    f"정확히 1개가 아니어서 순차 pair를 만들지 않습니다 "
+                    f"(count={len(matches)})."
+                ),
+            )
 
         companion, _policy, handoffs, companion_timeout = matches[0]
+        companion_bindings = resolve_companion_id_bindings(
+            structured=structured,
+            handoffs=handoffs,
+        )
+        if companion_bindings is None:
+            await self._fail_and_raise(
+                request.id,
+                code="EXECUTION_PRECONDITION_FAILED",
+                status_code=409,
+                message=(
+                    "상세/복합 요청에 명시적 id entity도 first-item 신호도 없어 "
+                    "tool_2 id를 추측하지 않습니다."
+                ),
+            )
         steps = build_sequential_pair_steps(
             primary_tool_version_id=primary_version.id,
             primary_bindings=primary_bindings,
@@ -464,16 +531,54 @@ class PlanGeneratorService:
             companion_tool_version_id=companion.id,
             companion_timeout_seconds=companion_timeout,
             handoffs=handoffs,
+            companion_bindings=companion_bindings,
         )
         logger.info(
             "plan_generator sequential_pair agent_request_id=%s "
-            "primary=%s companion=%s handoffs=%s",
+            "primary=%s companion=%s handoffs=%s binding_kinds=%s",
             request.id,
             primary_version.id,
             companion.id,
             [h.target_param for h in handoffs],
+            {
+                name: binding.get("kind")
+                for name, binding in companion_bindings.items()
+                if isinstance(binding, dict)
+            },
         )
         return steps, companion.id, companion_timeout
+
+    async def _has_answered_tool_confirmation(self, request: AgentRequest) -> bool:
+        """True when same-request TOOL_CONFIRMATION is ANSWERED confirmed=true.
+
+        Rejects OPEN / EXPIRED / CANCELLED / confirmed=false / answer-after-expiry.
+        """
+        clarification = (
+            await self._clarifications.get_latest_answered_tool_confirmation(
+                request.id
+            )
+        )
+        if clarification is None:
+            return False
+        if (
+            clarification.request_type
+            != ClarificationRequestType.TOOL_CONFIRMATION.value
+        ):
+            return False
+        if clarification.status != ClarificationRequestStatus.ANSWERED.value:
+            return False
+        if clarification.response_payload != {"confirmed": True}:
+            return False
+        if clarification.expires_at is not None and clarification.answered_at is not None:
+            expires = clarification.expires_at
+            answered = clarification.answered_at
+            if expires.tzinfo is None:
+                expires = expires.replace(tzinfo=UTC)
+            if answered.tzinfo is None:
+                answered = answered.replace(tzinfo=UTC)
+            if answered > expires:
+                return False
+        return True
 
     def _load_structured_request(self, request: AgentRequest) -> StructuredRequestV1:
         if request.structured_request_version != STRUCTURED_REQUEST_SCHEMA_VERSION:

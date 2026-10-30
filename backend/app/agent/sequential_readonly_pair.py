@@ -15,12 +15,19 @@ from typing import Any
 from uuid import UUID
 
 from app.core.errors import AppError
-from app.domain.enums import BindingKind, RiskClass
+from app.domain.enums import BindingKind, ParameterProvenance, RiskClass
 from app.schemas.execution_plan import (
     DETERMINISTIC_TOOL_STEP_ID,
     DETERMINISTIC_TOOL_STEP_NAME,
 )
 from app.schemas.structured_request import StructuredRequestV1
+
+_EXPLICIT_ID_PROVENANCE = frozenset(
+    {
+        ParameterProvenance.USER_EXPLICIT,
+        ParameterProvenance.CONVERSATION_CONFIRMED,
+    }
+)
 
 DETERMINISTIC_TOOL_STEP_ID_2 = "tool_2"
 DETERMINISTIC_TOOL_STEP_NAME_2 = "Tool Step 2"
@@ -67,6 +74,17 @@ _DETAIL_SIGNAL_TOKENS = (
     "getpet",
 )
 
+# First-list-item handoff only — never used to invent an id when the user
+# already named a specific pet/entity id.
+_FIRST_ITEM_HANDOFF_TOKENS = (
+    "first_item",
+    "first-item",
+    "firstitem",
+    "첫 번째",
+    "첫번째",
+    "첫번",
+)
+
 # Plural / list-only intent that must not alone trigger a pair.
 _LIST_ONLY_TOKENS = (
     "list",
@@ -77,6 +95,7 @@ _LIST_ONLY_TOKENS = (
     "findall",
     "search_all",
 )
+
 
 
 @dataclass(frozen=True, slots=True)
@@ -154,18 +173,8 @@ def _types_compatible(source_type: str, target_type: str) -> bool:
     return False
 
 
-def requests_sequential_detail_lookup(structured: StructuredRequestV1) -> bool:
-    """True only when StructuredRequest clearly asks for a follow-up detail.
-
-    Unclear / list-only / clarifying requests fall back to single TOOL.
-    Uses existing StructuredRequest fields only (no new schema keys).
-    Structured fields (intent / expected_outputs / capabilities) take priority
-    over free-form ``request_text`` alone.
-    """
-    if structured.needs_clarification or structured.ambiguities:
-        return False
-
-    structured_blob = " ".join(
+def _structured_signal_blob(structured: StructuredRequestV1) -> str:
+    return " ".join(
         [
             structured.intent,
             " ".join(structured.expected_outputs),
@@ -173,6 +182,22 @@ def requests_sequential_detail_lookup(structured: StructuredRequestV1) -> bool:
             " ".join(structured.constraints),
         ]
     ).lower()
+
+
+def requests_sequential_detail_lookup(structured: StructuredRequestV1) -> bool:
+    """True only when StructuredRequest clearly asks for a follow-up detail.
+
+    Unclear / list-only / clarifying requests stay single TOOL (list-only).
+    Composite detail intent must not silently shrink when pair construction fails
+    — Plan Generator fail-closes instead.
+    Uses existing StructuredRequest fields only (no new schema keys).
+    Structured fields (intent / expected_outputs / capabilities) take priority
+    over free-form ``request_text`` alone.
+    """
+    if structured.needs_clarification or structured.ambiguities:
+        return False
+
+    structured_blob = _structured_signal_blob(structured)
     text_l = structured.request_text.lower()
 
     if any(token in structured_blob for token in _DETAIL_SIGNAL_TOKENS):
@@ -184,6 +209,96 @@ def requests_sequential_detail_lookup(structured: StructuredRequestV1) -> bool:
 
     # Neutral structured fields may still confirm via explicit first/detail text.
     return any(token in text_l for token in _DETAIL_SIGNAL_TOKENS)
+
+
+def requests_first_item_id_handoff(structured: StructuredRequestV1) -> bool:
+    """True when the request explicitly asks for the first list item's detail."""
+    if structured.needs_clarification or structured.ambiguities:
+        return False
+    blob = f"{_structured_signal_blob(structured)} {structured.request_text.lower()}"
+    return any(token in blob for token in _FIRST_ITEM_HANDOFF_TOKENS)
+
+
+def extract_explicit_id_entity_value(
+    structured: StructuredRequestV1,
+) -> Any | None:
+    """Return the sole user-confirmed id-like entity value, else None.
+
+    Multiple distinct id-like entities → ambiguous → None (do not guess).
+    """
+    matches: list[Any] = []
+    for entity in structured.entities:
+        if entity.source not in _EXPLICIT_ID_PROVENANCE:
+            continue
+        if _normalize_param(entity.name) not in _ID_PARAM_NAMES:
+            continue
+        matches.append(entity.value)
+    if len(matches) != 1:
+        return None
+    return matches[0]
+
+
+def _coerce_id_literal(value: Any, *, target_json_type: str) -> Any | None:
+    """Coerce an explicit entity value to the companion JSON type without guessing."""
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return None
+    if target_json_type == "integer":
+        if isinstance(value, int):
+            return value
+        if isinstance(value, float) and value.is_integer():
+            return int(value)
+        if isinstance(value, str) and value.strip().lstrip("-").isdigit():
+            return int(value.strip())
+        return None
+    if target_json_type == "number":
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            try:
+                return float(value.strip())
+            except ValueError:
+                return None
+        return None
+    if target_json_type == "string":
+        if isinstance(value, str) and value.strip():
+            return value
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return str(value)
+        return None
+    return None
+
+
+def resolve_companion_id_bindings(
+    *,
+    structured: StructuredRequestV1,
+    handoffs: tuple[SequentialHandoff, ...] | list[SequentialHandoff],
+) -> dict[str, Any] | None:
+    """Build tool_2 id bindings from explicit entity or first-item STEP_OUTPUT.
+
+    Returns None when the id cannot be resolved without inventing meaning
+    (no explicit id and no first-item signal).
+    """
+    if len(handoffs) != 1:
+        return None
+    handoff = handoffs[0]
+    explicit = extract_explicit_id_entity_value(structured)
+    if explicit is not None:
+        coerced = _coerce_id_literal(
+            explicit, target_json_type=handoff.target_json_type
+        )
+        if coerced is None:
+            return None
+        return {
+            handoff.target_param: {
+                "kind": BindingKind.LITERAL.value,
+                "value": coerced,
+            }
+        }
+    if requests_first_item_id_handoff(structured):
+        return companion_step_bindings(handoffs)
+    return None
 
 
 def discover_id_handoffs(
@@ -259,8 +374,18 @@ def build_sequential_pair_steps(
     companion_tool_version_id: UUID,
     companion_timeout_seconds: int,
     handoffs: tuple[SequentialHandoff, ...] | list[SequentialHandoff],
+    companion_bindings: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
-    """Return ExecutionPlanV1 ``steps`` for tool_1 → tool_2."""
+    """Return ExecutionPlanV1 ``steps`` for tool_1 → tool_2.
+
+    ``companion_bindings`` overrides default STEP_OUTPUT handoffs when the
+    caller already resolved an explicit LITERAL id (or equivalent).
+    """
+    bindings = (
+        companion_bindings
+        if companion_bindings is not None
+        else companion_step_bindings(handoffs)
+    )
     return [
         {
             "id": DETERMINISTIC_TOOL_STEP_ID,
@@ -287,7 +412,7 @@ def build_sequential_pair_steps(
             "on_error": "FAIL_EXECUTION",
             "config": {
                 "tool_version_id": str(companion_tool_version_id),
-                "bindings": companion_step_bindings(handoffs),
+                "bindings": bindings,
             },
         },
     ]
