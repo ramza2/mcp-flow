@@ -716,6 +716,118 @@ async def test_composite_ops_shaped_id_string_entity_literal(
 
 
 @pytest.mark.asyncio
+async def test_composite_ops_id_generate_validate_ready(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ops shape name=id value=\"1\" → PlanGenerator → PlanValidator → READY."""
+    _install_no_side_effects(monkeypatch)
+    seeded = await _seed_sequential_planning(
+        db_session,
+        mode="composite",
+        explicit_pet_id="1",
+        explicit_id_entity_name="id",
+    )
+    gen = await PlanGeneratorService(db_session).generate(
+        agent_request_id=seeded["request_id"]
+    )
+    plan_run = await PlanGenerationRepository(db_session).get_by_id(
+        gen.plan_generation_run_id
+    )
+    assert plan_run is not None
+    assert plan_run.plan_snapshot["steps"][1]["config"]["bindings"]["petId"] == {
+        "kind": BindingKind.LITERAL.value,
+        "value": 1,
+    }
+
+    outcome = await PlanValidatorService(db_session).validate(
+        agent_request_id=seeded["request_id"]
+    )
+    assert outcome.decision == "READY"
+    request = await AgentRequestRepository(db_session).get(seeded["request_id"])
+    assert request is not None
+    assert request.status == AgentRequestStatus.READY.value
+    validation = await PlanValidationRepository(db_session).get_latest_for_agent_request(
+        seeded["request_id"]
+    )
+    assert validation is not None
+    assert validation.decision == "READY"
+    assert validation.policy_snapshot["schema_version"] == (
+        AGENT_REQUEST_SEQUENTIAL_POLICY_SCHEMA
+    )
+
+    # Runtime lineage + Binding resolve must accept evidenced LITERAL on tool_2.
+    created = await ExecutionCreationService(db_session).create_from_agent_request(
+        agent_request_id=seeded["request_id"],
+        requester_id=seeded["requester_id"],
+        idempotency_key=_idem_key(),
+    )
+    assert created.result.step_count == 2
+    execution = await ExecutionRepository(db_session).get(created.result.id)
+    assert execution is not None
+    steps_rows = await ExecutionRepository(db_session).list_steps(execution.id)
+    tool2 = next(s for s in steps_rows if s.step_key == DETERMINISTIC_TOOL_STEP_ID_2)
+    from app.execution.binding_resolver import RuntimeBindingResolver
+    from app.execution.lineage import assert_tool_step_lineage
+
+    lineage = assert_tool_step_lineage(execution, tool2, steps=steps_rows)
+    pet_binding = lineage.bindings["petId"]
+    assert getattr(pet_binding, "kind", None) == BindingKind.LITERAL
+    assert getattr(pet_binding, "value", None) == 1
+    resolved = RuntimeBindingResolver().resolve(
+        execution=execution,
+        step=tool2,
+        steps=steps_rows,
+        bindings=lineage.bindings,
+        plan=lineage.plan,
+    )
+    assert resolved == {"petId": 1}
+
+
+@pytest.mark.asyncio
+async def test_composite_arbitrary_literal_rejected_by_validator(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _install_no_side_effects(monkeypatch)
+    seeded = await _seed_sequential_planning(
+        db_session,
+        mode="composite",
+        explicit_pet_id="1",
+        explicit_id_entity_name="id",
+    )
+    gen = await PlanGeneratorService(db_session).generate(
+        agent_request_id=seeded["request_id"]
+    )
+    plan_run = await PlanGenerationRepository(db_session).get_by_id(
+        gen.plan_generation_run_id
+    )
+    assert plan_run is not None
+    # Tamper: invent a LITERAL id that is not grounded in StructuredRequest.
+    snapshot = dict(plan_run.plan_snapshot)
+    steps = list(snapshot["steps"])
+    tool2 = dict(steps[1])
+    config = dict(tool2["config"])
+    bindings = dict(config["bindings"])
+    bindings["petId"] = {"kind": BindingKind.LITERAL.value, "value": 99}
+    config["bindings"] = bindings
+    tool2["config"] = config
+    steps[1] = tool2
+    snapshot["steps"] = steps
+    from app.schemas.execution_plan import compute_plan_hash
+
+    plan_run.plan_snapshot = snapshot
+    plan_run.plan_hash = compute_plan_hash(snapshot)
+    await db_session.commit()
+
+    outcome = await PlanValidatorService(db_session).validate(
+        agent_request_id=seeded["request_id"]
+    )
+    assert outcome.decision == "FAILED"
+    request = await AgentRequestRepository(db_session).get(seeded["request_id"])
+    assert request is not None
+    assert request.status == AgentRequestStatus.FAILED.value
+
+
+@pytest.mark.asyncio
 async def test_detail_by_id_stays_single_tool(
     db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:

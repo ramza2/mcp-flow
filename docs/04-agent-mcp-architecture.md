@@ -628,9 +628,14 @@ complete ParameterBuildRun bindings
   - 사용자가 StructuredRequest entity로 id를 명시한 경우(`USER_EXPLICIT` /
     `CONVERSATION_CONFIRMED`, id-like name; 문자열 숫자 포함) → `LITERAL`로
     그 값을 전달한다. list 결과 `pets[0].id`로 치환하지 않는다.
+  - Plan Validator와 READY→CREATED create preflight는 tool_2 `LITERAL`이
+    동일 StructuredRequest 근거·companion 입력 스키마 타입과 일치할 때만
+    허용한다. 임의 LITERAL은 거부한다.
   - first-item 신호(`첫 번째` / `first_item` 등)가 있을 때만
     `STEP_OUTPUT` → `pets[0].id` handoff를 허용한다.
   - id도 first-item 신호도 없으면 id를 추측하지 않는다.
+  - Runtime lineage / Binding resolve는 companion tool_2에 `STEP_OUTPUT`
+    또는 근거 있는 `LITERAL`만 허용한다.
 - 목록-only 요청은 기존처럼 단일 TOOL을 유지한다.
 - 목록+상세/첫 항목 상세인데 pair를 안전하게 구성할 수 없으면
   단일 TOOL로 조용히 축소하지 않고 Plan Generator에서 fail-closed한다.

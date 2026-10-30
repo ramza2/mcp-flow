@@ -11,6 +11,7 @@ from app.agent.sequential_readonly_pair import (
     assert_usable_sequential_handoff_values,
     build_agent_request_sequential_policy_snapshot,
     build_sequential_pair_steps,
+    companion_literal_matches_explicit_id,
     companion_step_bindings,
     discover_id_handoffs,
     extract_explicit_id_entity_value,
@@ -370,6 +371,24 @@ def test_ops_shaped_id_string_entity_coerces_for_literal() -> None:
     assert handoffs is not None
     bindings = resolve_companion_id_bindings(structured=structured, handoffs=handoffs)
     assert bindings == {"petId": {"kind": BindingKind.LITERAL.value, "value": 1}}
+    assert (
+        companion_literal_matches_explicit_id(
+            structured,
+            param_name="petId",
+            literal_value=1,
+            target_json_type="integer",
+        )
+        is True
+    )
+    assert (
+        companion_literal_matches_explicit_id(
+            structured,
+            param_name="petId",
+            literal_value=99,
+            target_json_type="integer",
+        )
+        is False
+    )
 
 
 def test_detail_by_id_alone_is_not_sequential_pair() -> None:

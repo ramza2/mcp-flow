@@ -21,6 +21,8 @@ from app.agent.plan_validator import _literal_matches_type
 from app.agent.sequential_readonly_pair import (
     AGENT_REQUEST_SEQUENTIAL_POLICY_SCHEMA,
     DETERMINISTIC_TOOL_STEP_ID_2,
+    companion_literal_matches_explicit_id,
+    companion_param_json_type,
     is_safe_readonly_policy,
 )
 from app.core.errors import AppError
@@ -56,7 +58,11 @@ from app.schemas.execution_plan import (
     parse_complex_tool_step_config,
 )
 from app.schemas.parameter_binding import ParameterBuildSnapshot
-from app.schemas.plan_binding import PlanStepOutputBinding
+from app.schemas.plan_binding import PlanLiteralBinding, PlanStepOutputBinding
+from app.schemas.structured_request import (
+    STRUCTURED_REQUEST_SCHEMA_VERSION,
+    StructuredRequestV1,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -508,7 +514,7 @@ class ExecutionCreationService:
         plan_run: Any,
         plan: ExecutionPlanV1,
     ) -> dict[str, Any]:
-        """READY create gate for tool_1 → tool_2 READ_ONLY STEP_OUTPUT plans."""
+        """READY create gate for tool_1 → tool_2 READ_ONLY sequential plans."""
         first, second = plan.steps[0], plan.steps[1]
         if (
             first.id != DETERMINISTIC_TOOL_STEP_ID
@@ -627,7 +633,10 @@ class ExecutionCreationService:
                 status_code=409,
             )
         self._validate_bindings(tv1.input_schema, cfg1.bindings)
-        self._validate_step_output_bindings(tv2.input_schema, cfg2.bindings)
+        structured = self._load_structured_request(request)
+        self._validate_companion_bindings(
+            tv2.input_schema, cfg2.bindings, structured=structured
+        )
 
         # Per-step authz against pinned sequential policy entries (no bypass).
         for step, tool_version in ((first, tv1), (second, tv2)):
@@ -679,9 +688,36 @@ class ExecutionCreationService:
             "policy_snapshot": dict(snapshot),
         }
 
-    def _validate_step_output_bindings(
-        self, input_schema: Any, bindings: dict[str, Any]
+    def _load_structured_request(self, request: Any) -> StructuredRequestV1:
+        if request.structured_request_version != STRUCTURED_REQUEST_SCHEMA_VERSION:
+            raise AppError(
+                code="EXECUTION_PRECONDITION_FAILED",
+                message="structured_request_version이 지원되지 않습니다.",
+                status_code=409,
+            )
+        if not isinstance(request.structured_request, dict):
+            raise AppError(
+                code="EXECUTION_PRECONDITION_FAILED",
+                message="structured_request가 없습니다.",
+                status_code=409,
+            )
+        try:
+            return StructuredRequestV1.model_validate(request.structured_request)
+        except Exception as exc:
+            raise AppError(
+                code="EXECUTION_PRECONDITION_FAILED",
+                message="structured_request 재검증에 실패했습니다.",
+                status_code=409,
+            ) from exc
+
+    def _validate_companion_bindings(
+        self,
+        input_schema: Any,
+        bindings: dict[str, Any],
+        *,
+        structured: StructuredRequestV1,
     ) -> None:
+        """tool_2: STEP_OUTPUT handoff or evidenced explicit-id LITERAL."""
         if not isinstance(input_schema, dict) or input_schema.get("type") != "object":
             raise AppError(
                 code="EXECUTION_PRECONDITION_FAILED",
@@ -717,24 +753,55 @@ class ExecutionCreationService:
                     status_code=409,
                 )
         for key, binding in bindings.items():
-            if not isinstance(binding, PlanStepOutputBinding):
-                raise AppError(
-                    code="EXECUTION_PRECONDITION_FAILED",
-                    message=f"tool_2 binding {key!r} must be STEP_OUTPUT.",
-                    status_code=409,
-                )
-            if binding.step_id != DETERMINISTIC_TOOL_STEP_ID:
-                raise AppError(
-                    code="EXECUTION_PRECONDITION_FAILED",
-                    message="tool_2 STEP_OUTPUT.step_id는 tool_1이어야 합니다.",
-                    status_code=409,
-                )
-            if not isinstance(binding.path, str) or not binding.path.startswith("/"):
-                raise AppError(
-                    code="EXECUTION_PRECONDITION_FAILED",
-                    message=f"invalid STEP_OUTPUT.path for {key!r}",
-                    status_code=409,
-                )
+            if isinstance(binding, PlanStepOutputBinding):
+                if binding.step_id != DETERMINISTIC_TOOL_STEP_ID:
+                    raise AppError(
+                        code="EXECUTION_PRECONDITION_FAILED",
+                        message="tool_2 STEP_OUTPUT.step_id는 tool_1이어야 합니다.",
+                        status_code=409,
+                    )
+                if not isinstance(binding.path, str) or not binding.path.startswith("/"):
+                    raise AppError(
+                        code="EXECUTION_PRECONDITION_FAILED",
+                        message=f"invalid STEP_OUTPUT.path for {key!r}",
+                        status_code=409,
+                    )
+                continue
+            if isinstance(binding, PlanLiteralBinding):
+                target_type = companion_param_json_type(input_schema, key)
+                if target_type is None:
+                    raise AppError(
+                        code="EXECUTION_PRECONDITION_FAILED",
+                        message=(
+                            f"tool_2 LITERAL {key!r}의 JSON Schema type을 "
+                            f"확인할 수 없습니다."
+                        ),
+                        status_code=409,
+                    )
+                if not companion_literal_matches_explicit_id(
+                    structured,
+                    param_name=key,
+                    literal_value=binding.value,
+                    target_json_type=target_type,
+                ):
+                    raise AppError(
+                        code="EXECUTION_PRECONDITION_FAILED",
+                        message=(
+                            "순차 pair tool_2 LITERAL은 StructuredRequest의 "
+                            "USER_EXPLICIT/CONVERSATION_CONFIRMED id entity와 "
+                            "일치해야 합니다."
+                        ),
+                        status_code=409,
+                    )
+                continue
+            raise AppError(
+                code="EXECUTION_PRECONDITION_FAILED",
+                message=(
+                    f"tool_2 binding {key!r} must be STEP_OUTPUT or "
+                    f"evidenced LITERAL."
+                ),
+                status_code=409,
+            )
 
     def _validate_bindings(self, input_schema: Any, bindings: dict[str, Any]) -> None:
         if not isinstance(input_schema, dict) or input_schema.get("type") != "object":

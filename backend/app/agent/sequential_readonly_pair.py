@@ -290,6 +290,36 @@ def _coerce_id_literal(value: Any, *, target_json_type: str) -> Any | None:
     return None
 
 
+def companion_literal_matches_explicit_id(
+    structured: StructuredRequestV1,
+    *,
+    param_name: str,
+    literal_value: Any,
+    target_json_type: str,
+) -> bool:
+    """True when a tool_2 LITERAL equals the sole evidenced explicit id entity.
+
+    Rejects arbitrary LITERAL values that are not grounded in
+    USER_EXPLICIT / CONVERSATION_CONFIRMED id-like StructuredRequest entities.
+    """
+    if _normalize_param(param_name) not in _ID_PARAM_NAMES:
+        return False
+    explicit = extract_explicit_id_entity_value(structured)
+    if explicit is None:
+        return False
+    expected = _coerce_id_literal(explicit, target_json_type=target_json_type)
+    actual = _coerce_id_literal(literal_value, target_json_type=target_json_type)
+    if expected is None or actual is None:
+        return False
+    return expected == actual
+
+
+def companion_param_json_type(input_schema: Any, param_name: str) -> str | None:
+    """JSON Schema type for a companion input property, if present."""
+    props = _schema_properties(input_schema)
+    return _json_type(props.get(param_name))
+
+
 def resolve_companion_id_bindings(
     *,
     structured: StructuredRequestV1,
