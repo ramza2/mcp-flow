@@ -66,21 +66,19 @@ class ClarificationRequestRepository:
         )
         return (await self._session.execute(stmt)).scalar_one_or_none()
 
-    async def get_latest_answered_tool_confirmation(
+    async def get_latest_tool_confirmation(
         self, agent_request_id: uuid.UUID
     ) -> ClarificationRequest | None:
-        """Latest ANSWERED TOOL_CONFIRMATION for an AgentRequest (any payload)."""
+        """Most recent TOOL_CONFIRMATION for an AgentRequest (any status)."""
         stmt = (
             select(ClarificationRequest)
             .where(
                 ClarificationRequest.agent_request_id == agent_request_id,
                 ClarificationRequest.request_type
                 == ClarificationRequestType.TOOL_CONFIRMATION.value,
-                ClarificationRequest.status
-                == ClarificationRequestStatus.ANSWERED.value,
             )
             .order_by(
-                ClarificationRequest.answered_at.desc(),
+                ClarificationRequest.requested_at.desc(),
                 ClarificationRequest.id.desc(),
             )
             .limit(1)

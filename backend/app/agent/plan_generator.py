@@ -25,7 +25,7 @@ from app.agent.sequential_readonly_pair import (
     build_sequential_pair_steps,
     discover_id_handoffs,
     is_safe_readonly_policy,
-    requests_sequential_detail_lookup,
+    requests_sequential_list_detail_pair,
     resolve_companion_id_bindings,
 )
 from app.core.errors import AppError
@@ -398,16 +398,17 @@ class PlanGeneratorService:
         primary_timeout_seconds: int,
         grants: list[Any],
     ) -> tuple[list[dict[str, Any]], UUID, int] | None:
-        """Optionally build tool_1 → tool_2 when detail intent + unique companion.
+        """Optionally build tool_1 → tool_2 for list+detail / first-item pair.
 
-        List-only requests return None (single TOOL). Composite/detail intent that
-        cannot safely form a pair fail-closes — never silently shrinks to one TOOL.
+        List-only and detail-by-id (explicit id, no list signal) return None
+        (single TOOL). Pair-eligible intents that cannot safely form a pair
+        fail-close — never silently shrink to one TOOL.
         """
-        # List-only / unclear: keep single TOOL.
-        if not requests_sequential_detail_lookup(structured):
+        # List-only / detail-by-id: keep single TOOL.
+        if not requests_sequential_list_detail_pair(structured):
             return None
 
-        # Detail/composite requested — blockers fail closed (no silent shrink).
+        # Pair-eligible — blockers fail closed (no silent shrink).
         if selection.decision == "AUTO_SELECT":
             pass
         elif selection.decision == "CONFIRM":
@@ -418,7 +419,8 @@ class PlanGeneratorService:
                     status_code=409,
                     message=(
                         "순차 READ_ONLY pair는 CONFIRM selection에 대해 "
-                        "ANSWERED TOOL_CONFIRMATION confirmed=true가 필요합니다."
+                        "가장 최근 TOOL_CONFIRMATION이 ANSWERED confirmed=true "
+                        "이어야 합니다."
                     ),
                 )
         else:
@@ -503,9 +505,9 @@ class PlanGeneratorService:
                 code="EXECUTION_PRECONDITION_FAILED",
                 status_code=409,
                 message=(
-                    "상세/복합 요청에 대해 schema-compatible companion이 "
-                    f"정확히 1개가 아니어서 순차 pair를 만들지 않습니다 "
-                    f"(count={len(matches)})."
+                    "목록+상세/첫 항목 상세 요청에 대해 schema-compatible "
+                    f"companion이 정확히 1개가 아니어서 순차 pair를 만들지 "
+                    f"않습니다 (count={len(matches)})."
                 ),
             )
 
@@ -520,8 +522,8 @@ class PlanGeneratorService:
                 code="EXECUTION_PRECONDITION_FAILED",
                 status_code=409,
                 message=(
-                    "상세/복합 요청에 명시적 id entity도 first-item 신호도 없어 "
-                    "tool_2 id를 추측하지 않습니다."
+                    "목록+상세/첫 항목 상세 요청에 명시적 id entity도 "
+                    "first-item 신호도 없어 tool_2 id를 추측하지 않습니다."
                 ),
             )
         steps = build_sequential_pair_steps(
@@ -549,14 +551,14 @@ class PlanGeneratorService:
         return steps, companion.id, companion_timeout
 
     async def _has_answered_tool_confirmation(self, request: AgentRequest) -> bool:
-        """True when same-request TOOL_CONFIRMATION is ANSWERED confirmed=true.
+        """True when the latest same-request TOOL_CONFIRMATION is usable.
 
-        Rejects OPEN / EXPIRED / CANCELLED / confirmed=false / answer-after-expiry.
+        Uses the most recent TOOL_CONFIRMATION by ``requested_at`` (not an older
+        ANSWERED row). Rejects OPEN / EXPIRED / CANCELLED / confirmed=false /
+        answer-after-expiry so prior approvals cannot bypass a newer block.
         """
-        clarification = (
-            await self._clarifications.get_latest_answered_tool_confirmation(
-                request.id
-            )
+        clarification = await self._clarifications.get_latest_tool_confirmation(
+            request.id
         )
         if clarification is None:
             return False

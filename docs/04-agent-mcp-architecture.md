@@ -613,23 +613,26 @@ complete ParameterBuildRun bindings
   Parameter provenance는 `PlanGenerationRun → ParameterBuildRun.bindings_snapshot`으로 추적한다.
 - step id는 deterministic `tool_1`, name은 `Tool Step 1`이다.
 - 양쪽 `READ_ONLY`(confirmation/approval 없음)이고
-  StructuredRequest가 후속 상세 조회 목적을 명확히 나타내며,
+  StructuredRequest가 **목록+상세 복합** 또는 **첫 항목 상세**를 명확히 나타내며,
   schema-compatible companion candidate가 **정확히 1개**이고
   primary `pets.items.properties.id` 타입이 companion id 입력과 호환되며,
   selection이 `AUTO_SELECT`이거나
-  `CONFIRM` + 동일 AgentRequest의 `ANSWERED` `TOOL_CONFIRMATION`
-  (`response_payload={"confirmed": true}`, 미확인/거절/만료 제외)
+  `CONFIRM` + 동일 AgentRequest의 **가장 최근** `TOOL_CONFIRMATION`이
+  `ANSWERED`이며 `response_payload={"confirmed": true}`
+  (이후 OPEN/EXPIRED/거절이 최신이면 이전 승인으로 우회 불가)
   일 때만 optional `tool_2`(depends_on=`[tool_1]`,
   response_step_ids=`[tool_2]`)를 추가한다.
+- 단건 상세(id 명시, 목록 신호 없음)는 pair를 강제하지 않고
+  적합한 GET-by-id 단일 TOOL로 유지한다.
 - tool_2 id binding:
   - 사용자가 StructuredRequest entity로 id를 명시한 경우(`USER_EXPLICIT` /
-    `CONVERSATION_CONFIRMED`, id-like name) → `LITERAL`로 그 값을 전달한다.
-    list 결과 `pets[0].id`로 치환하지 않는다.
+    `CONVERSATION_CONFIRMED`, id-like name; 문자열 숫자 포함) → `LITERAL`로
+    그 값을 전달한다. list 결과 `pets[0].id`로 치환하지 않는다.
   - first-item 신호(`첫 번째` / `first_item` 등)가 있을 때만
     `STEP_OUTPUT` → `pets[0].id` handoff를 허용한다.
   - id도 first-item 신호도 없으면 id를 추측하지 않는다.
 - 목록-only 요청은 기존처럼 단일 TOOL을 유지한다.
-- 상세/복합 intent인데 pair를 안전하게 구성할 수 없으면
+- 목록+상세/첫 항목 상세인데 pair를 안전하게 구성할 수 없으면
   단일 TOOL로 조용히 축소하지 않고 Plan Generator에서 fail-closed한다.
   런타임 handoff id가 null/empty이면 tool_2 MCP 호출 전에 fail-closed한다.
   sequential pair의 Execution.policy_snapshot은

@@ -184,31 +184,51 @@ def _structured_signal_blob(structured: StructuredRequestV1) -> str:
     ).lower()
 
 
-def requests_sequential_detail_lookup(structured: StructuredRequestV1) -> bool:
-    """True only when StructuredRequest clearly asks for a follow-up detail.
+def _has_detail_signal(structured: StructuredRequestV1) -> bool:
+    structured_blob = _structured_signal_blob(structured)
+    text_l = structured.request_text.lower()
+    if any(token in structured_blob for token in _DETAIL_SIGNAL_TOKENS):
+        return True
+    if any(token in structured_blob for token in _LIST_ONLY_TOKENS):
+        # List-classified structured signals never upgrade from text alone.
+        return False
+    return any(token in text_l for token in _DETAIL_SIGNAL_TOKENS)
 
-    Unclear / list-only / clarifying requests stay single TOOL (list-only).
-    Composite detail intent must not silently shrink when pair construction fails
-    — Plan Generator fail-closes instead.
+
+def _has_list_signal(structured: StructuredRequestV1) -> bool:
+    structured_blob = _structured_signal_blob(structured)
+    text_l = structured.request_text.lower()
+    if any(token in structured_blob for token in _LIST_ONLY_TOKENS):
+        return True
+    return any(token in text_l for token in _LIST_ONLY_TOKENS)
+
+
+def requests_sequential_detail_lookup(structured: StructuredRequestV1) -> bool:
+    """True when StructuredRequest asks for a detail (pair or single by-id).
+
+    Unclear / list-only / clarifying requests stay False.
     Uses existing StructuredRequest fields only (no new schema keys).
-    Structured fields (intent / expected_outputs / capabilities) take priority
-    over free-form ``request_text`` alone.
     """
     if structured.needs_clarification or structured.ambiguities:
         return False
+    return _has_detail_signal(structured)
 
-    structured_blob = _structured_signal_blob(structured)
-    text_l = structured.request_text.lower()
 
-    if any(token in structured_blob for token in _DETAIL_SIGNAL_TOKENS):
-        return True
+def requests_sequential_list_detail_pair(structured: StructuredRequestV1) -> bool:
+    """True when list→detail pair is required (not detail-by-id alone).
 
-    # List-classified structured signals never upgrade to a pair from text alone.
-    if any(token in structured_blob for token in _LIST_ONLY_TOKENS):
+    Pair-eligible:
+    - first-item detail handoff, or
+    - both list and detail signals (composite).
+
+    Detail-only with an explicit id stays single TOOL (GET-by-id).
+    List-only stays single TOOL.
+    """
+    if structured.needs_clarification or structured.ambiguities:
         return False
-
-    # Neutral structured fields may still confirm via explicit first/detail text.
-    return any(token in text_l for token in _DETAIL_SIGNAL_TOKENS)
+    if requests_first_item_id_handoff(structured):
+        return True
+    return _has_detail_signal(structured) and _has_list_signal(structured)
 
 
 def requests_first_item_id_handoff(structured: StructuredRequestV1) -> bool:
