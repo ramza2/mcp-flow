@@ -1663,6 +1663,16 @@ Invocation Identity = immutable tool_version_id
 
 Tool 업무 오류(`isError`)와 transport/protocol 오류를 분리한다. outputSchema가 있으면 `structured_content`를 검증하고 불일치 결과를 `SUCCEEDED`로 처리하지 않는다. `isError=true`는 `RESULT_TOOL_ERROR`로 Step/Attempt/ToolCall `FAILED`를 유지하면서, redaction·size-bound를 거친 diagnostic `result_inline`을 보존할 수 있다 (raw response 전체 저장 금지).
 
+Factory-imported Tool의 `ToolVersion.output_schema`는 검토된 OpenAPI
+HTTP 응답 **본문** 스키마로 유지한다. Factory Runtime이 외부에 광고하는
+`tools/list.outputSchema`는 실제 `tools/call.structuredContent`와 일치하도록
+`{ok, http_status, latency_ms, protocol_version, body?, body_text?, ...}`
+객체 스키마이며, 검토된 본문 스키마는 `body` 속성에 포함한다.
+Factory-specific ResultValidator는 이 본문만 검증하고, STEP_OUTPUT의
+`/structured_content/body/...` 경로는 유지한다. Factory Discovery는
+외부의 envelope 계약을 비교하되 CLEAN Apply 시 본문 스키마만 ToolVersion에
+보존하여 중첩 envelope 재저장을 금지한다.
+
 ### 14.3 구현 위치 (MCP Tool Runner vertical slice)
 
 Current MCP `tools/call` 요청/응답 매핑과 `NormalizedToolResult` 계약은 `backend/app/mcp/` 아래에 존재한다.
