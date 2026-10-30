@@ -22,6 +22,7 @@ from app.factory.discovery_reconcile import (
     has_immutable_factory_lineage,
     index_remote_tools_strict,
 )
+from app.factory.mcp_output_schema import factory_mcp_output_schema
 from app.infrastructure.object_storage import InMemoryObjectStorage
 from app.mcp.normalize import RemoteToolDescriptor
 from app.models.factory import ToolFactoryReview
@@ -396,6 +397,57 @@ def test_contract_fingerprint_ignores_annotations_and_description() -> None:
     assert plan.entries[0].classification == "MATCHED"
 
 
+def test_factory_reconcile_requires_wire_envelope_with_reviewed_body_schema() -> None:
+    body_schema = {
+        "type": "object",
+        "properties": {"id": {"type": "integer"}},
+        "required": ["id"],
+    }
+    input_schema = {"type": "object", "properties": {}}
+    expected = {
+        "GET /pets": {
+            "input_schema": input_schema,
+            "output_schema": body_schema,
+        }
+    }
+    wire_schema = factory_mcp_output_schema(body_schema)
+    assert wire_schema is not None
+    matched = build_factory_reconcile_plan(
+        expected_by_name=expected,
+        remote_by_name={
+            "GET /pets": _desc(
+                "GET /pets", input_schema=input_schema, output_schema=wire_schema
+            )
+        },
+    )
+    assert matched.is_clean
+
+    # Old bare-body advertisement must not silently pass a Factory Runtime
+    # Discovery contract comparison.
+    bare = build_factory_reconcile_plan(
+        expected_by_name=expected,
+        remote_by_name={
+            "GET /pets": _desc(
+                "GET /pets", input_schema=input_schema, output_schema=body_schema
+            )
+        },
+    )
+    assert bare.entries[0].classification == "CONTRACT_CHANGED"
+
+    changed_envelope = {**wire_schema, "required": ["ok"]}
+    drift = build_factory_reconcile_plan(
+        expected_by_name=expected,
+        remote_by_name={
+            "GET /pets": _desc(
+                "GET /pets",
+                input_schema=input_schema,
+                output_schema=changed_envelope,
+            )
+        },
+    )
+    assert drift.entries[0].classification == "CONTRACT_CHANGED"
+
+
 def test_build_plan_classifications() -> None:
     expected = {
         "keep": {"input_schema": {"type": "object"}, "output_schema": None},
@@ -598,6 +650,61 @@ async def test_apply_mismatch_zero_partial_mutation(db_session: AsyncSession) ->
         .all()
     }
     assert names == {"GET /pets"}
+
+
+@pytest.mark.asyncio
+async def test_factory_discovery_apply_preserves_http_body_schema(
+    db_session: AsyncSession,
+) -> None:
+    """CLEAN Apply may version the wire descriptor but never import its envelope."""
+    input_schema = {"type": "object", "properties": {"q": {"type": "string"}}}
+    body_schema = {
+        "type": "object",
+        "properties": {"pets": {"type": "array"}},
+        "required": ["pets"],
+    }
+    server_id = await _factory_server_ready(
+        db_session,
+        tools=[
+            {
+                "remote_name": "GET /pets",
+                "input_schema": input_schema,
+                "output_schema": body_schema,
+            }
+        ],
+    )
+    http = _http_with_tools(
+        [
+            _desc(
+                "GET /pets",
+                input_schema=input_schema,
+                output_schema=factory_mcp_output_schema(body_schema),
+            )
+        ]
+    )
+    discovery = MCPDiscoveryService(db_session, http)
+    applied = await discovery.discover(server_id, apply_changes=True)
+    assert applied.success is True
+    assert applied.factory_diff is not None
+    assert applied.factory_diff.status == "CLEAN"
+
+    tool = (
+        await db_session.execute(
+            select(MCPTool).where(MCPTool.mcp_server_id == server_id)
+        )
+    ).scalar_one()
+    current_version = await MCPToolRepository(db_session).get_version(
+        tool.current_version_id
+    )
+    assert current_version is not None
+    assert current_version.output_schema == body_schema
+
+    # A second Discovery must compare the stored HTTP schema to the wire
+    # envelope again, without accumulating nested envelopes.
+    repeated = await discovery.discover(server_id, apply_changes=False)
+    assert repeated.success is True
+    assert repeated.factory_diff is not None
+    assert repeated.factory_diff.status == "CLEAN"
 
 
 @pytest.mark.asyncio
