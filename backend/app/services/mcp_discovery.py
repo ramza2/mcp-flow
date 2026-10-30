@@ -1184,10 +1184,13 @@ class MCPDiscoveryService:
             meta = remote_meta[name]
             tool = existing_by_name[name]
             prior_annotations: dict[str, Any] | None = None
+            prior_http_body_schema: Any = None
             if tool.current_version_id is not None:
                 prior = await self._tools.get_version(tool.current_version_id)
-                if prior is not None and isinstance(prior.annotations, dict):
-                    prior_annotations = prior.annotations
+                if prior is not None:
+                    prior_http_body_schema = prior.output_schema
+                    if isinstance(prior.annotations, dict):
+                        prior_annotations = prior.annotations
             lineage = extract_factory_lineage_annotations(prior_annotations)
             merged_annotations = {
                 **(desc.annotations or {}),
@@ -1197,7 +1200,9 @@ class MCPDiscoveryService:
                 name=desc.name,
                 description=desc.description,
                 input_schema=desc.input_schema,
-                output_schema=desc.output_schema,
+                # Keep the reviewed HTTP-body schema on ToolVersion. The wire
+                # descriptor's outputSchema is the MCP structuredContent envelope.
+                output_schema=prior_http_body_schema,
                 annotations=merged_annotations,
                 raw=desc.raw,
             )
