@@ -184,7 +184,9 @@ async def test_chat_result_projects_pets_and_masks_secrets(
 
     async def fake_generate(self, target, *, messages, parameters=None):
         model_inputs.append(json.loads(messages[-1]["content"]))
-        return {"answer": "조회된 반려동물은 Alpha와 Beta이며 상태는 각각 available, pending입니다."}
+        return {"answer": (
+            "조회된 반려동물은 Alpha와 Beta이며 상태는 각각 available, pending입니다."
+        )}
 
     monkeypatch.setattr(ModelProviderClient, "generate_json", fake_generate)
     answer = await authenticated_db_client.post(
