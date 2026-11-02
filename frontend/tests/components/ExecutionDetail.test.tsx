@@ -356,6 +356,30 @@ describe('ExecutionDetail SSE + polling fallback', () => {
     expect(screen.queryByText('Events API deferred')).not.toBeInTheDocument();
   });
 
+  it('shows historical RUNNING events without a spinner after execution FAILED', async () => {
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    mockRunningFetch({ detailStatus: 'FAILED', stepStatus: 'FAILED' });
+    renderWithRouter(<ExecutionDetail />, {
+      path: '/executions/:executionId',
+      route: `/executions/${EXEC_ID}`,
+    });
+    await screen.findByText(EXEC_ID);
+    const source = await waitForSse();
+    act(() => source.emitOpen());
+    act(() => {
+      source.emitNamed('execution.started', envelope('execution.started', 'RUNNING'), '55');
+      source.emitNamed('execution.failed', envelope('execution.failed', 'FAILED'), '56');
+    });
+
+    await user.click(screen.getByRole('button', { name: /^Events$/i }));
+    const rows = await screen.findAllByTestId('execution-event-row');
+    expect(rows).toHaveLength(2);
+    expect(within(rows[0]).getByText('RUNNING')).toBeInTheDocument();
+    expect(within(rows[1]).getByText('FAILED')).toBeInTheDocument();
+    expect(rows[0].querySelector('.animate-spin')).toBeNull();
+    expect(rows[1].querySelector('.animate-spin')).toBeNull();
+  });
+
   it('malformed lastEventId is not applied', async () => {
     mockRunningFetch();
     const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
