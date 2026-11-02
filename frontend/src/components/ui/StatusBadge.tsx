@@ -71,7 +71,7 @@ const CATEGORY_STYLES: Record<StatusCategory, { bg: string; text: string; dot: s
 
 const CATEGORY_ICONS: Record<StatusCategory, React.ReactNode> = {
   neutral: <Minus size={10} />,
-  processing: <Loader2 size={10} className="animate-spin" />,
+  processing: <Loader2 size={10} />,
   waiting: <Pause size={10} />,
   success: <CheckCircle2 size={10} />,
   warning: <AlertTriangle size={10} />,
@@ -82,9 +82,11 @@ const CATEGORY_ICONS: Record<StatusCategory, React.ReactNode> = {
 interface StatusBadgeProps {
   status: string;
   size?: 'sm' | 'md';
+  /** Disable live progress animation when displaying an immutable history entry. */
+  animate?: boolean;
 }
 
-export default function StatusBadge({ status, size = 'md' }: StatusBadgeProps) {
+export default function StatusBadge({ status, size = 'md', animate = true }: StatusBadgeProps) {
   const info = STATUS_MAP[status] ?? { category: 'neutral' as StatusCategory };
   const styles = CATEGORY_STYLES[info.category];
   const icon = CATEGORY_ICONS[info.category];
@@ -97,7 +99,7 @@ export default function StatusBadge({ status, size = 'md' }: StatusBadgeProps) {
         ${size === 'sm' ? 'text-[10px] px-1.5 py-0.5' : 'text-xs px-2 py-0.5'}
         ${styles.bg} ${styles.text}`}
     >
-      <span className={`shrink-0 ${isProcessing ? 'animate-spin' : ''}`}>{icon}</span>
+      <span className={`shrink-0 ${isProcessing && animate ? 'animate-spin' : ''}`}>{icon}</span>
       {label}
     </span>
   );
