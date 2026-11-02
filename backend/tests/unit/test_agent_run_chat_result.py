@@ -7,6 +7,7 @@ from app.services.agent_run_chat_result import (
     _is_factory_runtime_wrapper,
     _project_pets,
     _schema_validation_payload,
+    _schema_declared_evidence,
 )
 
 
@@ -108,3 +109,22 @@ def test_factory_wrapper_detection_and_schema_payload() -> None:
     assert _is_factory_runtime_wrapper(wrapper) is True
     assert _schema_validation_payload(wrapper) == wrapper["body"]
     assert _schema_validation_payload({"pets": []}) == {"pets": []}
+
+
+def test_schema_declared_evidence_nested_pet_fields_only() -> None:
+    schema = {
+        "type": "object",
+        "properties": {
+            "id": {"type": "integer"},
+            "name": {"type": "string"},
+            "status": {"type": "string"},
+            "api_key": {"type": "string"},
+        },
+    }
+    raw = {
+        "id": 1, "name": "Alpha", "status": "available",
+        "api_key": "NOT_FOR_MODEL", "undocumented": "NOT_FOR_MODEL",
+    }
+    safe = _schema_declared_evidence(raw, schema)
+    assert safe == {"id": 1, "name": "Alpha", "status": "available"}
+    assert "NOT_FOR_MODEL" not in str(safe)

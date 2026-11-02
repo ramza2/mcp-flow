@@ -8,6 +8,7 @@ import {
   analyzeAgentRun,
   buildAgentRunParameters,
   createAgentRunExecution,
+  composeAgentRunAnswer,
   generateAgentRunPlan,
   getAgentRunChatResult,
   getAgentRunProgress,
@@ -237,16 +238,31 @@ export default function AgentRunLive() {
         });
       }
       if (result.available && result.display_items.length > 0) {
-        const stepLine = (result.steps && result.steps.length > 1)
-          ? `\n단계: ${result.steps.map((s) => `${s.tool_name ?? s.step_key}(${s.status})`).join(' → ')}`
-          : '';
-        const lines = result.display_items.map(
-          (item) => `· ${item.name} / ${item.status}`,
-        );
-        pushMessage(
-          'assistant',
-          `${result.summary_text ?? '조회 결과입니다.'}${stepLine}\n${lines.join('\n')}`,
-        );
+        try {
+          // The server composes a grounded answer from safe Tool results.
+          const composed = await composeAgentRunAnswer(requestId, signal);
+          if (signal?.aborted) {
+            chatResultAnnouncedFor.current = null;
+            return;
+          }
+          pushMessage('assistant', composed.answer_text);
+        } catch (composeErr: unknown) {
+          if (isAbortError(composeErr) || signal?.aborted) {
+            chatResultAnnouncedFor.current = null;
+            return;
+          }
+          // Preserve deterministic display when the composition API fails.
+          const stepLine = (result.steps && result.steps.length > 1)
+            ? `\n단계: ${result.steps.map((s) => `${s.tool_name ?? s.step_key}(${s.status})`).join(' → ')}`
+            : '';
+          const lines = result.display_items.map(
+            (item) => `· ${item.name} / ${item.status}`,
+          );
+          pushMessage(
+            'assistant',
+            `${result.summary_text ?? '조회 결과입니다.'}${stepLine}\n${lines.join('\n')}`,
+          );
+        }
       } else if (result.summary_text) {
         pushMessage('assistant', result.summary_text);
       }

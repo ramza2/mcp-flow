@@ -37,6 +37,7 @@ from app.schemas.clarification import (
 from app.schemas.execution import AgentRequestExecutionCreateResult
 from app.schemas.tool_selection import SelectionDecision
 from app.services.agent_request import AgentRequestService
+from app.services.agent_run_answer_composer import AgentRunAnswerComposer
 from app.services.agent_run_chat_result import AgentRunChatResultService
 from app.services.clarification_response import (
     ClarificationResponseService,
@@ -236,6 +237,15 @@ class AgentRunProgressResult(BaseModel):
     # confirmation/approval. Clients must not invent eligibility; never exposes
     # policy_snapshot itself.
     safe_auto_execute: bool = False
+
+
+class AgentRunComposeAnswerView(BaseModel):
+    agent_request_id: uuid.UUID
+    execution_id: uuid.UUID | None
+    answer_text: str
+    generated: bool
+    from_cache: bool
+    fallback_reason: str | None
 
 
 class AgentRunChatDisplayItemView(BaseModel):
@@ -572,6 +582,27 @@ async def get_agent_run_chat_result(
             )
             for step in result.steps
         ],
+    )
+
+
+@router.post("/{request_id}/compose-answer", response_model=AgentRunComposeAnswerView)
+async def compose_agent_run_answer(
+    request_id: uuid.UUID,
+    session: DbSessionDep,
+    principal: CurrentPrincipalDep,
+) -> AgentRunComposeAnswerView:
+    """Owner-only natural answer; no Tool call or Execution mutation."""
+    composed = await AgentRunAnswerComposer(session).compose_for_owner(
+        agent_request_id=request_id,
+        requester_id=principal.user_id,
+    )
+    return AgentRunComposeAnswerView(
+        agent_request_id=composed.agent_request_id,
+        execution_id=composed.execution_id,
+        answer_text=composed.answer_text,
+        generated=composed.generated,
+        from_cache=composed.from_cache,
+        fallback_reason=composed.fallback_reason,
     )
 
 

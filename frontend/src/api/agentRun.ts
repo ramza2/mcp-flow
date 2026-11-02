@@ -159,6 +159,22 @@ export interface AgentRunChatResultDto {
   steps?: AgentRunChatStepDto[];
 }
 
+export interface AgentRunComposedAnswerDto {
+  agent_request_id: string;
+  execution_id: string | null;
+  answer_text: string;
+  generated: boolean;
+  from_cache: boolean;
+  fallback_reason: string | null;
+}
+
+export function composeAgentRunAnswer(requestId: string, signal?: AbortSignal) {
+  return apiRequest<AgentRunComposedAnswerDto>(
+    `/agent-requests/${requestId}/compose-answer`,
+    { method: 'POST', signal },
+  );
+}
+
 export function getAgentRunChatResult(requestId: string, signal?: AbortSignal) {
   return apiRequest<AgentRunChatResultDto>(
     `/agent-requests/${requestId}/chat-result`,

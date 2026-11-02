@@ -710,6 +710,7 @@ POST /api/v1/agent-requests/{request_id}/generate-plan
 POST /api/v1/agent-requests/{request_id}/validate-plan
 POST /api/v1/agent-requests/{request_id}/clarifications/{clarification_id}/responses
 GET  /api/v1/agent-requests/{request_id}/chat-result
+POST /api/v1/agent-requests/{request_id}/compose-answer
 ```
 
 - `POST /agent-requests`는 `agent_id`, `request_text`로 Conversation·USER message·RECEIVED AgentRequest만 원자적으로 생성한다.
@@ -724,6 +725,7 @@ GET  /api/v1/agent-requests/{request_id}/chat-result
 - 사용자 확인은 기존 `POST /clarifications/{id}/responses`의 `{"response_payload":{"confirmed":true|false}}`를 사용한다. 동의 후에는 계획을 다시 VALIDATING에서 검증하고, 거절은 CANCELLED로 종료한다.
 - 채팅형 Agent Run UI는 위 단계 API를 순서대로 자동 호출할 수 있다. Execution 생성은 `safe_auto_execute=true`일 때만 자동으로 `POST /executions`를 호출하고, 그 외(확인·승인·권한·검증 실패)는 채팅에 안내만 표시한다. Policy/승인 경계를 우회하지 않는다.
 - `GET /chat-result`는 **요청 소유자 전용** Tool 결과 표시 API다. Operations `GET /executions/{id}` safe detail을 확장하지 않는다. 소유권 불일치·타 사용자 추측 UUID는 404. 성공 단말 Execution의 response TOOL `result_inline`만 민감키 마스킹·크기 제한·(있을 때) `output_schema` 재검증 후 `display_items`/`summary_text`로 투영하고, `steps`로 단계별 상태를 함께 반환한다. `requestState`·Secret·원본 binding은 노출하지 않는다.
+- `POST /compose-answer`는 소유자 전용으로 완료된 성공 Execution의 **검증·마스킹·크기 제한된 Tool 출력**만 AgentVersion에 고정된 LLM Profile로 보내 질문에 맞는 한국어 응답을 생성한다. 결과는 `ConversationMessage`(ASSISTANT, USER)에 Execution ID와 연결해 저장하고 반복 호출 시 저장된 답변을 재사용한다. 모델 오류·응답 형식 오류·결과 비가용 시에는 검증된 결정적 요약으로 대체한다. Tool/Execution 상태는 변경하지 않으며 추가 MCP 호출·외부 지식 보강도 하지 않는다. 생성은 명시적 POST만 수행하고 GET 조회에서는 LLM을 호출하지 않는다. 응답은 `answer_text`, `generated`, `from_cache`, `fallback_reason`, `agent_request_id`, `execution_id`로 구성한다.
 - 각 planning 단계는 명시적 1회 호출이며 상태/CAS 충돌은 409로 거절한다. 클라이언트는 모호한 네트워크 실패에 자동 재시도하지 않는다.
 
 ### 11.2 READY Response
