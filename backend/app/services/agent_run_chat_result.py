@@ -16,7 +16,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.audit.sanitize import sanitize_audit_value
+from app.audit.sanitize import REDACTION_MARKER, _is_sensitive_key, sanitize_audit_value
 from app.execution.result_validator import validate_tool_result
 from app.mcp.contracts import NormalizedToolResult
 from app.models.execution import Execution, ExecutionStep
@@ -65,6 +65,8 @@ class AgentRunChatResult:
     summary_text: str | None
     truncated: bool
     steps: list[ChatStepStatus] = field(default_factory=list)
+    # Internal only: bounded, schema-declared facts for answer composition.
+    safe_evidence: Any | None = None
 
 
 def _utf8_json_size(value: Any) -> int:
@@ -168,6 +170,57 @@ def _schema_validation_payload(structured: Any) -> Any:
         body = structured.get("body")
         return body if isinstance(body, (dict, list)) else None
     return structured
+
+
+def _schema_declared_evidence(
+    value: Any, schema: Any, *, depth: int = 0,
+) -> Any | None:
+    """Project only declared, non-secret JSON-schema fields into LLM evidence.
+
+    Never forward unknown properties, raw MCP content, metadata, credentials,
+    bindings, or opaque MCP requestState. Unknown schema forms fail closed.
+    """
+    if not isinstance(schema, dict) or depth > 4:
+        return None
+    declared = schema.get("type")
+    if declared == "object" and isinstance(value, dict):
+        properties = schema.get("properties")
+        if not isinstance(properties, dict):
+            return None
+        result: dict[str, Any] = {}
+        for key, child_schema in list(properties.items())[:30]:
+            if (
+                not isinstance(key, str) or _is_sensitive_key(key)
+                or key.startswith("_") or key not in value
+                or value[key] == REDACTION_MARKER
+            ):
+                continue
+            projected = _schema_declared_evidence(
+                value[key], child_schema, depth=depth + 1,
+            )
+            if projected is not None:
+                result[key[:80]] = projected
+        return result or None
+    if declared == "array" and isinstance(value, list):
+        item_schema = schema.get("items")
+        if not isinstance(item_schema, dict):
+            return None
+        values = [
+            _schema_declared_evidence(item, item_schema, depth=depth + 1)
+            for item in value[:20]
+        ]
+        return [item for item in values if item is not None] or None
+    if declared == "string" and isinstance(value, str):
+        if value in {REDACTION_MARKER, "[TRUNCATED]"}:
+            return None
+        return value[:400] if value.strip() else None
+    if declared == "boolean" and isinstance(value, bool):
+        return value
+    if declared == "integer" and type(value) is int:
+        return value
+    if declared == "number" and type(value) in {int, float}:
+        return value
+    return None
 
 
 class AgentRunChatResultService:
@@ -381,6 +434,12 @@ class AgentRunChatResultService:
                 steps=step_statuses,
             )
 
+        schema_evidence = _schema_declared_evidence(
+            _schema_validation_payload(structured), output_schema,
+        )
+        if schema_evidence is not None and _utf8_json_size(schema_evidence) > 6_144:
+            schema_evidence = None
+
         return AgentRunChatResult(
             agent_request_id=request.id,
             execution_id=execution.id,
@@ -392,6 +451,7 @@ class AgentRunChatResultService:
             summary_text=f"{tool_name or '조회'} 결과 {len(pets)}건을 가져왔습니다.",
             truncated=False,
             steps=step_statuses,
+            safe_evidence=schema_evidence,
         )
 
     async def _latest_owned_execution(

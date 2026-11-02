@@ -346,7 +346,7 @@ Agent Run의 `READY`는 실행 완료가 아니다. 채팅형에서는 서버가
 표시한다. 순차 pair는 단계 상태와 최종 결과만 채팅에 요약하고 결과 카드 중복
 표시는 하지 않는다. 그 외 READY·확인·승인·입력 누락은 채팅에 질문/안내만 하고
 실행하지 않는다. 비안전 경로의 명시 확인과 `Idempotency-Key`는 유지한다. 완료 후
-소유자 전용 `GET .../chat-result`로 Tool 응답 요약을 표시하며, 고급 보기로
+소유자 전용 `GET .../chat-result`로 Tool 응답 안전성을 확인한 뒤 성공 결과에만 `POST .../compose-answer`를 호출하여 Agent 설정 LLM의 근거 기반 한국어 답변을 표시한다. 모델 오류 시 기존 결정적 요약으로 돌아가며, 생성 답변은 서버 ConversationMessage에 Execution 단위로 캐시되어 F5 재진입 때 재사용한다. 품종·수명·특징 등 실제 Tool 결과에 없는 사실은 추측하지 않는다. 고급 보기로
 기존 단계별 UI·실행 상세(`/executions/:executionId`)에 접근한다. F5 재진입 시
 `agent_request_id`로 기존 실행을 복원하고 중복 시작을 막는다.
 
