@@ -17,6 +17,17 @@ describe('StatusBadge presentation', () => {
     { status: 'DEPRECATED', label: 'DEPRECATED' },
   ];
 
+  it('animates a live RUNNING badge by default', () => {
+    const { container } = render(<StatusBadge status="RUNNING" />);
+    expect(container.querySelectorAll('.animate-spin')).toHaveLength(1);
+  });
+
+  it('renders a static RUNNING badge for immutable history', () => {
+    const { container } = render(<StatusBadge status="RUNNING" animate={false} />);
+    expect(screen.getByText('RUNNING')).toBeInTheDocument();
+    expect(container.querySelector('.animate-spin')).toBeNull();
+  });
+
   for (const { status, label } of cases) {
     it(`renders visible text for ${status} without crashing`, () => {
       render(<StatusBadge status={status} />);
