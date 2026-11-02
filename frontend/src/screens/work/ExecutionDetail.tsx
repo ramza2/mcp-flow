@@ -938,7 +938,7 @@ function EventsTab({
                     </span>
                   )}
                   {statusText && (
-                    <StatusBadge status={statusText} size="sm" />
+                    <StatusBadge status={statusText} size="sm" animate={false} />
                   )}
                   <button
                     type="button"
