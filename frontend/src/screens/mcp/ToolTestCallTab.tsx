@@ -4,7 +4,7 @@ import Button from '../../components/ui/Button';
 import JsonViewer from '../../components/ui/JsonViewer';
 import { InlineAlert, LoadingSkeleton } from '../../components/ui/EmptyState';
 import { createManualToolTest } from '../../api/mcp';
-import { isAbortError } from '../../api/client';
+import { isAbortError, isApiError } from '../../api/client';
 import type { JsonValue, ManualToolTestCreateResult, MCPToolVersionDto } from '../../api/types';
 import { shortenId } from '../../domain';
 import { toFeedbackError, type FeedbackError } from './toolLifecycle';
@@ -91,7 +91,15 @@ export default function ToolTestCallTab({
       setResult(created);
     } catch (err) {
       if (isAbortError(err)) return;
-      setError(toFeedbackError(err, 'Test Call 실행에 실패했습니다.'));
+      setError(
+        isApiError(err) && err.status === 403
+          ? {
+            message: '도구 실행 권한이 없습니다. 관리자에게 mcp.tool.execute 기능 권한과 해당 MCP 도구의 접근 권한(ResourceGrant)을 요청하세요.',
+            requestId: err.requestId ?? undefined,
+            code: err.code,
+          }
+          : toFeedbackError(err, '도구 실행 테스트에 실패했습니다.'),
+      );
     } finally {
       setSubmitting(false);
     }
@@ -108,7 +116,7 @@ export default function ToolTestCallTab({
       <div className="bg-white rounded-xl border border-slate-200 p-4 space-y-3">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div>
-            <h3 className="text-sm font-semibold text-slate-800">Test Call</h3>
+            <h3 className="text-sm font-semibold text-slate-800">도구 실행 테스트</h3>
             <p className="text-xs text-slate-500 mt-1">
               source_type=MANUAL_TOOL_TEST Execution을 생성합니다. Verification VERIFIED는
               자동 생성되지 않습니다.
@@ -119,7 +127,7 @@ export default function ToolTestCallTab({
             disabled={!canRun || submitting}
             onClick={() => void onRun()}
           >
-            {submitting ? 'Running…' : 'Run Test'}
+            {submitting ? '실행 중…' : '테스트 실행'}
           </Button>
         </div>
 

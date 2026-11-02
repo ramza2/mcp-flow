@@ -263,12 +263,12 @@ describe('MCPToolDetail — API detail', () => {
 
     await screen.findByRole('heading', { name: 'Search Docs' });
     await user.click(screen.getByRole('button', { name: /^Test Call$/i }));
-    expect(await screen.findByRole('button', { name: /^Run Test$/i })).toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: /^테스트 실행$/ })).toBeInTheDocument();
     expect(screen.queryByText(/Test Call deferred/i)).not.toBeInTheDocument();
     expect(screen.getByText(/VERIFIED/i)).toBeInTheDocument();
     expect(screen.getByText(/자동 생성되지 않습니다/i)).toBeInTheDocument();
 
-    await user.click(screen.getByRole('button', { name: /^Run Test$/i }));
+    await user.click(screen.getByRole('button', { name: /^테스트 실행$/ }));
     expect(await screen.findByText(/Execution 생성됨/i)).toBeInTheDocument();
     expect(
       fetchMock.mock.calls.some(
