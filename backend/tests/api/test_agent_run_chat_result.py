@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import json
 import uuid
 from datetime import UTC, datetime
 
 import pytest
+from app.model_provider.client import ModelProviderClient
 from app.models.execution import Execution, ExecutionStep
 from app.repositories.mcp_server import MCPServerRepository
 from app.repositories.mcp_tool import MCPToolRepository
@@ -37,6 +39,14 @@ async def test_chat_result_no_execution_and_foreign_404(
     assert body["unavailable_reason"] == "NO_EXECUTION"
     assert body["display_items"] == []
 
+    # No Execution means no LLM call, and a deterministic answer.
+    no_execution_answer = await authenticated_db_client.post(
+        f"/api/v1/agent-requests/{request_id}/compose-answer"
+    )
+    assert no_execution_answer.status_code == 200, no_execution_answer.text
+    assert no_execution_answer.json()["generated"] is False
+    assert no_execution_answer.json()["fallback_reason"] == "NO_EXECUTION"
+
     foreign = await authenticated_db_client.get(
         f"/api/v1/agent-requests/{uuid.uuid4()}/chat-result"
     )
@@ -47,6 +57,7 @@ async def test_chat_result_no_execution_and_foreign_404(
 async def test_chat_result_projects_pets_and_masks_secrets(
     authenticated_db_client: AsyncClient,
     db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     session_info = await authenticated_db_client.get("/api/v1/auth/session")
     assert session_info.status_code == 200, session_info.text
@@ -167,6 +178,40 @@ async def test_chat_result_projects_pets_and_masks_secrets(
         ("Beta", "pending"),
     ]
     assert "MUST_NOT_LEAK_SECRET" not in ok.text
+
+    # Composer may only send schema-declared Tool evidence to the Agent LLM.
+    model_inputs: list[dict] = []
+
+    async def fake_generate(self, target, *, messages, parameters=None):
+        model_inputs.append(json.loads(messages[-1]["content"]))
+        return {"answer": "조회된 반려동물은 Alpha와 Beta이며 상태는 각각 available, pending입니다."}
+
+    monkeypatch.setattr(ModelProviderClient, "generate_json", fake_generate)
+    answer = await authenticated_db_client.post(
+        f"/api/v1/agent-requests/{request_id}/compose-answer"
+    )
+    assert answer.status_code == 200, answer.text
+    first = answer.json()
+    assert first["generated"] is True
+    assert first["from_cache"] is False
+    assert first["execution_id"] == str(execution_id)
+    assert "Alpha와 Beta" in first["answer_text"]
+    assert len(model_inputs) == 1
+    assert model_inputs[0]["evidence"] == {
+        "pets": [
+            {"name": "Alpha", "status": "available"},
+            {"name": "Beta", "status": "pending"},
+        ]
+    }
+    assert "MUST_NOT_LEAK_SECRET" not in str(model_inputs)
+
+    again = await authenticated_db_client.post(
+        f"/api/v1/agent-requests/{request_id}/compose-answer"
+    )
+    assert again.status_code == 200
+    assert again.json()["from_cache"] is True
+    assert again.json()["answer_text"] == first["answer_text"]
+    assert len(model_inputs) == 1
 
 
 @pytest.mark.asyncio
