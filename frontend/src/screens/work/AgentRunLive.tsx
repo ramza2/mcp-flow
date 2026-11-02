@@ -237,7 +237,7 @@ export default function AgentRunLive() {
           }));
         });
       }
-      if (result.available && result.display_items.length > 0) {
+      if (result.available) {
         try {
           // The server composes a grounded answer from safe Tool results.
           const composed = await composeAgentRunAnswer(requestId, signal);
@@ -258,9 +258,10 @@ export default function AgentRunLive() {
           const lines = result.display_items.map(
             (item) => `· ${item.name} / ${item.status}`,
           );
+          const itemSummary = lines.length > 0 ? `\n${lines.join('\n')}` : '';
           pushMessage(
             'assistant',
-            `${result.summary_text ?? '조회 결과입니다.'}${stepLine}\n${lines.join('\n')}`,
+            `${result.summary_text ?? '조회 결과입니다.'}${stepLine}${itemSummary}`,
           );
         }
       } else if (result.summary_text) {

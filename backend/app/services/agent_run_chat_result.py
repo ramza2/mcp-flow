@@ -417,7 +417,17 @@ class AgentRunChatResultService:
                 )
 
         pets = _project_pets(structured)
-        if not pets:
+        schema_evidence = _schema_declared_evidence(
+            _schema_validation_payload(structured), output_schema,
+        )
+        if schema_evidence is not None and _utf8_json_size(schema_evidence) > 6_144:
+            schema_evidence = None
+
+        # Prefer the existing pet display cards. Other MCP Tool payloads are
+        # eligible only when their declared output schema was re-validated and
+        # yielded a bounded, sensitive-key-filtered structured projection.
+        # Never substitute unstructured Tool content or transport status text.
+        if not pets and schema_evidence is None:
             return AgentRunChatResult(
                 agent_request_id=request.id,
                 execution_id=execution.id,
@@ -434,12 +444,11 @@ class AgentRunChatResultService:
                 steps=step_statuses,
             )
 
-        schema_evidence = _schema_declared_evidence(
-            _schema_validation_payload(structured), output_schema,
+        summary = (
+            f"{tool_name or '조회'} 결과 {len(pets)}건을 가져왔습니다."
+            if pets
+            else f"{tool_name or '조회'}에서 검증된 구조화 결과를 받았습니다."
         )
-        if schema_evidence is not None and _utf8_json_size(schema_evidence) > 6_144:
-            schema_evidence = None
-
         return AgentRunChatResult(
             agent_request_id=request.id,
             execution_id=execution.id,
@@ -447,8 +456,8 @@ class AgentRunChatResultService:
             available=True,
             unavailable_reason=None,
             tool_name=tool_name,
-            display_items=pets,
-            summary_text=f"{tool_name or '조회'} 결과 {len(pets)}건을 가져왔습니다.",
+            display_items=pets or [],
+            summary_text=summary,
             truncated=False,
             steps=step_statuses,
             safe_evidence=schema_evidence,
