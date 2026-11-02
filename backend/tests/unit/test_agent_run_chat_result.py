@@ -6,8 +6,8 @@ from app.services.agent_run_chat_result import (
     _extract_pets_list,
     _is_factory_runtime_wrapper,
     _project_pets,
-    _schema_validation_payload,
     _schema_declared_evidence,
+    _schema_validation_payload,
 )
 
 

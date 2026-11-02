@@ -242,13 +242,13 @@ export default function AgentRunLive() {
           // The server composes a grounded answer from safe Tool results.
           const composed = await composeAgentRunAnswer(requestId, signal);
           if (signal?.aborted) {
-            chatResultAnnouncedFor.current = null;
+            chatResultAnnouncedFor.current = '';
             return;
           }
           pushMessage('assistant', composed.answer_text);
         } catch (composeErr: unknown) {
           if (isAbortError(composeErr) || signal?.aborted) {
-            chatResultAnnouncedFor.current = null;
+            chatResultAnnouncedFor.current = '';
             return;
           }
           // Preserve deterministic display when the composition API fails.
