@@ -4,6 +4,7 @@ import { ErrorState, InlineAlert, LoadingSkeleton, PermissionDenied } from '../.
 import { isAbortError, isApiError } from '../../api/client';
 import { listMCPTools } from '../../api/mcp';
 import type { MCPToolDto } from '../../api/types';
+import SafeReadOnlyGrantPicker from './SafeReadOnlyGrantPicker';
 import {
   createResourceGrant,
   deleteResourceGrant,
@@ -147,6 +148,15 @@ export default function ResourceGrantEditor({ owner, ownerId }: Props) {
           </Button>
         </div>
         {feedback && <InlineAlert type={feedback.includes('실패') ? 'error' : 'info'} message={feedback} />}
+        <SafeReadOnlyGrantPicker
+          key={owner + ':' + ownerId}
+          owner={owner}
+          ownerId={ownerId}
+          available={available}
+          busy={saving}
+          setBusy={setSaving}
+          onChanged={reload}
+        />
       </div>
       <div className="bg-white rounded-xl border border-slate-200 p-4 space-y-3">
         <h3 className="font-semibold text-sm text-slate-800">직접 부여한 MCP 도구 ({assigned.length}개)</h3>
