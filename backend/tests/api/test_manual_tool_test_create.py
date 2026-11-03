@@ -258,3 +258,126 @@ async def test_manual_tool_test_invalid_version(
         json={"mcp_tool_version_id": str(uuid.uuid4()), "arguments": {}},
     )
     assert resp.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_manual_tool_test_result_preview_owner_only_and_revocable(
+    manual_test_client: AsyncClient,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from sqlalchemy import delete, select
+
+    from app.models.auth import ResourceGrant
+    from app.models.execution import Execution, ExecutionStep
+
+    user_id = manual_test_client.mtt_user_id  # type: ignore[attr-defined]
+    tool_id, version_id = await _seed_tool(db_session_factory, user_id)
+    created = await manual_test_client.post(
+        f"{API}/{tool_id}/test-calls",
+        headers={"Idempotency-Key": str(uuid.uuid4())},
+        json={"mcp_tool_version_id": str(version_id), "arguments": {
+            "message": "MCPFlow echo E2E 테스트 성공",
+        }},
+    )
+    assert created.status_code == 201, created.text
+    execution_id = uuid.UUID(created.json()["id"])
+    url = f"{API}/{tool_id}/test-calls/{execution_id}/result"
+
+    pending = await manual_test_client.get(url)
+    assert pending.status_code == 200, pending.text
+    assert pending.json()["available"] is False
+    assert pending.json()["text_items"] == []
+
+    async with db_session_factory() as session:
+        execution = await session.get(Execution, execution_id)
+        assert execution is not None
+        execution.status = "SUCCEEDED"
+        step = (
+            await session.execute(
+                select(ExecutionStep).where(
+                    ExecutionStep.execution_id == execution_id,
+                    ExecutionStep.step_key == "manual_tool_test",
+                )
+            )
+        ).scalar_one()
+        step.status = "SUCCEEDED"
+        step.result_inline = {
+            "content": [
+                {"type": "text", "text": '{"message":"MCPFlow echo E2E 테스트 성공"}'},
+                {"type": "text", "text": "password=must-not-show"},
+            ],
+            "structured_content": {"credentials": "must-not-show"},
+            "metadata": {"sessionToken": "must-not-show"},
+        }
+        await session.commit()
+
+    fetched = await manual_test_client.get(url)
+    assert fetched.status_code == 200, fetched.text
+    body = fetched.json()
+    assert body["status"] == "SUCCEEDED"
+    assert body["available"] is True
+    assert body["message_echoed"] is True
+    assert body["text_items"] == [
+        '{"message":"MCPFlow echo E2E 테스트 성공"}',
+        "[REDACTED]",
+    ]
+    assert "must-not-show" not in fetched.text
+
+    # Tool ID mismatch is indistinguishable from an unknown test.
+    wrong_tool = await manual_test_client.get(
+        f"{API}/{uuid.uuid4()}/test-calls/{execution_id}/result"
+    )
+    assert wrong_tool.status_code == 404
+
+    # Access must be re-evaluated on every read, not only at execution creation.
+    async with db_session_factory() as session:
+        await session.execute(
+            delete(ResourceGrant).where(
+                ResourceGrant.user_id == user_id,
+                ResourceGrant.resource_id == tool_id,
+            )
+        )
+        await session.commit()
+    revoked = await manual_test_client.get(url)
+    assert revoked.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_manual_tool_test_result_is_hidden_from_other_user(
+    manual_test_client: AsyncClient,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from app.auth.passwords import hash_password
+    from app.domain.enums import UserStatus
+    from app.repositories.user import UserRepository
+
+    original_user_id = manual_test_client.mtt_user_id  # type: ignore[attr-defined]
+    tool_id, version_id = await _seed_tool(db_session_factory, original_user_id)
+    created = await manual_test_client.post(
+        f"{API}/{tool_id}/test-calls",
+        headers={"Idempotency-Key": str(uuid.uuid4())},
+        json={"mcp_tool_version_id": str(version_id), "arguments": {}},
+    )
+    assert created.status_code == 201, created.text
+    execution_id = created.json()["id"]
+
+    username = f"mtt-other-{uuid.uuid4().hex[:10]}"
+    password = "correct-horse-battery-staple"
+    async with db_session_factory() as session:
+        other = await UserRepository(session).create(
+            username=username,
+            display_name="Other User",
+            email=f"{username}@example.com",
+            status=UserStatus.ACTIVE,
+        )
+        await UserRepository(session).set_password_hash(other.id, hash_password(password))
+        await session.commit()
+    login = await manual_test_client.post(
+        "/api/v1/auth/login",
+        json={"username": username, "password": password},
+    )
+    assert login.status_code == 200, login.text
+    foreign = await manual_test_client.get(
+        f"{API}/{tool_id}/test-calls/{execution_id}/result"
+    )
+    assert foreign.status_code == 404
