@@ -3,9 +3,9 @@ import { useNavigate } from 'react-router';
 import Button from '../../components/ui/Button';
 import JsonViewer from '../../components/ui/JsonViewer';
 import { InlineAlert, LoadingSkeleton } from '../../components/ui/EmptyState';
-import { createManualToolTest } from '../../api/mcp';
+import { createManualToolTest, getManualToolTestResult } from '../../api/mcp';
 import { isAbortError, isApiError } from '../../api/client';
-import type { JsonValue, ManualToolTestCreateResult, MCPToolVersionDto } from '../../api/types';
+import type { JsonValue, ManualToolTestCreateResult, ManualToolTestResultDto, MCPToolVersionDto } from '../../api/types';
 import { shortenId } from '../../domain';
 import { toFeedbackError, type FeedbackError } from './toolLifecycle';
 
@@ -44,6 +44,9 @@ export default function ToolTestCallTab({
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<FeedbackError | null>(null);
   const [result, setResult] = useState<ManualToolTestCreateResult | null>(null);
+  const [responsePreview, setResponsePreview] = useState<ManualToolTestResultDto | null>(null);
+  const [checkingResponse, setCheckingResponse] = useState(false);
+  const [responseError, setResponseError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!active) return;
@@ -51,6 +54,8 @@ export default function ToolTestCallTab({
     setParseError(null);
     setError(null);
     setResult(null);
+    setResponsePreview(null);
+    setResponseError(null);
   }, [active, selectedVersion?.id]);
 
   const canRun = useMemo(() => {
@@ -79,6 +84,8 @@ export default function ToolTestCallTab({
     setSubmitting(true);
     setError(null);
     setResult(null);
+    setResponsePreview(null);
+    setResponseError(null);
     try {
       const created = await createManualToolTest(
         toolId,
@@ -102,6 +109,25 @@ export default function ToolTestCallTab({
       );
     } finally {
       setSubmitting(false);
+    }
+  }
+
+  async function onCheckResponse() {
+    if (!result || checkingResponse) return;
+    setCheckingResponse(true);
+    setResponseError(null);
+    try {
+      const preview = await getManualToolTestResult(toolId, result.id);
+      setResponsePreview(preview);
+    } catch (err) {
+      if (isAbortError(err)) return;
+      setResponseError(
+        isApiError(err) && err.status === 403
+          ? '응답 조회 권한이 없습니다. 현재 mcp.tool.execute 및 해당 도구의 ResourceGrant를 확인해 주세요.'
+          : toFeedbackError(err, '실행 응답을 확인하지 못했습니다.').message,
+      );
+    } finally {
+      setCheckingResponse(false);
     }
   }
 
@@ -189,13 +215,66 @@ export default function ToolTestCallTab({
               status={result.status} · source={result.source_type} · trigger=
               {result.trigger_type}
             </p>
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={() => navigate(`/executions/${result.id}`)}
-            >
-              Execution 상세로 이동
-            </Button>
+            <div className="flex flex-wrap gap-2">
+              <Button
+                size="sm"
+                disabled={checkingResponse}
+                onClick={() => void onCheckResponse()}
+              >
+                {checkingResponse ? '응답 확인 중…' : '실행 응답 확인 / 새로고침'}
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => navigate(`/executions/${result.id}`)}
+              >
+                Execution 상세로 이동
+              </Button>
+            </div>
+            {responseError && <InlineAlert type="error" message={responseError} />}
+            {responsePreview && (
+              <div className="rounded-lg border border-slate-200 bg-white p-3 space-y-2">
+                <p className="text-xs text-slate-700">
+                  실행 상태: <strong>{responsePreview.status}</strong>
+                  {responsePreview.message_echoed === true && (
+                    <span className="ml-2 text-emerald-700 font-semibold">
+                      입력 메시지 응답 포함 확인
+                    </span>
+                  )}
+                  {responsePreview.message_echoed === false && (
+                    <span className="ml-2 text-amber-700 font-semibold">
+                      입력 메시지와 응답 불일치
+                    </span>
+                  )}
+                </p>
+                {responsePreview.available ? (
+                  <div className="space-y-2">
+                    <p className="text-xs font-medium text-slate-700">Tool 응답 텍스트</p>
+                    {responsePreview.text_items.map((item, index) => (
+                      <pre
+                        key={index}
+                        className="max-h-64 overflow-auto rounded border border-slate-200 bg-slate-50 p-3 text-xs text-slate-700 whitespace-pre-wrap break-all"
+                      >
+                        {item}
+                      </pre>
+                    ))}
+                    {responsePreview.truncated && (
+                      <p className="text-xs text-amber-700">일부 응답은 길이 제한으로 생략됐습니다.</p>
+                    )}
+                  </div>
+                ) : (
+                  <p className="text-xs text-slate-600">
+                    {responsePreview.status !== 'SUCCEEDED'
+                      ? '아직 실행 중이거나 완료되지 않았습니다. 잠시 후 다시 응답 확인을 눌러 주세요.'
+                      : '표시 가능한 텍스트 결과가 없습니다. (' +
+                        (responsePreview.unavailable_reason ?? 'EMPTY') + ')'}
+                  </p>
+                )}
+                <p className="text-xs text-slate-500">
+                  보안을 위해 텍스트 응답만 제한적으로 표시하며 메타데이터와 민감정보는 제외합니다.
+                </p>
+              </div>
+            )}
           </div>
         )}
       </div>
