@@ -1,0 +1,41 @@
+# Optional, isolated MCP protocol test server.
+# Not included in compose.yaml or compose.server.yaml by default.
+# Start via: ./scripts/ops/mcp-everything-test.sh start
+services:
+  everything-mcp-test:
+    image: mcpflow-mcp-everything:2.1.0
+    build:
+      context: .
+      dockerfile: infra/docker/mcp-everything.Dockerfile
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,noexec,size=64m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 128
+    mem_limit: 256m
+    environment:
+      NODE_ENV: production
+      PORT: "3001"
+    # No ports, no Traefik labels, no mounted volumes, and no secrets.
+    networks:
+      - mcp_test
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "const net=require('node:net');const s=net.connect({host:'127.0.0.1',port:3001});s.on('connect',()=>{s.end();process.exit(0)});s.on('error',()=>process.exit(1));s.setTimeout(2000,()=>{s.destroy();process.exit(1)})"
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 15s
+
+networks:
+  mcp_test:
+    name: mcpflow_mcp_test
+    internal: true
+    attachable: true
