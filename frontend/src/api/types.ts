@@ -237,6 +237,17 @@ export interface ManualToolTestCreateResult {
   step_count: number;
 }
 
+/** Text-only, requester-scoped Manual Tool Test result preview. */
+export interface ManualToolTestResultDto {
+  execution_id: string;
+  status: string;
+  available: boolean;
+  text_items: string[];
+  message_echoed: boolean | null;
+  truncated: boolean;
+  unavailable_reason: string | null;
+}
+
 /** FNC-TOOL-006: VERIFIED derives result_summary / evidence_blob_id server-side. */
 export interface ToolVerificationCreateRequest {
   status: ToolVerificationStatus;
