@@ -331,7 +331,7 @@ Widget 클릭은 필터가 적용된 상세목록으로 이동한다.
 ## 11.1 사용자 흐름
 
 ```text
-Agent 선택
+기본 Agent 자동 지정 (필요 시 직접 선택)
  → 자연어 입력
  → Agent Request 분석
  → 추가정보가 필요하면 WAITING_INPUT
@@ -344,6 +344,8 @@ Agent 선택
  → 승인 필요 시 WAITING_APPROVAL
  → 최종 결과
 ```
+
+운영 관리자가 기본 Agent를 지정하면 일반 Agent Run에서는 Agent 선택란 없이 바로 지시문을 입력한다. `GET /agent-requests/available-agents`의 `default_agent_id`가 없으면 기존 직접 선택 모드를 유지한다. 사용자는 언제든 'Agent 직접 선택'으로 전환할 수 있다. 자동 모드에서는 `POST /agent-requests`의 `agent_id`를 생략하며, 서버에서 가시성·ACTIVE/PUBLISHED를 재검증하고 AgentVersion을 고정한다.
 
 **Planning 전 WAITING_INPUT**과 **Execution 중 MRTR WAITING_INPUT**을 UI에서 구분한다.
 

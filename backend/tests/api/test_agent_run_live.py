@@ -456,3 +456,155 @@ async def test_agent_run_progress_is_safe_projection_without_binding_values(
     assert "bindings_snapshot" not in result.text
     assert "plan_snapshot" not in result.text
     assert "response_payload" not in result.text
+
+
+@pytest.mark.asyncio
+async def test_agent_run_without_id_uses_single_runnable_agent(
+    authenticated_db_client: AsyncClient,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent_id, version_id = await _seed_runnable(db_session_factory)
+    monkeypatch.setattr(
+        "app.api.v1.agent_requests.get_settings",
+        lambda: SimpleNamespace(default_agent_id=None),
+    )
+    agents = await authenticated_db_client.get("/api/v1/agent-requests/available-agents")
+    assert agents.status_code == 200
+    assert agents.json()["default_agent_id"] == str(agent_id)
+
+    created = await authenticated_db_client.post(
+        "/api/v1/agent-requests", json={"request_text": "반려동물 목록을 보여줘"},
+    )
+    assert created.status_code == 201, created.text
+    assert created.json()["agent_version_id"] == str(version_id)
+
+
+@pytest.mark.asyncio
+async def test_agent_run_without_id_rejects_ambiguous_default_and_allows_explicit(
+    authenticated_db_client: AsyncClient,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent_id, version_id = await _seed_runnable(db_session_factory)
+    await _seed_runnable(db_session_factory)
+    monkeypatch.setattr(
+        "app.api.v1.agent_requests.get_settings",
+        lambda: SimpleNamespace(default_agent_id=None),
+    )
+    agents = await authenticated_db_client.get("/api/v1/agent-requests/available-agents")
+    assert agents.status_code == 200
+    assert agents.json()["default_agent_id"] is None
+
+    ambiguous = await authenticated_db_client.post(
+        "/api/v1/agent-requests", json={"request_text": "목록을 조회해줘"},
+    )
+    assert ambiguous.status_code == 409
+    explicit = await authenticated_db_client.post(
+        "/api/v1/agent-requests",
+        json={"agent_id": str(agent_id), "request_text": "목록을 조회해줘"},
+    )
+    assert explicit.status_code == 201
+    assert explicit.json()["agent_version_id"] == str(version_id)
+
+
+@pytest.mark.asyncio
+async def test_agent_run_configured_default_pins_version_and_explicit_override(
+    authenticated_db_client: AsyncClient,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    default_id, default_version_id = await _seed_runnable(db_session_factory)
+    other_id, other_version_id = await _seed_runnable(db_session_factory)
+    monkeypatch.setattr(
+        "app.api.v1.agent_requests.get_settings",
+        lambda: SimpleNamespace(default_agent_id=str(default_id)),
+    )
+    listed = await authenticated_db_client.get("/api/v1/agent-requests/available-agents")
+    assert listed.status_code == 200
+    assert listed.json()["default_agent_id"] == str(default_id)
+
+    implicit = await authenticated_db_client.post(
+        "/api/v1/agent-requests", json={"request_text": "목록을 조회해줘"},
+    )
+    assert implicit.status_code == 201, implicit.text
+    assert implicit.json()["agent_version_id"] == str(default_version_id)
+
+    explicit = await authenticated_db_client.post(
+        "/api/v1/agent-requests",
+        json={"agent_id": str(other_id), "request_text": "목록을 조회해줘"},
+    )
+    assert explicit.status_code == 201
+    assert explicit.json()["agent_version_id"] == str(other_version_id)
+
+
+@pytest.mark.asyncio
+async def test_configured_private_default_does_not_leak_to_other_owner(
+    authenticated_db_client: AsyncClient,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hidden_id, _ = await _seed_runnable(
+        db_session_factory, visibility="PRIVATE", owner_id=uuid.uuid4(),
+    )
+    monkeypatch.setattr(
+        "app.api.v1.agent_requests.get_settings",
+        lambda: SimpleNamespace(default_agent_id=str(hidden_id)),
+    )
+    listed = await authenticated_db_client.get("/api/v1/agent-requests/available-agents")
+    assert listed.status_code == 200
+    assert listed.json()["items"] == []
+    assert listed.json()["default_agent_id"] is None
+
+    implicit = await authenticated_db_client.post(
+        "/api/v1/agent-requests", json={"request_text": "비공개 Agent 조회"},
+    )
+    assert implicit.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_configured_unpublished_default_is_not_automatically_runnable(
+    authenticated_db_client: AsyncClient,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent_id, version_id = await _seed_runnable(db_session_factory)
+    monkeypatch.setattr(
+        "app.api.v1.agent_requests.get_settings",
+        lambda: SimpleNamespace(default_agent_id=str(agent_id)),
+    )
+    async with db_session_factory() as session:
+        version = await session.get(AgentVersion, version_id)
+        assert version is not None
+        version.status = "DRAFT"
+        await session.commit()
+
+    listed = await authenticated_db_client.get("/api/v1/agent-requests/available-agents")
+    assert listed.status_code == 200
+    assert listed.json()["default_agent_id"] is None
+    implicit = await authenticated_db_client.post(
+        "/api/v1/agent-requests", json={"request_text": "조회"},
+    )
+    assert implicit.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_invalid_default_configuration_is_rejected_but_explicit_still_works(
+    authenticated_db_client: AsyncClient,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent_id, _ = await _seed_runnable(db_session_factory)
+    monkeypatch.setattr(
+        "app.api.v1.agent_requests.get_settings",
+        lambda: SimpleNamespace(default_agent_id="not-a-uuid"),
+    )
+    invalid = await authenticated_db_client.post(
+        "/api/v1/agent-requests", json={"request_text": "조회"},
+    )
+    assert invalid.status_code == 409
+    explicit = await authenticated_db_client.post(
+        "/api/v1/agent-requests",
+        json={"agent_id": str(agent_id), "request_text": "조회"},
+    )
+    assert explicit.status_code == 201
