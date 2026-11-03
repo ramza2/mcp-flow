@@ -498,7 +498,9 @@ GET /mcp/tools/{tool_id}/test-calls/{execution_id}/result
   "execution_id": "<uuid>",
   "status": "SUCCEEDED",
   "available": true,
-  "text_items": ["{\\\"message\\\":\\\"MCPFlow echo E2E 테스트 성공\\\"}"],
+  "text_items": [
+    "{\"message\":\"MCPFlow echo E2E 테스트 성공\"}"
+  ],
   "message_echoed": true,
   "truncated": false,
   "unavailable_reason": null
