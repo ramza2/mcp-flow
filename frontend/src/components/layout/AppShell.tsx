@@ -53,12 +53,12 @@ const navConfig: NavItem[] = [
     ],
   },
   {
-    label: 'Administration',
+    label: '시스템 관리',
     icon: <Shield size={16} />,
     permission: 'admin.view',
     children: [
-      { label: 'Users & Roles', path: '/admin/users', icon: <Users size={14} />, permission: 'admin.view' },
-      { label: 'Roles & Permissions', path: '/admin/roles', icon: <Shield size={14} />, permission: 'admin.view' },
+      { label: '사용자 관리', path: '/admin/users', icon: <Users size={14} />, permission: 'admin.view' },
+      { label: '역할 및 권한', path: '/admin/roles', icon: <Shield size={14} />, permission: 'admin.view' },
       { label: 'Approval Policies', path: '/admin/approval-policies', icon: <CheckSquare size={14} />, permission: 'admin.view' },
       { label: 'Model Profiles', path: '/admin/model-profiles', icon: <Bot size={14} />, permission: 'admin.view' },
       { label: 'Audit Logs', path: '/admin/audit-logs', icon: <ScrollText size={14} />, permission: 'admin.view' },
