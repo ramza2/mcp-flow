@@ -265,10 +265,9 @@ async def test_manual_tool_test_result_preview_owner_only_and_revocable(
     manual_test_client: AsyncClient,
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    from sqlalchemy import delete, select
-
     from app.models.auth import ResourceGrant
     from app.models.execution import Execution, ExecutionStep
+    from sqlalchemy import delete, select
 
     user_id = manual_test_client.mtt_user_id  # type: ignore[attr-defined]
     tool_id, version_id = await _seed_tool(db_session_factory, user_id)
