@@ -428,7 +428,10 @@ async def submit_agent_run(
         if default_agent.default_agent_id is None:
             raise AppError(
                 code="RESOURCE_CONFLICT",
-                message="사용 가능한 기본 Agent가 없습니다. Agent를 직접 선택하거나 관리자에게 기본 Agent 설정을 요청해 주세요.",
+                message=(
+                    "사용 가능한 기본 Agent가 없습니다. Agent를 직접 선택하거나 "
+                    "관리자에게 기본 Agent 설정을 요청해 주세요."
+                ),
                 status_code=409,
             )
         agent_id = default_agent.default_agent_id
