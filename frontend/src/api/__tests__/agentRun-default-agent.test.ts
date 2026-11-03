@@ -24,7 +24,7 @@ describe('Agent Run automatic default contract', () => {
   });
 
   it('omits agent_id for automatic mode but preserves explicit selection', async () => {
-    const fetchMock = vi.fn().mockResolvedValue(
+    const fetchMock = vi.fn().mockImplementation(async () =>
       jsonResponse({ id: 'request-a', status: 'RECEIVED' }, 201),
     );
     vi.stubGlobal('fetch', fetchMock);
