@@ -427,6 +427,7 @@ GET   /mcp/tools/{tool_id}/versions/{version_id}
 GET   /mcp/tools/{tool_id}/policy
 PUT   /mcp/tools/{tool_id}/policy
 POST  /mcp/tools/{tool_id}/test-calls
+GET   /mcp/tools/{tool_id}/test-calls/{execution_id}/result
 GET   /mcp/tools/{tool_id}/impact
 ```
 
@@ -467,8 +468,43 @@ Response `201`:
 }
 ```
 
-Results/Step/ToolCall evidence are read via existing Execution query APIs
-(`GET /executions/{id}`, steps, events). No duplicate result store.
+Execution 상태 및 일반적인 이력은 기존 Execution query API에서 조회한다.
+Tool 원본 응답(result_inline)은 일반 Execution API에 포함하지 않는다.
+
+전용 응답 텍스트 확인 (2026-11-03):
+
+```text
+GET /mcp/tools/{tool_id}/test-calls/{execution_id}/result
+```
+
+- Cookie Session 필수 (GET, CSRF 불필요).
+- 해당 Execution의 requester 본인만 조회. 다른 requester, source_type 불일치,
+  tool/version lineage 불일치 → 동일한 404.
+- 조회 시점마다 User ACTIVE + `mcp.tool.execute` + 해당 `MCP_TOOL`
+  ResourceGrant 재확인. 권한 회수 시 403.
+- `SUCCEEDED` 전에는 `available=false`와 상태 코드만 반환.
+- 완료 시 저장된 `execution_steps.result_inline.content` 중 텍스트만
+  최대 4건 / 4096 bytes 범위에서 반환. credential 패턴 포함 텍스트 가림,
+  긴 텍스트 제한. 원본 `metadata`, `structured_content`, 이미지, 바인딩,
+  비밀값 및 입력 snapshot 미반환.
+- 입력 인자 `message`가 실제 저장된 응답 텍스트에 포함되었는지만
+  `message_echoed`로 표현 (`null`: message 인자 없음).
+- 기존 실행 이력 API 응답 구조 및 Verification 생성 정책 변경 없음.
+
+성공 응답 예시:
+
+```json
+{
+  "execution_id": "<uuid>",
+  "status": "SUCCEEDED",
+  "available": true,
+  "text_items": ["{\\\"message\\\":\\\"MCPFlow echo E2E 테스트 성공\\\"}"],
+  "message_echoed": true,
+  "truncated": false,
+  "unavailable_reason": null
+}
+```
+
 
 Canonical Tool status:
 
