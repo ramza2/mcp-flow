@@ -25,9 +25,9 @@ from app.services.authorization import AuthorizationResolver
 _MAX_TEXT_ITEMS = 4
 _MAX_TEXT_BYTES = 4096
 _SENSITIVE_TEXT = re.compile(
-    r"(?i)(?:\\bpassword\\b|\\bsecret\\b|\\bapi[_-]?key\\b|"
-    r"\\bauthorization\\b|\\bbearer\\b|\\bcookie\\b|"
-    r"\\btoken\\b|\\bcredential\\b|\\brequeststate\\b)"
+    r"(?i)(?:\bpassword\b|\bsecret\b|\bapi[_-]?key\b|"
+    r"\bauthorization\b|\bbearer\b|\bcookie\b|"
+    r"\btoken\b|\bcredential\b|\brequeststate\b)"
 )
 
 
