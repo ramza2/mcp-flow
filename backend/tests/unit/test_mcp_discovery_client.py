@@ -115,12 +115,18 @@ async def test_discover_capabilities_wire_format() -> None:
     assert captured["headers"]["mcp-protocol-version"] == CURRENT_MCP_PROTOCOL_VERSION
     assert captured["headers"]["mcp-method"] == "server/discover"
     assert captured["headers"]["content-type"] == "application/json"
+    assert captured["headers"]["accept"] == "application/json, text/event-stream"
     body = captured["body"]
     assert body["jsonrpc"] == "2.0"
     assert body["method"] == "server/discover"
     meta = body["params"]["_meta"]
     assert meta["io.modelcontextprotocol/protocolVersion"] == CURRENT_MCP_PROTOCOL_VERSION
-    assert "clientInfo" in meta
+    assert meta["io.modelcontextprotocol/clientCapabilities"] == {}
+    assert meta["io.modelcontextprotocol/clientInfo"] == {
+        "name": "mcpflow",
+        "version": "0.1.0",
+    }
+    assert "clientInfo" not in meta
     assert "authorization" not in {k.lower() for k in captured["headers"]}
 
 
@@ -152,6 +158,8 @@ async def test_list_tools_pagination() -> None:
 
     def handler(request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content.decode("utf-8"))
+        assert request.headers["accept"] == "application/json, text/event-stream"
+        assert body["params"]["_meta"]["io.modelcontextprotocol/clientCapabilities"] == {}
         calls.append(body)
         cursor = (body.get("params") or {}).get("cursor")
         if cursor is None:
