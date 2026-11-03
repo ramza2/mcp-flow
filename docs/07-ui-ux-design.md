@@ -127,6 +127,13 @@ Permission이 없는 메뉴는 숨기되 직접 URL/API 접근은 Backend가 최
 | `SCR-JOB-002` | Job 상세 | `/admin/jobs/:jobId` |
 | `SCR-SET-001` | System Settings | `/admin/settings` |
 
+역할·사용자 MCP 도구 접근 권한 화면에서는 기존 exact `MCP_TOOL` ResourceGrant를
+개별 추가/해제할 수 있다. 편의 기능으로 기존 ToolPolicy의 `READ_ONLY` +
+`allow_auto_select=true` + 확인·승인 불필요 조건을 모두 만족하는 ACTIVE Tool을
+조회해 명시적으로 선택·확인한 뒤, 동일한 개별 ResourceGrant API로 부여할 수 있다.
+미설정/조회 실패 정책은 추천에서 제외하고, AgentVersion Tool Grant와
+실행자의 `mcp.tool.execute` Permission·실행 직전 재검증은 별도로 유지한다.
+
 ---
 
 ## 5. Global Layout
