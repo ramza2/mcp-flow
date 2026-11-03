@@ -174,6 +174,21 @@ class ManualToolTestCreateResult(BaseModel):
     step_count: int = Field(ge=1)
 
 
+
+class ManualToolTestResult(BaseModel):
+    """Owner-only bounded preview of persisted Manual Tool Test text blocks."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    execution_id: uuid.UUID
+    status: str
+    available: bool
+    text_items: list[str] = Field(default_factory=list)
+    message_echoed: bool | None = None
+    truncated: bool = False
+    unavailable_reason: str | None = None
+
+
 class ToolVerificationCreate(BaseModel):
     """Create ToolVersion Verification (docs/06 §9.2, FNC-TOOL-006).
 

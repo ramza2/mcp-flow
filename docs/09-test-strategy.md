@@ -877,7 +877,9 @@ Coverage (does **not** auto-create Verification VERIFIED — FNC-TOOL-006 follow
 | Unit | Plan source `MANUAL_TOOL_TEST` parse; create materialization / auth / current VALID version fail-closed; queue CREATED→QUEUED |
 | API | Cookie Session/CSRF, Idempotency-Key, `mcp.tool.execute` + MCP_TOOL ResourceGrant, invalid version |
 | Integration | PostgreSQL MANUAL_TOOL_TEST → claim → mocked CurrentMCPClient → ToolCall 1 → Execution SUCCEEDED |
-| Frontend | Test Call tab JSON input, Run Test → execution_id, Execution detail navigation |
+| Frontend | Test Call JSON 입력 → Execution 생성 → 결과 확인/새로고침 및 text preview, message_echoed, 미완료/403 처리, Execution detail 이동 |
+| Result API | 본인 requester 전용, 다른 사용자/다른 tool·source 404, 권한·grant 회수 403, SUCCEEDED + DB persisted text만 미리보기 |
+| Security | metadata/structured_content/image 미노출, credential 텍스트 가림, 4개/4KB 한도, 기존 Execution API 원본 미노출 회귀 |
 
 Regression: existing AGENT_REQUEST / WORKFLOW_VERSION / SCHEDULE_OCCURRENCE queue+claim paths remain green; FACTORY_TEST stays unstaged.
 

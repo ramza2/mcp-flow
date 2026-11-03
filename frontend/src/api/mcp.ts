@@ -19,6 +19,7 @@ import type {
   MCPToolVersionListDto,
   ManualToolTestCreateRequest,
   ManualToolTestCreateResult,
+  ManualToolTestResultDto,
   ToolVerificationCreateRequest,
   ToolVerificationDto,
   ToolVerificationListDto,
@@ -224,6 +225,17 @@ export function createManualToolTest(
     signal: options.signal,
     headers: { 'Idempotency-Key': options.idempotencyKey },
   });
+}
+
+export function getManualToolTestResult(
+  toolId: string,
+  executionId: string,
+  signal?: AbortSignal,
+) {
+  return apiRequest<ManualToolTestResultDto>(
+    `/mcp/tools/${toolId}/test-calls/${executionId}/result`,
+    { signal },
+  );
 }
 
 export function createToolVerification(

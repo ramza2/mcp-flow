@@ -598,7 +598,11 @@ Verification Tab은 ToolVersion별 검증일, 검증자, Test Execution, criteri
 
 - 선택 ToolVersion + input_schema 기반 JSON arguments 입력
 - `Run Test` → `POST /mcp/tools/{tool_id}/test-calls`
-- 생성된 `execution_id` 표시 및 Execution 상세로 이동
+- 생성된 `execution_id` 표시, `실행 응답 확인 / 새로고침` 버튼으로 전용 조회
+  `GET /mcp/tools/{tool_id}/test-calls/{execution_id}/result` 실행
+- SUCCEEDED 시 응답 텍스트와 `입력 메시지 응답 포함 확인` 상태 표시
+- 미완료 상태는 다시 조회 안내. 403/404 에러와 민감정보 비표시/길이 제한 안내
+- 일반 Execution 상세 이동 유지 (원본 Tool content는 일반 Execution API에서 숨김)
 - Loading / Error / Permission(FORBIDDEN) 상태 표시
 - Test Call 성공만으로 Verification VERIFIED를 자동 생성하지 않는다
   (FNC-TOOL-006 Generate Verification 사용)

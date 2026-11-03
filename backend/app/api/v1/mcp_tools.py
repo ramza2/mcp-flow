@@ -12,6 +12,7 @@ from app.core.errors import AppError
 from app.schemas.mcp_tool import (
     ManualToolTestCreateRequest,
     ManualToolTestCreateResult,
+    ManualToolTestResult,
     MCPToolListResponse,
     MCPToolPolicyPut,
     MCPToolPolicyResponse,
@@ -24,6 +25,7 @@ from app.schemas.mcp_tool import (
     ToolVerificationResponse,
 )
 from app.services.manual_tool_test_creation import ManualToolTestCreationService
+from app.services.manual_tool_test_result import ManualToolTestResultService
 from app.services.mcp_tool import MCPToolService
 from app.services.mcp_tool_policy import MCPToolPolicyService
 from app.services.mcp_tool_query import MCPToolQueryService
@@ -244,6 +246,23 @@ async def create_manual_tool_test(
     )
     response.status_code = outcome.http_status
     return outcome.result
+
+
+@router.get(
+    "/{tool_id}/test-calls/{execution_id}/result",
+    response_model=ManualToolTestResult,
+)
+async def get_manual_tool_test_result(
+    tool_id: uuid.UUID,
+    execution_id: uuid.UUID,
+    session: DbSessionDep,
+    principal: CurrentPrincipalDep,
+) -> ManualToolTestResult:
+    return await ManualToolTestResultService(session).get(
+        tool_id=tool_id,
+        execution_id=execution_id,
+        requester_id=principal.user_id,
+    )
 
 
 @router.get("/{tool_id}/policy", response_model=MCPToolPolicyResponse)
