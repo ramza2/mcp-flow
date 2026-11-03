@@ -75,6 +75,15 @@ async def test_happy_path_returns_structured_content() -> None:
     assert body["params"]["arguments"] == {"location": "Seoul"}
     assert captured["headers"]["mcp-protocol-version"] == CURRENT_MCP_PROTOCOL_VERSION
     assert captured["headers"]["mcp-name"] == "weather_lookup"
+    assert captured["headers"]["accept"] == "application/json, text/event-stream"
+    assert body["params"]["_meta"] == {
+        "io.modelcontextprotocol/protocolVersion": CURRENT_MCP_PROTOCOL_VERSION,
+        "io.modelcontextprotocol/clientCapabilities": {},
+        "io.modelcontextprotocol/clientInfo": {
+            "name": "mcpflow",
+            "version": "0.1.0",
+        },
+    }
 
 
 @pytest.mark.asyncio

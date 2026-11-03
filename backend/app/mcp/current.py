@@ -55,7 +55,7 @@ class CurrentMCPClient:
             "MCP-Protocol-Version": CURRENT_MCP_PROTOCOL_VERSION,
             "Mcp-Method": method,
             "Content-Type": "application/json",
-            "Accept": "application/json",
+            "Accept": "application/json, text/event-stream",
         }
         if mcp_name:
             headers["Mcp-Name"] = mcp_name
@@ -65,7 +65,8 @@ class CurrentMCPClient:
         params: dict[str, Any] = {
             "_meta": {
                 "io.modelcontextprotocol/protocolVersion": CURRENT_MCP_PROTOCOL_VERSION,
-                "clientInfo": dict(_CLIENT_INFO),
+                "io.modelcontextprotocol/clientCapabilities": {},
+                "io.modelcontextprotocol/clientInfo": dict(_CLIENT_INFO),
             }
         }
         if extra:
