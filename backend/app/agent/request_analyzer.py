@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import uuid
 from datetime import UTC, datetime
 from typing import Any
@@ -32,6 +33,25 @@ from app.schemas.structured_request import (
 from app.services.agent_request import AgentRequestService
 
 logger = logging.getLogger(__name__)
+
+# LLM phrasing varies; suppress only recognisable *Tool-result* contingencies.
+# A list must be a requested capability, and real meaning ambiguities remain.
+_LIST_RESULT_CONTINGENCY_PATTERNS = (
+    re.compile(
+        r"\b(?:whether|if)\b.{0,160}\b(?:exists?|empty|contains?|available)\b"
+        r".{0,160}\b(?:list|results?)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:whether|if)\b.{0,160}\b(?:list|results?)\b"
+        r".{0,160}\b(?:empty|contains?|exists?)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"(?:목록|조회\s*결과).{0,80}(?:비어\s*있|비었|항목이\s*없|결과가\s*없)",
+        re.IGNORECASE,
+    ),
+)
 
 _SECURITY_SYSTEM_CONTRACT = """\
 You are the MCPFlow Request Analyzer.
@@ -91,6 +111,21 @@ Put danger in risk_hints (for example DESTRUCTIVE). Do not add hypothetical \
 prerequisites to missing_inputs only because the request is risky. Example: \
 "Launch the rocket now" should structure intent/capability/risk with \
 needs_clarification=false so Selector can return NO_MATCH when no Tool matches.
+
+Clarification vs execution-time contingencies:
+- ambiguities describes ONLY uncertainty about the user's intended action or
+  target that a user can resolve before a Tool call. Do not ask users to
+  predict Tool output, data existence, empty lists, runtime failures, or
+  the ID of an item that a prior step is supposed to return.
+- For an instruction such as "list pets, then get details of the first pet",
+  "first" means the first item in the returned list order. Extract pet.list
+  and pet.detail; the detail ID comes from the list Step output. An empty
+  list is an execution outcome, not request-level clarification. Do not
+  invent a sort order or ask whether the list contains any pets.
+- For "반려동물 목록을 조회하고 첫 번째 반려동물의 상세 정보를 알려줘",
+  required_capabilities=["pet.list", "pet.detail"], missing_inputs=[],
+  ambiguities=[], needs_clarification=false. If the user refers to
+  "that list" without specifying which list, preserve true ambiguity.
 
 Entity name rules:
 - entity.name must be a stable English lower_snake_case semantic key, never a \
@@ -403,32 +438,58 @@ class RequestAnalyzerService:
     def _sanitize_request_level_clarification(
         structured: StructuredRequestV1,
     ) -> StructuredRequestV1:
-        """Defer Tool-input sufficiency to Selector when the request is routable.
+        """Defer operational input checks; keep true user-meaning ambiguity.
 
-        docs/04 separates Analyzer meaning/routing from Selector Tool existence
-        and required-input coverage:
-
-        - True meaning ambiguity (`ambiguities` non-empty) → keep WAITING_INPUT.
-        - Unroutable incompleteness (empty `required_capabilities`) → keep
-          Analyzer clarification unchanged.
-        - Routable request (`required_capabilities` non-empty, `ambiguities`
-          empty) → clear Analyzer-level `missing_inputs` / `needs_clarification`
-          so Authorized Retrieval / Selector can run. Tool absence → NO_MATCH;
-          selected Tool with unmet required inputs → CLARIFY. RiskClass is
-          never used as a routing bypass (docs/04: no RiskClass→confirmation
-          mapping at selection either).
-
-        Analyzer cannot classify missing_inputs names against Tool schemas;
-        clearing on the routable path is deferral, not a claim that inputs are
-        satisfied. AUTO_SELECT remains gated by Selector coverage / policy.
+        A model may mislabel a hypothetical *list result* (e.g. "whether any
+        pets exist in the list") as a user question. That cannot be answered
+        until the list Tool runs, so suppress this narrow class only when the
+        request explicitly includes a list capability. Unknown or genuine
+        meaning ambiguity remains WAITING_INPUT. Selector still checks Tool
+        existence, required inputs, policy and authorization (docs/04).
         """
 
-        if not structured.required_capabilities or structured.ambiguities:
+        if not structured.required_capabilities:
             return structured
-        if not structured.missing_inputs and not structured.needs_clarification:
+
+        has_list_action = any(
+            capability.rpartition(".")[2] == "list"
+            for capability in structured.required_capabilities
+        )
+        remaining_ambiguities = [
+            ambiguity
+            for ambiguity in structured.ambiguities
+            if not (
+                has_list_action
+                and any(
+                    pattern.search(ambiguity)
+                    for pattern in _LIST_RESULT_CONTINGENCY_PATTERNS
+                )
+            )
+        ]
+
+        # A genuine user-meaning ambiguity still blocks retrieval. Do not
+        # silently discard it merely because another entry was speculative.
+        if remaining_ambiguities:
+            if len(remaining_ambiguities) == len(structured.ambiguities):
+                return structured
+            data = structured.model_dump(mode="json")
+            data["ambiguities"] = remaining_ambiguities
+            data["needs_clarification"] = True
+            return StructuredRequestV1.model_validate(data)
+
+        if (
+            not structured.missing_inputs
+            and not structured.ambiguities
+            and not structured.needs_clarification
+        ):
             return structured
+
+        # Tool-specific completeness is Selector's responsibility. No
+        # clarification survives when the intent is routable and all model
+        # ambiguities were speculative Tool-result contingencies.
         data = structured.model_dump(mode="json")
         data["missing_inputs"] = []
+        data["ambiguities"] = []
         data["needs_clarification"] = False
         return StructuredRequestV1.model_validate(data)
 
