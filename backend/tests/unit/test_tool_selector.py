@@ -271,6 +271,57 @@ async def _seed_retrieving(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("second_fit", "expected_decision"),
+    [(0.8, "AUTO_SELECT"), (0.8001, "CONFIRM")],
+)
+async def test_auto_select_margin_boundary_ignores_float_roundoff(
+    db_session: AsyncSession,
+    second_fit: float,
+    expected_decision: str,
+) -> None:
+    """A true 0.10 fit margin must not request confirmation due to float noise."""
+    request_id, _, _ = await _seed_retrieving(
+        db_session,
+        selection_settings={
+            "auto_select_threshold": 0.6,
+            "confirmation_threshold": 0.45,
+            "max_candidates": 12,
+        },
+    )
+    candidates = [
+        _candidate(_descriptor(name="GET /pets", required_inputs=(), retrieval_score=0.95)),
+        _candidate(_descriptor(name="GET /other", required_inputs=(), retrieval_score=0.85)),
+    ]
+    payload = {
+        "candidates": [
+            {
+                "tool_version_id": str(candidates[0].descriptor.tool_version_id),
+                "llm_fit_score": 0.9,
+                "reason_summary": "pet list",
+            },
+            {
+                "tool_version_id": str(candidates[1].descriptor.tool_version_id),
+                "llm_fit_score": second_fit,
+                "reason_summary": "other list",
+            },
+        ],
+        "ambiguities": [],
+    }
+    llm = _MockLLM(payload)
+    outcome = await ToolSelectorService(
+        db_session,
+        model_provider=llm,  # type: ignore[arg-type]
+        tool_retrieval=_MockRetrieval(candidates),  # type: ignore[arg-type]
+    ).select(agent_request_id=request_id)
+
+    assert outcome.decision == expected_decision
+    assert outcome.confidence is not None
+    assert outcome.confidence.total >= 0.6
+    assert "natural Korean for Korean requests" in llm.messages[0][0]["content"]
+
+
+@pytest.mark.asyncio
 async def test_auto_select_building_parameters(db_session: AsyncSession) -> None:
     request_id, user_id, version_id = await _seed_retrieving(db_session)
     desc = _descriptor(retrieval_score=0.95)
