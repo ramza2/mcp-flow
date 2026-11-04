@@ -318,6 +318,26 @@ class RequestAnalyzerService:
         payload["schema_version"] = STRUCTURED_REQUEST_SCHEMA_VERSION
         payload["request_text"] = raw_request_text
 
+        # The model may contradict its own clarification lists. This boolean
+        # is derived from those lists; reconcile only a valid boolean with
+        # valid list shapes before strict StructuredRequest validation. Other
+        # missing/invalid fields and unexpected keys must still fail closed.
+        missing_inputs = payload.get("missing_inputs")
+        ambiguities = payload.get("ambiguities")
+        needs_clarification = payload.get("needs_clarification")
+        if (
+            isinstance(missing_inputs, list)
+            and isinstance(ambiguities, list)
+            and isinstance(needs_clarification, bool)
+        ):
+            expected_clarification = bool(missing_inputs or ambiguities)
+            if needs_clarification != expected_clarification:
+                logger.info(
+                    "request_analyzer clarification_flag_reconciled agent_request_id=%s",
+                    agent_request_id,
+                )
+                payload["needs_clarification"] = expected_clarification
+
         try:
             structured = StructuredRequestV1.model_validate(payload)
         except ValidationError as exc:
