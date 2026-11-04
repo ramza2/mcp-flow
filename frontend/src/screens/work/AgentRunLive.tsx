@@ -124,6 +124,53 @@ function statusPlainKorean(status: string): string {
   return map[status] ?? `상태: ${status}`;
 }
 
+const KOREAN_STATUS_LABELS: Record<string, string> = {
+  RECEIVED: '접수',
+  ANALYZING: '분석 중',
+  RETRIEVING: '기능 검색 중',
+  SELECTING: '기능 선택 중',
+  BUILDING_PARAMETERS: '입력값 준비 중',
+  PLANNING: '계획 수립 중',
+  VALIDATING: '계획 검증 중',
+  WAITING_INPUT: '추가 정보 대기',
+  WAITING_CONFIRMATION: '확인 대기',
+  READY: '실행 준비 완료',
+  REJECTED: '거절',
+  FAILED: '실패',
+  CANCELLED: '취소',
+  CREATED: '생성됨',
+  QUEUED: '대기 중',
+  RUNNING: '실행 중',
+  WAITING_APPROVAL: '승인 대기',
+  CANCEL_REQUESTED: '취소 요청됨',
+  SUCCEEDED: '완료',
+  PARTIALLY_SUCCEEDED: '일부 완료',
+  TIMED_OUT: '시간 초과',
+};
+
+function statusLabelKorean(status: string): string {
+  return KOREAN_STATUS_LABELS[status] ?? '상태 확인 필요';
+}
+
+function hasReadableToolName(name: string | null | undefined): name is string {
+  return Boolean(name?.trim() && !/^tool(?:[_\s-]?\d+)?$/i.test(name.trim()));
+}
+
+function executionStepName(
+  step: ExecutionStepListItemDto,
+  index: number,
+  stepsCount: number,
+  stage: AgentRunProgressDto | null,
+  result: AgentRunChatResultDto | null,
+  selected: AgentRunSelectionDto | null,
+): string {
+  const fromResult = result?.steps?.find((item) => item.step_key === step.step_key)?.tool_name;
+  const fromPlan = stage?.plan?.step_names?.[index];
+  const fromSelection = stepsCount === 1 ? selected?.selected_tool_name : null;
+  const name = [fromResult, fromPlan, fromSelection].find(hasReadableToolName);
+  return name?.trim() ?? `${index + 1}단계 ${step.step_type === 'TOOL' ? '도구 실행' : '작업 실행'}`;
+}
+
 function selectionReasonForDisplay(
   reason: string | null,
   requestText: string,
@@ -142,6 +189,14 @@ function selectionReasonForDisplay(
     return fallback;
   }
   return summary;
+}
+
+function lastUserMessageIndex(messages: ChatMessage[]): number {
+  let lastIndex = -1;
+  messages.forEach((message, index) => {
+    if (message.role === 'user') lastIndex = index;
+  });
+  return lastIndex;
 }
 
 let messageSeq = 0;
@@ -175,7 +230,6 @@ export default function AgentRunLive() {
   const inFlight = useRef(false);
   const autoPipelineLock = useRef(false);
   const autoExecAttemptedFor = useRef<string>('');
-  const lastStatusMessage = useRef<string>('');
   /** Dedupes final chat answer when SSE + polling both observe terminal. */
   const chatResultAnnouncedFor = useRef<string>('');
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -193,9 +247,23 @@ export default function AgentRunLive() {
   const pushMessage = useCallback((role: ChatRole, text: string) => {
     const trimmed = text.trim();
     if (!trimmed) return;
-    if (role === 'system' && lastStatusMessage.current === trimmed) return;
-    if (role === 'system') lastStatusMessage.current = trimmed;
-    setMessages((prev) => [...prev, { id: nextMessageId(), role, text: trimmed }]);
+    // A final answer ends progress reporting for the current request.
+    if (role === 'system' && chatResultAnnouncedFor.current) return;
+    const message: ChatMessage = { id: nextMessageId(), role, text: trimmed };
+    setMessages((prev) => {
+      if (role !== 'system') {
+        return [...prev, message];
+      }
+      // The conversation retains user/assistant messages, but only the latest
+      // transient status for this request. SSE and polling can report the same
+      // step with different punctuation, so replacing also avoids repeats.
+      const lastUserIndex = lastUserMessageIndex(prev);
+      const recent = prev.slice(lastUserIndex + 1);
+      const lastProgress = recent.filter((item) => item.role === 'system').slice(-1)[0];
+      if (lastProgress?.text === trimmed) return prev;
+      const kept = prev.filter((item, index) => index <= lastUserIndex || item.role !== 'system');
+      return [...kept, message];
+    });
   }, []);
 
   useEffect(() => {
@@ -277,7 +345,12 @@ export default function AgentRunLive() {
           }
           // Preserve deterministic display when the composition API fails.
           const stepLine = (result.steps && result.steps.length > 1)
-            ? `\n단계: ${result.steps.map((s) => `${s.tool_name ?? s.step_key}(${s.status})`).join(' → ')}`
+            ? `\n단계: ${result.steps.map((step, index) => {
+                const name = hasReadableToolName(step.tool_name)
+                  ? step.tool_name.trim()
+                  : `${index + 1}단계 도구 실행`;
+                return `${name}(${statusLabelKorean(step.status)})`;
+              }).join(' → ')}`
             : '';
           const lines = result.display_items.map(
             (item) => `· ${item.name} / ${item.status}`,
@@ -616,7 +689,7 @@ export default function AgentRunLive() {
       setExecution(null);
       setExecutionLoadedForRequest('');
       setChatResult(null);
-      lastStatusMessage.current = '';
+      chatResultAnnouncedFor.current = '';
       autoStartedForRequest.current = created.id;
       navigate(`/run/${created.conversation_id}`);
       pushMessage('system', '요청을 접수했습니다. 분석을 시작합니다…');
@@ -767,6 +840,9 @@ export default function AgentRunLive() {
     && !execution
     && !progress?.safe_auto_execute,
   );
+  const currentStatusVisible = messages
+    .slice(lastUserMessageIndex(messages) + 1)
+    .some((item) => item.role === 'system');
 
   return (
     <div className="p-6 max-w-3xl mx-auto space-y-4">
@@ -834,10 +910,17 @@ export default function AgentRunLive() {
         <section aria-label="실행 단계" className="rounded-xl border border-slate-200 bg-white p-4 space-y-2">
           <h2 className="text-sm font-semibold text-slate-800">실행 단계</h2>
           <ol className="text-sm text-slate-700 space-y-1 list-decimal list-inside">
-            {executionSteps.map((step) => (
+            {executionSteps.map((step, index) => (
               <li key={step.id}>
-                {step.step_key}
-                <span className="ml-2 text-xs text-slate-500">{statusPlainKorean(step.status)}</span>
+                {executionStepName(
+                  step,
+                  index,
+                  executionSteps.length,
+                  progress,
+                  chatResult?.execution_id === execution?.id ? chatResult : null,
+                  selection,
+                )}
+                <span className="ml-2 text-xs text-slate-500">{statusLabelKorean(step.status)}</span>
               </li>
             ))}
           </ol>
@@ -952,7 +1035,7 @@ export default function AgentRunLive() {
           </div>
         )}
 
-        {working && (
+        {working && !currentStatusVisible && (
           <div role="status" className="flex gap-2 items-center text-sm text-indigo-700">
             <Loader2 size={15} className="animate-spin" />
             처리 중입니다…
@@ -1019,16 +1102,17 @@ export default function AgentRunLive() {
 
       {request && (
         <div className="flex flex-wrap items-center gap-2 text-sm text-slate-500">
-          <StatusBadge status={request.status} size="sm" />
+          <span className="text-xs">요청 상태</span>
+          <StatusBadge status={request.status} label={statusLabelKorean(request.status)} size="sm" />
           {execution && executionLoadedForRequest === request.id ? (
             <>
-              <span>Execution: {execution.status} · {execution.id}</span>
+              <span>실행 상태: {statusLabelKorean(execution.status)} · {execution.id}</span>
               <Button size="sm" variant="outline" onClick={() => navigate(`/executions/${execution.id}`)}>
                 실행 상세 보기
               </Button>
             </>
           ) : (
-            <span>Execution: {executionLoadedForRequest === request.id ? '생성되지 않음' : '확인 중'}</span>
+            <span>실행 상태: {executionLoadedForRequest === request.id ? '생성되지 않음' : '확인 중'}</span>
           )}
           <Button size="sm" variant="outline" onClick={() => navigate('/executions')}>전체 실행 이력 보기</Button>
         </div>
