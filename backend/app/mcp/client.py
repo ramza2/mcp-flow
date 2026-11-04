@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
 import httpx
@@ -45,9 +46,12 @@ class MCPHttpClient:
         timeout_ms: int = 10000,
         *,
         protocol_era: str | MCPProtocolEra = MCPProtocolEra.CURRENT,
+        auth_headers: Mapping[str, str] | None = None,
     ) -> dict[str, Any]:
         self._reject_legacy(protocol_era)
-        return await self._current.discover_capabilities(endpoint, timeout_ms=timeout_ms)
+        return await self._current.discover_capabilities(
+            endpoint, timeout_ms=timeout_ms, auth_headers=auth_headers
+        )
 
     async def list_tools(
         self,
@@ -55,6 +59,9 @@ class MCPHttpClient:
         timeout_ms: int = 60000,
         *,
         protocol_era: str | MCPProtocolEra = MCPProtocolEra.CURRENT,
+        auth_headers: Mapping[str, str] | None = None,
     ) -> list[RemoteToolDescriptor]:
         self._reject_legacy(protocol_era)
-        return await self._current.list_tools(endpoint, timeout_ms=timeout_ms)
+        return await self._current.list_tools(
+            endpoint, timeout_ms=timeout_ms, auth_headers=auth_headers
+        )

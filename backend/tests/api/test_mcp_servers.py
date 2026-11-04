@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import uuid
 from typing import Any
 
@@ -709,3 +710,123 @@ async def test_tool_query_endpoints(
         f"{API_TOOLS}/{tool_id}/versions/{uuid.uuid4()}"
     )
     assert missing_version.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_registered_bearer_secret_used_for_connection_and_discovery(
+    db_client: AsyncClient,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    override_mcp_client,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The API resolves stored credentials for both RPC paths without exposing them."""
+    from app.core.secret_crypto import encrypt_secret_payload
+    from app.domain.enums import SecretKind, SecretStatus
+    from app.repositories.secret import SecretRecordRepository
+
+    token = "synthetic-discovery-bearer-secret"
+    master_key = b"m" * 32
+    encrypted = encrypt_secret_payload(
+        master_key, kind=SecretKind.API_KEY.value, material={"value": token}
+    )
+    async with db_session_factory() as session:
+        record = await SecretRecordRepository(session).create(
+            name=f"synthetic-mcp-{uuid.uuid4().hex[:10]}",
+            secret_kind=SecretKind.API_KEY.value,
+            ciphertext=encrypted.ciphertext,
+            nonce=encrypted.nonce,
+            key_version=encrypted.key_version,
+            fingerprint=encrypted.fingerprint,
+            status=SecretStatus.ACTIVE.value,
+        )
+        secret_id = record.id
+        await session.commit()
+
+    server = await _create_server(
+        db_client, auth_type="BEARER", auth_secret_id=str(secret_id)
+    )
+    monkeypatch.setattr(
+        "app.api.v1.mcp_servers.load_master_key_from_settings",
+        lambda *, file_path: master_key,
+    )
+    observed: list[str] = []
+    echo_remote_error = {"enabled": False}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = request.content.decode("utf-8")
+        rpc = json.loads(body)
+        assert token not in body
+        assert request.headers["authorization"] == f"Bearer {token}"
+        observed.append(rpc["method"])
+        if echo_remote_error["enabled"]:
+            return httpx.Response(
+                200,
+                json={
+                    "jsonrpc": "2.0",
+                    "id": rpc["id"],
+                    "error": {"code": -32001, "message": f"remote reflected {token}"},
+                },
+            )
+        result = (
+            {"tools": {"listChanged": False}}
+            if rpc["method"] == "server/discover"
+            else {"tools": [{"name": "dqa.mcp_ready", "inputSchema": {"type": "object"}}]}
+        )
+        return httpx.Response(
+            200, json={"jsonrpc": "2.0", "id": rpc["id"], "result": result}
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as upstream:
+        override_mcp_client(MCPHttpClient(http=upstream))
+        checked = await db_client.post(
+            f"{API_SERVERS}/{server['id']}/connection-tests"
+        )
+        assert checked.status_code == 201, checked.text
+        assert checked.json()["status"] == "SUCCEEDED"
+
+        discovered = await db_client.post(
+            f"{API_SERVERS}/{server['id']}/discoveries",
+            json={"apply_changes": False},
+        )
+        assert discovered.status_code == 201, discovered.text
+        assert discovered.json()["success"] is True
+        assert token not in checked.text
+        assert token not in discovered.text
+        assert observed == [
+            "server/discover", "tools/list", "server/discover", "tools/list"
+        ]
+
+        # An untrusted remote error must never cause credential persistence.
+        echo_remote_error["enabled"] = True
+        echoed_discovery = await db_client.post(
+            f"{API_SERVERS}/{server['id']}/discoveries",
+            json={"apply_changes": False},
+        )
+        assert echoed_discovery.status_code == 201
+        assert echoed_discovery.json()["success"] is False
+        assert token not in echoed_discovery.text
+
+        echoed_check = await db_client.post(
+            f"{API_SERVERS}/{server['id']}/connection-tests"
+        )
+        assert echoed_check.status_code == 201
+        assert echoed_check.json()["status"] == "FAILED"
+        assert token not in echoed_check.text
+        observed_before_revocation = list(observed)
+
+        # Revocation must take effect on the next request, before outbound HTTP.
+        from app.models.secret import SecretRecord
+
+        async with db_session_factory() as session:
+            stored = await session.get(SecretRecord, secret_id)
+            assert stored is not None
+            stored.status = SecretStatus.REVOKED.value
+            await session.commit()
+
+        blocked = await db_client.post(
+            f"{API_SERVERS}/{server['id']}/connection-tests"
+        )
+        assert blocked.status_code == 201
+        assert blocked.json()["status"] == "FAILED"
+        assert blocked.json()["error_code"] == "MCP_AUTH_SECRET_UNAVAILABLE"
+        assert observed == observed_before_revocation
