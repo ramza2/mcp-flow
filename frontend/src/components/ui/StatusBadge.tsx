@@ -81,16 +81,18 @@ const CATEGORY_ICONS: Record<StatusCategory, React.ReactNode> = {
 
 interface StatusBadgeProps {
   status: string;
+  /** Presentation-only label override; canonical status is unchanged. */
+  label?: string;
   size?: 'sm' | 'md';
   /** Disable live progress animation when displaying an immutable history entry. */
   animate?: boolean;
 }
 
-export default function StatusBadge({ status, size = 'md', animate = true }: StatusBadgeProps) {
+export default function StatusBadge({ status, label: labelOverride, size = 'md', animate = true }: StatusBadgeProps) {
   const info = STATUS_MAP[status] ?? { category: 'neutral' as StatusCategory };
   const styles = CATEGORY_STYLES[info.category];
   const icon = CATEGORY_ICONS[info.category];
-  const label = info.label ?? status.replace(/_/g, ' ');
+  const label = labelOverride ?? info.label ?? status.replace(/_/g, ' ');
   const isProcessing = info.category === 'processing';
 
   return (
