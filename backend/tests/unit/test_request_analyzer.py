@@ -656,6 +656,9 @@ def test_security_contract_covers_missing_inputs_and_entity_rules() -> None:
     assert "never" in contract
     assert "intent MUST be a non-empty" in contract
     assert "required_capabilities=[], specify the missing meaning" in contract
+    assert "Clarification vs execution-time contingencies" in contract
+    assert "Do not ask users to" in contract
+    assert "An empty" in contract
 
 
 @pytest.mark.asyncio
@@ -749,6 +752,119 @@ async def test_rocket_speculative_missing_inputs_sanitized_to_retrieving(
     assert row is not None
     assert row.status == AgentRequestStatus.RETRIEVING.value
     assert row.missing_fields == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("capabilities", "ambiguities", "expected_status", "expected_ambiguities"),
+    [
+        (
+            ["pet.list", "pet.detail"],
+            ["Uncertainty about whether pets exist in the list to retrieve a 'first' pet"],
+            AgentRequestStatus.RETRIEVING,
+            [],
+        ),
+        (
+            ["pet.list", "pet.detail"],
+            ["Uncertainty about whether the returned list is empty"],
+            AgentRequestStatus.RETRIEVING,
+            [],
+        ),
+        (
+            ["pet.list", "pet.detail"],
+            ["목록이 비어 있을 가능성"],
+            AgentRequestStatus.RETRIEVING,
+            [],
+        ),
+        (
+            ["pet.list", "pet.detail"],
+            ["Which collection of pets does the user mean?"],
+            AgentRequestStatus.WAITING_INPUT,
+            ["Which collection of pets does the user mean?"],
+        ),
+        (
+            ["pet.lookup"],
+            ["The term 'first' is ambiguous without a defined sorting criteria or identifier"],
+            AgentRequestStatus.WAITING_INPUT,
+            ["The term 'first' is ambiguous without a defined sorting criteria or identifier"],
+        ),
+    ],
+)
+async def test_list_result_contingency_is_not_user_clarification(
+    db_session: AsyncSession,
+    capabilities: list[str],
+    ambiguities: list[str],
+    expected_status: AgentRequestStatus,
+    expected_ambiguities: list[str],
+) -> None:
+    """Regression for a real pet-list E2E blocked before executing its first Tool."""
+
+    raw = "반려동물 목록을 조회하고 첫 번째 반려동물의 상세 정보를 알려줘."
+    request_id, _, _ = await _seed_received(db_session, raw_text=raw)
+    provider = _MockProvider(
+        {
+            "schema_version": "1.0",
+            "request_text": "MODEL SHOULD NOT WIN",
+            "intent": "Retrieve a list of pets and detail of its first item",
+            "entities": [],
+            "constraints": [],
+            "expected_outputs": ["First pet details"],
+            "required_capabilities": capabilities,
+            "risk_hints": [RiskClass.READ_ONLY.value],
+            "missing_inputs": [],
+            "ambiguities": ambiguities,
+            "needs_clarification": True,
+        }
+    )
+    result = await RequestAnalyzerService(
+        db_session, model_provider=provider  # type: ignore[arg-type]
+    ).analyze(agent_request_id=request_id)
+
+    assert result.request_text == raw
+    assert result.ambiguities == expected_ambiguities
+    assert result.needs_clarification is bool(expected_ambiguities)
+    row = await AgentRequestRepository(db_session).get(request_id)
+    assert row is not None
+    assert row.status == expected_status.value
+    assert row.structured_request["ambiguities"] == expected_ambiguities
+    assert row.structured_request["needs_clarification"] is bool(expected_ambiguities)
+
+
+@pytest.mark.asyncio
+async def test_list_result_contingency_keeps_independent_true_ambiguity(
+    db_session: AsyncSession,
+) -> None:
+    request_id, _, _ = await _seed_received(
+        db_session, raw_text="그 목록에서 첫 번째 반려동물을 조회해줘"
+    )
+    provider = _MockProvider(
+        {
+            "schema_version": "1.0",
+            "request_text": "MODEL SHOULD NOT WIN",
+            "intent": "Read first pet details from an unspecified collection",
+            "entities": [],
+            "constraints": [],
+            "expected_outputs": ["Pet details"],
+            "required_capabilities": ["pet.list", "pet.detail"],
+            "risk_hints": [RiskClass.READ_ONLY.value],
+            "missing_inputs": [],
+            "ambiguities": [
+                "Uncertainty about whether pets exist in the list",
+                "Which pet collection is meant by that list?",
+            ],
+            "needs_clarification": True,
+        }
+    )
+    result = await RequestAnalyzerService(
+        db_session, model_provider=provider  # type: ignore[arg-type]
+    ).analyze(agent_request_id=request_id)
+
+    assert result.ambiguities == ["Which pet collection is meant by that list?"]
+    assert result.needs_clarification is True
+    row = await AgentRequestRepository(db_session).get(request_id)
+    assert row is not None
+    assert row.status == AgentRequestStatus.WAITING_INPUT.value
+    assert row.structured_request["ambiguities"] == result.ambiguities
 
 
 @pytest.mark.asyncio
