@@ -751,7 +751,8 @@ GET  /api/v1/agent-requests/{request_id}/chat-result
 POST /api/v1/agent-requests/{request_id}/compose-answer
 ```
 
-- `POST /agent-requests`는 `agent_id`, `request_text`로 Conversation·USER message·RECEIVED AgentRequest만 원자적으로 생성한다.
+- `POST /agent-requests`는 `request_text`와 선택적 `agent_id`로 Conversation·USER message·RECEIVED AgentRequest만 원자적으로 생성한다. 명시한 `agent_id`는 기존대로 유효성·가시성을 검증한다. 생략하면 `MCPFLOW_DEFAULT_AGENT_ID`에 명시된 Agent 또는 사용자에게 실행 가능한 Agent가 정확히 하나일 때만 자동 결정하고, 다수·없음·설정 Agent 접근 불가 시 409로 거절한다. 서버는 결정된 `ACTIVE` Agent의 현행 `PUBLISHED` AgentVersion을 요청과 Conversation에 그대로 고정한다.
+- `GET /agent-requests/available-agents`는 기존 소유권 필터 목록 외 `default_agent_id`(UUID 또는 `null`)를 제공한다. 숨김·비활성·미게시 Agent는 기본값으로 공개하지 않는다. 운영 기본값은 API Compose 환경변수 `MCPFLOW_DEFAULT_AGENT_ID`로 지정하며, 비어 있으면 단일 후보만 자동 지정한다. 클라이언트가 목록 첫 항목을 임의 기본값으로 가정하지 않는다.
 - `analyze`는 RECEIVED 상태에서만 기존 RequestAnalyzer를 명시적으로 한 번 호출한다.
 - `select-tool`은 RETRIEVING 상태에서만 기존 ToolSelector(권한 적용 검색/평가)를 명시적으로 호출한다. MCP Tool 호출이나 Execution 생성은 하지 않는다.
 - `GET /selection`은 요청 소유자에게 최근 ToolSelectionRun의 안전한 요약(`decision`, 선택 Tool 이름/버전, `confidence`, `reason_summary`, 시각)과 현재 요청 상태를 반환한다. 실행 증적/비밀/내부 프롬프트는 노출하지 않는다. 선택 이력이 없으면 `selection=null`이다.

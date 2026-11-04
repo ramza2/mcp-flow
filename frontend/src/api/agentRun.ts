@@ -24,13 +24,15 @@ export interface AgentRunRequestDto {
 }
 
 export function listRunnableAgents(signal?: AbortSignal) {
-  return apiRequest<{ items: RunnableAgentDto[] }>('/agent-requests/available-agents', { signal });
+  return apiRequest<{ items: RunnableAgentDto[]; default_agent_id: string | null }>(
+    '/agent-requests/available-agents', { signal },
+  );
 }
 
-export function submitAgentRun(agentId: string, requestText: string) {
+export function submitAgentRun(agentId: string | null, requestText: string) {
   return apiRequest<AgentRunRequestDto>('/agent-requests', {
     method: 'POST',
-    body: { agent_id: agentId, request_text: requestText },
+    body: { ...(agentId ? { agent_id: agentId } : {}), request_text: requestText },
   });
 }
 

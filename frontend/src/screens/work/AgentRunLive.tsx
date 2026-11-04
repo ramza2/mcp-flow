@@ -135,6 +135,8 @@ export default function AgentRunLive() {
   const navigate = useNavigate();
   const [agents, setAgents] = useState<RunnableAgentDto[]>([]);
   const [agentId, setAgentId] = useState('');
+  const [defaultAgentId, setDefaultAgentId] = useState('');
+  const [chooseAgent, setChooseAgent] = useState(false);
   const [prompt, setPrompt] = useState('');
   const [request, setRequest] = useState<AgentRunRequestDto | null>(null);
   const [selection, setSelection] = useState<AgentRunSelectionDto | null>(null);
@@ -185,7 +187,9 @@ export default function AgentRunLive() {
     void listRunnableAgents(controller.signal).then((response) => {
       if (controller.signal.aborted) return;
       setAgents(response.items);
-      setAgentId((old) => old || response.items[0]?.id || '');
+      setDefaultAgentId(response.default_agent_id ?? '');
+      setAgentId((old) => old || response.default_agent_id || response.items[0]?.id || '');
+      setChooseAgent(!response.default_agent_id);
     }).catch((err: unknown) => {
       if (!isAbortError(err)) setError(failureMessage(err));
     }).finally(() => {
@@ -565,13 +569,14 @@ export default function AgentRunLive() {
 
   const handleSend = async () => {
     const text = prompt.trim();
-    if (inFlight.current || !text || !agentId) return;
+    if (inFlight.current || !text || (chooseAgent ? !agentId : !defaultAgentId)) return;
     inFlight.current = true;
     setWorking(true);
     setError(null);
     try {
       pushMessage('user', text);
-      const created = await submitAgentRun(agentId, text);
+      // Automatic mode lets the server pin the default published AgentVersion.
+      const created = await submitAgentRun(chooseAgent ? agentId : null, text);
       setPrompt('');
       setRequest(created);
       setSelection(null);
@@ -743,23 +748,54 @@ export default function AgentRunLive() {
       </header>
 
       <section className="rounded-xl border border-slate-200 bg-white p-4 space-y-3">
-        <label className="block text-sm font-semibold text-slate-700" htmlFor="agent-run-selection">
-          Agent 선택
-        </label>
-        <select
-          id="agent-run-selection"
-          className="w-full rounded-md border border-slate-300 p-2 text-sm"
-          value={agentId}
-          disabled={working || loadingAgents}
-          onChange={(event) => setAgentId(event.target.value)}
-        >
-          {agents.length === 0 && <option value="">사용 가능한 Agent 없음</option>}
-          {agents.map((agent) => (
-            <option key={agent.id} value={agent.id}>
-              {agent.name} (v{agent.version_no})
-            </option>
-          ))}
-        </select>
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <p className="text-sm font-semibold text-slate-700">업무 처리 Agent</p>
+            <p className="text-xs text-slate-500">
+              {loadingAgents
+                ? '사용 가능한 Agent를 확인하고 있습니다.'
+                : chooseAgent
+                  ? 'Agent 직접 선택 모드'
+                  : `자동 선택: ${agents.find((agent) => agent.id === defaultAgentId)?.name ?? '기본 Agent'}`}
+            </p>
+          </div>
+          {defaultAgentId && (
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={working || loadingAgents}
+              onClick={() => setChooseAgent((value) => !value)}
+            >
+              {chooseAgent ? '자동 선택으로 전환' : 'Agent 직접 선택'}
+            </Button>
+          )}
+        </div>
+        {chooseAgent && (
+          <>
+            {!defaultAgentId && !loadingAgents && (
+              <p className="text-xs text-amber-700">
+                기본 Agent가 설정되지 않았습니다. Agent를 직접 선택해 실행할 수 있습니다.
+              </p>
+            )}
+            <label className="block text-sm font-medium text-slate-700" htmlFor="agent-run-selection">
+              Agent 선택
+            </label>
+            <select
+              id="agent-run-selection"
+              className="w-full rounded-md border border-slate-300 p-2 text-sm"
+              value={agentId}
+              disabled={working || loadingAgents}
+              onChange={(event) => setAgentId(event.target.value)}
+            >
+              {agents.length === 0 && <option value="">사용 가능한 Agent 없음</option>}
+              {agents.map((agent) => (
+                <option key={agent.id} value={agent.id}>
+                  {agent.name} (v{agent.version_no})
+                </option>
+              ))}
+            </select>
+          </>
+        )}
       </section>
 
       <section
@@ -917,7 +953,7 @@ export default function AgentRunLive() {
           <Button
             icon={<Send size={14} />}
             loading={working}
-            disabled={!agentId || !prompt.trim() || working}
+            disabled={!(chooseAgent ? agentId : defaultAgentId) || !prompt.trim() || working}
             onClick={() => void handleSend()}
           >
             실행

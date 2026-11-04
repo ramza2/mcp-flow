@@ -21,6 +21,10 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
 
     docs_enabled: bool = True
+    default_agent_id: str | None = Field(
+        default=None,
+        description="Optional published Agent UUID for natural-language requests without agent_id.",
+    )
 
     database_url: str = Field(
         default="postgresql+asyncpg://mcpflow:change-me@localhost:5432/mcpflow",

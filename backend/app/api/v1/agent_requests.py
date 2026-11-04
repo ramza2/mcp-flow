@@ -16,6 +16,7 @@ from app.agent.plan_validator import PlanValidatorService
 from app.agent.request_analyzer import RequestAnalyzerService
 from app.agent.tool_selector import ToolSelectorService
 from app.api.dependencies import CurrentPrincipalDep, DbSessionDep
+from app.core.config import get_settings
 from app.core.errors import AppError
 from app.model_provider.errors import ModelProviderError
 from app.models.agent import Agent, AgentVersion
@@ -59,6 +60,22 @@ class RunnableAgentView(BaseModel):
 
 class RunnableAgentsView(BaseModel):
     items: list[RunnableAgentView]
+    default_agent_id: uuid.UUID | None = None
+
+
+def _configured_default_agent_id() -> uuid.UUID | None:
+    """Resolve operator preference; invalid configuration fails closed."""
+    raw = get_settings().default_agent_id
+    if raw is None or not raw.strip():
+        return None
+    try:
+        return uuid.UUID(raw.strip())
+    except ValueError as exc:
+        raise AppError(
+            code="RESOURCE_CONFLICT",
+            message="기본 Agent 설정이 유효하지 않습니다. 관리자에게 문의해 주세요.",
+            status_code=409,
+        ) from exc
 
 
 @router.get("/available-agents", response_model=RunnableAgentsView)
@@ -87,7 +104,15 @@ async def available_agents(
         if version.agent_id == agent.id
         and (agent.visibility == "INTERNAL" or agent.owner_id == principal.user_id)
     ]
-    return RunnableAgentsView(items=items)
+    configured_id = _configured_default_agent_id()
+    permitted_ids = {item.id for item in items}
+    if configured_id is not None:
+        # The configured ID must never reveal a hidden or non-runnable Agent.
+        default_id = configured_id if configured_id in permitted_ids else None
+    else:
+        # A single available Agent is unambiguous even without operator config.
+        default_id = items[0].id if len(items) == 1 else None
+    return RunnableAgentsView(items=items, default_agent_id=default_id)
 
 
 class AgentRunSubmit(BaseModel):
@@ -95,7 +120,7 @@ class AgentRunSubmit(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    agent_id: uuid.UUID
+    agent_id: uuid.UUID | None = None
     request_text: str = Field(min_length=1, max_length=4000)
 
 
@@ -397,8 +422,22 @@ async def submit_agent_run(
     text = body.request_text.strip()
     if not text:
         raise AppError(code="VALIDATION_ERROR", message="지시문을 입력해 주세요.", status_code=422)
+    agent_id = body.agent_id
+    if agent_id is None:
+        default_agent = await available_agents(session, principal)
+        if default_agent.default_agent_id is None:
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message=(
+                    "사용 가능한 기본 Agent가 없습니다. Agent를 직접 선택하거나 "
+                    "관리자에게 기본 Agent 설정을 요청해 주세요."
+                ),
+                status_code=409,
+            )
+        agent_id = default_agent.default_agent_id
+
     agents = AgentRepository(session)
-    agent = await agents.get(body.agent_id)
+    agent = await agents.get(agent_id)
     if agent is None or agent.status != "ACTIVE" or agent.current_version_id is None:
         raise AppError(code="NOT_FOUND", message="사용 가능한 Agent가 아닙니다.", status_code=404)
     if agent.visibility != "INTERNAL" and agent.owner_id != principal.user_id:
