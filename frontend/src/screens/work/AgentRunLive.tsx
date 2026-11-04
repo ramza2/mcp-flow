@@ -124,6 +124,26 @@ function statusPlainKorean(status: string): string {
   return map[status] ?? `상태: ${status}`;
 }
 
+function selectionReasonForDisplay(
+  reason: string | null,
+  requestText: string,
+  decision: AgentRunSelectionDto['decision'],
+): string {
+  const fallback = decision === 'CONFIRM'
+    ? '업무에 사용할 기능을 선택했습니다. 아래에서 확인하고 계속 진행해 주세요.'
+    : decision === 'CLARIFY'
+      ? '업무에 필요한 추가 정보가 있습니다. 아래에서 확인해 주세요.'
+      : decision === 'NO_MATCH'
+        ? '요청에 맞는 기능을 찾지 못했습니다.'
+        : '요청에 맞는 기능을 선택했습니다.';
+  const summary = reason?.trim();
+  // Do not show an English-only model rationale for a Korean user request.
+  if (!summary || (/[가-힣]/.test(requestText) && !/[가-힣]/.test(summary))) {
+    return fallback;
+  }
+  return summary;
+}
+
 let messageSeq = 0;
 function nextMessageId(): string {
   messageSeq += 1;
@@ -471,8 +491,11 @@ export default function AgentRunLive() {
             break;
           }
           if (selected.selection?.decision === 'CLARIFY' || selected.selection?.decision === 'CONFIRM') {
-            pushMessage('assistant', selected.selection.reason_summary
-              || '기능을 확정하려면 추가 확인이 필요합니다.');
+            pushMessage('assistant', selectionReasonForDisplay(
+              selected.selection.reason_summary,
+              selected.request.raw_request_text,
+              selected.selection.decision,
+            ));
           }
           stage = await getAgentRunProgress(requestId);
           setProgress(stage);
@@ -807,6 +830,20 @@ export default function AgentRunLive() {
         )}
       </section>
 
+      {executionSteps.length > 0 && (
+        <section aria-label="실행 단계" className="rounded-xl border border-slate-200 bg-white p-4 space-y-2">
+          <h2 className="text-sm font-semibold text-slate-800">실행 단계</h2>
+          <ol className="text-sm text-slate-700 space-y-1 list-decimal list-inside">
+            {executionSteps.map((step) => (
+              <li key={step.id}>
+                {step.step_key}
+                <span className="ml-2 text-xs text-slate-500">{statusPlainKorean(step.status)}</span>
+              </li>
+            ))}
+          </ol>
+        </section>
+      )}
+
       <section
         className="rounded-xl border border-slate-200 bg-slate-50 min-h-[280px] max-h-[52vh] overflow-y-auto p-4 space-y-3"
         aria-live="polite"
@@ -912,20 +949,6 @@ export default function AgentRunLive() {
             <Button size="sm" disabled={working || !executionConfirmed} onClick={() => void handleCreateExecution()}>
               실제 업무 실행 시작
             </Button>
-          </div>
-        )}
-
-        {executionSteps.length > 0 && (
-          <div className="mr-4 rounded-lg border border-slate-200 bg-slate-50 p-3 space-y-2">
-            <h3 className="text-sm font-semibold text-slate-800">실행 단계</h3>
-            <ol className="text-sm text-slate-700 space-y-1 list-decimal list-inside">
-              {executionSteps.map((step) => (
-                <li key={step.id}>
-                  {step.step_key}
-                  <span className="ml-2 text-xs text-slate-500">{step.status}</span>
-                </li>
-              ))}
-            </ol>
           </div>
         )}
 
@@ -1074,7 +1097,11 @@ export default function AgentRunLive() {
               )}
               {selection.reason_summary && (
                 <p className="text-sm text-indigo-800 whitespace-pre-wrap">
-                  {selection.reason_summary}
+                  {selectionReasonForDisplay(
+                    selection.reason_summary,
+                    request?.raw_request_text ?? '',
+                    selection.decision,
+                  )}
                 </p>
               )}
               <p className="text-xs text-indigo-700">

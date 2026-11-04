@@ -297,6 +297,39 @@ describe('AgentRunLive — chat phase 1', () => {
     expect(screen.queryByText('실제 실행 상세')).toBeNull();
   });
 
+  it('shows Korean confirmation guidance when the model rationale is English-only', async () => {
+    const englishReason = "First step to list pets, then use the first pet's ID with the second tool to retrieve detailed info.";
+    mocks.progress
+      .mockResolvedValueOnce(stage('RETRIEVING'))
+      .mockResolvedValue(stage('WAITING_CONFIRMATION', {
+        open_clarification: {
+          id: 'confirm-pets', request_type: 'TOOL_CONFIRMATION',
+          prompt_text: '선택된 도구의 사용을 확인해 주세요.',
+          fields: [], requested_at: '2026-11-04T07:00:00Z',
+        },
+      }));
+    mocks.select.mockResolvedValue({
+      request: row('WAITING_CONFIRMATION'),
+      selection: {
+        ...selection(), decision: 'CONFIRM', reason_summary: englishReason,
+      },
+    });
+
+    renderLive();
+    await screen.findByRole('option', { name: '실제 Agent (v2)' });
+    fireEvent.change(screen.getByPlaceholderText(/무엇을 도와드릴까요/), {
+      target: { value: '첫 번째 반려동물을 조회해 줘' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: '실행' }));
+
+    expect(await screen.findByText(/업무에 사용할 기능을 선택했습니다/)).toBeTruthy();
+    expect(screen.queryByText(englishReason)).toBeNull();
+    expect(screen.getByRole('button', { name: '확인하고 계속' })).toBeTruthy();
+    expect(mocks.createExecution).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: '고급 보기' }));
+    expect(screen.queryByText(englishReason)).toBeNull();
+  });
+
   it('does not auto-retry persisted ANALYZING after reload', async () => {
     mocks.latest.mockResolvedValue(row('ANALYZING'));
     mocks.getSelection.mockResolvedValue({
@@ -348,6 +381,12 @@ describe('AgentRunLive — chat phase 1', () => {
       expect(screen.getByText(/· Beta \/ pending/)).toBeTruthy();
     });
     expect(screen.getAllByText(/결과 2건을 가져왔습니다/).length).toBe(1);
+    // Execution progress is a separate panel before the transcript, so the
+    // terminal answer stays at the bottom of the chat instead of above steps.
+    const stepsPanel = screen.getByRole('region', { name: '실행 단계' });
+    const terminalAnswer = screen.getByText(/· Alpha \/ available/);
+    expect(stepsPanel.compareDocumentPosition(terminalAnswer) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(stepsPanel.textContent).toContain('실행이 완료되었습니다.');
     expect(mocks.createExecution).not.toHaveBeenCalled();
   });
 
