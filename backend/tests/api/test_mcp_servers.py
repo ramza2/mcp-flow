@@ -750,6 +750,7 @@ async def test_registered_bearer_secret_used_for_connection_and_discovery(
         lambda *, file_path: master_key,
     )
     observed: list[str] = []
+    echo_remote_error = {"enabled": False}
 
     def handler(request: httpx.Request) -> httpx.Response:
         body = request.content.decode("utf-8")
@@ -757,6 +758,15 @@ async def test_registered_bearer_secret_used_for_connection_and_discovery(
         assert token not in body
         assert request.headers["authorization"] == f"Bearer {token}"
         observed.append(rpc["method"])
+        if echo_remote_error["enabled"]:
+            return httpx.Response(
+                200,
+                json={
+                    "jsonrpc": "2.0",
+                    "id": rpc["id"],
+                    "error": {"code": -32001, "message": f"remote reflected {token}"},
+                },
+            )
         result = (
             {"tools": {"listChanged": False}}
             if rpc["method"] == "server/discover"
@@ -786,6 +796,24 @@ async def test_registered_bearer_secret_used_for_connection_and_discovery(
             "server/discover", "tools/list", "server/discover", "tools/list"
         ]
 
+        # An untrusted remote error must never cause credential persistence.
+        echo_remote_error["enabled"] = True
+        echoed_discovery = await db_client.post(
+            f"{API_SERVERS}/{server['id']}/discoveries",
+            json={"apply_changes": False},
+        )
+        assert echoed_discovery.status_code == 201
+        assert echoed_discovery.json()["success"] is False
+        assert token not in echoed_discovery.text
+
+        echoed_check = await db_client.post(
+            f"{API_SERVERS}/{server['id']}/connection-tests"
+        )
+        assert echoed_check.status_code == 201
+        assert echoed_check.json()["status"] == "FAILED"
+        assert token not in echoed_check.text
+        observed_before_revocation = list(observed)
+
         # Revocation must take effect on the next request, before outbound HTTP.
         from app.models.secret import SecretRecord
 
@@ -801,6 +829,4 @@ async def test_registered_bearer_secret_used_for_connection_and_discovery(
         assert blocked.status_code == 201
         assert blocked.json()["status"] == "FAILED"
         assert blocked.json()["error_code"] == "MCP_AUTH_SECRET_UNAVAILABLE"
-        assert observed == [
-            "server/discover", "tools/list", "server/discover", "tools/list"
-        ]
+        assert observed == observed_before_revocation

@@ -407,7 +407,13 @@ class MCPDiscoveryService:
                 latency_ms=latency_ms,
                 error_layer=exc.error_layer,
                 error_code=exc.error_code,
-                error_message=exc.message,
+                # Remote errors may reflect the Authorization header. Never persist
+                # untrusted remote messages for credentialed MCP servers.
+                error_message=(
+                    "Authenticated MCP connection test failed."
+                    if auth_headers
+                    else exc.message
+                ),
             )
             # Do not set server.status=ERROR automatically.
             server = await self._require_server(config.id)
@@ -522,7 +528,10 @@ class MCPDiscoveryService:
                 if exc.error_layer == "TIMEOUT"
                 else exc.error_code
             )
-            discovery.error_message = exc.message
+            # Remote messages can echo supplied credentials; do not persist them.
+            discovery.error_message = (
+                "Authenticated MCP discovery failed." if auth_headers else exc.message
+            )
             discovery.finished_at = finished
             discovery.discovery_mode = str(discovery_mode)
             discovery.raw_response = {
