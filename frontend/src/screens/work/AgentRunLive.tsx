@@ -418,6 +418,15 @@ export default function AgentRunLive() {
       return analyzed;
     } catch (err: unknown) {
       setError(`분석 요청 확인 필요: ${failureMessage(err)}. 상태 새로고침으로 확인하세요.`);
+      // Analyzer may have persisted FAILED before returning its validation error.
+      // Refresh status without invoking analysis again; do not mask the original error.
+      try {
+        const stage = await getAgentRunProgress(requestId);
+        setProgress(stage);
+        setRequest(stage.request);
+      } catch {
+        // Keep the previous snapshot; the explicit refresh button remains available.
+      }
       return null;
     }
   };
