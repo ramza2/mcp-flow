@@ -870,10 +870,10 @@ async def test_calendar_request_extracts_title_when_to_retrieving(
 
 
 @pytest.mark.asyncio
-async def test_needs_clarification_mismatch_fails_validation(
+async def test_analyzer_reconciles_false_clarification_flag_with_missing_inputs(
     db_session: AsyncSession,
 ) -> None:
-    """Contract invariant: needs_clarification must match missing/ambiguities."""
+    """Derive the flag from valid model lists; keep real ambiguity visible."""
 
     request_id, _, _ = await _seed_received(
         db_session, raw_text="내일 오후 3시에 팀 미팅 일정 잡아줘"
@@ -885,13 +885,52 @@ async def test_needs_clarification_mismatch_fails_validation(
             extra={"needs_clarification": False},
         )
     )
+    result = await RequestAnalyzerService(
+        db_session, model_provider=provider  # type: ignore[arg-type]
+    ).analyze(agent_request_id=request_id)
+    assert result.needs_clarification is True
+    assert result.missing_inputs == ["회의 참석자", "회의 주제"]
+
+    row = await AgentRequestRepository(db_session).get(request_id)
+    assert row is not None
+    assert row.status == AgentRequestStatus.WAITING_INPUT.value
+    assert row.structured_request["needs_clarification"] is True
+
+
+@pytest.mark.asyncio
+async def test_analyzer_reconciles_true_clarification_flag_without_missing_inputs(
+    db_session: AsyncSession,
+) -> None:
+    request_id, _, _ = await _seed_received(db_session)
+    provider = _MockProvider(
+        _structured(request_text="x", extra={"needs_clarification": True})
+    )
+    result = await RequestAnalyzerService(
+        db_session, model_provider=provider  # type: ignore[arg-type]
+    ).analyze(agent_request_id=request_id)
+    assert result.needs_clarification is False
+    assert result.missing_inputs == []
+    assert result.ambiguities == []
+
+    row = await AgentRequestRepository(db_session).get(request_id)
+    assert row is not None
+    assert row.status == AgentRequestStatus.RETRIEVING.value
+    assert row.structured_request["needs_clarification"] is False
+
+
+@pytest.mark.asyncio
+async def test_analyzer_still_rejects_malformed_clarification_list(
+    db_session: AsyncSession,
+) -> None:
+    request_id, _, _ = await _seed_received(db_session)
+    provider = _MockProvider(
+        _structured(request_text="x", extra={"missing_inputs": "location"})
+    )
     with pytest.raises(AppError) as exc:
         await RequestAnalyzerService(
             db_session, model_provider=provider  # type: ignore[arg-type]
         ).analyze(agent_request_id=request_id)
     assert exc.value.code == "VALIDATION_ERROR"
-
     row = await AgentRequestRepository(db_session).get(request_id)
     assert row is not None
     assert row.status == AgentRequestStatus.FAILED.value
-    assert row.structured_request is None
