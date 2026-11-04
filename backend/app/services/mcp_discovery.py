@@ -31,6 +31,7 @@ from app.factory.discovery_reconcile import (
     has_immutable_factory_lineage,
     index_remote_tools_strict,
 )
+from app.mcp.auth_headers import build_mcp_auth_headers
 from app.mcp.client import MCPHttpClient
 from app.mcp.errors import DiscoverUnsupportedError, MCPClientError
 from app.mcp.normalize import (
@@ -259,15 +260,24 @@ class MCPDiscoveryService:
             )
         return server
 
-    async def _credential_auth_blocked(self, config: ServerConfig) -> bool:
-        """Fail-closed for any non-NONE auth until a real SecretResolver is available."""
-
+    async def _resolve_auth_headers(self, config: ServerConfig) -> dict[str, str]:
+        """Resolve outbound credentials in memory; reject before contacting the server."""
         if config.auth_type == MCPAuthType.NONE:
-            return False
+            return {}
         if config.auth_secret_id is None:
-            return True
+            raise AppError(
+                code="MCP_AUTH_SECRET_UNAVAILABLE",
+                message="MCP authentication secret is unavailable.",
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            )
         resolved = await self._secrets.resolve(config.auth_secret_id)
-        return resolved is None
+        if resolved is None:
+            raise AppError(
+                code="MCP_AUTH_SECRET_UNAVAILABLE",
+                message="MCP authentication secret is unavailable.",
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            )
+        return build_mcp_auth_headers(auth_type=config.auth_type, resolved=resolved)
 
     async def connection_test(self, server_id: uuid.UUID) -> ConnectionTestResponse:
         from app.services.mcp_server import connection_deferred_effective
@@ -288,17 +298,16 @@ class MCPDiscoveryService:
         # End DB transaction before any remote HTTP work.
         await self._session.commit()
 
-        if await self._credential_auth_blocked(config):
+        try:
+            auth_headers = await self._resolve_auth_headers(config)
+        except AppError as exc:
             check = await self._discoveries.create_check(
                 mcp_server_id=config.id,
                 check_type=MCPCheckType.MANUAL,
                 status=MCPCheckStatus.FAILED,
                 error_layer="AUTH",
-                error_code="MCP_AUTH_SECRET_UNAVAILABLE",
-                error_message=(
-                    "Secret Store resolver is not available; "
-                    "credential auth MCP servers cannot perform remote HTTP calls."
-                ),
+                error_code=exc.code,
+                error_message="MCP authentication credentials are unavailable or unsupported.",
             )
             server = await self._require_server(config.id)
             server.last_error_at = datetime.now(UTC)
@@ -319,8 +328,11 @@ class MCPDiscoveryService:
             server.last_error_at = datetime.now(UTC)
             await self._session.commit()
             await self._session.refresh(check)
+            auth_headers.clear()
             return _check_to_response(check, discovery_mode=prior_discovery_mode)
 
+        # Secret resolution may use the DB. Close its transaction before network I/O.
+        await self._session.commit()
         started = time.perf_counter()
         discovery_mode: str | None = None
         protocol_version: str | None = None
@@ -330,6 +342,7 @@ class MCPDiscoveryService:
                     config.endpoint_url,
                     timeout_ms=config.connect_timeout_ms,
                     protocol_era=config.protocol_era,
+                    auth_headers=auth_headers,
                 )
                 discovery_mode = MCPDiscoveryMode.EXPLICIT_DISCOVERY
             except DiscoverUnsupportedError:
@@ -339,6 +352,7 @@ class MCPDiscoveryService:
                 config.endpoint_url,
                 timeout_ms=config.call_timeout_ms,
                 protocol_era=config.protocol_era,
+                auth_headers=auth_headers,
             )
             protocol_version = CURRENT_MCP_PROTOCOL_VERSION
             latency_ms = int((time.perf_counter() - started) * 1000)
@@ -401,6 +415,8 @@ class MCPDiscoveryService:
             await self._session.commit()
             await self._session.refresh(check)
             return _check_to_response(check, discovery_mode=prior_discovery_mode)
+        finally:
+            auth_headers.clear()
 
     async def discover(
         self,
@@ -452,16 +468,9 @@ class MCPDiscoveryService:
                     status_code=status.HTTP_409_CONFLICT,
                 )
 
-        if await self._credential_auth_blocked(config):
-            raise AppError(
-                code="MCP_AUTH_SECRET_UNAVAILABLE",
-                message=(
-                    "Secret Store resolver is not available; "
-                    "credential auth MCP servers cannot perform remote discovery."
-                ),
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            )
+        auth_headers = await self._resolve_auth_headers(config)
         if not config.endpoint_url:
+            auth_headers.clear()
             raise AppError(
                 code="VALIDATION_ERROR",
                 message="endpoint_url is required for HTTP discovery.",
@@ -490,6 +499,7 @@ class MCPDiscoveryService:
                     config.endpoint_url,
                     timeout_ms=config.connect_timeout_ms,
                     protocol_era=config.protocol_era,
+                    auth_headers=auth_headers,
                 )
                 discovery_mode = MCPDiscoveryMode.EXPLICIT_DISCOVERY
             except DiscoverUnsupportedError:
@@ -500,6 +510,7 @@ class MCPDiscoveryService:
                 config.endpoint_url,
                 timeout_ms=config.call_timeout_ms,
                 protocol_era=config.protocol_era,
+                auth_headers=auth_headers,
             )
         except MCPClientError as exc:
             finished = datetime.now(UTC)
@@ -533,6 +544,8 @@ class MCPDiscoveryService:
             await self._session.commit()
             await self._session.refresh(discovery)
             return _discovery_to_response(discovery)
+        finally:
+            auth_headers.clear()
 
         if factory_server:
             return await self._discover_factory(

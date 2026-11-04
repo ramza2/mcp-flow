@@ -308,6 +308,8 @@ class CurrentMCPClient:
         self,
         endpoint: str,
         timeout_ms: int = 10000,
+        *,
+        auth_headers: Mapping[str, str] | None = None,
     ) -> dict[str, Any]:
         """Call optional ``server/discover``. Raises DiscoverUnsupportedError if unsupported."""
 
@@ -315,6 +317,7 @@ class CurrentMCPClient:
             endpoint=endpoint,
             method="server/discover",
             timeout_ms=timeout_ms,
+            auth_headers=auth_headers,
         )
         if result is None:
             return {}
@@ -361,6 +364,8 @@ class CurrentMCPClient:
         self,
         endpoint: str,
         timeout_ms: int = 60000,
+        *,
+        auth_headers: Mapping[str, str] | None = None,
     ) -> list[RemoteToolDescriptor]:
         """Collect all tools via ``tools/list`` with cursor pagination."""
 
@@ -378,6 +383,7 @@ class CurrentMCPClient:
                 method="tools/list",
                 timeout_ms=timeout_ms,
                 params_extra=extra or None,
+                auth_headers=auth_headers,
             )
             if result is None:
                 break

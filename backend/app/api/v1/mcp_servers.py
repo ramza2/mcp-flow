@@ -6,9 +6,14 @@ import uuid
 from typing import Annotated
 
 from fastapi import APIRouter, Header, Query, status
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.dependencies import DbSessionDep, MCPHttpClientDep
+from app.api.dependencies import DbSessionDep, MCPHttpClientDep, SettingsDep
+from app.core.config import Settings
 from app.core.errors import AppError
+from app.core.secret_crypto import load_master_key_from_settings
+from app.core.secrets import DatabaseSecretResolver
+from app.mcp.client import MCPHttpClient
 from app.schemas.mcp_server import (
     ConnectionTestResponse,
     DiscoveryCreateRequest,
@@ -24,6 +29,22 @@ from app.services.mcp_discovery import MCPDiscoveryService
 from app.services.mcp_server import MCPServerService
 
 router = APIRouter(prefix="/mcp/servers", tags=["mcp-servers"])
+
+
+def _discovery_service(
+    session: AsyncSession, mcp_client: MCPHttpClient, settings: Settings
+) -> MCPDiscoveryService:
+    """Reuse the Tool Runner's secret store; fail closed if the master key is absent."""
+    return MCPDiscoveryService(
+        session,
+        mcp_client,
+        secret_resolver=DatabaseSecretResolver(
+            session,
+            master_key_loader=lambda: load_master_key_from_settings(
+                file_path=settings.secret_master_key_file
+            ),
+        ),
+    )
 
 
 def _parse_if_match(if_match: str | None) -> int | None:
@@ -166,8 +187,9 @@ async def create_connection_test(
     server_id: uuid.UUID,
     session: DbSessionDep,
     mcp_client: MCPHttpClientDep,
+    settings: SettingsDep,
 ) -> ConnectionTestResponse:
-    service = MCPDiscoveryService(session, mcp_client)
+    service = _discovery_service(session, mcp_client, settings)
     return await service.connection_test(server_id)
 
 
@@ -181,8 +203,9 @@ async def create_discovery(
     body: DiscoveryCreateRequest,
     session: DbSessionDep,
     mcp_client: MCPHttpClientDep,
+    settings: SettingsDep,
 ) -> DiscoveryResponse:
-    service = MCPDiscoveryService(session, mcp_client)
+    service = _discovery_service(session, mcp_client, settings)
     return await service.discover(
         server_id,
         mode=body.mode,

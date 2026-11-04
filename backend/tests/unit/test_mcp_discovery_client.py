@@ -413,3 +413,42 @@ def test_tool_schema_models_importable() -> None:
     assert "content_hash" in MCPToolVersionResponse.model_fields
     with pytest.raises(ValidationError):
         MCPServerCreate(name="", transport_type=MCPTransportType.STREAMABLE_HTTP)
+
+
+@pytest.mark.asyncio
+async def test_authenticated_discovery_and_paginated_list_use_headers_only() -> None:
+    """Discovery and every tools/list page carry credentials without JSON-RPC leakage."""
+    seen: list[tuple[str, str]] = []
+    secret = "synthetic-mcp-test-token"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content.decode("utf-8"))
+        assert request.headers["authorization"] == f"Bearer {secret}"
+        assert secret not in request.content.decode("utf-8")
+        method = body["method"]
+        seen.append((method, request.headers["authorization"]))
+        if method == "server/discover":
+            result = {"tools": {"listChanged": False}}
+        elif body["params"].get("cursor") == "next":
+            result = {"tools": [{"name": "second", "inputSchema": {"type": "object"}}]}
+        else:
+            result = {
+                "tools": [{"name": "first", "inputSchema": {"type": "object"}}],
+                "nextCursor": "next",
+            }
+        return httpx.Response(
+            200, json={"jsonrpc": "2.0", "id": body["id"], "result": result}
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        client = MCPHttpClient(http=http)
+        auth = {"Authorization": f"Bearer {secret}"}
+        capabilities = await client.discover_capabilities(
+            "https://mock.example/mcp", auth_headers=auth
+        )
+        tools = await client.list_tools("https://mock.example/mcp", auth_headers=auth)
+
+    assert capabilities["tools"]["listChanged"] is False
+    assert [tool.name for tool in tools] == ["first", "second"]
+    assert [method for method, _ in seen] == ["server/discover", "tools/list", "tools/list"]
+    assert auth == {"Authorization": f"Bearer {secret}"}
