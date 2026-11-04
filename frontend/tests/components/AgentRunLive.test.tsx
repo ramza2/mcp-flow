@@ -274,6 +274,10 @@ describe('AgentRunLive — chat phase 1', () => {
       expect(mocks.createExecution).toHaveBeenCalledWith(requestId);
     });
     expect(screen.queryByText(/메일을 발송했습니다/)).toBeNull();
+    // Transient analysis/selection/planning messages collapse into one current status.
+    expect(screen.queryByText(/사용할 기능을 찾고 있습니다/)).toBeNull();
+    expect(screen.queryByText(/실행 계획을 만들고 있습니다/)).toBeNull();
+    expect(screen.queryByText(/요청을 접수했습니다. 분석을 시작합니다/)).toBeNull();
     // Stay on chat — do not navigate away to execution detail exclusively.
     expect(screen.queryByText('실제 실행 상세')).toBeNull();
   });
@@ -386,8 +390,89 @@ describe('AgentRunLive — chat phase 1', () => {
     const stepsPanel = screen.getByRole('region', { name: '실행 단계' });
     const terminalAnswer = screen.getByText(/· Alpha \/ available/);
     expect(stepsPanel.compareDocumentPosition(terminalAnswer) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(stepsPanel.textContent).toContain('실행이 완료되었습니다.');
+    expect(stepsPanel.textContent).toContain('완료');
+    expect(stepsPanel.textContent).toContain('GET /pets');
+    expect(stepsPanel.textContent).not.toContain('tool_1');
+    expect(screen.getByText('실행 준비 완료')).toBeTruthy();
+    expect(screen.getByText(`실행 상태: 완료 · ${executionId}`)).toBeTruthy();
+    expect(screen.queryByText(/Execution: SUCCEEDED/)).toBeNull();
     expect(mocks.createExecution).not.toHaveBeenCalled();
+  });
+
+  it('uses each real tool name from the terminal result instead of step keys', async () => {
+    mocks.latest.mockResolvedValue(row('READY'));
+    mocks.getSelection.mockResolvedValue({ request: row('READY'), selection: selection() });
+    mocks.progress.mockResolvedValue(stage('READY', {
+      plan: {
+        id: 'two-step-plan', plan_hash: 'a'.repeat(64), goal: '반려동물 상세 조회',
+        step_count: 2, step_names: ['목록 조회', '상세 조회'], created_at: '2026-11-04T07:00:00Z',
+      },
+      safe_auto_execute: true,
+    }));
+    mocks.listExecutions.mockResolvedValue({
+      items: [{ id: executionId, status: 'SUCCEEDED', agent_request_id: requestId }],
+      page: 1, page_size: 1, total: 1,
+    });
+    mocks.chatResult.mockResolvedValue({
+      agent_request_id: requestId,
+      execution_id: executionId,
+      execution_status: 'SUCCEEDED',
+      available: true,
+      unavailable_reason: null,
+      tool_name: 'GET /pets/{pet_id}',
+      display_items: [{ name: 'Alpha', status: 'available' }],
+      summary_text: '반려동물 상세 정보를 조회했습니다.',
+      truncated: false,
+      steps: [
+        { step_key: 'tool_1', status: 'SUCCEEDED', tool_name: 'GET /pets' },
+        { step_key: 'tool_2', status: 'SUCCEEDED', tool_name: 'GET /pets/{pet_id}' },
+      ],
+    });
+
+    renderLive(`/run/${conversationId}`);
+    const stepsPanel = await screen.findByRole('region', { name: '실행 단계' });
+    await waitFor(() => expect(stepsPanel.textContent).toContain('GET /pets/{pet_id}'));
+    expect(stepsPanel.textContent).toContain('GET /pets');
+    expect(stepsPanel.textContent).not.toContain('tool_1');
+    expect(stepsPanel.textContent).not.toContain('tool_2');
+  });
+
+  it('uses Korean stage descriptions when tool metadata and plan labels are placeholders', async () => {
+    mocks.latest.mockResolvedValue(row('READY'));
+    mocks.getSelection.mockResolvedValue({ request: row('READY'), selection: selection() });
+    mocks.progress.mockResolvedValue(stage('READY', {
+      plan: {
+        id: 'two-step-plan', plan_hash: 'a'.repeat(64), goal: '반려동물 상세 조회',
+        step_count: 2, step_names: ['tool_1', 'tool_2'], created_at: '2026-11-04T07:00:00Z',
+      },
+      safe_auto_execute: true,
+    }));
+    mocks.listExecutions.mockResolvedValue({
+      items: [{ id: executionId, status: 'SUCCEEDED', agent_request_id: requestId }],
+      page: 1, page_size: 1, total: 1,
+    });
+    mocks.chatResult.mockResolvedValue({
+      agent_request_id: requestId,
+      execution_id: executionId,
+      execution_status: 'SUCCEEDED',
+      available: true,
+      unavailable_reason: null,
+      tool_name: null,
+      display_items: [],
+      summary_text: '조회 결과입니다.',
+      truncated: false,
+      steps: [
+        { step_key: 'tool_1', status: 'SUCCEEDED', tool_name: null },
+        { step_key: 'tool_2', status: 'SUCCEEDED', tool_name: null },
+      ],
+    });
+
+    renderLive(`/run/${conversationId}`);
+    const stepsPanel = await screen.findByRole('region', { name: '실행 단계' });
+    await waitFor(() => expect(stepsPanel.textContent).toContain('2단계 도구 실행'));
+    expect(stepsPanel.textContent).toContain('1단계 도구 실행');
+    expect(stepsPanel.textContent).not.toContain('tool_1');
+    expect(stepsPanel.textContent).not.toContain('tool_2');
   });
 
   it('does not duplicate the final answer when SSE and polling both complete', async () => {
@@ -426,6 +511,7 @@ describe('AgentRunLive — chat phase 1', () => {
       expect(screen.getByText(/· Beta \/ pending/)).toBeTruthy();
     });
     expect(screen.getAllByText(/결과 2건을 가져왔습니다/).length).toBe(1);
+    expect(screen.getAllByText('실행이 완료되었습니다.').length).toBeLessThanOrEqual(1);
     expect(mocks.chatResult.mock.calls.length).toBeGreaterThanOrEqual(1);
     vi.useRealTimers();
   });
