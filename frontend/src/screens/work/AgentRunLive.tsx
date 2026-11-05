@@ -437,7 +437,8 @@ export default function AgentRunLive() {
     setExecutionConfirmed(false);
     autoExecAttemptedFor.current = '';
     chatResultAnnouncedFor.current = '';
-    setExecutionSteps([]);
+    // A restored terminal result can populate steps before this effect runs.
+    // Clear steps at the actual new-request boundary instead.
   }, [request?.id]);
 
   // Execution SSE / polling while non-terminal.
@@ -697,6 +698,7 @@ export default function AgentRunLive() {
       setExecution(null);
       setExecutionLoadedForRequest('');
       setChatResult(null);
+      setExecutionSteps([]);
       chatResultAnnouncedFor.current = '';
       autoStartedForRequest.current = created.id;
       navigate(`/run/${created.conversation_id}`);
