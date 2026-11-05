@@ -410,7 +410,7 @@ describe('AgentRunLive — chat phase 1', () => {
 
     renderLive(`/run/${conversationId}`);
     await screen.findByText(/GET \/pets 결과 2건을 가져왔습니다/);
-    expect(screen.getByRole('region', { name: '실행 단계' })).toBeTruthy();
+    expect(await screen.findByRole('region', { name: '실행 단계' })).toBeTruthy();
 
     const promptInput = screen.getByPlaceholderText(/무엇을 도와드릴까요/);
     fireEvent.change(promptInput, { target: { value: '다음 업무 초안' } });
