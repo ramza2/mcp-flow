@@ -399,6 +399,80 @@ describe('AgentRunLive — chat phase 1', () => {
     expect(mocks.createExecution).not.toHaveBeenCalled();
   });
 
+  it('restores the pinned Agent and user request on F5 without another execution', async () => {
+    const otherAgentId = '11111111-1111-4111-8111-111111111111';
+    mocks.list.mockResolvedValue({
+      items: [
+        {
+          id: otherAgentId,
+          agent_version_id: '22222222-2222-4222-8222-222222222222',
+          name: 'Test Agent',
+          description: null,
+          version_no: 1,
+        },
+        {
+          id: agentId,
+          agent_version_id: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
+          name: '실제 Agent',
+          description: null,
+          version_no: 2,
+        },
+      ],
+      default_agent_id: otherAgentId,
+    });
+    mocks.latest.mockResolvedValue(row('READY'));
+    mocks.getSelection.mockResolvedValue({ request: row('READY'), selection: selection() });
+    mocks.progress.mockResolvedValue(stage('READY', { safe_auto_execute: true }));
+    mocks.listExecutions.mockResolvedValue({
+      items: [{ id: executionId, status: 'SUCCEEDED', agent_request_id: requestId }],
+      page: 1, page_size: 1, total: 1,
+    });
+
+    renderLive(`/run/${conversationId}`);
+
+    const agentSelect = await screen.findByRole('combobox', { name: 'Agent 선택' });
+    await waitFor(() => expect(agentSelect).toHaveValue(agentId));
+    expect(screen.getByText('Agent 직접 선택 모드')).toBeTruthy();
+    expect(await screen.findByText('문서를 검색해줘')).toBeTruthy();
+    expect(await screen.findByText(/GET \/pets 결과 2건을 가져왔습니다/)).toBeTruthy();
+    expect(screen.getByText(`실행 상태: 완료 · ${executionId}`)).toBeTruthy();
+    expect(mocks.submit).not.toHaveBeenCalled();
+    expect(mocks.createExecution).not.toHaveBeenCalled();
+
+    const refreshCallsBefore = mocks.latest.mock.calls.length;
+    fireEvent.click(screen.getByRole('button', { name: '상태 새로고침' }));
+    await waitFor(() => expect(mocks.latest.mock.calls.length).toBeGreaterThan(refreshCallsBefore));
+    expect(screen.getAllByText('문서를 검색해줘')).toHaveLength(1);
+    expect(mocks.createExecution).not.toHaveBeenCalled();
+  });
+
+  it('keeps automatic Agent mode when the saved version matches the current default', async () => {
+    mocks.list.mockResolvedValue({
+      items: [{
+        id: agentId,
+        agent_version_id: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
+        name: '실제 Agent',
+        description: null,
+        version_no: 2,
+      }],
+      default_agent_id: agentId,
+    });
+    mocks.latest.mockResolvedValue(row('READY'));
+    mocks.getSelection.mockResolvedValue({ request: row('READY'), selection: selection() });
+    mocks.progress.mockResolvedValue(stage('READY', { safe_auto_execute: true }));
+    mocks.listExecutions.mockResolvedValue({
+      items: [{ id: executionId, status: 'SUCCEEDED', agent_request_id: requestId }],
+      page: 1, page_size: 1, total: 1,
+    });
+
+    renderLive(`/run/${conversationId}`);
+
+    expect(await screen.findByText('문서를 검색해줘')).toBeTruthy();
+    await waitFor(() => expect(screen.getByText('자동 선택: 실제 Agent')).toBeTruthy());
+    expect(screen.queryByRole('combobox', { name: 'Agent 선택' })).toBeNull();
+    expect(mocks.createExecution).not.toHaveBeenCalled();
+  });
+
   it('clears the completed transcript and draft on new chat while keeping the selected Agent', async () => {
     mocks.latest.mockResolvedValue(row('READY'));
     mocks.getSelection.mockResolvedValue({ request: row('READY'), selection: selection() });
