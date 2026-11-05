@@ -407,6 +407,14 @@ export default function AgentRunLive() {
 
   useEffect(() => {
     if (!conversationId) {
+      // React Router reuses this screen when returning from /run/:conversationId.
+      // Clear only the new chat's local UI state; past executions remain saved.
+      setPrompt('');
+      setMessages([]);
+      setQuestionValues({});
+      setError(null);
+      setAdvanced(false);
+      setExecutionConfirmed(false);
       setRequest(null);
       setSelection(null);
       setProgress(null);
