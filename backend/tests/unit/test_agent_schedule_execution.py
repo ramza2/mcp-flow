@@ -367,7 +367,16 @@ async def test_resume_reuses_persisted_agent_request_id(
     ).scalar_one()
     assert row.payload.get("agent_request_id") == str(calls[0])
 
-    later = now + timedelta(seconds=31)
+    # The claim is renewed against wall-clock time while materializing the
+    # request, so its persisted expiry may be later than `now + 30s` on slow
+    # CI runners. Advance past the actual lease, not a guessed timestamp.
+    claim = row.payload.get("claim")
+    assert isinstance(claim, dict)
+    lease_expires_at = AgentScheduleExecutionService._parse_lease_expiry(
+        claim.get("lease_expires_at")
+    )
+    assert lease_expires_at is not None
+    later = lease_expires_at + timedelta(seconds=1)
     await AgentScheduleExecutionService(db_session).process_unpublished_batch(
         limit=10, now=later, lease_seconds=30
     )
