@@ -399,6 +399,37 @@ describe('AgentRunLive — chat phase 1', () => {
     expect(mocks.createExecution).not.toHaveBeenCalled();
   });
 
+  it('clears the completed transcript and draft on new chat while keeping the selected Agent', async () => {
+    mocks.latest.mockResolvedValue(row('READY'));
+    mocks.getSelection.mockResolvedValue({ request: row('READY'), selection: selection() });
+    mocks.progress.mockResolvedValue(stage('READY', { safe_auto_execute: true }));
+    mocks.listExecutions.mockResolvedValue({
+      items: [{ id: executionId, status: 'SUCCEEDED', agent_request_id: requestId }],
+      page: 1, page_size: 1, total: 1,
+    });
+
+    renderLive(`/run/${conversationId}`);
+    await screen.findByText(/GET \/pets 결과 2건을 가져왔습니다/);
+    expect(screen.getByRole('region', { name: '실행 단계' })).toBeTruthy();
+
+    const promptInput = screen.getByPlaceholderText(/무엇을 도와드릴까요/);
+    fireEvent.change(promptInput, { target: { value: '다음 업무 초안' } });
+    const newChat = screen.getByRole('button', { name: '새 대화' });
+    await waitFor(() => expect(newChat).not.toBeDisabled());
+    fireEvent.click(newChat);
+
+    await waitFor(() => {
+      expect(screen.queryByText(/GET \/pets 결과 2건을 가져왔습니다/)).toBeNull();
+      expect(screen.queryByRole('region', { name: '실행 단계' })).toBeNull();
+      expect(screen.queryByText(`실행 상태: 완료 · ${executionId}`)).toBeNull();
+      expect(screen.getByText(/원하는 업무를 입력한 뒤 실행을 눌러 주세요/)).toBeTruthy();
+    });
+    expect(screen.getByPlaceholderText(/무엇을 도와드릴까요/)).toHaveValue('');
+    expect(screen.getByRole('option', { name: '실제 Agent (v2)' })).toBeTruthy();
+    expect(mocks.submit).not.toHaveBeenCalled();
+    expect(mocks.createExecution).not.toHaveBeenCalled();
+  });
+
   it('uses each real tool name from the terminal result instead of step keys', async () => {
     mocks.latest.mockResolvedValue(row('READY'));
     mocks.getSelection.mockResolvedValue({ request: row('READY'), selection: selection() });
