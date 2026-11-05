@@ -639,3 +639,27 @@ def test_generic_entity_id_uses_evidenced_literal() -> None:
         literal_value=43,
         target_json_type="integer",
     )
+
+
+def test_discover_generic_does_not_treat_grid_as_identifier() -> None:
+    # "grid" has a lowercase "id" suffix but is not an entity identifier.
+    assert discover_id_handoffs(
+        primary_output_schema={
+            "type": "object",
+            "properties": {
+                "rows": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {"id": {"type": "string"}},
+                    },
+                },
+            },
+        },
+        companion_input_schema={
+            "type": "object",
+            "properties": {"grid": {"type": "string"}},
+            "required": ["grid"],
+        },
+        uses_factory_envelope=False,
+    ) is None
