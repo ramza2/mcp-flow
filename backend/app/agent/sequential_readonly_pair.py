@@ -1,8 +1,9 @@
 """AgentRequest sequential READ_ONLY Tool pair (chat phase-2).
 
 Builds an optional second TOOL step that depends on ``tool_1`` and receives
-inputs via ``STEP_OUTPUT`` bindings. Reuses Execution Plan v1 + runtime
-``STEP_OUTPUT`` resolution; does not invent new Step Types or Binding kinds.
+inputs via ``STEP_OUTPUT`` bindings from an unambiguous list item id.
+Reuses Execution Plan v1 and runtime ``STEP_OUTPUT`` resolution; does not invent
+new Step Types or Binding kinds.
 
 Pair emission is opt-in only when StructuredRequest clearly asks for a
 follow-up detail lookup and exactly one schema-compatible companion exists.
@@ -120,6 +121,17 @@ def _normalize_param(name: str) -> str:
     return "".join(ch for ch in name.lower() if ch not in {"_", "-", " "})
 
 
+def _is_id_like_param(name: str) -> bool:
+    """Recognize known ids and common OpenAPI entityId / entity_id forms.
+
+    Do not treat arbitrary words ending with lowercase "id" (e.g. "grid")
+    as identifier parameters.
+    """
+    if _normalize_param(name) in _ID_PARAM_NAMES:
+        return True
+    return name.endswith(("_id", "-id", "Id")) and len(name) > 2
+
+
 def _schema_properties(schema: Any) -> dict[str, Any]:
     if not isinstance(schema, dict) or schema.get("type") != "object":
         return {}
@@ -143,22 +155,6 @@ def _json_type(schema: Any) -> str | None:
     if isinstance(raw, str) and raw.strip():
         return raw.strip()
     return None
-
-
-def _pets_item_id_schema(primary_output_schema: Any) -> dict[str, Any] | None:
-    """Return ``pets.items.properties.id`` schema object when present."""
-    props = _schema_properties(primary_output_schema)
-    pets = props.get("pets")
-    if not isinstance(pets, dict) or pets.get("type") != "array":
-        return None
-    items = pets.get("items")
-    if not isinstance(items, dict):
-        return None
-    item_props = items.get("properties")
-    if not isinstance(item_props, dict):
-        return None
-    id_schema = item_props.get("id")
-    return id_schema if isinstance(id_schema, dict) else None
 
 
 def _types_compatible(source_type: str, target_type: str) -> bool:
@@ -250,7 +246,7 @@ def extract_explicit_id_entity_value(
     for entity in structured.entities:
         if entity.source not in _EXPLICIT_ID_PROVENANCE:
             continue
-        if _normalize_param(entity.name) not in _ID_PARAM_NAMES:
+        if not _is_id_like_param(entity.name):
             continue
         matches.append(entity.value)
     if len(matches) != 1:
@@ -302,7 +298,7 @@ def companion_literal_matches_explicit_id(
     Rejects arbitrary LITERAL values that are not grounded in
     USER_EXPLICIT / CONVERSATION_CONFIRMED id-like StructuredRequest entities.
     """
-    if _normalize_param(param_name) not in _ID_PARAM_NAMES:
+    if not _is_id_like_param(param_name):
         return False
     explicit = extract_explicit_id_entity_value(structured)
     if explicit is None:
@@ -351,50 +347,73 @@ def resolve_companion_id_bindings(
     return None
 
 
+def _json_pointer_token(name: str) -> str:
+    """Escape a JSON object key according to RFC 6901."""
+    return name.replace("~", "~0").replace("/", "~1")
+
+
 def discover_id_handoffs(
     *,
     primary_output_schema: Any,
     companion_input_schema: Any,
     uses_factory_envelope: bool,
 ) -> list[SequentialHandoff] | None:
-    """Map companion required id-like params to primary pets[0].id output.
+    """Discover an unambiguous collection[0] id → detail id handoff.
 
-    Returns None when the pair is not a unique, type-safe READ_ONLY handoff.
-    Requires ``pets.items.properties.id`` with a JSON type compatible with the
-    companion id input schema.
+    Supports any top-level object array with an object item whose id field is
+    named "id" or exactly matches the companion id parameter, including
+    common camelCase/snake_case names. No nested traversal, ref guessing,
+    non-id parameters, or selection among multiple eligible paths.
     """
     required = _schema_required(companion_input_schema)
-    if not required:
+    if len(required) != 1 or not _is_id_like_param(required[0]):
+        return None
+    target_param = required[0]
+    target_type = _json_type(
+        _schema_properties(companion_input_schema).get(target_param)
+    )
+    if target_type not in {"string", "integer", "number"}:
         return None
 
-    id_schema = _pets_item_id_schema(primary_output_schema)
-    if id_schema is None:
+    source_candidates: list[tuple[str, str, str | None]] = []
+    for collection_name, collection_schema in _schema_properties(
+        primary_output_schema
+    ).items():
+        if not isinstance(collection_schema, dict):
+            continue
+        if collection_schema.get("type") != "array":
+            continue
+        items = collection_schema.get("items")
+        item_props = _schema_properties(items)
+        for id_name, id_schema in item_props.items():
+            if _normalize_param(id_name) not in {
+                "id",
+                _normalize_param(target_param),
+            }:
+                continue
+            source_candidates.append(
+                (collection_name, id_name, _json_type(id_schema))
+            )
+
+    # Never infer which collection or id property the user meant.
+    if len(source_candidates) != 1:
         return None
-    source_type = _json_type(id_schema)
-    if source_type is None:
+    collection_name, id_name, source_type = source_candidates[0]
+    if source_type is None or not _types_compatible(source_type, target_type):
         return None
 
-    id_params = [name for name in required if _normalize_param(name) in _ID_PARAM_NAMES]
-    if len(id_params) != 1:
-        # Phase-2: only a single id-like required param is auto-wired.
-        return None
-    # All required companion params must be covered by handoffs (id only for now).
-    if set(required) != {id_params[0]}:
-        return None
-
-    companion_props = _schema_properties(companion_input_schema)
-    target_schema = companion_props.get(id_params[0])
-    target_type = _json_type(target_schema)
-    if target_type is None or not _types_compatible(source_type, target_type):
-        return None
-
-    if uses_factory_envelope:
-        path = "/structured_content/body/pets/0/id"
-    else:
-        path = "/structured_content/pets/0/id"
+    prefix = (
+        "/structured_content/body"
+        if uses_factory_envelope
+        else "/structured_content"
+    )
+    path = (
+        f"{prefix}/{_json_pointer_token(collection_name)}"
+        f"/0/{_json_pointer_token(id_name)}"
+    )
     return [
         SequentialHandoff(
-            target_param=id_params[0],
+            target_param=target_param,
             from_path=path,
             source_json_type=source_type,
             target_json_type=target_type,
