@@ -454,3 +454,188 @@ def test_first_item_still_uses_step_output_pets_zero() -> None:
     assert handoffs is not None
     bindings = resolve_companion_id_bindings(structured=structured, handoffs=handoffs)
     assert bindings == companion_step_bindings(handoffs)
+
+
+def test_discover_generic_orders_to_order_detail() -> None:
+    handoffs = discover_id_handoffs(
+        primary_output_schema={
+            "type": "object",
+            "properties": {
+                "orders": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "id": {"type": "integer"},
+                            "amount": {"type": "number"},
+                        },
+                    },
+                },
+            },
+        },
+        companion_input_schema={
+            "type": "object",
+            "properties": {"orderId": {"type": "integer"}},
+            "required": ["orderId"],
+        },
+        uses_factory_envelope=False,
+    )
+    assert handoffs is not None
+    assert len(handoffs) == 1
+    assert handoffs[0].target_param == "orderId"
+    assert handoffs[0].from_path == "/structured_content/orders/0/id"
+
+
+def test_discover_generic_entity_id_and_factory_envelope() -> None:
+    handoffs = discover_id_handoffs(
+        primary_output_schema={
+            "type": "object",
+            "properties": {
+                "issues": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {"issueId": {"type": "string"}},
+                    },
+                }
+            },
+        },
+        companion_input_schema={
+            "type": "object",
+            "properties": {"issue_id": {"type": "string"}},
+            "required": ["issue_id"],
+        },
+        uses_factory_envelope=True,
+    )
+    assert handoffs is not None
+    assert handoffs[0].from_path == "/structured_content/body/issues/0/issueId"
+    assert handoffs[0].source_json_type == "string"
+
+
+def test_discover_generic_json_pointer_escapes_field_names() -> None:
+    handoffs = discover_id_handoffs(
+        primary_output_schema={
+            "type": "object",
+            "properties": {
+                "a/b~c": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {"id": {"type": "string"}},
+                    },
+                },
+            },
+        },
+        companion_input_schema={
+            "type": "object",
+            "properties": {"id": {"type": "string"}},
+            "required": ["id"],
+        },
+        uses_factory_envelope=False,
+    )
+    assert handoffs is not None
+    assert handoffs[0].from_path == "/structured_content/a~1b~0c/0/id"
+
+
+def test_discover_generic_rejects_ambiguous_collections() -> None:
+    output = {
+        "type": "object",
+        "properties": {
+            name: {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {"id": {"type": "integer"}},
+                },
+            }
+            for name in ("orders", "drafts")
+        },
+    }
+    assert discover_id_handoffs(
+        primary_output_schema=output,
+        companion_input_schema={
+            "type": "object",
+            "properties": {"orderId": {"type": "integer"}},
+            "required": ["orderId"],
+        },
+        uses_factory_envelope=True,
+    ) is None
+
+
+def test_discover_generic_rejects_multiple_id_fields() -> None:
+    assert discover_id_handoffs(
+        primary_output_schema={
+            "type": "object",
+            "properties": {
+                "orders": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "id": {"type": "integer"},
+                            "orderId": {"type": "integer"},
+                        },
+                    },
+                },
+            },
+        },
+        companion_input_schema={
+            "type": "object",
+            "properties": {"orderId": {"type": "integer"}},
+            "required": ["orderId"],
+        },
+        uses_factory_envelope=False,
+    ) is None
+
+
+def test_discover_generic_rejects_non_scalar_id_and_non_id_input() -> None:
+    output = {
+        "type": "object",
+        "properties": {
+            "rows": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {"id": {"type": "object"}},
+                },
+            },
+        },
+    }
+    for name, json_type in (("id", "object"), ("grid", "string")):
+        assert discover_id_handoffs(
+            primary_output_schema=output,
+            companion_input_schema={
+                "type": "object",
+                "properties": {name: {"type": json_type}},
+                "required": [name],
+            },
+            uses_factory_envelope=False,
+        ) is None
+
+
+def test_generic_entity_id_uses_evidenced_literal() -> None:
+    structured = _structured(
+        request_text="고객 ID 42의 상세와 목록을 조회해 줘",
+        intent="customer.list+customer.detail",
+        expected_outputs=["customers", "customer"],
+        entities=[
+            {
+                "name": "customer_id",
+                "value": "42",
+                "source": ParameterProvenance.USER_EXPLICIT.value,
+            }
+        ],
+    )
+    assert extract_explicit_id_entity_value(structured) == "42"
+    assert companion_literal_matches_explicit_id(
+        structured,
+        param_name="customerId",
+        literal_value=42,
+        target_json_type="integer",
+    )
+    assert not companion_literal_matches_explicit_id(
+        structured,
+        param_name="customerId",
+        literal_value=43,
+        target_json_type="integer",
+    )
