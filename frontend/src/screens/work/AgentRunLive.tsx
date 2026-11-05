@@ -232,6 +232,8 @@ export default function AgentRunLive() {
   const autoExecAttemptedFor = useRef<string>('');
   /** Dedupes final chat answer when SSE + polling both observe terminal. */
   const chatResultAnnouncedFor = useRef<string>('');
+  /** A fresh in-page submission already has the user's chosen Agent mode. */
+  const locallySubmittedRequestId = useRef('');
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   const refreshExecutionSteps = useCallback(async (executionId: string, signal?: AbortSignal) => {
@@ -285,6 +287,16 @@ export default function AgentRunLive() {
     });
     return () => controller.abort();
   }, []);
+
+  // The saved request pins the AgentVersion used for this conversation. A
+  // previous explicit selection must not silently become today's default on F5.
+  useEffect(() => {
+    if (!request || loadingAgents || locallySubmittedRequestId.current === request.id) return;
+    const savedAgent = agents.find((agent) => agent.agent_version_id === request.agent_version_id);
+    if (!savedAgent) return;
+    setAgentId(savedAgent.id);
+    setChooseAgent(!defaultAgentId || savedAgent.id !== defaultAgentId);
+  }, [request?.id, request?.agent_version_id, agents, defaultAgentId, loadingAgents]);
 
   const loadChatResult = useCallback(async (requestId: string, signal?: AbortSignal) => {
     try {
@@ -377,6 +389,15 @@ export default function AgentRunLive() {
       const latest = await getConversationLatestAgentRun(conversationId, signal);
       if (signal?.aborted) return null;
       setRequest(latest);
+      // Chat bubbles are in-memory UI state. Recreate the persisted user turn
+      // before announcing the saved terminal answer; never issue a new request.
+      const savedText = latest.raw_request_text.trim();
+      if (savedText) {
+        setMessages((prev) => {
+          if (prev.some((message) => message.role === 'user' && message.text === savedText)) return prev;
+          return [{ id: `restored-user-${latest.id}`, role: 'user', text: savedText }, ...prev];
+        });
+      }
       const [selected, stage, history] = await Promise.all([
         getAgentRunSelection(latest.id, signal),
         getAgentRunProgress(latest.id, signal),
@@ -692,6 +713,7 @@ export default function AgentRunLive() {
       // Automatic mode lets the server pin the default published AgentVersion.
       const created = await submitAgentRun(chooseAgent ? agentId : null, text);
       setPrompt('');
+      locallySubmittedRequestId.current = created.id;
       setRequest(created);
       setSelection(null);
       setProgress(null);
