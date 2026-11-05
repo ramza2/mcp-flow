@@ -1,8 +1,9 @@
 """AgentRequest sequential READ_ONLY Tool pair (chat phase-2).
 
 Builds an optional second TOOL step that depends on ``tool_1`` and receives
-inputs via ``STEP_OUTPUT`` bindings from an unambiguous list item id. Reuses Execution Plan v1 + runtime
-``STEP_OUTPUT`` resolution; does not invent new Step Types or Binding kinds.
+inputs via ``STEP_OUTPUT`` bindings from an unambiguous list item id.
+Reuses Execution Plan v1 and runtime ``STEP_OUTPUT`` resolution; does not invent
+new Step Types or Binding kinds.
 
 Pair emission is opt-in only when StructuredRequest clearly asks for a
 follow-up detail lookup and exactly one schema-compatible companion exists.
