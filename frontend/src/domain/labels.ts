@@ -163,6 +163,23 @@ export function formatTimestamp(value: string | null | undefined): string {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
+/** Schedule dates must be shown in the Schedule's IANA timezone, not the browser's. */
+export function formatScheduleTimestamp(value: string | null | undefined, timezone: string): string {
+  if (!value) return '—';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  try {
+    const formatted = new Intl.DateTimeFormat('sv-SE', {
+      timeZone: timezone,
+      year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+    }).format(date);
+    return `${formatted} (${timezone})`;
+  } catch {
+    return formatTimestamp(value);
+  }
+}
+
 export function shortenId(value: string | null | undefined, keep = 8): string {
   if (!value) return '—';
   if (value.length <= keep + 1) return value;
