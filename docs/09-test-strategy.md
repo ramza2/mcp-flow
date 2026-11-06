@@ -1038,6 +1038,12 @@ Approval `REJECTED/EXPIRED`를 Execution `REJECTED/EXPIRED` 상태로 직접 매
 
 ## 17. Schedule 시험
 
+### Frontend Live registry (2026-11-06)
+
+- `frontend/src/api/__tests__/schedules-api.test.ts`: 실제 API 경로·검색/페이징·Version ID pin·CSRF create·If-Match PATCH·lifecycle·occurrence 목록.
+- `frontend/tests/components/ScheduleEdit.test.tsx`: Mock 화면을 사용하지 않고 live 목록 표시, 명시 PUBLISHED/VALID 버전 선택, Agent ONCE 제한, 신규 PAUSED 저장, ACTIVE 편집 제약, PAUSED 메타데이터 PATCH 시 다음 예약시각 보존.
+- 시간 표시는 해당 Schedule IANA timezone 기준이며, CRON의 임의 fake next-run preview는 출력하지 않는다.
+
 ### Registry foundation (implemented)
 
 | Layer | Module |
