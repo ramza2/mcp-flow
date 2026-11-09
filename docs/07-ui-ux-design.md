@@ -669,6 +669,13 @@ Tool Grant API는 Version 단위다.
 
 초기 Designer는 BPMN 전체가 아니라 Execution Plan v1만 표현한다.
 
+### 예시 화면 한국어 UX (2026-11-09)
+
+- 현 `/workflows`, Workflow 상세, Designer는 `mockWorkflows` 등 예시 데이터 기반이며 실제 Workflow API 저장·게시·실행에 연동되지 않았다. 목록/상세/편집에서 그 제한을 명확히 알린다.
+- UI 표시는 워크플로·초안·게시·실행 단계·선행 단계·조건식·입력값 연결 등 한국어로 제공한다. Canonical Workflow/WorkflowVersion 상태, Step Type, Binding Kind, Predicate/Join/Loop option value는 변경하지 않는다.
+- 기존 Designer의 `Draft 저장`은 서버 요청 없이 화면만 이동하므로 저장 동작으로 표시하지 않는다. 화면 종료는 `시연 종료 (저장 안 됨)`으로 명시하고, 상세의 실제 게시 동작 없는 버튼은 비활성화한다.
+- 목록의 검색·상태 필터는 브라우저에 표시한 예시 데이터에만 적용한다. 이 UI 변경은 서버 기능의 구현 완료를 의미하지 않는다.
+
 Authoring Node:
 
 ```text

@@ -106,10 +106,11 @@ describe('New Agent / New Workflow draft regression', () => {
       route: '/workflows/wf-newblank01/versions/v1/edit',
     });
 
-    expect(screen.getByText(/New Workflow · Draft v1/i)).toBeInTheDocument();
-    expect(screen.getByText(/empty plan/i)).toBeInTheDocument();
+    expect(screen.getByText(/새 워크플로 · 초안 v1 \(예시\)/i)).toBeInTheDocument();
+    expect(screen.getByText(/기본 단계 1개/i)).toBeInTheDocument();
     expect(screen.queryByText('Weekly Report Workflow')).not.toBeInTheDocument();
     expect(screen.queryByText('Get Data')).not.toBeInTheDocument();
-    expect(screen.getByText('Tool 1')).toBeInTheDocument();
+    expect(screen.getByText('도구 실행 1')).toBeInTheDocument();
+    expect(screen.getByText(/서버 저장·게시·실제 실행은 연결되지 않았습니다/i)).toBeInTheDocument();
   });
 });
