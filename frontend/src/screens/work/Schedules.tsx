@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router';
 import { Plus, RefreshCw } from 'lucide-react';
 import PageHeader from '../../components/ui/PageHeader';
@@ -13,6 +13,16 @@ import { isAbortError, isApiError } from '../../api/client';
 import { SCHEDULE_STATUSES, formatScheduleTimestamp, labelScheduleTarget, shortenId, type ScheduleStatus } from '../../domain';
 
 const PAGE_SIZE = 20;
+const LIVE_REFRESH_MS = 15_000;
+
+function humanScheduleExpression(row: ScheduleDto): string {
+  if (row.schedule_type !== 'INTERVAL') return row.schedule_expression;
+  const match = /^(?:P([1-9]\d*)D|PT([1-9]\d*)([HMS]))$/.exec(row.schedule_expression);
+  if (!match) return row.schedule_expression;
+  if (match[1]) return `${Number(match[1]).toLocaleString('ko-KR')}일 간격`;
+  const unit = { H: '시간', M: '분', S: '초' }[match[3] as 'H' | 'M' | 'S'];
+  return `${Number(match[2]).toLocaleString('ko-KR')}${unit} 간격`;
+}
 
 export default function Schedules() {
   const navigate = useNavigate();
@@ -28,51 +38,84 @@ export default function Schedules() {
   const [error, setError] = useState<{ message: string; requestId?: string; forbidden?: boolean } | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
+  const [refreshError, setRefreshError] = useState<string | null>(null);
+  const [lastSynced, setLastSynced] = useState<number | null>(null);
+  const actionInProgress = useRef(false);
 
   useEffect(() => {
     const timer = setTimeout(() => { setQuery(searchInput); setPage(1); }, 300);
     return () => clearTimeout(timer);
   }, [searchInput]);
 
-  const load = useCallback(() => {
+  useEffect(() => {
     const controller = new AbortController();
-    setLoading(true);
-    setError(null);
-    listSchedules({ page, page_size: PAGE_SIZE, q: query || undefined, status: status || undefined, signal: controller.signal })
-      .then(data => {
+    let inFlight = false;
+    let forbidden = false;
+
+    const load = async (quiet: boolean) => {
+      if (inFlight || forbidden || actionInProgress.current) return;
+      inFlight = true;
+      if (!quiet) {
+        setLoading(true);
+        setError(null);
+      }
+      try {
+        const data = await listSchedules({ page, page_size: PAGE_SIZE, q: query || undefined, status: status || undefined, signal: controller.signal });
         if (controller.signal.aborted) return;
         setItems(data.items);
         setTotal(data.total);
         setHasNext(data.has_next);
-      })
-      .catch(err => {
+        setError(null);
+        setRefreshError(null);
+        setLastSynced(Date.now());
+      } catch (err) {
         if (controller.signal.aborted || isAbortError(err)) return;
-        setItems([]);
         const apiErr = isApiError(err) ? err : null;
-        setError({
-          message: apiErr?.message ?? '예약 목록을 불러오지 못했습니다.',
-          requestId: apiErr?.requestId ?? undefined,
-          forbidden: apiErr?.status === 403,
-        });
-      })
-      .finally(() => { if (!controller.signal.aborted) setLoading(false); });
-    return () => controller.abort();
-  }, [page, query, status, reload]);
+        if (apiErr?.status === 403 || !quiet) {
+          forbidden = apiErr?.status === 403;
+          setError({
+            message: apiErr?.message ?? '예약 목록을 불러오지 못했습니다.',
+            requestId: apiErr?.requestId ?? undefined,
+            forbidden,
+          });
+        } else {
+          setRefreshError('자동 갱신에 실패했습니다. 다음 갱신을 기다리거나 새로고침을 눌러주세요.');
+        }
+      } finally {
+        inFlight = false;
+        if (!controller.signal.aborted && !quiet) setLoading(false);
+      }
+    };
 
-  useEffect(() => load(), [load]);
+    const refreshVisible = () => {
+      if (document.visibilityState === 'visible') void load(true);
+    };
+    void load(false);
+    const timer = window.setInterval(refreshVisible, LIVE_REFRESH_MS);
+    document.addEventListener('visibilitychange', refreshVisible);
+    return () => {
+      controller.abort();
+      window.clearInterval(timer);
+      document.removeEventListener('visibilitychange', refreshVisible);
+    };
+  }, [page, query, status, reload]);
 
   const updateStatus = async (row: ScheduleDto) => {
     const action = row.status === 'ACTIVE' ? 'pause'
       : row.last_run_at || row.next_run_at ? 'resume' : 'activate';
+    let succeeded = false;
+    actionInProgress.current = true;
     setBusyId(row.id);
     setActionError(null);
     try {
       await changeScheduleStatus(row.id, action);
-      setReload(n => n + 1);
+      succeeded = true;
     } catch (err) {
       setActionError(isApiError(err) ? `${err.message}${err.requestId ? ` (Request ID: ${err.requestId})` : ''}` : '예약 상태를 변경하지 못했습니다.');
     } finally {
+      actionInProgress.current = false;
       setBusyId(null);
+      if (succeeded) setReload(n => n + 1);
     }
   };
 
@@ -87,7 +130,7 @@ export default function Schedules() {
     { key: 'schedule_type', label: '실행 주기', render: row => (
       <div>
         <p className="text-xs text-slate-700">{row.schedule_type}</p>
-        <span className="text-xs font-mono text-slate-500">{row.schedule_expression}</span>
+        <span className="text-xs text-slate-500" title={row.schedule_expression}>{humanScheduleExpression(row)}</span>
         <p className="text-xs text-slate-400">{row.timezone}</p>
       </div>
     ) },
@@ -120,6 +163,7 @@ export default function Schedules() {
       />
       <div className="p-6 space-y-4">
         {actionError && <InlineAlert type="error" message={actionError} />}
+        {refreshError && <InlineAlert type="warning" message={refreshError} />}
         <FilterBar
           search
           searchPlaceholder="예약 이름 검색..."
@@ -128,6 +172,9 @@ export default function Schedules() {
           onFilter={(_, value) => { setStatus(value as ScheduleStatus | ''); setPage(1); }}
           actions={<Button variant="outline" icon={<RefreshCw size={13} />} onClick={() => setReload(n => n + 1)}>새로고침</Button>}
         />
+        <p className="text-xs text-slate-500" role="status">
+          {lastSynced ? `마지막 갱신: ${new Date(lastSynced).toLocaleTimeString('ko-KR')} · 화면을 보는 동안 15초마다 자동 갱신` : '예약 목록을 조회 중입니다.'}
+        </p>
         <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
           {loading ? <LoadingSkeleton rows={6} />
             : error?.forbidden ? <PermissionDenied />

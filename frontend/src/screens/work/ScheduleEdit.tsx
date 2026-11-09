@@ -22,6 +22,35 @@ import { SCHEDULE_MISFIRE_POLICIES, SCHEDULE_OVERLAP_POLICIES, SCHEDULE_TARGET_T
 
 type TargetOption = { id: string; name: string };
 type VersionOption = { id: string; version_no: number };
+type IntervalUnit = 'MINUTES' | 'HOURS' | 'DAYS';
+type CronPreset = 'DAILY' | 'WEEKDAYS' | 'WEEKLY' | 'ADVANCED';
+
+function parseBasicInterval(value: string): { count: string; unit: IntervalUnit } | null {
+  const match = /^(?:P(\d+)D|PT(\d+)([HM]))$/.exec(value);
+  if (!match) return null;
+  const count = match[1] ?? match[2];
+  if (!/^[1-9]\d*$/.test(count) || !Number.isSafeInteger(Number(count))) return null;
+  return { count, unit: match[1] ? 'DAYS' : match[3] === 'H' ? 'HOURS' : 'MINUTES' };
+}
+
+function buildInterval(count: string, unit: IntervalUnit): string {
+  if (!/^[1-9]\d*$/.test(count) || !Number.isSafeInteger(Number(count))) return '';
+  return unit === 'DAYS' ? `P${count}D` : `PT${count}${unit === 'HOURS' ? 'H' : 'M'}`;
+}
+
+function parseCronPreset(value: string): { preset: CronPreset; time: string; weekday: string } | null {
+  const match = /^(\d{1,2}) (\d{1,2}) \* \* (\*|1-5|[0-6])$/.exec(value);
+  if (!match || Number(match[1]) > 59 || Number(match[2]) > 23) return null;
+  const preset = match[3] === '*' ? 'DAILY' : match[3] === '1-5' ? 'WEEKDAYS' : 'WEEKLY';
+  return { preset, time: `${match[2].padStart(2, '0')}:${match[1].padStart(2, '0')}`, weekday: preset === 'WEEKLY' ? match[3] : '1' };
+}
+
+function buildCron(preset: CronPreset, time: string, weekday: string): string {
+  if (!/^\d{2}:\d{2}$/.test(time)) return '';
+  const [hour, minute] = time.split(':').map(Number);
+  if (hour > 23 || minute > 59) return '';
+  return `${minute} ${hour} * * ${preset === 'DAILY' ? '*' : preset === 'WEEKDAYS' ? '1-5' : weekday}`;
+}
 
 const inputClass = 'w-full h-9 px-3 text-sm border border-slate-200 rounded-md focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent bg-white disabled:bg-slate-100 disabled:text-slate-500';
 
@@ -55,7 +84,13 @@ export default function ScheduleEdit() {
   const [scheduleType, setScheduleType] = useState<ScheduleType>('ONCE');
   const [oneTimeAt, setOneTimeAt] = useState('');
   const [cron, setCron] = useState('0 9 * * *');
+  const [cronPreset, setCronPreset] = useState<CronPreset>('DAILY');
+  const [cronTime, setCronTime] = useState('09:00');
+  const [cronWeekday, setCronWeekday] = useState('1');
   const [interval, setInterval] = useState('PT1H');
+  const [intervalAdvanced, setIntervalAdvanced] = useState(false);
+  const [intervalCount, setIntervalCount] = useState('1');
+  const [intervalUnit, setIntervalUnit] = useState<IntervalUnit>('HOURS');
   const [timezone, setTimezone] = useState('Asia/Seoul');
   const [overlap, setOverlap] = useState<ScheduleOverlapPolicy>('SKIP');
   const [misfire, setMisfire] = useState<ScheduleMisfirePolicy>('SKIP');
@@ -85,8 +120,18 @@ export default function ScheduleEdit() {
         setInputJson(JSON.stringify(row.inputs, null, 2));
         setScheduleType(row.schedule_type);
         setOneTimeAt(row.schedule_type === 'ONCE' ? row.schedule_expression.slice(0, 16) : '');
-        if (row.schedule_type === 'CRON') setCron(row.schedule_expression);
-        if (row.schedule_type === 'INTERVAL') setInterval(row.schedule_expression);
+        if (row.schedule_type === 'CRON') {
+          setCron(row.schedule_expression);
+          const parsed = parseCronPreset(row.schedule_expression);
+          setCronPreset(parsed?.preset ?? 'ADVANCED');
+          if (parsed) { setCronTime(parsed.time); setCronWeekday(parsed.weekday); }
+        }
+        if (row.schedule_type === 'INTERVAL') {
+          setInterval(row.schedule_expression);
+          const parsed = parseBasicInterval(row.schedule_expression);
+          setIntervalAdvanced(parsed === null);
+          if (parsed) { setIntervalCount(parsed.count); setIntervalUnit(parsed.unit); }
+        }
         setTimezone(row.timezone);
         setOverlap(row.overlap_policy);
         setMisfire(row.misfire_policy);
@@ -168,6 +213,9 @@ export default function ScheduleEdit() {
       : scheduleType === 'CRON' ? cron.trim() : interval.trim();
     if (!expression.trim() || (scheduleType === 'ONCE' && oneTimeAt.length !== 16)) {
       setFormError('실행 시각 또는 반복 표현식을 입력해 주세요.'); return;
+    }
+    if (scheduleType === 'INTERVAL' && !intervalAdvanced && !buildInterval(intervalCount, intervalUnit)) {
+      setFormError('반복 간격은 1 이상의 정수로 입력해 주세요.'); return;
     }
     if (!Number.isInteger(maxCatchUp) || maxCatchUp < 1 || maxCatchUp > 100) {
       setFormError('최대 보충 실행 횟수는 1~100 사이 정수로 지정해 주세요.'); return;
@@ -297,11 +345,54 @@ export default function ScheduleEdit() {
           </Field>
           {scheduleType === 'ONCE' ? <Field label="실행 시각 (선택한 시간대 기준)">
             <input aria-label="실행 시각" type="datetime-local" value={oneTimeAt} disabled={configLocked || readOnly} onChange={event => setOneTimeAt(event.target.value)} className={inputClass} />
-          </Field> : scheduleType === 'CRON' ? <Field label="CRON 표현식 (5개 필드)">
-            <input aria-label="CRON 표현식" value={cron} disabled={configLocked || readOnly} onChange={event => setCron(event.target.value)} className={`${inputClass} font-mono`} />
-            <p className="text-xs text-slate-500 mt-1">예: 0 9 * * * = 매일 오전 9시 (지정한 시간대 기준)</p>
-          </Field> : <Field label="ISO-8601 실행 간격 (예: PT1H)">
-            <input aria-label="실행 간격" value={interval} disabled={configLocked || readOnly} onChange={event => setInterval(event.target.value)} className={`${inputClass} font-mono`} />
+          </Field> : scheduleType === 'CRON' ? <Field label="반복 실행 규칙">
+            <select aria-label="반복 규칙" value={cronPreset} disabled={configLocked || readOnly} onChange={event => {
+              const preset = event.target.value as CronPreset;
+              setCronPreset(preset);
+              if (preset !== 'ADVANCED') setCron(buildCron(preset, cronTime, cronWeekday));
+            }} className={inputClass}>
+              <option value="DAILY">매일</option>
+              <option value="WEEKDAYS">평일 (월~금)</option>
+              <option value="WEEKLY">매주 지정 요일</option>
+              <option value="ADVANCED">고급 (CRON 직접 입력)</option>
+            </select>
+            {cronPreset !== 'ADVANCED' ? <div className="flex gap-2 mt-2">
+              <input aria-label="반복 실행 시간" type="time" value={cronTime} disabled={configLocked || readOnly} onChange={event => {
+                setCronTime(event.target.value);
+                setCron(buildCron(cronPreset, event.target.value, cronWeekday));
+              }} className={inputClass} />
+              {cronPreset === 'WEEKLY' && <select aria-label="반복 요일" value={cronWeekday} disabled={configLocked || readOnly} onChange={event => {
+                setCronWeekday(event.target.value);
+                setCron(buildCron(cronPreset, cronTime, event.target.value));
+              }} className={inputClass}>
+                {['일', '월', '화', '수', '목', '금', '토'].map((day, index) => <option key={day} value={index}>{day}요일</option>)}
+              </select>}
+            </div> : <input aria-label="CRON 표현식" value={cron} disabled={configLocked || readOnly} onChange={event => setCron(event.target.value)} className={`${inputClass} font-mono mt-2`} />}
+            <p className="text-xs text-slate-500 mt-1">표현식: <span className="font-mono">{cron || '시간을 선택해 주세요'}</span> · 지정한 시간대 기준 (실제 예정 시각은 서버에서 계산)</p>
+          </Field> : <Field label="반복 간격">
+            <label className="flex items-center gap-2 text-xs text-slate-600 mb-2">
+              <input type="checkbox" checked={intervalAdvanced} disabled={configLocked || readOnly} onChange={event => {
+                setIntervalAdvanced(event.target.checked);
+                if (!event.target.checked) setInterval(buildInterval(intervalCount, intervalUnit));
+              }} /> 고급 입력 (ISO-8601)
+            </label>
+            {intervalAdvanced ? <input aria-label="실행 간격 (ISO-8601)" value={interval} disabled={configLocked || readOnly} onChange={event => setInterval(event.target.value)} placeholder="예: PT3M, P1DT2H" className={`${inputClass} font-mono`} />
+              : <div className="flex gap-2">
+                <input aria-label="반복 간격 숫자" type="number" min={1} step={1} value={intervalCount} disabled={configLocked || readOnly} onChange={event => {
+                  setIntervalCount(event.target.value);
+                  setInterval(buildInterval(event.target.value, intervalUnit));
+                }} className={inputClass} />
+                <select aria-label="반복 간격 단위" value={intervalUnit} disabled={configLocked || readOnly} onChange={event => {
+                  const unit = event.target.value as IntervalUnit;
+                  setIntervalUnit(unit);
+                  setInterval(buildInterval(intervalCount, unit));
+                }} className={inputClass}>
+                  <option value="MINUTES">분</option>
+                  <option value="HOURS">시간</option>
+                  <option value="DAYS">일</option>
+                </select>
+              </div>}
+            <p className="text-xs text-slate-500 mt-1">저장 표현식: <span className="font-mono">{interval || '간격을 입력해 주세요'}</span></p>
           </Field>}
           <Field label="시간대 (IANA)">
             <input aria-label="시간대" value={timezone} disabled={configLocked || readOnly} onChange={event => setTimezone(event.target.value)} placeholder="Asia/Seoul" className={inputClass} />
