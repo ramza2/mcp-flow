@@ -88,13 +88,13 @@ describe('New Agent / New Workflow draft regression', () => {
     });
 
     await waitFor(() => {
-      expect(screen.getByText(/New Agent · Draft/i)).toBeInTheDocument();
+      expect(screen.getByText(/새 에이전트 · 초안/)).toBeInTheDocument();
     });
     expect(createAgent).not.toHaveBeenCalled();
     expect(getAgent).not.toHaveBeenCalled();
     expect(listAgentVersions).not.toHaveBeenCalled();
     expect(listAgentToolGrants).not.toHaveBeenCalled();
-    expect(screen.getByText(/아직 DB에 저장되지 않았습니다/i)).toBeInTheDocument();
+    expect(screen.getByText(/아직 저장되지 않았습니다/i)).toBeInTheDocument();
     expect(screen.queryByDisplayValue('General Work Assistant')).not.toBeInTheDocument();
     expect(screen.queryByText(/당신은 MCPFlow 업무 자동화 Agent/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/agt-001/i)).not.toBeInTheDocument();

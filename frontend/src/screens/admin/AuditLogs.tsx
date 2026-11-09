@@ -293,7 +293,7 @@ export default function AuditLogs() {
               </table>
               <div className="flex items-center justify-between gap-3 px-4 py-3 border-t border-slate-200">
                 <p className="text-xs text-slate-500">
-                  page {cursorIndex + 1} · {items.length}건
+                  {cursorIndex + 1}페이지 · {items.length}건
                 </p>
                 <div className="flex gap-2">
                   <Button
@@ -302,7 +302,7 @@ export default function AuditLogs() {
                     disabled={cursorIndex <= 0 || loading}
                     onClick={goPrev}
                   >
-                    Previous
+                    이전
                   </Button>
                   <Button
                     size="sm"
@@ -310,7 +310,7 @@ export default function AuditLogs() {
                     disabled={!nextCursor || loading}
                     onClick={goNext}
                   >
-                    Next
+                    다음
                   </Button>
                 </div>
               </div>

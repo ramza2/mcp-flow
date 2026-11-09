@@ -23,7 +23,7 @@ import { listMCPServers, listMCPTools } from '../../api/mcp';
 import { listLLMProfiles } from '../../api/modelProfiles';
 import { isAbortError, isApiError } from '../../api/client';
 import type { AgentDto, AgentVersionDto, LLMProfileDto, MCPServerDto, MCPToolDto } from '../../api/types';
-import { AGENT_VISIBILITIES, type AgentVisibility } from '../../domain';
+import { AGENT_VISIBILITIES, labelAgentVisibility, type AgentVisibility } from '../../domain';
 
 type VersionStatus = 'DRAFT' | 'PUBLISHED' | 'DEPRECATED';
 
@@ -252,10 +252,10 @@ export default function AgentEdit() {
   const clientErrors = useMemo(() => {
     const errors: string[] = [];
     if (!name.trim()) errors.push('Agent 이름이 필요합니다.');
-    if (!instructions.trim()) errors.push('Instructions가 비어 있습니다.');
-    if (!llmProfileId) errors.push('LLM Profile이 선택되지 않았습니다.');
+    if (!instructions.trim()) errors.push('에이전트 업무 지시문을 입력해 주세요.');
+    if (!llmProfileId) errors.push('사용할 LLM 모델 프로필을 선택해 주세요.');
     if (autoSelectThreshold < confirmationThreshold) {
-      errors.push('auto_select_threshold는 confirmation_threshold 이상이어야 합니다.');
+      errors.push('자동 선택 기준은 사용자 확인 기준 이상이어야 합니다.');
     }
     return errors;
   }, [name, instructions, llmProfileId, autoSelectThreshold, confirmationThreshold]);
@@ -434,7 +434,7 @@ export default function AgentEdit() {
     try {
       if (isLocalNew || !agent || !version || isDirty) {
         setValidationMessages([
-          '저장되지 않은 변경사항이 있습니다. 먼저 Draft 저장을 실행한 뒤 Validate하세요.',
+          '저장되지 않은 변경사항이 있습니다. 먼저 초안 저장을 실행한 뒤 검증해 주세요.',
         ]);
         return;
       }
@@ -446,14 +446,14 @@ export default function AgentEdit() {
       } : prev);
       if (validated.validation_status !== 'VALID') {
         const report = validated.validation_report as { errors?: Array<{ message?: string }> } | null;
-        const messages = (report?.errors ?? []).map(e => e.message ?? 'validation error');
-        setValidationMessages(messages.length ? messages : ['버전 검증이 INVALID입니다.']);
+        const messages = (report?.errors ?? []).map(e => e.message ?? '검증 오류');
+        setValidationMessages(messages.length ? messages : ['버전 검증에 실패했습니다.']);
         return;
       }
-      setValidationOk(`검증 결과: VALID (v${validated.version_no}). 게시/활성화는 수행하지 않았습니다.`);
+      setValidationOk(`검증 통과 (v${validated.version_no}). 아직 게시·활성화되지는 않았습니다.`);
     } catch (err) {
       const apiErr = isApiError(err) ? err : null;
-      setFormError(apiErr?.message ?? (err instanceof Error ? err.message : 'Validate에 실패했습니다.'));
+      setFormError(apiErr?.message ?? (err instanceof Error ? err.message : '검증에 실패했습니다.'));
     } finally {
       setValidating(false);
     }
@@ -469,8 +469,8 @@ export default function AgentEdit() {
       const validated = await validateAgentVersion(saved.agent.id, saved.version.id);
       if (validated.validation_status !== 'VALID') {
         const report = validated.validation_report as { errors?: Array<{ message?: string }> } | null;
-        const messages = (report?.errors ?? []).map(e => e.message ?? 'validation error');
-        setValidationMessages(messages.length ? messages : ['버전 검증이 INVALID입니다.']);
+        const messages = (report?.errors ?? []).map(e => e.message ?? '검증 오류');
+        setValidationMessages(messages.length ? messages : ['버전 검증에 실패했습니다.']);
         setVersion(prev => prev ? {
           ...prev,
           validation_status: validated.validation_status,
@@ -485,7 +485,7 @@ export default function AgentEdit() {
       navigate(`/agents/${saved.agent.id}`);
     } catch (err) {
       const apiErr = isApiError(err) ? err : null;
-      setFormError(apiErr?.message ?? (err instanceof Error ? err.message : 'Publish에 실패했습니다.'));
+      setFormError(apiErr?.message ?? (err instanceof Error ? err.message : '게시·활성화에 실패했습니다.'));
     } finally {
       setPublishing(false);
     }
@@ -520,17 +520,17 @@ export default function AgentEdit() {
     return (
       <div className="p-6">
         <ErrorState
-          message={loadError?.message ?? `Agent를 찾을 수 없습니다: ${agentId ?? '(missing id)'}`}
+          message={loadError?.message ?? `에이전트를 찾을 수 없습니다: ${agentId ?? '(ID 없음)'}`}
           requestId={loadError?.requestId}
         />
         <div className="mt-4">
-          <Button variant="outline" onClick={() => navigate('/agents')}>Agents로 돌아가기</Button>
+          <Button variant="outline" onClick={() => navigate('/agents')}>에이전트 목록으로</Button>
         </div>
       </div>
     );
   }
 
-  const displayName = agent?.name || name || 'New Agent';
+  const displayName = agent?.name || name || '새 에이전트';
   const agentPath = agent ? `/agents/${agent.id}` : '/agents';
 
   if (publishedBlocked && version && agent) {
@@ -538,24 +538,24 @@ export default function AgentEdit() {
       <div>
         <PageHeader
           breadcrumbs={[
-            { label: 'Agents', to: '/agents' },
+            { label: '에이전트 관리', to: '/agents' },
             { label: agent.name, to: `/agents/${agent.id}` },
             { label: `v${version.version_no}` },
           ]}
-          title={`Agent Version v${version.version_no}`}
+          title={`에이전트 버전 v${version.version_no}`}
           actions={<Button variant="outline" onClick={() => navigate(`/agents/${agent.id}`)}>닫기</Button>}
         />
         <div className="p-6 max-w-2xl space-y-4">
-          <InlineAlert type="warning" message="Published versions cannot be edited" />
+          <InlineAlert type="warning" message="게시된 버전은 수정할 수 없습니다." />
           <div className="bg-white rounded-xl border border-slate-200 p-6 space-y-3">
             <p className="text-sm text-slate-600">
-              PUBLISHED Version은 불변입니다. 변경이 필요하면 새 DRAFT Version을 생성하세요.
+              게시된 버전은 변경할 수 없습니다. 수정하려면 새 초안 버전을 생성해 주세요.
             </p>
             <div className="flex gap-2">
               <Button icon={<Plus size={13} />} onClick={() => navigate(`/agents/${agent.id}/versions/new/edit`)}>
-                Create New Draft Version
+                새 초안 버전 만들기
               </Button>
-              <Button variant="outline" onClick={() => navigate(`/agents/${agent.id}`)}>Agent로 돌아가기</Button>
+              <Button variant="outline" onClick={() => navigate(`/agents/${agent.id}`)}>에이전트 상세로</Button>
             </div>
           </div>
         </div>
@@ -567,16 +567,16 @@ export default function AgentEdit() {
     <div>
       <PageHeader
         breadcrumbs={[
-          { label: 'Agents', to: '/agents' },
+          { label: '에이전트 관리', to: '/agents' },
           { label: displayName, to: agentPath },
-          { label: isLocalNew || (isNewVersionRoute && !version) ? '새 버전' : readOnly ? `v${version?.version_no} View` : `v${version?.version_no ?? '?'} 편집` },
+          { label: isLocalNew || (isNewVersionRoute && !version) ? '새 버전' : readOnly ? `v${version?.version_no} 보기` : `v${version?.version_no ?? '?'} 편집` },
         ]}
         title={
           isLocalNew || (isNewVersionRoute && !version)
-            ? 'New Agent · Draft'
+            ? '새 에이전트 · 초안'
             : readOnly
-              ? `Agent Version View (v${version?.version_no})`
-              : `Agent 버전 편집 (v${version?.version_no ?? 'new'})`
+              ? `에이전트 버전 보기 (v${version?.version_no})`
+              : `에이전트 버전 편집 (v${version?.version_no ?? '새 버전'})`
         }
         actions={
           <>
@@ -586,70 +586,72 @@ export default function AgentEdit() {
                 삭제
               </Button>
             )}
-            {!readOnly && <Button loading={saving} onClick={handleSave}>Draft 저장</Button>}
+            {!readOnly && <Button loading={saving} onClick={handleSave}>초안 저장</Button>}
           </>
         }
       />
       <div className="p-6 max-w-5xl space-y-6">
         {isLocalNew && (
-          <InlineAlert type="info" message="아직 DB에 저장되지 않았습니다. 취소하면 Agent가 생성되지 않습니다. Draft 저장 또는 Publish 시에만 생성됩니다." />
+          <InlineAlert type="info" message="아직 저장되지 않았습니다. 취소하면 에이전트가 생성되지 않으며, 초안 저장 또는 게시·활성화 시 처음 등록됩니다." />
         )}
         {readOnly ? (
-          <InlineAlert type="info" message="DEPRECATED Version은 View만 가능합니다. 수정하려면 새 DRAFT Version을 생성하세요." />
+          <InlineAlert type="info" message="이전 버전은 보기만 가능합니다. 수정하려면 새 초안 버전을 생성해 주세요." />
         ) : !isLocalNew ? (
-          <InlineAlert type="info" message="편집 내용은 DRAFT 버전으로 저장됩니다. Validate는 서버 검증만 수행하며, Publish만 게시·활성화합니다." />
+          <InlineAlert type="info" message="변경 내용은 초안 버전으로 저장됩니다. '검증'은 저장된 버전만 확인하며, 실제 사용하려면 '게시·활성화'가 필요합니다." />
         ) : null}
         {formError && <InlineAlert type="error" message={formError} />}
 
-        <Section title="1. Basic">
+        <Section title="1. 기본 정보">
           <Field label="이름">
             <input value={name} onChange={e => setName(e.target.value)} disabled={readOnly} className={inputClass} />
           </Field>
-          <Field label="Description">
+          <Field label="설명">
             <textarea value={description} onChange={e => setDescription(e.target.value)} disabled={readOnly} rows={2} className={`${inputClass} h-auto py-2 resize-y`} />
           </Field>
           <div className="grid grid-cols-2 gap-4">
-            <Field label="Visibility">
+            <Field label="공개 범위">
               <select
                 value={visibility}
                 onChange={e => setVisibility(e.target.value as AgentVisibility)}
                 disabled={readOnly}
                 className={inputClass}
               >
-                {AGENT_VISIBILITIES.map(v => <option key={v} value={v}>{v}</option>)}
+                {AGENT_VISIBILITIES.map(v => <option key={v} value={v}>{labelAgentVisibility(v)}</option>)}
               </select>
             </Field>
-            <Field label="Change Summary">
+            <Field label="버전 변경 요약 (선택)">
               <input value={changeSummary} onChange={e => setChangeSummary(e.target.value)} disabled={readOnly} placeholder="변경 요약" className={inputClass} />
             </Field>
           </div>
         </Section>
 
-        <Section title="2. Instructions">
+        <Section title="2. 에이전트 업무 지시문" description="에이전트의 역할, 사용할 도구의 범위, 응답 방식과 주의사항을 자연어로 작성하세요. 실행할 때마다 이 지시문을 기준으로 계획을 수립하며, 비밀번호·API 키 등 비밀정보는 적지 마세요.">
           <textarea
+            aria-label="에이전트 업무 지시문"
             value={instructions}
             onChange={e => setInstructions(e.target.value)}
             disabled={readOnly}
+            placeholder={'예: 당신은 등록된 도구로 필요한 정보를 조회하는 업무 지원 에이전트입니다.\n요청이 모호하면 먼저 질문하고, 조회되지 않은 내용은 추측하지 마세요.'}
             rows={10}
             className={`${inputClass} h-auto py-2 font-mono text-xs leading-relaxed resize-y`}
           />
         </Section>
 
-        <Section title="3. Model Profile">
-          <Field label="LLM Profile">
+        <Section title="3. AI 모델 선택" description="자연어를 이해하고 실행 계획을 만드는 데 사용할 LLM 프로필입니다. 프로필 이름이 같아 보여도 설정이 다를 수 있으니 확인해 주세요.">
+          <Field label="LLM 모델 프로필">
             <select value={llmProfileId} onChange={e => setLlmProfileId(e.target.value)} disabled={readOnly} className={inputClass}>
-              <option value="">Select LLM Profile</option>
+              <option value="">LLM 모델 프로필 선택</option>
               {profiles.map(p => (
                 <option key={p.id} value={p.id}>{p.name} ({p.model})</option>
               ))}
             </select>
           </Field>
           {profiles.length === 0 && (
-            <InlineAlert type="warning" message="등록된 LLM Profile이 없습니다. Admin → Model Profiles에서 먼저 생성하세요." />
+            <InlineAlert type="warning" message="등록된 LLM 모델 프로필이 없습니다. 시스템 관리 → 모델 프로필에서 먼저 생성해 주세요." />
           )}
         </Section>
 
-        <Section title={`4. Tool Scope (${selectedTools.length})`}>
+        <Section title={`4. 사용 가능한 MCP 도구 (${selectedTools.length}개 선택)`} description="에이전트가 사용할 수 있는 도구를 체크해 주세요. 선택한 도구만 사용 권한 목록에 포함됩니다. 실제 실행 가능 여부는 서버의 정책·권한 검증을 따릅니다.">
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
             <div className="space-y-3">
               <div className="relative">
@@ -657,17 +659,17 @@ export default function AgentEdit() {
                 <input
                   value={toolSearch}
                   onChange={e => setToolSearch(e.target.value)}
-                  placeholder="Search tools..."
+                  placeholder="도구 이름 또는 MCP 서버 검색..."
                   disabled={readOnly}
                   className={`${inputClass} pl-8`}
                 />
               </div>
               <select value={serverFilter} onChange={e => setServerFilter(e.target.value)} disabled={readOnly} className={inputClass}>
-                <option value="ALL">MCP Server</option>
+                <option value="ALL">전체 MCP 서버</option>
                 {servers.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
               </select>
               <div>
-                <p className="text-xs font-medium text-slate-500 mb-2">Available Tools (ACTIVE)</p>
+                <p className="text-xs font-medium text-slate-500 mb-2">선택 가능한 도구 (활성 상태)</p>
                 <div className="space-y-1.5 max-h-80 overflow-auto border border-slate-200 rounded-lg p-2">
                   {filteredTools.map(tool => {
                     const selected = selectedTools.includes(tool.id);
@@ -693,59 +695,59 @@ export default function AgentEdit() {
                     );
                   })}
                   {filteredTools.length === 0 && (
-                    <p className="text-xs text-slate-400 text-center py-6">조건에 맞는 ACTIVE Tool이 없습니다.</p>
+                    <p className="text-xs text-slate-400 text-center py-6">조건에 맞는 활성 도구가 없습니다.</p>
                   )}
                 </div>
               </div>
             </div>
 
             <div>
-              <p className="text-xs font-medium text-slate-500 mb-2">Selected Tools</p>
+              <p className="text-xs font-medium text-slate-500 mb-2">선택한 도구</p>
               <div className="space-y-1.5 max-h-[28rem] overflow-auto border border-slate-200 rounded-lg p-2 bg-slate-50/50">
                 {selectedToolObjs.map(tool => (
                   <div key={tool.id} className="flex items-start gap-3 p-2.5 rounded-lg border border-slate-200 bg-white">
                     <div className="min-w-0 flex-1">
                       <div className="text-sm font-medium text-slate-800">{tool.display_name ?? tool.remote_name}</div>
                       <div className="text-xs text-slate-400 mt-0.5">
-                        Tool Name: <span className="font-mono">{tool.remote_name}</span>
+                        도구 식별자: <span className="font-mono">{tool.remote_name}</span>
                       </div>
                     </div>
                     {!readOnly && (
-                      <button onClick={() => toggleTool(tool.id)} className="p-1 rounded text-slate-400 hover:text-red-500 hover:bg-red-50">
+                        <button onClick={() => toggleTool(tool.id)} aria-label={`${tool.display_name ?? tool.remote_name} 선택 해제`} className="p-1 rounded text-slate-400 hover:text-red-500 hover:bg-red-50">
                         <X size={13} />
                       </button>
                     )}
                   </div>
                 ))}
                 {selectedToolObjs.length === 0 && (
-                  <p className="text-xs text-slate-400 text-center py-8">선택된 Tool이 없습니다. (선택 없이도 Validate 가능)</p>
+                  <p className="text-xs text-slate-400 text-center py-8">선택된 도구가 없습니다. (도구 없이도 검증은 가능)</p>
                 )}
               </div>
             </div>
           </div>
         </Section>
 
-        <Section title="5. Selection Settings">
-          <div className="grid grid-cols-3 gap-4">
-            <Field label="auto_select_threshold">
-              <input type="number" step="0.01" min={0} max={1} value={autoSelectThreshold} disabled={readOnly}
+        <Section title="5. 도구 선택 기준 (고급 설정)" description="기본값을 그대로 사용해도 됩니다. 기준값은 0~1 사이의 신뢰도이며, 자동 선택 기준 이상이면 조건에 따라 도구를 자동 선택하고 그보다 낮으면 사용자 확인이 필요할 수 있습니다.">
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <Field label="자동 선택 기준 (기본 0.82)">
+              <input aria-label="자동 선택 기준" type="number" step="0.01" min={0} max={1} value={autoSelectThreshold} disabled={readOnly}
                 onChange={e => setAutoSelectThreshold(Number(e.target.value))} className={inputClass} />
             </Field>
-            <Field label="confirmation_threshold">
-              <input type="number" step="0.01" min={0} max={1} value={confirmationThreshold} disabled={readOnly}
+            <Field label="사용자 확인 기준 (기본 0.60)">
+              <input aria-label="사용자 확인 기준" type="number" step="0.01" min={0} max={1} value={confirmationThreshold} disabled={readOnly}
                 onChange={e => setConfirmationThreshold(Number(e.target.value))} className={inputClass} />
             </Field>
-            <Field label="max_candidates">
-              <input type="number" min={1} value={maxCandidates} disabled={readOnly}
+            <Field label="검토할 도구 후보 수 (기본 5)">
+              <input aria-label="검토할 도구 후보 수" type="number" min={1} value={maxCandidates} disabled={readOnly}
                 onChange={e => setMaxCandidates(Number(e.target.value))} className={inputClass} />
             </Field>
           </div>
         </Section>
 
-        <Section title="6. Validate & Publish">
+        <Section title="6. 검증 및 게시" description="초안 저장은 실제 실행을 시작하지 않습니다. '검증'은 저장된 설정을 서버에서 확인하고, '게시·활성화'는 저장·검증 후 사용할 수 있도록 전환합니다.">
           <div className="space-y-3">
             {clientErrors.length === 0 && validationMessages.length === 0 && !validationOk ? (
-              <InlineAlert type="info" message="필수 입력을 채운 뒤 Draft 저장 → Validate → Publish를 순서대로 실행할 수 있습니다." />
+              <InlineAlert type="info" message="권장 순서: 초안 저장 → 검증 → 게시·활성화. '게시·활성화'는 저장과 검증도 수행합니다." />
             ) : (
               <div className="space-y-2">
                 {clientErrors.map(msg => <InlineAlert key={msg} type="error" message={msg} />)}
@@ -755,23 +757,23 @@ export default function AgentEdit() {
             )}
             {!readOnly && (
               <div className="flex gap-2 flex-wrap">
-                <Button variant="outline" loading={saving} onClick={handleSave}>Draft 저장</Button>
+                <Button variant="outline" loading={saving} onClick={handleSave}>초안 저장</Button>
                 <Button
                   variant="outline"
                   loading={validating}
                   disabled={clientErrors.length > 0}
                   onClick={handleValidate}
                 >
-                  Validate
+                  검증
                 </Button>
                 <Button loading={publishing} disabled={clientErrors.length > 0} onClick={handlePublish}>
-                  Publish & Activate
+                  게시·활성화
                 </Button>
               </div>
             )}
             {readOnly && agent && (
               <Button icon={<Plus size={13} />} onClick={() => navigate(`/agents/${agent.id}/versions/new/edit`)}>
-                Create New Draft Version
+                새 초안 버전 만들기
               </Button>
             )}
           </div>
@@ -782,8 +784,8 @@ export default function AgentEdit() {
         open={deleteOpen}
         onClose={() => setDeleteOpen(false)}
         onConfirm={handleDelete}
-        title="Agent 삭제"
-        description="이 DRAFT Agent를 삭제합니다. 게시 이력이 없는 본인 소유 DRAFT만 삭제할 수 있습니다."
+        title="에이전트 삭제"
+        description="이 초안 에이전트를 삭제합니다. 게시 이력이 없는 본인 소유의 초안만 삭제할 수 있습니다."
         confirmLabel="삭제"
         danger
         loading={deleting}
@@ -792,10 +794,11 @@ export default function AgentEdit() {
   );
 }
 
-function Section({ title, children }: { title: string; children: React.ReactNode }) {
+function Section({ title, description, children }: { title: string; description?: string; children: React.ReactNode }) {
   return (
     <div className="bg-white rounded-xl border border-slate-200 p-4">
-      <h3 className="text-sm font-semibold text-slate-800 mb-4">{title}</h3>
+      <h3 className={`text-sm font-semibold text-slate-800 ${description ? '' : 'mb-4'}`}>{title}</h3>
+      {description && <p className="text-xs text-slate-500 mt-1 mb-4 leading-relaxed">{description}</p>}
       <div className="space-y-4">{children}</div>
     </div>
   );
