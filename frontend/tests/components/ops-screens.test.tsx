@@ -389,7 +389,7 @@ describe('Ops screens real API wiring', () => {
     await user.click(screen.getByText('execution.create'));
     expect(await screen.findByText(/"status": "CREATED"/i)).toBeInTheDocument();
 
-    await user.click(screen.getByRole('button', { name: /Next/i }));
+    await user.click(screen.getByRole('button', { name: '다음' }));
     await waitFor(() => {
       expect(String(fetchMock.mock.calls.at(-1)?.[0])).toContain('cursor=next-c');
     });

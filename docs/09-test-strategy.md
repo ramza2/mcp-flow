@@ -897,6 +897,11 @@ DRAFT → PUBLISHED → DEPRECATED
 - Tool Grant는 DRAFT Version에서만 PUT
 - 새 변경은 새 DRAFT Version
 - 현재 Published Version의 과거 Execution 재현 가능
+- 한글 에이전트 목록/상세/편집: 한국어 메뉴·업무 지시문 설명·검증/게시 구분,
+  visibility·상태 표시 라벨과 Canonical Code/API payload 분리, 새 에이전트
+  미저장 취소 시 DB 생성 없음, 초안 저장/검증/게시 lifecycle 회귀 유지.
+- 공통 Pagination의 `이전`/`다음`과 페이지 표시 한글화 후에도
+  `page`/`pageSize`/`hasNext` 및 버튼 disabled 동작 보존.
 
 ### WorkflowVersion
 

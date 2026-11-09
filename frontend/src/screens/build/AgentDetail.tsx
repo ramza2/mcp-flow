@@ -18,7 +18,7 @@ import {
 } from '../../api/agents';
 import { isAbortError, isApiError } from '../../api/client';
 import type { AgentDto, AgentToolGrantDto, AgentVersionDto } from '../../api/types';
-import { formatTimestamp } from '../../domain';
+import { formatTimestamp, labelAgentStatus, labelAgentVersionStatus, labelAgentVisibility } from '../../domain';
 
 type VersionStatus = 'DRAFT' | 'PUBLISHED' | 'DEPRECATED';
 
@@ -122,7 +122,7 @@ export default function AgentDetail() {
       if (validated.validation_status !== 'VALID') {
         const report = validated.validation_report as { errors?: Array<{ message?: string }> } | null;
         const messages = report?.errors?.map(e => e.message).filter(Boolean) ?? [];
-        setActionError(messages[0] ?? '버전 검증에 실패했습니다. VALID 이후에 Publish할 수 있습니다.');
+        setActionError(messages[0] ?? '버전 검증에 실패했습니다. 검증을 통과한 뒤 게시할 수 있습니다.');
         await load();
         return;
       }
@@ -130,7 +130,7 @@ export default function AgentDetail() {
       await load();
     } catch (err) {
       const apiErr = isApiError(err) ? err : null;
-      setActionError(apiErr?.message ?? 'Publish에 실패했습니다.');
+      setActionError(apiErr?.message ?? '게시에 실패했습니다.');
     } finally {
       setActionBusy(false);
     }
@@ -180,12 +180,12 @@ export default function AgentDetail() {
     return (
       <div className="p-6">
         <ErrorState
-          message={error?.message ?? `Agent를 찾을 수 없습니다: ${agentId ?? '(missing id)'}`}
+          message={error?.message ?? `에이전트를 찾을 수 없습니다: ${agentId ?? '(ID 없음)'}`}
           requestId={error?.requestId}
           onRetry={() => { load(); }}
         />
         <div className="mt-4">
-          <Button variant="outline" onClick={() => navigate('/agents')}>Agents로 돌아가기</Button>
+          <Button variant="outline" onClick={() => navigate('/agents')}>에이전트 목록으로</Button>
         </div>
       </div>
     );
@@ -195,13 +195,13 @@ export default function AgentDetail() {
     <div>
       <div className="bg-white border-b border-slate-200 px-6 py-4">
         <button onClick={() => navigate('/agents')} className="flex items-center gap-1.5 text-sm text-slate-500 hover:text-slate-700 mb-3">
-          <ArrowLeft size={14} /> Agents
+          <ArrowLeft size={14} /> 에이전트 관리
         </button>
         <div className="flex items-start justify-between">
           <div>
             <h1 className="text-lg font-semibold text-slate-900">{agent.name}</h1>
             <div className="flex items-center gap-3 mt-1">
-              <StatusBadge status={agent.status} />
+              <StatusBadge status={agent.status} label={labelAgentStatus(agent.status)} />
               {currentPublished && (
                 <VersionBadge version={`v${currentPublished.version_no}`} status="PUBLISHED" />
               )}
@@ -215,7 +215,7 @@ export default function AgentDetail() {
               icon={latestStatus === 'DRAFT' ? <Pencil size={13} /> : <Plus size={13} />}
               onClick={handleLatestPrimary}
             >
-              {latestStatus === 'DRAFT' ? '최신 버전 편집' : 'Create New Draft'}
+              {latestStatus === 'DRAFT' ? '최신 버전 편집' : '새 초안 버전 만들기'}
             </Button>
             <Button
               size="sm"
@@ -224,7 +224,7 @@ export default function AgentDetail() {
               loading={actionBusy && latestStatus === 'DRAFT'}
               onClick={handlePublish}
             >
-              Publish
+              게시
             </Button>
             <Button
               size="sm"
@@ -234,7 +234,7 @@ export default function AgentDetail() {
               loading={actionBusy && agent.status !== 'ACTIVE'}
               onClick={handleActivate}
             >
-              Activate
+              활성화
             </Button>
             {canDelete && (
               <Button
@@ -258,10 +258,10 @@ export default function AgentDetail() {
       <div className="bg-white border-b border-slate-200 px-6">
         <TabBar
           tabs={[
-            { id: 'overview', label: 'Overview' },
-            { id: 'versions', label: 'Versions', badge: versions.length },
-            { id: 'tools', label: 'Allowed Tools', badge: grants.length },
-            { id: 'instructions', label: 'Instructions' },
+            { id: 'overview', label: '기본 정보' },
+            { id: 'versions', label: '버전 이력', badge: versions.length },
+            { id: 'tools', label: '허용된 도구', badge: grants.length },
+            { id: 'instructions', label: '업무 지시문' },
           ]}
           activeTab={tab}
           onChange={setTab}
@@ -270,20 +270,20 @@ export default function AgentDetail() {
 
       <div className="p-6">
         {tab === 'overview' && (
-          <div className="grid grid-cols-2 gap-4 max-w-3xl">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 max-w-3xl">
             <InfoCard title="기본 정보">
-              <Row label="Code">{agent.code}</Row>
-              <Row label="Visibility">{agent.visibility}</Row>
-              <Row label="Owner" mono>{agent.owner_id ?? '—'}</Row>
-              <Row label="Description">{agent.description ?? '—'}</Row>
+              <Row label="코드">{agent.code}</Row>
+              <Row label="공개 범위"><span title={agent.visibility}>{labelAgentVisibility(agent.visibility)}</span></Row>
+              <Row label="소유자 ID" mono>{agent.owner_id ?? '—'}</Row>
+              <Row label="설명">{agent.description ?? '—'}</Row>
             </InfoCard>
             <InfoCard title="버전 상태">
-              <Row label="Published" mono>
+              <Row label="게시된 버전" mono>
                 {currentPublished ? `v${currentPublished.version_no}` : '—'}
               </Row>
-              <Row label="Current Version Id" mono>{agent.current_version_id ?? '—'}</Row>
-              <Row label="Created">{formatTimestamp(agent.created_at)}</Row>
-              <Row label="Updated">{formatTimestamp(agent.updated_at)}</Row>
+              <Row label="현재 버전 ID" mono>{agent.current_version_id ?? '—'}</Row>
+              <Row label="생성일">{formatTimestamp(agent.created_at)}</Row>
+              <Row label="수정일">{formatTimestamp(agent.updated_at)}</Row>
             </InfoCard>
           </div>
         )}
@@ -292,7 +292,7 @@ export default function AgentDetail() {
           <div className="space-y-3 max-w-4xl">
             <InlineAlert
               type="info"
-              message="편집은 DRAFT Version에만 적용됩니다. PUBLISHED는 View 또는 Create New Draft Version만 가능하며, DEPRECATED는 View만 가능합니다."
+              message="초안 버전만 수정할 수 있습니다. 게시된 버전을 변경하려면 새 초안 버전을 만들고, 이전 버전은 조회만 가능합니다."
             />
             <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
               <DataTable
@@ -300,7 +300,7 @@ export default function AgentDetail() {
                 data={versions}
                 rowKey={r => r.id}
                 onRowClick={r => navigate(`/agents/${agent.id}/versions/${r.id}/edit`)}
-                emptyMessage="버전이 없습니다. Create New Draft로 첫 버전을 만드세요."
+                emptyMessage="버전이 없습니다. 새 초안 버전을 만들어 주세요."
               />
             </div>
           </div>
@@ -312,14 +312,14 @@ export default function AgentDetail() {
               columns={grantCols}
               data={grants}
               rowKey={r => r.mcp_tool_id}
-              emptyMessage="허용된 Tool이 없습니다."
+                emptyMessage="허용된 MCP 도구가 없습니다."
             />
           </div>
         )}
 
         {tab === 'instructions' && (
           <div className="max-w-3xl space-y-3">
-            <InlineAlert type="info" message="Instructions는 Agent가 Tool을 선택하고 실행 계획을 세울 때 참조하는 시스템 프롬프트입니다." />
+            <InlineAlert type="info" message="업무 지시문은 에이전트가 허용된 도구를 선택하고 실행 계획을 세울 때 참고합니다. 비밀정보는 입력하지 마세요." />
             <pre className="bg-white border border-slate-200 rounded-xl p-4 text-sm text-slate-700 whitespace-pre-wrap font-sans leading-relaxed">
               {latest?.system_instruction || '—'}
             </pre>
@@ -343,11 +343,11 @@ export default function AgentDetail() {
 
 function versionCols(navigate: (to: string) => void, agentId: string): Column<AgentVersionDto>[] {
   return [
-    { key: 'version', label: 'Version', render: r => <VersionBadge version={`v${r.version_no}`} status={r.status} /> },
-    { key: 'status', label: '상태', render: r => <StatusBadge status={r.status} size="sm" /> },
-    { key: 'changeSummary', label: 'Change Summary', render: r => <span className="text-sm text-slate-700">{r.change_summary ?? '—'}</span> },
-    { key: 'validation', label: 'Validation', render: r => <StatusBadge status={r.validation_status} size="sm" /> },
-    { key: 'createdAt', label: 'Created', render: r => <span className="text-xs text-slate-400">{formatTimestamp(r.created_at)}</span> },
+    { key: 'version', label: '버전', render: r => <VersionBadge version={`v${r.version_no}`} status={r.status} /> },
+    { key: 'status', label: '상태', render: r => <StatusBadge status={r.status} label={labelAgentVersionStatus(r.status)} size="sm" /> },
+    { key: 'changeSummary', label: '변경 요약', render: r => <span className="text-sm text-slate-700">{r.change_summary ?? '—'}</span> },
+    { key: 'validation', label: '검증', render: r => <StatusBadge status={r.validation_status} label={r.validation_status === 'VALID' ? '통과' : '실패'} size="sm" /> },
+    { key: 'createdAt', label: '생성일', render: r => <span className="text-xs text-slate-400">{formatTimestamp(r.created_at)}</span> },
     { key: 'actions', label: '', render: r => {
       const status = r.status as VersionStatus;
       return (
@@ -366,10 +366,10 @@ function versionCols(navigate: (to: string) => void, agentId: string): Column<Ag
 }
 
 const grantCols: Column<AgentToolGrantDto>[] = [
-  { key: 'tool', label: 'Tool Id', render: r => <span className="font-mono text-xs text-slate-700">{r.mcp_tool_id}</span> },
-  { key: 'effect', label: 'Effect', render: r => <span className="text-xs text-slate-600">{r.effect}</span> },
-  { key: 'confirm', label: 'Confirmation', render: r => (
-    <span className="text-xs text-slate-500">{r.requires_confirmation ? 'required' : '—'}</span>
+  { key: 'tool', label: '도구 ID', render: r => <span className="font-mono text-xs text-slate-700">{r.mcp_tool_id}</span> },
+  { key: 'effect', label: '허용 여부', render: r => <span className="text-xs text-slate-600" title={r.effect}>{r.effect === 'ALLOW' ? '허용' : r.effect === 'DENY' ? '차단' : r.effect}</span> },
+  { key: 'confirm', label: '실행 전 확인', render: r => (
+    <span className="text-xs text-slate-500">{r.requires_confirmation ? '필요' : '—'}</span>
   ) },
 ];
 

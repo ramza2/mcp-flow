@@ -12,7 +12,7 @@ import { EmptyState, ErrorState, LoadingSkeleton } from '../../components/ui/Emp
 import { listAgents } from '../../api/agents';
 import { isAbortError, isApiError } from '../../api/client';
 import type { AgentDto } from '../../api/types';
-import { AGENT_STATUSES, formatTimestamp } from '../../domain';
+import { AGENT_STATUSES, formatTimestamp, labelAgentStatus, labelAgentVisibility } from '../../domain';
 
 const PAGE_SIZE = 20;
 
@@ -97,23 +97,23 @@ export default function Agents() {
   };
 
   const columns: Column<AgentDto>[] = [
-    { key: 'name', label: 'Name', render: r => (
+    { key: 'name', label: '이름', render: r => (
       <div className="flex items-center gap-2">
         <span className="w-7 h-7 rounded-md bg-indigo-50 text-indigo-600 flex items-center justify-center shrink-0"><Bot size={14} /></span>
         <span className="font-medium text-slate-800">{r.name}</span>
       </div>
     )},
-    { key: 'status', label: '상태', render: r => <StatusBadge status={r.status} size="sm" /> },
-    { key: 'visibility', label: 'Visibility', render: r => (
-      <span className="text-xs text-slate-600">{r.visibility}</span>
+    { key: 'status', label: '상태', render: r => <StatusBadge status={r.status} label={labelAgentStatus(r.status)} size="sm" /> },
+    { key: 'visibility', label: '공개 범위', render: r => (
+      <span className="text-xs text-slate-600" title={r.visibility}>{labelAgentVisibility(r.visibility)}</span>
     ) },
-    { key: 'publishedVersion', label: 'Current Version', render: r => r.current_version_id
+    { key: 'publishedVersion', label: '현재 게시 버전', render: r => r.current_version_id
       ? <VersionBadge version={`${r.current_version_id.slice(0, 8)}…`} status="PUBLISHED" />
       : <span className="text-xs text-slate-400">–</span> },
-    { key: 'owner', label: 'Owner', render: r => (
+    { key: 'owner', label: '소유자 ID', render: r => (
       <span className="text-xs text-slate-500 font-mono">{r.owner_id ? `${r.owner_id.slice(0, 8)}…` : '—'}</span>
     ) },
-    { key: 'updatedAt', label: 'Updated', render: r => (
+    { key: 'updatedAt', label: '수정일', render: r => (
       <span className="text-xs text-slate-400">{formatTimestamp(r.updated_at)}</span>
     ) },
     { key: 'actions', label: '', render: r => (
@@ -126,23 +126,23 @@ export default function Agents() {
   return (
     <div>
       <PageHeader
-        title="Agents"
-        description="자연어 요청을 처리하는 AI Agent와 버전을 관리합니다."
+        title="에이전트 관리"
+        description="업무 지시문을 이해하고 허용된 MCP 도구를 사용하는 에이전트를 생성·관리합니다."
         actions={
           <Button icon={<Plus size={14} />} onClick={handleNewAgent}>
-            New Agent
+            새 에이전트
           </Button>
         }
       />
       <div className="p-6 space-y-4">
         <FilterBar
           search
-          searchPlaceholder="Agent 이름 검색..."
+          searchPlaceholder="에이전트 이름 검색..."
           onSearch={setSearchInput}
           filters={[
             { key: 'status', label: '상태', options: AGENT_STATUSES.map(v => ({
               value: v,
-              label: v.charAt(0) + v.slice(1).toLowerCase(),
+              label: labelAgentStatus(v),
             })) },
           ]}
           onFilter={handleFilter}
@@ -154,8 +154,8 @@ export default function Agents() {
             <ErrorState message={error.message} requestId={error.requestId} onRetry={() => { loadAgents(); }} />
           ) : agents.length === 0 ? (
             <EmptyState
-              title="등록된 Agent가 없습니다"
-              description="New Agent로 본인 소유의 PRIVATE Agent를 생성한 뒤 버전을 게시·활성화하세요."
+              title="등록된 에이전트가 없습니다"
+              description="새 에이전트를 만들고 업무 지시문과 모델을 설정한 뒤 게시·활성화하세요."
             />
           ) : (
             <>
@@ -164,7 +164,7 @@ export default function Agents() {
                 data={agents}
                 rowKey={r => r.id}
                 onRowClick={r => navigate(`/agents/${r.id}`)}
-                emptyMessage="등록된 Agent가 없습니다."
+                emptyMessage="등록된 에이전트가 없습니다."
               />
               <Pagination
                 page={page}

@@ -145,6 +145,45 @@ describe('AgentEdit persist / validate safety', () => {
     await mockCatalog();
   });
 
+  it('shows Korean guidance while persisting original visibility and selection codes', async () => {
+    vi.mocked(createAgent).mockResolvedValue(savedAgent);
+    vi.mocked(createAgentVersion).mockResolvedValue(savedVersion);
+    vi.mocked(putAgentToolGrants).mockResolvedValue({ items: [] });
+
+    renderWithRouter(<AgentEdit />, {
+      path: '/agents/:agentId/versions/:versionId/edit',
+      route: '/agents/new/versions/new/edit',
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText('2. 에이전트 업무 지시문')).toBeInTheDocument();
+      expect(screen.getByText(/역할, 사용할 도구의 범위/)).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: '게시·활성화' })).toBeInTheDocument();
+    });
+
+    fillNewAgentForm('조회 전용 도우미', '허용된 MCP 도구로 정보를 조회합니다.');
+    const visibilitySelect = screen.getByDisplayValue('비공개 (나만 보기)') as HTMLSelectElement;
+    fireEvent.change(visibilitySelect, { target: { value: 'RESTRICTED' } });
+    expect(visibilitySelect.value).toBe('RESTRICTED');
+    fireEvent.click(screen.getAllByRole('button', { name: '초안 저장' })[0]);
+
+    await waitFor(() => {
+      expect(createAgent).toHaveBeenCalledWith(expect.objectContaining({
+        name: '조회 전용 도우미',
+        visibility: 'RESTRICTED',
+      }));
+      expect(createAgentVersion).toHaveBeenCalledWith('agt-saved', expect.objectContaining({
+        system_instruction: '허용된 MCP 도구로 정보를 조회합니다.',
+        selection_settings: {
+          auto_select_threshold: 0.82,
+          confirmation_threshold: 0.60,
+          max_candidates: 5,
+        },
+      }));
+      expect(putAgentToolGrants).toHaveBeenCalled();
+    });
+  });
+
   it('does not validate a previous version while the form is dirty', async () => {
     vi.mocked(getAgent).mockResolvedValue(savedAgent);
     vi.mocked(listAgentVersions).mockResolvedValue({
@@ -170,13 +209,13 @@ describe('AgentEdit persist / validate safety', () => {
     fireEvent.change(screen.getByDisplayValue('plan safely'), {
       target: { value: 'changed instructions' },
     });
-    fireEvent.click(screen.getByRole('button', { name: 'Validate' }));
+    fireEvent.click(screen.getByRole('button', { name: '검증' }));
 
     await waitFor(() => {
       expect(screen.getByText(/저장되지 않은 변경사항이 있습니다/)).toBeInTheDocument();
     });
     expect(validateAgentVersion).not.toHaveBeenCalled();
-    expect(screen.queryByText(/검증 결과: VALID/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/검증 통과/)).not.toBeInTheDocument();
   });
 
   it('reuses in-memory Agent after version create failure (no duplicate create)', async () => {
@@ -199,11 +238,11 @@ describe('AgentEdit persist / validate safety', () => {
     });
 
     await waitFor(() => {
-      expect(screen.getByText(/New Agent · Draft/i)).toBeInTheDocument();
+      expect(screen.getByText(/새 에이전트 · 초안/)).toBeInTheDocument();
     });
 
     fillNewAgentForm('Partial Agent', 'instructions here');
-    fireEvent.click(screen.getAllByRole('button', { name: 'Draft 저장' })[0]);
+    fireEvent.click(screen.getAllByRole('button', { name: '초안 저장' })[0]);
 
     await waitFor(() => {
       expect(createAgent).toHaveBeenCalledTimes(1);
@@ -211,7 +250,7 @@ describe('AgentEdit persist / validate safety', () => {
       expect(screen.getByText(/version failed/i)).toBeInTheDocument();
     });
 
-    fireEvent.click(screen.getAllByRole('button', { name: 'Draft 저장' })[0]);
+    fireEvent.click(screen.getAllByRole('button', { name: '초안 저장' })[0]);
 
     await waitFor(() => {
       expect(createAgent).toHaveBeenCalledTimes(1);
@@ -238,11 +277,11 @@ describe('AgentEdit persist / validate safety', () => {
     });
 
     await waitFor(() => {
-      expect(screen.getByText(/New Agent · Draft/i)).toBeInTheDocument();
+      expect(screen.getByText(/새 에이전트 · 초안/)).toBeInTheDocument();
     });
 
     fillNewAgentForm('Orphan Agent', 'orphan instructions');
-    fireEvent.click(screen.getAllByRole('button', { name: 'Draft 저장' })[0]);
+    fireEvent.click(screen.getAllByRole('button', { name: '초안 저장' })[0]);
 
     await waitFor(() => {
       expect(createAgent).toHaveBeenCalledTimes(1);
@@ -274,11 +313,11 @@ describe('AgentEdit persist / validate safety', () => {
     });
 
     await waitFor(() => {
-      expect(screen.getByText(/New Agent · Draft/i)).toBeInTheDocument();
+      expect(screen.getByText(/새 에이전트 · 초안/)).toBeInTheDocument();
     });
 
     fillNewAgentForm('Stuck Agent', 'stuck instructions');
-    fireEvent.click(screen.getAllByRole('button', { name: 'Draft 저장' })[0]);
+    fireEvent.click(screen.getAllByRole('button', { name: '초안 저장' })[0]);
 
     await waitFor(() => {
       expect(createAgent).toHaveBeenCalledTimes(1);
@@ -292,6 +331,6 @@ describe('AgentEdit persist / validate safety', () => {
       expect(screen.getByText(/delete failed/i)).toBeInTheDocument();
     });
     expect(router.state.location.pathname).toBe('/agents/new/versions/new/edit');
-    expect(screen.getByText(/New Agent · Draft/i)).toBeInTheDocument();
+    expect(screen.getByText(/새 에이전트 · 초안/)).toBeInTheDocument();
   });
 });

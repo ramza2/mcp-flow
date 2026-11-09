@@ -1,4 +1,7 @@
 import type {
+  AgentStatus,
+  AgentVersionStatus,
+  AgentVisibility,
   AuditActorType,
   AuditResult,
   ExecutionSourceType,
@@ -18,6 +21,37 @@ import type {
 } from './types';
 
 /** Presentation labels — Domain values stay Canonical; UI maps separately. */
+
+export const AGENT_STATUS_LABELS: Record<AgentStatus, string> = {
+  DRAFT: '초안',
+  ACTIVE: '활성',
+  INACTIVE: '비활성',
+  ARCHIVED: '보관됨',
+};
+
+export const AGENT_VERSION_STATUS_LABELS: Record<AgentVersionStatus, string> = {
+  DRAFT: '초안',
+  PUBLISHED: '게시됨',
+  DEPRECATED: '이전 버전',
+};
+
+export const AGENT_VISIBILITY_LABELS: Record<AgentVisibility, string> = {
+  PRIVATE: '비공개 (나만 보기)',
+  RESTRICTED: '제한 공개',
+  INTERNAL: '조직 내부 공개',
+};
+
+export function labelAgentStatus(value: string): string {
+  return AGENT_STATUS_LABELS[value as AgentStatus] ?? value;
+}
+
+export function labelAgentVersionStatus(value: string): string {
+  return AGENT_VERSION_STATUS_LABELS[value as AgentVersionStatus] ?? value;
+}
+
+export function labelAgentVisibility(value: string): string {
+  return AGENT_VISIBILITY_LABELS[value as AgentVisibility] ?? value;
+}
 
 export const EXECUTION_SOURCE_LABELS: Record<ExecutionSourceType, string> = {
   AGENT_REQUEST: 'Agent',
