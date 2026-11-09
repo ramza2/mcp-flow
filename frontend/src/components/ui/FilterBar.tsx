@@ -36,6 +36,7 @@ export default function FilterBar({ search, searchPlaceholder, onSearch, filters
       {filters?.map(f => (
         <select
           key={f.key}
+          aria-label={f.label}
           onChange={e => onFilter?.(f.key, e.target.value)}
           className="h-8 text-sm border border-slate-200 rounded-md bg-white text-slate-600 px-2.5 focus:outline-none focus:ring-2 focus:ring-indigo-500"
         >

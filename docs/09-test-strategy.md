@@ -1045,6 +1045,7 @@ Approval `REJECTED/EXPIRED`를 Execution `REJECTED/EXPIRED` 상태로 직접 매
 - 시간 표시는 해당 Schedule IANA timezone 기준이며, CRON의 임의 fake next-run preview는 출력하지 않는다.
 - 목록 15초 자동 갱신/숨김 탭 일시 중단·복귀/일시적 실패 시 기존 행 보존, 수동 갱신, `PT3M` 숫자+단위 입력, 주간 CRON 선택, 복합 표현식의 고급 모드 보존 및 PAUSED 메타데이터 PATCH를 컴포넌트 테스트로 확인한다.
 - 설정 화면 최근 occurrence 20건의 15초 독립 갱신, 숨김 탭 중단·복귀, 실패 시 기존 이력 보존, 수동 이력 갱신 및 미저장 폼 입력 보존(`GET /schedules/{id}` 재호출 없음)을 컴포넌트 테스트로 확인한다.
+- 한글 UX 회귀: `AppShell.auth.test.tsx`에서 한글 메뉴로 진입해 기존 `/schedules` 경로가 보존되는지, `ScheduleEdit.test.tsx`에서 예약 상태·주기·정책·실행 판단의 한국어 라벨과 Canonical Code(`value`, 툴팁, API payload)가 분리되는지 확인한다. 알 수 없는 판단 사유는 원문으로 표시한다.
 
 ### Registry foundation (implemented)
 

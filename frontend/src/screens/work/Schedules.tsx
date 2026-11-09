@@ -10,10 +10,15 @@ import Pagination from '../../components/ui/Pagination';
 import { EmptyState, ErrorState, InlineAlert, LoadingSkeleton, PermissionDenied } from '../../components/ui/EmptyState';
 import { changeScheduleStatus, listSchedules, type ScheduleDto } from '../../api/schedules';
 import { isAbortError, isApiError } from '../../api/client';
-import { SCHEDULE_STATUSES, formatScheduleTimestamp, labelScheduleTarget, shortenId, type ScheduleStatus } from '../../domain';
+import { SCHEDULE_STATUSES, formatScheduleTimestamp, labelScheduleStatus, labelScheduleTarget, shortenId, type ScheduleStatus } from '../../domain';
 
 const PAGE_SIZE = 20;
 const LIVE_REFRESH_MS = 15_000;
+const SCHEDULE_TYPE_LABELS: Record<ScheduleDto['schedule_type'], string> = {
+  ONCE: '한 번 실행',
+  CRON: '정해진 시간에 반복',
+  INTERVAL: '일정 간격으로 반복',
+};
 
 function humanScheduleExpression(row: ScheduleDto): string {
   if (row.schedule_type !== 'INTERVAL') return row.schedule_expression;
@@ -129,14 +134,14 @@ export default function Schedules() {
     ) },
     { key: 'schedule_type', label: '실행 주기', render: row => (
       <div>
-        <p className="text-xs text-slate-700">{row.schedule_type}</p>
+        <p className="text-xs text-slate-700" title={row.schedule_type}>{SCHEDULE_TYPE_LABELS[row.schedule_type]}</p>
         <span className="text-xs text-slate-500" title={row.schedule_expression}>{humanScheduleExpression(row)}</span>
         <p className="text-xs text-slate-400">{row.timezone}</p>
       </div>
     ) },
     { key: 'next_run_at', label: '다음 실행', render: row => <span className="text-xs">{formatScheduleTimestamp(row.next_run_at, row.timezone)}</span> },
     { key: 'last_run_at', label: '최근 실행', render: row => <span className="text-xs">{formatScheduleTimestamp(row.last_run_at, row.timezone)}</span> },
-    { key: 'status', label: '상태', render: row => <StatusBadge status={row.status} size="sm" /> },
+    { key: 'status', label: '상태', render: row => <span title={row.status}><StatusBadge status={row.status} label={labelScheduleStatus(row.status)} size="sm" /></span> },
     { key: 'actions', label: '관리', render: row => (
       <div onClick={event => event.stopPropagation()}>
         {(row.status === 'ACTIVE' || row.status === 'PAUSED') && (
@@ -158,7 +163,7 @@ export default function Schedules() {
     <div>
       <PageHeader
         title="예약 실행"
-        description="실제 Agent·Workflow 예약을 조회하고 활성화·일시정지할 수 있습니다."
+        description="에이전트와 워크플로의 자동 실행 일정을 확인하고, 필요할 때 활성화하거나 일시정지할 수 있습니다."
         actions={<Button icon={<Plus size={14} />} onClick={() => navigate('/schedules/new')}>새 예약</Button>}
       />
       <div className="p-6 space-y-4">
@@ -168,7 +173,7 @@ export default function Schedules() {
           search
           searchPlaceholder="예약 이름 검색..."
           onSearch={setSearchInput}
-          filters={[{ key: 'status', label: '상태', options: SCHEDULE_STATUSES.map(value => ({ value, label: value })) }]}
+          filters={[{ key: 'status', label: '상태', options: SCHEDULE_STATUSES.map(value => ({ value, label: labelScheduleStatus(value) })) }]}
           onFilter={(_, value) => { setStatus(value as ScheduleStatus | ''); setPage(1); }}
           actions={<Button variant="outline" icon={<RefreshCw size={13} />} onClick={() => setReload(n => n + 1)}>새로고침</Button>}
         />

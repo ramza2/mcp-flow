@@ -74,4 +74,31 @@ describe('AppShell session user', () => {
       }),
     );
   });
+
+  it('uses Korean navigation while keeping the existing schedule route and permissions', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(mockAuthSession)));
+    const router = createMemoryRouter(
+      [{
+        path: '/', element: <AppShell />,
+        children: [
+          { index: true, element: <div>홈 화면</div> },
+          { path: 'schedules', element: <div>예약 목록 화면</div> },
+        ],
+      }],
+      { initialEntries: ['/'] },
+    );
+    render(<AuthProvider><RouterProvider router={router} /></AuthProvider>);
+
+    await waitFor(() => expect(screen.getByRole('link', { name: '대시보드' })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole('button', { name: '업무 실행' }));
+    const schedulesLink = screen.getByRole('link', { name: '예약 실행' });
+    expect(schedulesLink).toHaveAttribute('href', '/schedules');
+    fireEvent.click(schedulesLink);
+    expect(await screen.findByText('예약 목록 화면')).toBeInTheDocument();
+    expect(router.state.location.pathname).toBe('/schedules');
+
+    fireEvent.click(screen.getByRole('button', { name: '메뉴 접기' }));
+    expect(screen.getByRole('button', { name: '메뉴 펼치기' })).toBeInTheDocument();
+    expect(screen.getByTitle('업무 실행')).toBeInTheDocument();
+  });
 });
