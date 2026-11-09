@@ -697,7 +697,7 @@ Designer 규칙:
 - 대상은 실제 Agent/Workflow 목록 및 `PUBLISHED` + `VALID` Version에서 **명시적 Version ID**를 선택한다. 목업 ID·임의 latest 대체 불가.
 - `AGENT_VERSION`과 `WORKFLOW_VERSION` 모두 ONCE/CRON/INTERVAL을 선택할 수 있다. Agent 입력은 `inputs.request_text`(최대 4000자)이며 매 occurrence마다 독립 계획을 수행한다. Agent 수동 trigger는 지원하지 않는다.
 - `ACTIVE`/`COMPLETED`/`ERROR`에서는 이름과 설명만 PATCH 가능하며, `PAUSED`에서만 일정·대상·정책을 수정한다. PATCH는 `lock_version` optimistic lock을 사용한다.
-- 설정 화면은 `GET /schedules/{id}/occurrences` 최근 20건과 연결된 Execution 상세로의 이동을 제공한다.
+- 설정 화면은 `GET /schedules/{id}/occurrences` 최근 20건과 연결된 Execution 상세로의 이동을 제공한다. 열린 탭에서는 이력만 15초마다 조용히 갱신하고, 탭 숨김 시 조회를 건너뛰며 복귀 시 즉시 갱신한다. 갱신 실패 시 기존 이력을 보존하고 경고·마지막 갱신 시각·수동 이력 새로고침을 제공한다. 이력 갱신으로 예약 편집 폼을 다시 불러오거나 변경 중인 입력값을 초기화하지 않는다.
 - 현 UI의 CRON 예시 텍스트는 실제 서버 계산 결과가 아니다. 서버 제공 preview API가 생기기 전까지 실행 예정 시각을 **추측 표시하지 않는다**.
 - `INTERVAL`은 숫자+분/시간/일 단위 입력을 기본으로 하고 기존 ISO-8601 표현식은 고급 입력으로 보존한다. `CRON`은 매일/평일/특정 요일+시간 선택과 고급 5필드 직접 입력을 제공하며, 저장 API는 기존 `schedule_expression` 형식을 그대로 사용한다. 알 수 없는 기존 복합 표현식은 고급 모드에서 손실 없이 보존한다.
 
