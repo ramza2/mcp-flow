@@ -20,6 +20,7 @@ import type {
   ScheduleTargetType,
   WorkflowStatus,
   WorkflowVersionStatus,
+  WorkflowVisibility,
 } from './types';
 
 /** Presentation labels — Domain values stay Canonical; UI maps separately. */
@@ -74,6 +75,16 @@ export function labelWorkflowStatus(value: string): string {
 
 export function labelWorkflowVersionStatus(value: string): string {
   return WORKFLOW_VERSION_STATUS_LABELS[value as WorkflowVersionStatus] ?? value;
+}
+
+export const WORKFLOW_VISIBILITY_LABELS: Record<WorkflowVisibility, string> = {
+  PRIVATE: '비공개 (나만 보기)',
+  RESTRICTED: '제한 공개',
+  INTERNAL: '조직 내부 공개',
+};
+
+export function labelWorkflowVisibility(value: string): string {
+  return WORKFLOW_VISIBILITY_LABELS[value as WorkflowVisibility] ?? value;
 }
 
 export const EXECUTION_SOURCE_LABELS: Record<ExecutionSourceType, string> = {

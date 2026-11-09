@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { useNavigate } from 'react-router';
 import { Plus, GitBranch, Eye } from 'lucide-react';
 import PageHeader from '../../components/ui/PageHeader';
@@ -6,73 +6,102 @@ import DataTable, { Column } from '../../components/ui/DataTable';
 import StatusBadge, { VersionBadge } from '../../components/ui/StatusBadge';
 import FilterBar from '../../components/ui/FilterBar';
 import Button from '../../components/ui/Button';
-import { InlineAlert } from '../../components/ui/EmptyState';
-import { mockWorkflows } from '../../data/mock';
-import { WORKFLOW_STATUSES, labelWorkflowStatus } from '../../domain';
+import Pagination from '../../components/ui/Pagination';
+import { EmptyState, ErrorState, LoadingSkeleton } from '../../components/ui/EmptyState';
+import { listWorkflows, type WorkflowDto } from '../../api/workflows';
+import { isAbortError, isApiError } from '../../api/client';
+import { WORKFLOW_STATUSES, formatTimestamp, labelWorkflowStatus, labelWorkflowVisibility } from '../../domain';
+import type { WorkflowStatus } from '../../domain/types';
+
+const PAGE_SIZE = 20;
 
 export default function Workflows() {
   const navigate = useNavigate();
   const [query, setQuery] = useState('');
-  const [statusFilter, setStatusFilter] = useState('');
-  const filteredWorkflows = mockWorkflows.filter(workflow =>
-    workflow.name.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()) &&
-    (!statusFilter || workflow.status === statusFilter),
-  );
+  const [debouncedQuery, setDebouncedQuery] = useState('');
+  const [statusFilter, setStatusFilter] = useState<WorkflowStatus | ''>('');
+  const [page, setPage] = useState(1);
+  const [workflows, setWorkflows] = useState<WorkflowDto[]>([]);
+  const [total, setTotal] = useState(0);
+  const [hasNext, setHasNext] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<{ message: string; requestId?: string } | null>(null);
 
-  /** Mock UX: create Logical Workflow + initial DRAFT Version (Designer falls back if id unknown). */
-  const handleNewWorkflow = () => {
-    const id = `wf-${Date.now().toString(36)}`;
-    navigate(`/workflows/${id}/versions/v1/edit`);
-  };
+  useEffect(() => {
+    const timer = setTimeout(() => { setDebouncedQuery(query); setPage(1); }, 300);
+    return () => clearTimeout(timer);
+  }, [query]);
 
-  const columns: Column<typeof mockWorkflows[0]>[] = [
-    { key: 'name', label: '이름', render: r => (
+  const load = useCallback(() => {
+    const controller = new AbortController();
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+    listWorkflows({
+      page, page_size: PAGE_SIZE,
+      q: debouncedQuery || undefined,
+      status: statusFilter || undefined,
+      signal: controller.signal,
+    }).then(result => {
+      if (cancelled) return;
+      setWorkflows(result.items);
+      setTotal(result.total);
+      setHasNext(result.has_next);
+    }).catch(err => {
+      if (cancelled || isAbortError(err)) return;
+      const apiErr = isApiError(err) ? err : null;
+      setError({ message: apiErr?.message ?? '워크플로 목록을 불러오지 못했습니다.', requestId: apiErr?.requestId ?? undefined });
+      setWorkflows([]);
+      setTotal(0);
+      setHasNext(false);
+    }).finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; controller.abort(); };
+  }, [page, debouncedQuery, statusFilter]);
+
+  useEffect(() => load(), [load]);
+
+  const columns: Column<WorkflowDto>[] = [
+    { key: 'name', label: '이름', render: row => (
       <div className="flex items-center gap-2">
         <span className="w-7 h-7 rounded-md bg-cyan-50 text-cyan-600 flex items-center justify-center shrink-0"><GitBranch size={14} /></span>
-        <span className="font-medium text-slate-800">{r.name}</span>
+        <span className="font-medium text-slate-800">{row.name}</span>
       </div>
-    )},
-    { key: 'status', label: '상태', render: r => <StatusBadge status={r.status} label={labelWorkflowStatus(r.status)} size="sm" /> },
-    { key: 'publishedVersion', label: '게시 버전', render: r => r.publishedVersion
-      ? <VersionBadge version={r.publishedVersion} status="PUBLISHED" />
-      : <span className="text-xs text-slate-400">–</span> },
-    { key: 'steps', label: '단계 수', render: r => <span className="text-sm text-slate-600">{r.steps}</span>, align: 'center' },
-    { key: 'owner', label: '소유자', render: r => <span className="text-xs text-slate-500">{r.owner}</span> },
-    { key: 'lastPublished', label: '최근 게시', render: r => <span className="text-xs text-slate-400">{r.lastPublished ?? '–'}</span> },
-    { key: 'updatedAt', label: '수정일', render: r => <span className="text-xs text-slate-400">{r.updatedAt}</span> },
-    { key: 'actions', label: '', render: r => (
-      <div className="flex items-center gap-1" onClick={e => e.stopPropagation()}>
-        <button onClick={() => navigate(`/workflows/${r.id}`)} className="p-1.5 rounded text-slate-400 hover:text-indigo-600 hover:bg-indigo-50" title="상세"><Eye size={13} /></button>
-      </div>
-    )},
+    ) },
+    { key: 'status', label: '상태', render: row => <StatusBadge status={row.status} label={labelWorkflowStatus(row.status)} size="sm" /> },
+    { key: 'visibility', label: '공개 범위', render: row => <span title={row.visibility} className="text-xs text-slate-600">{labelWorkflowVisibility(row.visibility)}</span> },
+    { key: 'current', label: '현재 게시 버전', render: row => row.current_version_id
+      ? <VersionBadge version={`${row.current_version_id.slice(0, 8)}…`} status="PUBLISHED" />
+      : <span className="text-xs text-slate-400">—</span> },
+    { key: 'updated', label: '수정일', render: row => <span className="text-xs text-slate-400">{formatTimestamp(row.updated_at)}</span> },
+    { key: 'actions', label: '', render: row => (
+      <button onClick={event => { event.stopPropagation(); navigate(`/workflows/${row.id}`); }} className="p-1.5 rounded text-slate-400 hover:text-indigo-600 hover:bg-indigo-50" title="상세"><Eye size={13} /></button>
+    ) },
   ];
 
   return (
     <div>
       <PageHeader
         title="워크플로 관리"
-        description="여러 도구와 실행 단계를 연결하는 흐름을 살펴봅니다."
-        actions={<Button icon={<Plus size={14} />} onClick={handleNewWorkflow}>새 워크플로 예시</Button>}
+        description="저장된 워크플로를 조회하고 실행 계획 초안을 관리합니다."
+        actions={<Button icon={<Plus size={14} />} onClick={() => navigate('/workflows/new')}>새 워크플로</Button>}
       />
       <div className="p-6 space-y-4">
-        <InlineAlert type="info" message="현재 워크플로 목록과 디자이너는 예시 데이터 기반 화면입니다. 새로 만든 워크플로와 변경 사항은 서버에 저장되지 않으며 실제 실행·게시되지 않습니다." />
         <FilterBar
-          search searchPlaceholder="워크플로 이름 검색..." onSearch={setQuery} onFilter={(key, value) => { if (key === 'status') setStatusFilter(value); }}
-          filters={[
-            { key: 'status', label: '상태', options: WORKFLOW_STATUSES.map(v => ({
-              value: v,
-              label: labelWorkflowStatus(v),
-            })) },
-          ]}
+          search searchPlaceholder="워크플로 이름 검색..." onSearch={setQuery}
+          onFilter={(key, value) => { if (key === 'status') { setStatusFilter(value as WorkflowStatus | ''); setPage(1); } }}
+          filters={[{ key: 'status', label: '상태', options: WORKFLOW_STATUSES.map(value => ({ value, label: labelWorkflowStatus(value) })) }]}
         />
         <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
-          <DataTable
-            columns={columns}
-            data={filteredWorkflows}
-            rowKey={r => r.id}
-            onRowClick={r => navigate(`/workflows/${r.id}`)}
-            emptyMessage="조건에 맞는 워크플로 예시가 없습니다."
-          />
+          {loading ? <LoadingSkeleton rows={6} /> : error ? (
+            <ErrorState message={error.message} requestId={error.requestId} onRetry={() => { load(); }} />
+          ) : workflows.length === 0 ? (
+            <EmptyState title="등록된 워크플로가 없습니다" description="새 워크플로를 등록하고 실행 계획 초안을 작성하세요." />
+          ) : (
+            <>
+              <DataTable columns={columns} data={workflows} rowKey={row => row.id} onRowClick={row => navigate(`/workflows/${row.id}`)} />
+              <Pagination page={page} pageSize={PAGE_SIZE} total={total} hasNext={hasNext} onPageChange={setPage} />
+            </>
+          )}
         </div>
       </div>
     </div>

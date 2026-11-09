@@ -1,30 +1,106 @@
-/** Minimal Workflow registry reads for explicitly pinned Schedule targets. */
+/** Live Workflow registry and version APIs (docs/06 §12). */
 import { apiRequest } from './client';
-import type { PageDto } from './types';
+import type { JsonValue, PageDto } from './types';
+import type { WorkflowStatus, WorkflowVersionStatus, WorkflowVersionValidationStatus, WorkflowVisibility } from '../domain/types';
 
-export interface WorkflowTargetDto {
+export interface WorkflowDto {
   id: string;
+  code: string;
   name: string;
-  status: string;
+  description: string | null;
+  status: WorkflowStatus;
   current_version_id: string | null;
+  owner_id: string | null;
+  visibility: WorkflowVisibility;
+  created_at: string;
+  created_by: string | null;
+  updated_at: string;
+  updated_by: string | null;
+  lock_version: number;
 }
 
-export interface WorkflowVersionTargetDto {
+export interface WorkflowVersionDto {
   id: string;
   workflow_id: string;
   version_no: number;
-  status: string;
-  validation_status: string;
+  status: WorkflowVersionStatus;
+  plan_schema_version: string;
+  plan_definition: Record<string, JsonValue>;
+  input_schema: Record<string, JsonValue>;
+  output_schema: Record<string, JsonValue>;
+  policy_defaults: Record<string, JsonValue>;
+  validation_status: WorkflowVersionValidationStatus;
+  validation_report: Record<string, JsonValue> | null;
+  content_hash: string;
+  change_summary: string | null;
+  published_at: string | null;
+  published_by: string | null;
+  deprecated_at: string | null;
+  deprecated_by: string | null;
+  created_at: string;
+  created_by: string | null;
+}
+
+export type WorkflowTargetDto = WorkflowDto;
+export type WorkflowVersionTargetDto = WorkflowVersionDto;
+
+export interface WorkflowListParams {
+  page?: number;
+  page_size?: number;
+  status?: WorkflowStatus;
+  q?: string;
+  sort?: string;
+  signal?: AbortSignal;
+}
+
+export function listWorkflows({ page = 1, page_size = 20, status, q, sort = '-updated_at', signal }: WorkflowListParams = {}) {
+  return apiRequest<PageDto<WorkflowDto>>('/workflows', {
+    query: { page, page_size, status, q, sort }, signal,
+  });
+}
+
+export function getWorkflow(workflowId: string, signal?: AbortSignal) {
+  return apiRequest<WorkflowDto>(`/workflows/${workflowId}`, { signal });
+}
+
+export function createWorkflow(body: { name: string; description?: string | null; visibility: WorkflowVisibility }) {
+  return apiRequest<WorkflowDto>('/workflows', { method: 'POST', body });
+}
+
+export function listWorkflowVersions(workflowId: string, signal?: AbortSignal) {
+  return apiRequest<PageDto<WorkflowVersionDto>>(`/workflows/${workflowId}/versions`, {
+    query: { page: 1, page_size: 100, sort: '-version_no' }, signal,
+  });
+}
+
+export function getWorkflowVersion(workflowId: string, versionId: string, signal?: AbortSignal) {
+  return apiRequest<WorkflowVersionDto>(`/workflows/${workflowId}/versions/${versionId}`, { signal });
+}
+
+export function createWorkflowVersion(workflowId: string, body: {
+  plan_definition?: Record<string, JsonValue>;
+  source_version_id?: string;
+  change_summary?: string;
+}) {
+  return apiRequest<WorkflowVersionDto>(`/workflows/${workflowId}/versions`, { method: 'POST', body });
+}
+
+export function saveWorkflowPlan(workflowId: string, versionId: string, plan: Record<string, JsonValue>) {
+  return apiRequest<WorkflowVersionDto>(`/workflows/${workflowId}/versions/${versionId}/plan`, {
+    method: 'PUT', body: { plan_definition: plan },
+  });
+}
+
+export function validateWorkflowVersion(workflowId: string, versionId: string) {
+  return apiRequest<Pick<WorkflowVersionDto, 'id' | 'workflow_id' | 'version_no' | 'status' | 'validation_status' | 'validation_report' | 'content_hash'>>(
+    `/workflows/${workflowId}/versions/${versionId}/validate`, { method: 'POST' },
+  );
 }
 
 export function listWorkflowTargets(signal?: AbortSignal) {
-  return apiRequest<PageDto<WorkflowTargetDto>>('/workflows', {
-    query: { page: 1, page_size: 100 }, signal,
-  });
+  return listWorkflows({ page: 1, page_size: 100, signal });
 }
 
 export function listWorkflowTargetVersions(workflowId: string, signal?: AbortSignal) {
-  return apiRequest<PageDto<WorkflowVersionTargetDto>>(`/workflows/${workflowId}/versions`, {
-    query: { page: 1, page_size: 100, sort: '-version_no' }, signal,
-  });
+  return listWorkflowVersions(workflowId, signal);
 }

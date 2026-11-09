@@ -22,7 +22,8 @@ import AgentDetail from './screens/build/AgentDetail';
 import AgentEdit from './screens/build/AgentEdit';
 import Workflows from './screens/build/Workflows';
 import WorkflowDetail from './screens/build/WorkflowDetail';
-import WorkflowDesigner from './screens/build/WorkflowDesigner';
+import WorkflowNew from './screens/build/WorkflowNew';
+import WorkflowPlanEditor from './screens/build/WorkflowPlanEditor';
 
 // MCP
 import MCPServers from './screens/mcp/MCPServers';
@@ -78,8 +79,9 @@ export const router = createBrowserRouter([
           { path: 'agents/:agentId', Component: AgentDetail },
           { path: 'agents/:agentId/versions/:versionId/edit', Component: AgentEdit },
           { path: 'workflows', Component: Workflows },
+          { path: 'workflows/new', Component: WorkflowNew },
           { path: 'workflows/:workflowId', Component: WorkflowDetail },
-          { path: 'workflows/:workflowId/versions/:versionId/edit', Component: WorkflowDesigner },
+          { path: 'workflows/:workflowId/versions/:versionId/edit', Component: WorkflowPlanEditor },
 
           // MCP
           { path: 'mcp/servers', Component: MCPServers },

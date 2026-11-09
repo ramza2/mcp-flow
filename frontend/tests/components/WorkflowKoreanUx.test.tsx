@@ -1,8 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import Workflows from '@/screens/build/Workflows';
-import WorkflowDetail from '@/screens/build/WorkflowDetail';
 import WorkflowDesigner from '@/screens/build/WorkflowDesigner';
 import {
   labelWorkflowStatus,
@@ -12,7 +10,7 @@ import {
 } from '@/domain';
 import { renderWithRouter } from '../test-utils';
 
-describe('Workflow Korean UX — presentation-only and mock safety', () => {
+describe('Workflow Korean UX — canonical labels and legacy demo isolation', () => {
   it('translates canonical statuses without changing their values', () => {
     expect(WORKFLOW_STATUSES).toEqual(['DRAFT', 'ACTIVE', 'INACTIVE', 'ARCHIVED']);
     expect(WORKFLOW_VERSION_STATUSES).toEqual(['DRAFT', 'PUBLISHED', 'DEPRECATED']);
@@ -21,35 +19,7 @@ describe('Workflow Korean UX — presentation-only and mock safety', () => {
     expect(labelWorkflowStatus('SOMETHING_NEW')).toBe('SOMETHING_NEW');
   });
 
-  it('labels mock workflows honestly and filters client-side by name/status', async () => {
-    const user = userEvent.setup();
-    renderWithRouter(<Workflows />, { path: '/workflows', route: '/workflows' });
-
-    expect(screen.getByText('워크플로 관리')).toBeInTheDocument();
-    expect(screen.getByText(/새로 만든 워크플로와 변경 사항은 서버에 저장되지 않으며/i)).toBeInTheDocument();
-    expect(screen.getByText('Weekly Report Workflow')).toBeInTheDocument();
-    expect(screen.getByText('Approval & Send Workflow')).toBeInTheDocument();
-
-    await user.selectOptions(screen.getByRole('combobox', { name: '상태' }), 'DRAFT');
-    expect(screen.getByText('Approval & Send Workflow')).toBeInTheDocument();
-    expect(screen.queryByText('Weekly Report Workflow')).not.toBeInTheDocument();
-
-    await user.type(screen.getByPlaceholderText('워크플로 이름 검색...'), 'absent');
-    expect(screen.getByText('조건에 맞는 워크플로 예시가 없습니다.')).toBeInTheDocument();
-  });
-
-  it('does not present an operational Publish action on a demo detail', () => {
-    renderWithRouter(<WorkflowDetail />, {
-      path: '/workflows/:workflowId',
-      route: '/workflows/wf-003',
-    });
-
-    expect(screen.getByText(/디자이너의 변경 사항은 저장되지 않고/i)).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: '게시 (미지원)' })).toBeDisabled();
-    expect(screen.getByText('개요')).toBeInTheDocument();
-  });
-
-  it('makes unsaved designer behavior explicit and preserves JOIN option value', async () => {
+  it('keeps legacy demo isolated from operational routes and preserves JOIN values', async () => {
     const user = userEvent.setup();
     const { router } = renderWithRouter(<WorkflowDesigner />, {
       path: '/workflows/:workflowId/versions/:versionId/edit',
