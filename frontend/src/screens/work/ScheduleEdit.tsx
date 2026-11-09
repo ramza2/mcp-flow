@@ -372,8 +372,17 @@ export default function ScheduleEdit() {
           </Field> : <Field label="반복 간격">
             <label className="flex items-center gap-2 text-xs text-slate-600 mb-2">
               <input type="checkbox" checked={intervalAdvanced} disabled={configLocked || readOnly} onChange={event => {
+                if (!event.target.checked) {
+                  const parsed = parseBasicInterval(interval);
+                  if (!parsed) {
+                    setFormError('현재 복합 실행 간격은 숫자·단위 입력으로 표현할 수 없습니다. 고급 입력에서 수정해 주세요.');
+                    return;
+                  }
+                  setIntervalCount(parsed.count);
+                  setIntervalUnit(parsed.unit);
+                }
+                setFormError(null);
                 setIntervalAdvanced(event.target.checked);
-                if (!event.target.checked) setInterval(buildInterval(intervalCount, intervalUnit));
               }} /> 고급 입력 (ISO-8601)
             </label>
             {intervalAdvanced ? <input aria-label="실행 간격 (ISO-8601)" value={interval} disabled={configLocked || readOnly} onChange={event => setInterval(event.target.value)} placeholder="예: PT3M, P1DT2H" className={`${inputClass} font-mono`} />

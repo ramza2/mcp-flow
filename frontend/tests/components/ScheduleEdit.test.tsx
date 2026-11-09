@@ -219,6 +219,23 @@ describe('Schedule live management', () => {
     await waitFor(() => expect(mocks.update).toHaveBeenCalledWith(scheduleId, { name: '이름만 수정' }, 4));
   });
 
+  it('round-trips advanced simple intervals and protects complex intervals from accidental replacement', async () => {
+    mocks.get.mockResolvedValueOnce({ ...existing, status: 'PAUSED', schedule_type: 'INTERVAL', schedule_expression: 'PT3M' });
+    renderWithRouter(<ScheduleEdit />, { path: '/schedules/:id/edit', route: `/schedules/${scheduleId}/edit` });
+    await waitFor(() => expect(screen.getByLabelText('반복 간격 숫자')).toHaveValue(3));
+    fireEvent.click(screen.getByRole('checkbox', { name: '고급 입력 (ISO-8601)' }));
+    fireEvent.change(screen.getByRole('textbox', { name: '실행 간격 (ISO-8601)' }), { target: { value: 'PT15M' } });
+    fireEvent.click(screen.getByRole('checkbox', { name: '고급 입력 (ISO-8601)' }));
+    expect(screen.getByLabelText('반복 간격 숫자')).toHaveValue(15);
+    expect(screen.getByRole('combobox', { name: '반복 간격 단위' })).toHaveValue('MINUTES');
+    fireEvent.click(screen.getByRole('checkbox', { name: '고급 입력 (ISO-8601)' }));
+    fireEvent.change(screen.getByRole('textbox', { name: '실행 간격 (ISO-8601)' }), { target: { value: 'P1DT2H' } });
+    fireEvent.click(screen.getByRole('checkbox', { name: '고급 입력 (ISO-8601)' }));
+    expect(screen.getByRole('checkbox', { name: '고급 입력 (ISO-8601)' })).toBeChecked();
+    expect(screen.getByRole('textbox', { name: '실행 간격 (ISO-8601)' })).toHaveValue('P1DT2H');
+    expect(screen.getByText(/현재 복합 실행 간격은 숫자·단위 입력으로 표현할 수 없습니다/)).toBeInTheDocument();
+  });
+
   it('preserves an advanced CRON expression during a metadata-only edit', async () => {
     mocks.get.mockResolvedValueOnce({ ...existing, status: 'PAUSED', schedule_type: 'CRON', schedule_expression: '*/15 9-18 * * 1-5' });
     renderWithRouter(<ScheduleEdit />, { path: '/schedules/:id/edit', route: `/schedules/${scheduleId}/edit` });
