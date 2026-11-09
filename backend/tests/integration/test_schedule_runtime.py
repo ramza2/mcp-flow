@@ -1694,6 +1694,53 @@ async def test_pg_concurrent_scheduler_same_due(
 
 @pytest.mark.integration
 @pytest.mark.asyncio
+async def test_pg_concurrent_agent_recurring_due_dedupes_outbox(
+    integration_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from app.models.outbox import OutboxEvent
+
+    from tests.unit.test_agent_schedule_execution import (
+        _activate_recurring_agent_schedule,
+    )
+
+    async with integration_session_factory() as session:
+        schedule_id, version_id, now = await _activate_recurring_agent_schedule(
+            session, overlap=ScheduleOverlapPolicy.ALLOW
+        )
+
+    barrier = asyncio.Barrier(2)
+
+    async def _fire() -> int:
+        async with integration_session_factory() as session:
+            await barrier.wait()
+            result = await ScheduleRuntimeService(
+                session, misfire_grace_seconds=0
+            ).process_due_schedule(schedule_id, now=now)
+            await session.commit()
+            return result.executions_created
+
+    counts = await asyncio.gather(_fire(), _fire())
+    assert sum(counts) == 3
+
+    async with integration_session_factory() as session:
+        occurrences, _ = await ScheduleOccurrenceRepository(session).list_for_schedule(
+            schedule_id
+        )
+        assert len(occurrences) == 3
+        event_rows = list((await session.execute(
+            select(OutboxEvent).where(
+                OutboxEvent.event_type == "AGENT_SCHEDULE_PLAN",
+                OutboxEvent.aggregate_id.in_([occ.id for occ in occurrences]),
+            )
+        )).scalars().all())
+        assert len(event_rows) == 3
+        assert len({event.dedupe_key for event in event_rows}) == 3
+        assert all(event.payload["agent_version_id"] == str(version_id) for event in event_rows)
+        assert await _executions_for_schedule(session, schedule_id) == []
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
 async def test_pg_manual_trigger_concurrent_same_key(
     integration_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:

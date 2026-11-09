@@ -43,6 +43,7 @@ from app.domain.enums import (
     ScheduleOverlapPolicy,
     ScheduleStatus,
     ScheduleTargetType,
+    ScheduleType,
 )
 from app.models.execution import Execution
 from app.models.schedule import Schedule, ScheduleOccurrence
@@ -479,9 +480,9 @@ class ScheduleRuntimeService:
             return "NOOP"
 
         if schedule.target_type == ScheduleTargetType.AGENT_VERSION.value:
-            # ONCE + request_text only; CRON/INTERVAL stay fail-closed.
-            # Durable Outbox handoff — no LLM/MCP under Schedule FOR UPDATE.
-            if schedule.schedule_type != "ONCE":
+            # All recurrence modes use durable per-occurrence Outbox handoff;
+            # never run LLM/MCP while holding the Schedule row lock.
+            if schedule.schedule_type not in {type_.value for type_ in ScheduleType}:
                 self._fail_or_skip_occurrence(
                     occurrence,
                     status=OccurrenceStatus.FAILED.value,
@@ -591,7 +592,7 @@ class ScheduleRuntimeService:
         # Unmaterialized held peers still block without Execution locks.
         unmaterialized_waits = any(
             prior_exec is None
-            and prior_occ.decision_reason in _WAIT_REASONS
+            and prior_occ.decision_reason in (*_WAIT_REASONS, reasons.AGENT_PLAN_QUEUED)
             for prior_occ, prior_exec in priors
         )
 
@@ -856,7 +857,7 @@ class ScheduleRuntimeService:
                     continue
             if (
                 occ.status == OccurrenceStatus.PLANNED.value
-                and occ.decision_reason in _WAIT_REASONS
+                and occ.decision_reason in (*_WAIT_REASONS, reasons.AGENT_PLAN_QUEUED)
                 and execution is None
             ):
                 out.append((occ, None))

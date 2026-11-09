@@ -694,7 +694,7 @@ Designer 규칙:
 - 목록/설정 화면에서 `activate`·`pause`·`resume`은 사용자 클릭으로만 실행한다. Backend 상태 `ACTIVE/PAUSED/COMPLETED/ERROR`를 그대로 표시한다.
 - 신규 예약은 `POST /schedules`로 **PAUSED** 저장 후 별도 활성화한다. 자동으로 실행하지 않는다.
 - 대상은 실제 Agent/Workflow 목록 및 `PUBLISHED` + `VALID` Version에서 **명시적 Version ID**를 선택한다. 목업 ID·임의 latest 대체 불가.
-- `AGENT_VERSION`은 Backend 범위대로 `ONCE` + `inputs.request_text`만 허용한다. `WORKFLOW_VERSION`은 ONCE/CRON/INTERVAL 선택 가능하다.
+- `AGENT_VERSION`과 `WORKFLOW_VERSION` 모두 ONCE/CRON/INTERVAL을 선택할 수 있다. Agent 입력은 `inputs.request_text`(최대 4000자)이며 매 occurrence마다 독립 계획을 수행한다. Agent 수동 trigger는 지원하지 않는다.
 - `ACTIVE`/`COMPLETED`/`ERROR`에서는 이름과 설명만 PATCH 가능하며, `PAUSED`에서만 일정·대상·정책을 수정한다. PATCH는 `lock_version` optimistic lock을 사용한다.
 - 설정 화면은 `GET /schedules/{id}/occurrences` 최근 20건과 연결된 Execution 상세로의 이동을 제공한다.
 - 현 UI의 CRON 예시 텍스트는 실제 서버 계산 결과가 아니다. 서버 제공 preview API가 생기기 전까지 실행 예정 시각을 **추측 표시하지 않는다**.

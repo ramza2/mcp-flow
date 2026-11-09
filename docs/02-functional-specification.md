@@ -978,7 +978,7 @@ requester_id = Schedule.owner_id
 
 Manual `POST /trigger`는 동일 lineage에 `trigger_type=USER`만 다르다.
 
-AGENT_VERSION Schedule 자동 발사 (ONCE vertical):
+AGENT_VERSION Schedule 자동 발사 (ONCE/CRON/INTERVAL):
 
 ```text
 source_type = SCHEDULE_OCCURRENCE
@@ -991,8 +991,10 @@ requester_id = Schedule.owner_id
 inputs.request_text = 비어 있지 않은 문자열 (≤4000)
 ```
 
-제약 (이 슬라이스):
-- `schedule_type=ONCE`만 지원. CRON/INTERVAL 생성·발사·수동 `POST /trigger`는 fail-closed.
+제약:
+- ONCE/CRON/INTERVAL에서 각 `(schedule_id, scheduled_for)`마다 독립된 AgentRequest를 생성하고, 고정된 `agent_version_id`와 저장된 `inputs.request_text`를 재사용한다. 기존 Schedule recurrence/DST/misfire 규칙을 그대로 적용한다.
+- Agent의 미완료 Outbox planning(Execution 생성 전 `AGENT_PLAN_QUEUED`)도 overlap 정책의 active prior로 간주한다. `SKIP`은 건너뛰고, `QUEUE`는 대기한다. `REPLACE`는 이미 시작된 planning을 중간 취소하지 않고 그 처리가 완료될 때까지 기다린다. `ALLOW`는 병렬 planning을 허용한다.
+- 수동 `POST /trigger`는 AGENT_VERSION에서 계속 fail-closed.
 - Scheduler DB lock/TX 안에서 LLM·원격 MCP 호출 금지. durable Outbox `AGENT_SCHEDULE_PLAN`으로 비동기 계획 후 Execution 생성.
 - READY + 모든 Tool `READ_ONLY` + 확인/승인 불필요일 때만 자동 실행. WAITING_INPUT / WAITING_CONFIRMATION / REJECTED / FAILED 및 쓰기·파괴·UNKNOWN 위험은 실행 없이 fail-closed.
 - 동일 Occurrence 재처리 시 AgentRequest/Execution 중복 생성 금지 (occurrence당 Execution 최대 1).

@@ -1,4 +1,4 @@
-"""Unit tests for AGENT_VERSION Schedule ONCE planning handoff."""
+"""Unit tests for AGENT_VERSION Schedule occurrence planning handoff."""
 
 from __future__ import annotations
 
@@ -15,6 +15,7 @@ from app.domain.enums import (
     ScheduleTargetType,
     ScheduleType,
 )
+from app.models.execution import Execution
 from app.models.outbox import OutboxEvent
 from app.repositories.schedule import ScheduleRepository
 from app.repositories.schedule_occurrence import ScheduleOccurrenceRepository
@@ -44,6 +45,155 @@ def test_extract_agent_schedule_request_text_requires_nonempty() -> None:
         extract_agent_schedule_request_text({"request_text": "   "})
     with pytest.raises(AppError):
         extract_agent_schedule_request_text({"request_text": "x" * 4001})
+
+
+async def _activate_recurring_agent_schedule(
+    db_session: AsyncSession,
+    *,
+    overlap: ScheduleOverlapPolicy,
+    schedule_type: ScheduleType = ScheduleType.INTERVAL,
+) -> tuple[uuid.UUID, uuid.UUID, datetime]:
+    owner_id = await _seed_schedule_manager(db_session, with_workflow_execute=False)
+    version_id = await _seed_published_agent_version(db_session, owner_id)
+    now = datetime.now(UTC).replace(second=0, microsecond=0)
+    schedule = await ScheduleService(db_session).create(
+        ScheduleCreate(
+            name=f"recurring-{schedule_type.value}-{overlap.value}",
+            target_type=ScheduleTargetType.AGENT_VERSION,
+            target_id=version_id,
+            schedule_type=schedule_type,
+            schedule_expression=(
+                "PT1M" if schedule_type == ScheduleType.INTERVAL else "* * * * *"
+            ),
+            timezone="UTC",
+            inputs={"request_text": "  list pets safely  "},
+            start_at=now + timedelta(hours=1),
+            misfire_policy=ScheduleMisfirePolicy.CATCH_UP_LIMITED,
+            max_catch_up=3,
+            overlap_policy=overlap,
+        ),
+        owner_id=owner_id,
+    )
+    await ScheduleService(db_session).activate(schedule.id, owner_id=owner_id)
+    stored = await ScheduleRepository(db_session).lock_for_update(schedule.id)
+    assert stored is not None
+    stored.start_at = now - timedelta(minutes=2)
+    stored.next_run_at = now - timedelta(minutes=2)
+    stored.lock_version = int(stored.lock_version) + 1
+    await db_session.commit()
+    return schedule.id, version_id, now
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("schedule_type", [ScheduleType.INTERVAL, ScheduleType.CRON])
+async def test_recurring_agent_due_has_distinct_outbox_per_tick(
+    db_session: AsyncSession, schedule_type: ScheduleType
+) -> None:
+    schedule_id, version_id, now = await _activate_recurring_agent_schedule(
+        db_session, overlap=ScheduleOverlapPolicy.ALLOW, schedule_type=schedule_type
+    )
+    service = ScheduleRuntimeService(db_session, misfire_grace_seconds=0)
+    fired = await service.process_due_schedule(schedule_id, now=now)
+    await db_session.commit()
+    assert fired.executions_created == 3  # Durable plan handoffs, not Executions yet.
+    occurrences, _ = await ScheduleOccurrenceRepository(db_session).list_for_schedule(
+        schedule_id
+    )
+    assert len(occurrences) == 3
+    assert len({o.scheduled_for for o in occurrences}) == 3
+    assert all(o.decision_reason == reasons.AGENT_PLAN_QUEUED for o in occurrences)
+    events = list(
+        (await db_session.execute(
+            select(OutboxEvent).where(OutboxEvent.event_type == "AGENT_SCHEDULE_PLAN")
+        )).scalars().all()
+    )
+    assert len(events) == 3
+    assert len({e.aggregate_id for e in events}) == 3
+    assert len({e.dedupe_key for e in events}) == 3
+    assert all(e.payload["agent_version_id"] == str(version_id) for e in events)
+    assert all(e.payload["request_text"] == "list pets safely" for e in events)
+    assert (await db_session.execute(select(Execution.id))).scalars().all() == []
+    repeated = await service.process_due_schedule(schedule_id, now=now)
+    assert repeated.executions_created == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("overlap", "queued", "skipped", "waiting"),
+    [
+        (ScheduleOverlapPolicy.ALLOW, 3, 0, 0),
+        (ScheduleOverlapPolicy.SKIP, 1, 2, 0),
+        (ScheduleOverlapPolicy.QUEUE, 1, 0, 2),
+        (ScheduleOverlapPolicy.REPLACE, 1, 1, 1),
+    ],
+)
+async def test_recurring_agent_overlap_includes_planning_without_execution(
+    db_session: AsyncSession,
+    overlap: ScheduleOverlapPolicy,
+    queued: int,
+    skipped: int,
+    waiting: int,
+) -> None:
+    schedule_id, _version_id, now = await _activate_recurring_agent_schedule(
+        db_session, overlap=overlap
+    )
+    await ScheduleRuntimeService(db_session, misfire_grace_seconds=0).process_due_schedule(
+        schedule_id, now=now
+    )
+    await db_session.commit()
+    occurrences, _ = await ScheduleOccurrenceRepository(db_session).list_for_schedule(
+        schedule_id
+    )
+    assert len(occurrences) == 3
+    assert sum(o.decision_reason == reasons.AGENT_PLAN_QUEUED for o in occurrences) == queued
+    assert sum(o.status == OccurrenceStatus.SKIPPED.value for o in occurrences) == skipped
+    assert sum(
+        o.decision_reason in {reasons.OVERLAP_QUEUE, reasons.OVERLAP_REPLACE_WAIT}
+        for o in occurrences
+    ) == waiting
+    events = list(
+        (await db_session.execute(
+            select(OutboxEvent).where(OutboxEvent.event_type == "AGENT_SCHEDULE_PLAN")
+        )).scalars().all()
+    )
+    assert len(events) == queued
+
+
+@pytest.mark.asyncio
+async def test_queued_recurring_agent_creates_new_request_after_previous_fails_closed(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    schedule_id, _version_id, now = await _activate_recurring_agent_schedule(
+        db_session, overlap=ScheduleOverlapPolicy.QUEUE
+    )
+    runtime = ScheduleRuntimeService(db_session, misfire_grace_seconds=0)
+    await runtime.process_due_schedule(schedule_id, now=now)
+    await db_session.commit()
+
+    async def _needs_input(self: Any, request_id: uuid.UUID) -> None:  # noqa: ARG001
+        raise AppError(code="EXECUTION_NOT_READY", message="WAITING_INPUT", status_code=409)
+
+    monkeypatch.setattr(AgentScheduleExecutionService, "_advance_pipeline", _needs_input)
+    planner = AgentScheduleExecutionService(db_session)
+    first = await planner.process_unpublished_batch(limit=1, now=now)
+    await db_session.commit()
+    assert first.failed == 1
+    released = await runtime.process_waiting_schedule(schedule_id, now=now)
+    await db_session.commit()
+    assert released.executions_created == 1
+    second = await planner.process_unpublished_batch(limit=1, now=now)
+    await db_session.commit()
+    assert second.failed == 1
+
+    events = list(
+        (await db_session.execute(
+            select(OutboxEvent).where(OutboxEvent.event_type == "AGENT_SCHEDULE_PLAN")
+        )).scalars().all()
+    )
+    assert len(events) == 2
+    assert len({e.payload["agent_request_id"] for e in events}) == 2
+    assert all(e.published_at is not None for e in events)
+    assert (await db_session.execute(select(Execution.id))).scalars().all() == []
 
 
 @pytest.mark.asyncio

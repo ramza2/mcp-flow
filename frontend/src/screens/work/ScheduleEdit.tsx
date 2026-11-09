@@ -54,7 +54,7 @@ export default function ScheduleEdit() {
   const [inputJson, setInputJson] = useState('{}');
   const [scheduleType, setScheduleType] = useState<ScheduleType>('ONCE');
   const [oneTimeAt, setOneTimeAt] = useState('');
-  const [cron, setCron] = useState('0 9 * * 1');
+  const [cron, setCron] = useState('0 9 * * *');
   const [interval, setInterval] = useState('PT1H');
   const [timezone, setTimezone] = useState('Asia/Seoul');
   const [overlap, setOverlap] = useState<ScheduleOverlapPolicy>('SKIP');
@@ -261,7 +261,6 @@ export default function ScheduleEdit() {
               {SCHEDULE_TARGET_TYPES.map(type => <label key={type} className="flex items-center gap-2 text-sm">
                 <input type="radio" checked={targetType === type} disabled={configLocked || readOnly} onChange={() => {
                   setTargetType(type); setLogicalTargetId(''); setVersionId('');
-                  if (type === 'AGENT_VERSION') setScheduleType('ONCE');
                 }} />{labelScheduleTarget(type)}
               </label>)}
             </div>
@@ -291,17 +290,16 @@ export default function ScheduleEdit() {
           <Field label="예약 종류">
             <select aria-label="예약 종류" value={scheduleType} disabled={configLocked || readOnly} onChange={event => setScheduleType(event.target.value as ScheduleType)} className={inputClass}>
               <option value="ONCE">일회성 (ONCE)</option>
-              {targetType === 'WORKFLOW_VERSION' && <>
-                <option value="CRON">반복 (CRON)</option>
-                <option value="INTERVAL">간격 (INTERVAL)</option>
-              </>}
+              <option value="CRON">반복 (CRON)</option>
+              <option value="INTERVAL">간격 (INTERVAL)</option>
             </select>
-            {targetType === 'AGENT_VERSION' && <p className="text-xs text-amber-700 mt-1">현재 Backend는 Agent 예약에 일회성(ONCE)만 지원합니다.</p>}
+            {targetType === 'AGENT_VERSION' && <p className="text-xs text-slate-500 mt-1">반복 예약은 실행할 때마다 선택한 Agent 버전으로 업무 지시를 새로 분석합니다. 자동 실행은 안전한 조회 작업만 허용됩니다.</p>}
           </Field>
           {scheduleType === 'ONCE' ? <Field label="실행 시각 (선택한 시간대 기준)">
             <input aria-label="실행 시각" type="datetime-local" value={oneTimeAt} disabled={configLocked || readOnly} onChange={event => setOneTimeAt(event.target.value)} className={inputClass} />
           </Field> : scheduleType === 'CRON' ? <Field label="CRON 표현식 (5개 필드)">
             <input aria-label="CRON 표현식" value={cron} disabled={configLocked || readOnly} onChange={event => setCron(event.target.value)} className={`${inputClass} font-mono`} />
+            <p className="text-xs text-slate-500 mt-1">예: 0 9 * * * = 매일 오전 9시 (지정한 시간대 기준)</p>
           </Field> : <Field label="ISO-8601 실행 간격 (예: PT1H)">
             <input aria-label="실행 간격" value={interval} disabled={configLocked || readOnly} onChange={event => setInterval(event.target.value)} className={`${inputClass} font-mono`} />
           </Field>}

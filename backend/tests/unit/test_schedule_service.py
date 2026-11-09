@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from typing import Any
 
 import pytest
@@ -234,6 +234,66 @@ async def test_create_pins_agent_version(db_session: AsyncSession) -> None:
     assert schedule.target_type == ScheduleTargetType.AGENT_VERSION.value
     assert schedule.agent_version_id == agent_version_id
     assert schedule.workflow_version_id is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("schedule_type", "expression"),
+    [
+        (ScheduleType.CRON, "0 9 * * *"),
+        (ScheduleType.INTERVAL, "PT1H"),
+    ],
+)
+async def test_agent_recurring_schedule_create_edit_and_activate(
+    db_session: AsyncSession, schedule_type: ScheduleType, expression: str
+) -> None:
+    owner_id = await _seed_schedule_manager(db_session)
+    version_id = await _seed_published_agent_version(db_session, owner_id)
+    service = ScheduleService(db_session)
+    created = await service.create(
+        _schedule_body(
+            target_type=ScheduleTargetType.AGENT_VERSION,
+            target_id=version_id,
+            schedule_type=schedule_type,
+            schedule_expression=expression,
+            inputs={"request_text": "  read pet list  "},
+        ),
+        owner_id=owner_id,
+    )
+    assert created.status == ScheduleStatus.PAUSED.value
+    assert created.input_template == {"request_text": "read pet list"}
+    patched = await service.update(
+        created.id,
+        ScheduleUpdate(inputs={"request_text": "read cats"}),
+        owner_id=owner_id,
+        expected_lock_version=created.lock_version,
+    )
+    assert patched.input_template == {"request_text": "read cats"}
+    assert patched.next_run_at is None
+    activated = await service.activate(patched.id, owner_id=owner_id)
+    assert activated.agent_version_id == version_id
+    assert activated.schedule_type == schedule_type.value
+    assert activated.next_run_at is not None
+
+
+@pytest.mark.asyncio
+async def test_agent_recurring_schedule_requires_request_text(
+    db_session: AsyncSession,
+) -> None:
+    owner_id = await _seed_schedule_manager(db_session)
+    version_id = await _seed_published_agent_version(db_session, owner_id)
+    with pytest.raises(AppError) as exc:
+        await ScheduleService(db_session).create(
+            _schedule_body(
+                target_type=ScheduleTargetType.AGENT_VERSION,
+                target_id=version_id,
+                schedule_type=ScheduleType.CRON,
+                schedule_expression="0 9 * * *",
+                inputs={"request_text": "  "},
+            ),
+            owner_id=owner_id,
+        )
+    assert exc.value.code == "VALIDATION_ERROR"
 
 
 @pytest.mark.asyncio
@@ -500,6 +560,47 @@ async def test_resume_preserves_overdue_next_run_at(db_session: AsyncSession) ->
     if actual.tzinfo is None:
         actual = actual.replace(tzinfo=UTC)
     assert actual == overdue
+
+
+@pytest.mark.asyncio
+async def test_recurring_window_normalized_to_utc_across_lifecycle(
+    db_session: AsyncSession,
+) -> None:
+    owner_id = await _seed_schedule_manager(db_session)
+    version_id = await _seed_published_agent_version(db_session, owner_id)
+    local_start = (datetime.now(UTC) + timedelta(days=1)).astimezone(
+        timezone(timedelta(hours=9))
+    ).replace(microsecond=0)
+    service = ScheduleService(db_session)
+    created = await service.create(
+        _schedule_body(
+            target_type=ScheduleTargetType.AGENT_VERSION,
+            target_id=version_id,
+            schedule_type=ScheduleType.INTERVAL,
+            schedule_expression="PT1M",
+            start_at=local_start,
+            end_at=local_start + timedelta(hours=2),
+        ),
+        owner_id=owner_id,
+    )
+    stored_start = created.start_at
+    assert stored_start is not None
+    assert stored_start.replace(tzinfo=UTC) == local_start.astimezone(UTC)
+
+    active = await service.activate(created.id, owner_id=owner_id)
+    paused = await service.pause(active.id, owner_id=owner_id)
+    updated = await service.update(
+        paused.id,
+        ScheduleUpdate(schedule_expression="PT2M", lock_version=paused.lock_version),
+        owner_id=owner_id,
+        expected_lock_version=paused.lock_version,
+    )
+    assert updated.next_run_at is None
+    resumed = await service.resume(updated.id, owner_id=owner_id)
+    assert resumed.status == ScheduleStatus.ACTIVE.value
+    next_run = resumed.next_run_at
+    assert next_run is not None
+    assert next_run.replace(tzinfo=UTC) == local_start.astimezone(UTC)
 
 
 @pytest.mark.asyncio

@@ -169,6 +169,38 @@ async def test_create_extra_forbid(schedule_client: AsyncClient) -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("schedule_type", "expression"),
+    [("CRON", "0 9 * * *"), ("INTERVAL", "PT1H")],
+)
+async def test_agent_recurring_api_create_and_activate(
+    schedule_client: AsyncClient,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    schedule_type: str,
+    expression: str,
+) -> None:
+    target_id = await _seed_agent_target(db_session_factory)
+    created = await schedule_client.post(
+        API,
+        json=_create_body(
+            target_id,
+            schedule_type=schedule_type,
+            schedule_expression=expression,
+            inputs={"request_text": "  매일 목록 조회  "},
+        ),
+    )
+    assert created.status_code == 201, created.text
+    result = created.json()
+    assert result["status"] == "PAUSED"
+    assert result["target_id"] == str(target_id)
+    assert result["inputs"] == {"request_text": "매일 목록 조회"}
+    activated = await schedule_client.post(f"{API}/{result['id']}/activate")
+    assert activated.status_code == 200, activated.text
+    assert activated.json()["status"] == "ACTIVE"
+    assert activated.json()["next_run_at"] is not None
+
+
+@pytest.mark.asyncio
 async def test_create_list_get_patch_lifecycle(
     schedule_client: AsyncClient,
     db_session_factory: async_sessionmaker[AsyncSession],

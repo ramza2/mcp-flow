@@ -6,7 +6,6 @@ import uuid
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from app.core.errors import AppError
 from app.domain.enums import (
     ExecutionSourceType,
     ExecutionStatus,
@@ -476,7 +475,7 @@ async def test_replace_supersedes_older_replace_wait(
 
 
 @pytest.mark.asyncio
-async def test_agent_version_interval_create_fail_closed(
+async def test_agent_version_interval_create_supported(
     db_session: AsyncSession,
 ) -> None:
     owner_id = await _seed_schedule_manager(db_session, with_workflow_execute=False)
@@ -488,14 +487,16 @@ async def test_agent_version_interval_create_fail_closed(
         schedule_type=ScheduleType.INTERVAL,
         schedule_expression="PT1H",
         timezone="UTC",
-        inputs={"request_text": "should not create"},
+        inputs={"request_text": "  list pets  "},
         misfire_policy=ScheduleMisfirePolicy.RUN_ONCE,
         overlap_policy=ScheduleOverlapPolicy.ALLOW,
     )
-    with pytest.raises(AppError) as exc:
-        await ScheduleService(db_session).create(body, owner_id=owner_id)
-    assert exc.value.code == "VALIDATION_ERROR"
-    assert "ONCE" in str(exc.value)
+    created = await ScheduleService(db_session).create(body, owner_id=owner_id)
+    assert created.schedule_type == ScheduleType.INTERVAL.value
+    assert created.agent_version_id == agent_version_id
+    assert created.input_template == {"request_text": "list pets"}
+    active = await ScheduleService(db_session).activate(created.id, owner_id=owner_id)
+    assert active.next_run_at is not None
 
 
 async def test_agent_version_once_enqueues_plan_outbox(

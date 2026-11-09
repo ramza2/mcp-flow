@@ -60,6 +60,15 @@ _CONFIG_FIELDS = frozenset(
 )
 
 
+def _stored_utc(value: datetime | None) -> datetime | None:
+    """Keep persisted Schedule times in UTC (SQLite drops timezone metadata)."""
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
+
+
 class ScheduleService:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
@@ -236,7 +245,7 @@ class ScheduleService:
                 message="AGENT_VERSION Schedule inputs must be a JSON object.",
                 status_code=status.HTTP_400_BAD_REQUEST,
             )
-        # ONCE vertical requires non-empty request_text; store normalized copy.
+        # Every Agent occurrence reuses this validated natural-language task.
         text = extract_agent_schedule_request_text(inputs)
         normalized = dict(inputs)
         normalized["request_text"] = text
@@ -411,19 +420,6 @@ class ScheduleService:
             data.schedule_expression,
             data.timezone,
         )
-        if (
-            str(data.target_type) == ScheduleTargetType.AGENT_VERSION.value
-            and str(data.schedule_type) != ScheduleType.ONCE.value
-        ):
-            raise AppError(
-                code="VALIDATION_ERROR",
-                message=(
-                    "AGENT_VERSION Schedule supports schedule_type=ONCE only "
-                    "(CRON/INTERVAL remain fail-closed)."
-                ),
-                status_code=status.HTTP_400_BAD_REQUEST,
-            )
-
         agent_version_id, workflow_version_id, input_template = await self._validate_target(
             target_type=data.target_type,
             target_id=data.target_id,
@@ -448,8 +444,8 @@ class ScheduleService:
             status=ScheduleStatus.PAUSED.value,
             next_run_at=None,
             last_run_at=None,
-            start_at=data.start_at,
-            end_at=data.end_at,
+            start_at=_stored_utc(data.start_at),
+            end_at=_stored_utc(data.end_at),
             created_by=owner_id,
         )
         await self._session.commit()
@@ -542,24 +538,11 @@ class ScheduleService:
                 "schedule_expression", schedule.schedule_expression
             )
             timezone = payload.get("timezone", schedule.timezone)
-            start_at = payload.get("start_at", schedule.start_at)
-            end_at = payload.get("end_at", schedule.end_at)
+            start_at = _stored_utc(payload.get("start_at", schedule.start_at))
+            end_at = _stored_utc(payload.get("end_at", schedule.end_at))
             self._assert_window(start_at, end_at)
 
             validate_schedule_expression(schedule_type, schedule_expression, timezone)
-            if (
-                str(target_type) == ScheduleTargetType.AGENT_VERSION.value
-                and schedule_type != ScheduleType.ONCE.value
-            ):
-                raise AppError(
-                    code="VALIDATION_ERROR",
-                    message=(
-                        "AGENT_VERSION Schedule supports schedule_type=ONCE only "
-                        "(CRON/INTERVAL remain fail-closed)."
-                    ),
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                )
-
             inputs = payload.get("inputs", schedule.input_template or {})
             agent_version_id, workflow_version_id, input_template = (
                 await self._validate_target(
@@ -628,7 +611,8 @@ class ScheduleService:
             )
 
         now = datetime.now(UTC)
-        start_at = schedule.start_at
+        start_at = _stored_utc(schedule.start_at)
+        end_at = _stored_utc(schedule.end_at)
         if schedule.schedule_type == ScheduleType.INTERVAL.value and start_at is None:
             start_at = now
 
@@ -650,7 +634,7 @@ class ScheduleService:
             schedule.schedule_expression,
             schedule.timezone,
         )
-        self._assert_window(start_at, schedule.end_at)
+        self._assert_window(start_at, end_at)
 
         next_run = self._compute_next_run(
             schedule_type=schedule.schedule_type,
@@ -658,7 +642,7 @@ class ScheduleService:
             timezone=schedule.timezone,
             after=now,
             start_at=start_at,
-            end_at=schedule.end_at,
+            end_at=end_at,
         )
         if schedule.schedule_type == ScheduleType.ONCE.value and next_run is None:
             raise AppError(
@@ -735,7 +719,8 @@ class ScheduleService:
             )
 
         now = datetime.now(UTC)
-        start_at = schedule.start_at
+        start_at = _stored_utc(schedule.start_at)
+        end_at = _stored_utc(schedule.end_at)
         if schedule.schedule_type == ScheduleType.INTERVAL.value and start_at is None:
             start_at = now
 
@@ -757,10 +742,10 @@ class ScheduleService:
             schedule.schedule_expression,
             schedule.timezone,
         )
-        self._assert_window(start_at, schedule.end_at)
+        self._assert_window(start_at, end_at)
 
         # Preserve overdue next_run_at; only recompute when null (config edit).
-        next_run = schedule.next_run_at
+        next_run = _stored_utc(schedule.next_run_at)
         if next_run is None:
             next_run = self._compute_next_run(
                 schedule_type=schedule.schedule_type,
@@ -768,7 +753,7 @@ class ScheduleService:
                 timezone=schedule.timezone,
                 after=now,
                 start_at=start_at,
-                end_at=schedule.end_at,
+                end_at=end_at,
             )
             if (
                 schedule.schedule_type == ScheduleType.ONCE.value
