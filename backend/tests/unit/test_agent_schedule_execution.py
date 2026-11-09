@@ -15,8 +15,8 @@ from app.domain.enums import (
     ScheduleTargetType,
     ScheduleType,
 )
-from app.models.outbox import OutboxEvent
 from app.models.execution import Execution
+from app.models.outbox import OutboxEvent
 from app.repositories.schedule import ScheduleRepository
 from app.repositories.schedule_occurrence import ScheduleOccurrenceRepository
 from app.scheduler import decision_reasons as reasons
