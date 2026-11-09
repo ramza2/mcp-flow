@@ -33,6 +33,15 @@ const existing = {
   start_at: null, end_at: null, created_at: '2026-11-06T00:00:00Z',
   updated_at: '2026-11-06T00:00:00Z', lock_version: 4,
 };
+const firstOccurrence = {
+  id: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd', schedule_id: scheduleId,
+  scheduled_for: '2026-11-09T04:49:33Z', status: 'COMPLETED', decision_reason: 'DUE',
+  execution_id: null, created_at: '2026-11-09T04:49:34Z', enqueued_at: null, finished_at: null,
+};
+const nextOccurrence = {
+  ...firstOccurrence, id: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
+  scheduled_for: '2026-11-09T04:52:33Z', status: 'SKIPPED', decision_reason: 'MISFIRE_SKIP',
+};
 
 beforeEach(() => {
   for (const mock of Object.values(mocks)) mock.mockReset();
@@ -97,6 +106,70 @@ describe('Schedule live management', () => {
     await act(async () => { (tick as () => void)(); });
     expect(screen.getByText('정기 예약')).toBeInTheDocument();
     expect(screen.getByText(/자동 갱신에 실패했습니다/)).toBeInTheDocument();
+  });
+
+  it('refreshes only detail occurrence history every 15 seconds without resetting unsaved fields', async () => {
+    const intervalSpy = vi.spyOn(window, 'setInterval');
+    mocks.get.mockResolvedValueOnce({ ...existing, status: 'PAUSED' });
+    mocks.occurrences.mockResolvedValueOnce(page([firstOccurrence])).mockResolvedValueOnce(page([nextOccurrence, firstOccurrence]));
+    renderWithRouter(<ScheduleEdit />, { path: '/schedules/:id/edit', route: `/schedules/${scheduleId}/edit` });
+    expect(await screen.findByText(/13:49.*COMPLETED.*DUE/)).toBeInTheDocument();
+    expect(screen.getByRole('status')).toHaveTextContent('15초마다 자동 갱신');
+    fireEvent.change(screen.getByRole('textbox', { name: '이름' }), { target: { value: '저장 전 수정한 이름' } });
+    const tick = intervalSpy.mock.calls.find(([, delay]) => delay === 15_000)?.[0];
+    expect(tick).toBeTypeOf('function');
+    await act(async () => { (tick as () => void)(); });
+    expect(await screen.findByText(/13:52.*SKIPPED.*MISFIRE_SKIP/)).toBeInTheDocument();
+    expect(screen.getByRole('textbox', { name: '이름' })).toHaveValue('저장 전 수정한 이름');
+    expect(mocks.get).toHaveBeenCalledTimes(1);
+    expect(mocks.occurrences).toHaveBeenCalledTimes(2);
+    expect(mocks.occurrences).toHaveBeenLastCalledWith(scheduleId, expect.objectContaining({ page_size: 20 }));
+  });
+
+  it('skips detail history polling while hidden and refreshes on tab return', async () => {
+    const intervalSpy = vi.spyOn(window, 'setInterval');
+    const visibilitySpy = vi.spyOn(document, 'visibilityState', 'get');
+    mocks.occurrences.mockResolvedValueOnce(page([firstOccurrence])).mockResolvedValueOnce(page([nextOccurrence]));
+    renderWithRouter(<ScheduleEdit />, { path: '/schedules/:id/edit', route: `/schedules/${scheduleId}/edit` });
+    expect(await screen.findByText(/13:49.*COMPLETED.*DUE/)).toBeInTheDocument();
+    const tick = intervalSpy.mock.calls.find(([, delay]) => delay === 15_000)?.[0];
+    visibilitySpy.mockReturnValue('hidden');
+    await act(async () => { (tick as () => void)(); });
+    expect(mocks.occurrences).toHaveBeenCalledTimes(1);
+    visibilitySpy.mockReturnValue('visible');
+    await act(async () => { fireEvent(document, new Event('visibilitychange')); });
+    expect(await screen.findByText(/13:52.*SKIPPED.*MISFIRE_SKIP/)).toBeInTheDocument();
+    expect(mocks.occurrences).toHaveBeenCalledTimes(2);
+  });
+
+  it('preserves previous detail history on polling failure and recovers by manual history refresh', async () => {
+    const intervalSpy = vi.spyOn(window, 'setInterval');
+    mocks.occurrences.mockResolvedValueOnce(page([firstOccurrence]))
+      .mockRejectedValueOnce(new Error('network'))
+      .mockResolvedValueOnce(page([nextOccurrence]));
+    renderWithRouter(<ScheduleEdit />, { path: '/schedules/:id/edit', route: `/schedules/${scheduleId}/edit` });
+    expect(await screen.findByText(/13:49.*COMPLETED.*DUE/)).toBeInTheDocument();
+    const tick = intervalSpy.mock.calls.find(([, delay]) => delay === 15_000)?.[0];
+    await act(async () => { (tick as () => void)(); });
+    expect(screen.getByText(/13:49.*COMPLETED.*DUE/)).toBeInTheDocument();
+    expect(screen.getByText(/이력 자동 갱신에 실패했습니다/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '이력 새로고침' }));
+    expect(await screen.findByText(/13:52.*SKIPPED.*MISFIRE_SKIP/)).toBeInTheDocument();
+    expect(screen.queryByText(/이력 자동 갱신에 실패했습니다/)).not.toBeInTheDocument();
+    expect(mocks.occurrences).toHaveBeenCalledTimes(3);
+    expect(mocks.get).toHaveBeenCalledTimes(1);
+  });
+
+  it('stops detail history polling and visibility listeners when leaving the page', async () => {
+    const intervalSpy = vi.spyOn(window, 'setInterval');
+    const clearIntervalSpy = vi.spyOn(window, 'clearInterval');
+    const { unmount } = renderWithRouter(<ScheduleEdit />, { path: '/schedules/:id/edit', route: `/schedules/${scheduleId}/edit` });
+    await waitFor(() => expect(mocks.occurrences).toHaveBeenCalledTimes(1));
+    const timer = intervalSpy.mock.results.find((_, index) => intervalSpy.mock.calls[index][1] === 15_000)?.value;
+    unmount();
+    expect(clearIntervalSpy).toHaveBeenCalledWith(timer);
+    fireEvent(document, new Event('visibilitychange'));
+    expect(mocks.occurrences).toHaveBeenCalledTimes(1);
   });
 
   it('offers published Agent versions, recurring schedules and canonical policies', async () => {

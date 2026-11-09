@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router';
+import { RefreshCw } from 'lucide-react';
 import PageHeader from '../../components/ui/PageHeader';
 import Button from '../../components/ui/Button';
 import { ErrorState, InlineAlert, LoadingSkeleton } from '../../components/ui/EmptyState';
@@ -24,6 +25,7 @@ type TargetOption = { id: string; name: string };
 type VersionOption = { id: string; version_no: number };
 type IntervalUnit = 'MINUTES' | 'HOURS' | 'DAYS';
 type CronPreset = 'DAILY' | 'WEEKDAYS' | 'WEEKLY' | 'ADVANCED';
+const HISTORY_REFRESH_MS = 15_000;
 
 function parseBasicInterval(value: string): { count: string; unit: IntervalUnit } | null {
   const match = /^(?:P(\d+)D|PT(\d+)([HM]))$/.exec(value);
@@ -101,6 +103,9 @@ export default function ScheduleEdit() {
 
   const [occurrences, setOccurrences] = useState<ScheduleOccurrenceDto[]>([]);
   const [occurrenceError, setOccurrenceError] = useState<string | null>(null);
+  const [historyRefreshError, setHistoryRefreshError] = useState<string | null>(null);
+  const [historyLastSynced, setHistoryLastSynced] = useState<number | null>(null);
+  const [historyReload, setHistoryReload] = useState(0);
 
   useEffect(() => {
     if (isNew || !id) return;
@@ -181,11 +186,37 @@ export default function ScheduleEdit() {
   useEffect(() => {
     if (!id || isNew) return;
     const controller = new AbortController();
-    listScheduleOccurrences(id, { page_size: 20, signal: controller.signal })
-      .then(data => { if (!controller.signal.aborted) setOccurrences(data.items); })
-      .catch(err => { if (!controller.signal.aborted && !isAbortError(err)) setOccurrenceError(errorText(err)); });
-    return () => controller.abort();
-  }, [id, isNew, refresh]);
+    let inFlight = false;
+    const loadHistory = async (quiet: boolean) => {
+      if (inFlight) return;
+      inFlight = true;
+      try {
+        const data = await listScheduleOccurrences(id, { page_size: 20, signal: controller.signal });
+        if (controller.signal.aborted) return;
+        setOccurrences(data.items);
+        setOccurrenceError(null);
+        setHistoryRefreshError(null);
+        setHistoryLastSynced(Date.now());
+      } catch (err) {
+        if (controller.signal.aborted || isAbortError(err)) return;
+        if (quiet) setHistoryRefreshError('이력 자동 갱신에 실패했습니다. 다음 갱신을 기다리거나 이력 새로고침을 눌러주세요.');
+        else setOccurrenceError(errorText(err));
+      } finally {
+        inFlight = false;
+      }
+    };
+    const refreshVisibleHistory = () => {
+      if (document.visibilityState === 'visible') void loadHistory(true);
+    };
+    void loadHistory(false);
+    const timer = window.setInterval(refreshVisibleHistory, HISTORY_REFRESH_MS);
+    document.addEventListener('visibilitychange', refreshVisibleHistory);
+    return () => {
+      controller.abort();
+      window.clearInterval(timer);
+      document.removeEventListener('visibilitychange', refreshVisibleHistory);
+    };
+  }, [id, isNew, refresh, historyReload]);
 
   const configLocked = existing !== null && existing.status !== 'PAUSED';
   const readOnly = loading || saving;
@@ -426,7 +457,14 @@ export default function ScheduleEdit() {
         </Section>
 
         {existing && <Section title="최근 예약 실행 이력">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <p className="text-xs text-slate-500" role="status">
+              {historyLastSynced ? `마지막 갱신: ${new Date(historyLastSynced).toLocaleTimeString('ko-KR')} · 화면을 보는 동안 15초마다 자동 갱신` : '예약 실행 이력을 조회 중입니다.'}
+            </p>
+            <Button variant="outline" size="sm" icon={<RefreshCw size={13} />} onClick={() => setHistoryReload(value => value + 1)}>이력 새로고침</Button>
+          </div>
           {occurrenceError && <InlineAlert type="error" message={`이력 조회 실패: ${occurrenceError}`} />}
+          {historyRefreshError && <InlineAlert type="warning" message={historyRefreshError} />}
           {occurrences.length === 0 ? <p className="text-sm text-slate-500">실행 이력이 없습니다.</p> : (
             <ul className="space-y-2">
               {occurrences.map(occ => <li key={occ.id} className="border-b border-slate-100 pb-2 text-sm flex flex-wrap items-center justify-between gap-2">
