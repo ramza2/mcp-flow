@@ -691,6 +691,7 @@ Designer 규칙:
 ### Live registry UI (2026-11-06)
 
 - `/schedules`는 실제 `GET /api/v1/schedules`를 조회한다. 이름 검색·상태 필터·페이지·새로고침·권한/오류 상태를 제공한다.
+- 목록이 열린 브라우저 탭에서는 15초마다 현재 검색·필터·페이지의 서버 상태(`next_run_at`, `last_run_at`, `status` 포함)를 조용히 재조회한다. 탭이 숨겨지면 주기 조회를 건너뛰고 복귀 시 즉시 재조회한다. 일시적 자동 갱신 실패는 기존 목록을 유지하고 경고·최근 갱신 시각을 표시하며, 수동 새로고침을 계속 제공한다.
 - 목록/설정 화면에서 `activate`·`pause`·`resume`은 사용자 클릭으로만 실행한다. Backend 상태 `ACTIVE/PAUSED/COMPLETED/ERROR`를 그대로 표시한다.
 - 신규 예약은 `POST /schedules`로 **PAUSED** 저장 후 별도 활성화한다. 자동으로 실행하지 않는다.
 - 대상은 실제 Agent/Workflow 목록 및 `PUBLISHED` + `VALID` Version에서 **명시적 Version ID**를 선택한다. 목업 ID·임의 latest 대체 불가.
@@ -698,6 +699,7 @@ Designer 규칙:
 - `ACTIVE`/`COMPLETED`/`ERROR`에서는 이름과 설명만 PATCH 가능하며, `PAUSED`에서만 일정·대상·정책을 수정한다. PATCH는 `lock_version` optimistic lock을 사용한다.
 - 설정 화면은 `GET /schedules/{id}/occurrences` 최근 20건과 연결된 Execution 상세로의 이동을 제공한다.
 - 현 UI의 CRON 예시 텍스트는 실제 서버 계산 결과가 아니다. 서버 제공 preview API가 생기기 전까지 실행 예정 시각을 **추측 표시하지 않는다**.
+- `INTERVAL`은 숫자+분/시간/일 단위 입력을 기본으로 하고 기존 ISO-8601 표현식은 고급 입력으로 보존한다. `CRON`은 매일/평일/특정 요일+시간 선택과 고급 5필드 직접 입력을 제공하며, 저장 API는 기존 `schedule_expression` 형식을 그대로 사용한다. 알 수 없는 기존 복합 표현식은 고급 모드에서 손실 없이 보존한다.
 
 Form:
 

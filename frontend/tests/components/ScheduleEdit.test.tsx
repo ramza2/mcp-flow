@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
-import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { fireEvent, screen, waitFor, within } from '@testing-library/react';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { act, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import ScheduleEdit from '@/screens/work/ScheduleEdit';
 import Schedules from '@/screens/work/Schedules';
 import { renderWithRouter } from '../test-utils';
@@ -48,6 +48,8 @@ beforeEach(() => {
   mocks.occurrences.mockResolvedValue(page([]));
 });
 
+afterEach(() => vi.restoreAllMocks());
+
 describe('Schedule live management', () => {
   it('shows live API rows (not mock examples) and invokes pause', async () => {
     renderWithRouter(<Schedules />, { path: '/schedules', route: '/schedules' });
@@ -55,6 +57,46 @@ describe('Schedule live management', () => {
     expect(mocks.list).toHaveBeenCalled();
     fireEvent.click(screen.getByRole('button', { name: '일시정지' }));
     await waitFor(() => expect(mocks.status).toHaveBeenCalledWith(scheduleId, 'pause'));
+  });
+
+  it('quietly refreshes visible schedules every 15 seconds without requiring page reload', async () => {
+    const intervalSpy = vi.spyOn(window, 'setInterval');
+    mocks.list.mockResolvedValueOnce(page([{ ...existing, status: 'ACTIVE' }]))
+      .mockResolvedValueOnce(page([{ ...existing, name: '자동 갱신됨', status: 'PAUSED' }]));
+    renderWithRouter(<Schedules />, { path: '/schedules', route: '/schedules' });
+    expect(await screen.findByText('정기 예약')).toBeInTheDocument();
+    expect(screen.getByRole('status')).toHaveTextContent('15초마다 자동 갱신');
+    const tick = intervalSpy.mock.calls.find(([, delay]) => delay === 15_000)?.[0];
+    expect(tick).toBeTypeOf('function');
+    await act(async () => { (tick as () => void)(); });
+    expect(await screen.findByText('자동 갱신됨')).toBeInTheDocument();
+    expect(mocks.list).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not poll in a background tab, but refreshes upon returning', async () => {
+    const intervalSpy = vi.spyOn(window, 'setInterval');
+    const visibilitySpy = vi.spyOn(document, 'visibilityState', 'get');
+    renderWithRouter(<Schedules />, { path: '/schedules', route: '/schedules' });
+    expect(await screen.findByText('정기 예약')).toBeInTheDocument();
+    const tick = intervalSpy.mock.calls.find(([, delay]) => delay === 15_000)?.[0];
+    expect(tick).toBeTypeOf('function');
+    visibilitySpy.mockReturnValue('hidden');
+    await act(async () => { (tick as () => void)(); });
+    expect(mocks.list).toHaveBeenCalledTimes(1);
+    visibilitySpy.mockReturnValue('visible');
+    await act(async () => { fireEvent(document, new Event('visibilitychange')); });
+    await waitFor(() => expect(mocks.list).toHaveBeenCalledTimes(2));
+  });
+
+  it('keeps displayed rows when a background refresh fails', async () => {
+    const intervalSpy = vi.spyOn(window, 'setInterval');
+    mocks.list.mockResolvedValueOnce(page([existing])).mockRejectedValueOnce(new Error('network'));
+    renderWithRouter(<Schedules />, { path: '/schedules', route: '/schedules' });
+    expect(await screen.findByText('정기 예약')).toBeInTheDocument();
+    const tick = intervalSpy.mock.calls.find(([, delay]) => delay === 15_000)?.[0];
+    await act(async () => { (tick as () => void)(); });
+    expect(screen.getByText('정기 예약')).toBeInTheDocument();
+    expect(screen.getByText(/자동 갱신에 실패했습니다/)).toBeInTheDocument();
   });
 
   it('offers published Agent versions, recurring schedules and canonical policies', async () => {
@@ -103,13 +145,49 @@ describe('Schedule live management', () => {
     fireEvent.change(screen.getByRole('textbox', { name: '이름' }), { target: { value: '아침 조회' } });
     fireEvent.change(screen.getByRole('textbox', { name: 'Agent 업무 지시' }), { target: { value: '오늘 반려동물 목록을 조회해 줘' } });
     fireEvent.change(screen.getByRole('combobox', { name: '예약 종류' }), { target: { value: 'CRON' } });
-    expect(screen.getByText(/0 9 \* \* \* = 매일 오전 9시/)).toBeInTheDocument();
+    expect(screen.getByRole('combobox', { name: '반복 규칙' })).toHaveValue('DAILY');
+    expect(screen.getByLabelText('반복 실행 시간')).toHaveValue('09:00');
     fireEvent.click(screen.getByRole('button', { name: '저장' }));
     await waitFor(() => expect(mocks.create).toHaveBeenCalledWith(expect.objectContaining({
       name: '아침 조회', target_type: 'AGENT_VERSION', target_id: versionId,
       schedule_type: 'CRON', schedule_expression: '0 9 * * *', timezone: 'Asia/Seoul',
       inputs: { request_text: '오늘 반려동물 목록을 조회해 줘' },
       overlap_policy: 'SKIP', misfire_policy: 'SKIP', max_catch_up: 1,
+    })));
+  });
+
+  it('creates a weekly CRON expression using weekday and local time controls', async () => {
+    renderWithRouter(<ScheduleEdit />, { path: '/schedules/new', route: '/schedules/new' });
+    await waitFor(() => expect(screen.getByRole('combobox', { name: '대상 선택' })).toBeEnabled());
+    fireEvent.change(screen.getByRole('combobox', { name: '대상 선택' }), { target: { value: agentId } });
+    await waitFor(() => expect(screen.getByRole('combobox', { name: '게시된 Version' })).toBeEnabled());
+    fireEvent.change(screen.getByRole('combobox', { name: '게시된 Version' }), { target: { value: versionId } });
+    fireEvent.change(screen.getByRole('textbox', { name: '이름' }), { target: { value: '금요일 업무' } });
+    fireEvent.change(screen.getByRole('textbox', { name: 'Agent 업무 지시' }), { target: { value: '조회' } });
+    fireEvent.change(screen.getByRole('combobox', { name: '예약 종류' }), { target: { value: 'CRON' } });
+    fireEvent.change(screen.getByRole('combobox', { name: '반복 규칙' }), { target: { value: 'WEEKLY' } });
+    fireEvent.change(screen.getByLabelText('반복 실행 시간'), { target: { value: '14:30' } });
+    fireEvent.change(screen.getByRole('combobox', { name: '반복 요일' }), { target: { value: '5' } });
+    fireEvent.click(screen.getByRole('button', { name: '저장' }));
+    await waitFor(() => expect(mocks.create).toHaveBeenCalledWith(expect.objectContaining({
+      schedule_type: 'CRON', schedule_expression: '30 14 * * 5',
+    })));
+  });
+
+  it('creates three-minute intervals from number and unit controls', async () => {
+    renderWithRouter(<ScheduleEdit />, { path: '/schedules/new', route: '/schedules/new' });
+    await waitFor(() => expect(screen.getByRole('combobox', { name: '대상 선택' })).toBeEnabled());
+    fireEvent.change(screen.getByRole('combobox', { name: '대상 선택' }), { target: { value: agentId } });
+    await waitFor(() => expect(screen.getByRole('combobox', { name: '게시된 Version' })).toBeEnabled());
+    fireEvent.change(screen.getByRole('combobox', { name: '게시된 Version' }), { target: { value: versionId } });
+    fireEvent.change(screen.getByRole('textbox', { name: '이름' }), { target: { value: '3분 간격 조회' } });
+    fireEvent.change(screen.getByRole('textbox', { name: 'Agent 업무 지시' }), { target: { value: '조회' } });
+    fireEvent.change(screen.getByRole('combobox', { name: '예약 종류' }), { target: { value: 'INTERVAL' } });
+    fireEvent.change(screen.getByLabelText('반복 간격 숫자'), { target: { value: '3' } });
+    fireEvent.change(screen.getByRole('combobox', { name: '반복 간격 단위' }), { target: { value: 'MINUTES' } });
+    fireEvent.click(screen.getByRole('button', { name: '저장' }));
+    await waitFor(() => expect(mocks.create).toHaveBeenCalledWith(expect.objectContaining({
+      schedule_type: 'INTERVAL', schedule_expression: 'PT3M',
     })));
   });
 
@@ -129,5 +207,42 @@ describe('Schedule live management', () => {
     fireEvent.change(screen.getByRole('textbox', { name: '이름' }), { target: { value: '설명만 수정한 예약' } });
     fireEvent.click(screen.getByRole('button', { name: '저장' }));
     await waitFor(() => expect(mocks.update).toHaveBeenCalledWith(scheduleId, { name: '설명만 수정한 예약' }, 4));
+  });
+
+  it('preserves a paused three-minute expression during a metadata-only edit', async () => {
+    mocks.get.mockResolvedValueOnce({ ...existing, status: 'PAUSED', schedule_type: 'INTERVAL', schedule_expression: 'PT3M' });
+    renderWithRouter(<ScheduleEdit />, { path: '/schedules/:id/edit', route: `/schedules/${scheduleId}/edit` });
+    await waitFor(() => expect(screen.getByLabelText('반복 간격 숫자')).toHaveValue(3));
+    expect(screen.getByRole('combobox', { name: '반복 간격 단위' })).toHaveValue('MINUTES');
+    fireEvent.change(screen.getByRole('textbox', { name: '이름' }), { target: { value: '이름만 수정' } });
+    fireEvent.click(screen.getByRole('button', { name: '저장' }));
+    await waitFor(() => expect(mocks.update).toHaveBeenCalledWith(scheduleId, { name: '이름만 수정' }, 4));
+  });
+
+  it('round-trips advanced simple intervals and protects complex intervals from accidental replacement', async () => {
+    mocks.get.mockResolvedValueOnce({ ...existing, status: 'PAUSED', schedule_type: 'INTERVAL', schedule_expression: 'PT3M' });
+    renderWithRouter(<ScheduleEdit />, { path: '/schedules/:id/edit', route: `/schedules/${scheduleId}/edit` });
+    await waitFor(() => expect(screen.getByLabelText('반복 간격 숫자')).toHaveValue(3));
+    fireEvent.click(screen.getByRole('checkbox', { name: '고급 입력 (ISO-8601)' }));
+    fireEvent.change(screen.getByRole('textbox', { name: '실행 간격 (ISO-8601)' }), { target: { value: 'PT15M' } });
+    fireEvent.click(screen.getByRole('checkbox', { name: '고급 입력 (ISO-8601)' }));
+    expect(screen.getByLabelText('반복 간격 숫자')).toHaveValue(15);
+    expect(screen.getByRole('combobox', { name: '반복 간격 단위' })).toHaveValue('MINUTES');
+    fireEvent.click(screen.getByRole('checkbox', { name: '고급 입력 (ISO-8601)' }));
+    fireEvent.change(screen.getByRole('textbox', { name: '실행 간격 (ISO-8601)' }), { target: { value: 'P1DT2H' } });
+    fireEvent.click(screen.getByRole('checkbox', { name: '고급 입력 (ISO-8601)' }));
+    expect(screen.getByRole('checkbox', { name: '고급 입력 (ISO-8601)' })).toBeChecked();
+    expect(screen.getByRole('textbox', { name: '실행 간격 (ISO-8601)' })).toHaveValue('P1DT2H');
+    expect(screen.getByText(/현재 복합 실행 간격은 숫자·단위 입력으로 표현할 수 없습니다/)).toBeInTheDocument();
+  });
+
+  it('preserves an advanced CRON expression during a metadata-only edit', async () => {
+    mocks.get.mockResolvedValueOnce({ ...existing, status: 'PAUSED', schedule_type: 'CRON', schedule_expression: '*/15 9-18 * * 1-5' });
+    renderWithRouter(<ScheduleEdit />, { path: '/schedules/:id/edit', route: `/schedules/${scheduleId}/edit` });
+    await waitFor(() => expect(screen.getByRole('combobox', { name: '반복 규칙' })).toHaveValue('ADVANCED'));
+    expect(screen.getByRole('textbox', { name: 'CRON 표현식' })).toHaveValue('*/15 9-18 * * 1-5');
+    fireEvent.change(screen.getByRole('textbox', { name: '이름' }), { target: { value: '이름만 수정' } });
+    fireEvent.click(screen.getByRole('button', { name: '저장' }));
+    await waitFor(() => expect(mocks.update).toHaveBeenCalledWith(scheduleId, { name: '이름만 수정' }, 4));
   });
 });
