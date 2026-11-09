@@ -1,4 +1,4 @@
-"""AGENT_VERSION Schedule ONCE → AgentRequest pipeline → SCHEDULE_OCCURRENCE Execution.
+"""AGENT_VERSION Schedule occurrence → AgentRequest → safe Execution.
 
 Scheduler Schedule FOR UPDATE must never call LLM/MCP. This service is invoked
 from the dedicated ``agent-schedule-planner`` process after a durable
@@ -163,10 +163,14 @@ class AgentScheduleExecutionService:
                 message="enqueue_plan_outbox requires AGENT_VERSION target.",
                 status_code=409,
             )
-        if schedule.schedule_type != ScheduleType.ONCE.value:
+        if schedule.schedule_type not in {
+            ScheduleType.ONCE.value,
+            ScheduleType.CRON.value,
+            ScheduleType.INTERVAL.value,
+        }:
             raise AppError(
                 code="EXECUTION_PRECONDITION_FAILED",
-                message="AGENT_VERSION Schedule execution supports ONCE only.",
+                message="AGENT_VERSION Schedule has an unsupported schedule_type.",
                 status_code=409,
             )
         if schedule.agent_version_id is None:

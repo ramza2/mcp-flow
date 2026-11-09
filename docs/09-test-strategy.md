@@ -1041,7 +1041,7 @@ Approval `REJECTED/EXPIRED`를 Execution `REJECTED/EXPIRED` 상태로 직접 매
 ### Frontend Live registry (2026-11-06)
 
 - `frontend/src/api/__tests__/schedules-api.test.ts`: 실제 API 경로·검색/페이징·Version ID pin·CSRF create·If-Match PATCH·lifecycle·occurrence 목록.
-- `frontend/tests/components/ScheduleEdit.test.tsx`: Mock 화면을 사용하지 않고 live 목록 표시, 명시 PUBLISHED/VALID 버전 선택, Agent ONCE 제한, 신규 PAUSED 저장, ACTIVE 편집 제약, PAUSED 메타데이터 PATCH 시 다음 예약시각 보존.
+- `frontend/tests/components/ScheduleEdit.test.tsx`: Mock 화면을 사용하지 않고 live 목록 표시, 명시 PUBLISHED/VALID 버전 선택, Agent ONCE/CRON/INTERVAL 지원, 신규 PAUSED 저장, ACTIVE 편집 제약, PAUSED 메타데이터 PATCH 시 다음 예약시각 보존.
 - 시간 표시는 해당 Schedule IANA timezone 기준이며, CRON의 임의 fake next-run preview는 출력하지 않는다.
 
 ### Registry foundation (implemented)
@@ -1062,6 +1062,13 @@ Approval `REJECTED/EXPIRED`를 Execution `REJECTED/EXPIRED` 상태로 직접 매
 | Integration | `tests/integration/test_schedule_runtime.py` — due fire → SCHEDULE_OCCURRENCE Execution, queue/claim, REPLACE wait, exact WorkflowVersion pin, Approval/MRTR scheduled path |
 
 예약이 logical Agent/Workflow의 최신 version을 암묵적으로 실행하지 않는지 확인한다. `CANCEL_REQUESTED` crash recovery는 별도 slice.
+
+### Agent recurring Schedule (#185)
+
+- Agent CRON/INTERVAL 생성·PATCH·활성화, 동일 버전 pin/`request_text` 유지 및 invalid inputs fail-closed.
+- 여러 due tick의 고유 Occurrence/Outbox/AgentRequest lineage, 중복 fire/consumer 시 정확히 한 번의 materialization.
+- Agent planning 진행 중 overlap `SKIP`/`QUEUE`/`REPLACE`/`ALLOW`, misfire 정책 및 기존 DST recurrence 보존.
+- 비-READY, 비-READ_ONLY, 승인·확인 필요 경로는 Execution 미생성; 수동 Agent trigger 차단.
 
 ---
 

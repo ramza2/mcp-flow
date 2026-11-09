@@ -57,7 +57,7 @@ describe('Schedule live management', () => {
     await waitFor(() => expect(mocks.status).toHaveBeenCalledWith(scheduleId, 'pause'));
   });
 
-  it('only offers explicit published Agent versions, canonical policies and ONCE', async () => {
+  it('offers published Agent versions, recurring schedules and canonical policies', async () => {
     renderWithRouter(<ScheduleEdit />, { path: '/schedules/new', route: '/schedules/new' });
     expect(screen.getByText('Agent Version')).toBeInTheDocument();
     expect(screen.getByText('Workflow Version')).toBeInTheDocument();
@@ -67,7 +67,8 @@ describe('Schedule live management', () => {
     await waitFor(() => expect(within(screen.getByRole('combobox', { name: '대상 선택' })).getByRole('option', { name: 'Pets Agent' })).toBeInTheDocument());
     fireEvent.change(screen.getByRole('combobox', { name: '대상 선택' }), { target: { value: agentId } });
     await waitFor(() => expect(within(screen.getByRole('combobox', { name: '게시된 Version' })).getByRole('option', { name: /v3/ })).toBeInTheDocument());
-    expect(within(screen.getByRole('combobox', { name: '예약 종류' })).queryByRole('option', { name: /CRON/ })).not.toBeInTheDocument();
+    expect(within(screen.getByRole('combobox', { name: '예약 종류' })).getByRole('option', { name: /CRON/ })).toBeInTheDocument();
+    expect(within(screen.getByRole('combobox', { name: '예약 종류' })).getByRole('option', { name: /INTERVAL/ })).toBeInTheDocument();
     const overlap = screen.getByRole('combobox', { name: '동시 실행 정책' });
     const misfire = screen.getByRole('combobox', { name: '미실행 처리 정책' });
     expect(within(overlap).getByRole('option', { name: 'REPLACE' })).toBeInTheDocument();
@@ -91,6 +92,25 @@ describe('Schedule live management', () => {
       inputs: { request_text: '반려동물 목록' },
     });
     expect(mocks.create.mock.calls[0][0]).not.toHaveProperty('status');
+  });
+
+  it('creates a daily CRON Agent Schedule with a pinned version and task', async () => {
+    renderWithRouter(<ScheduleEdit />, { path: '/schedules/new', route: '/schedules/new' });
+    await waitFor(() => expect(screen.getByRole('combobox', { name: '대상 선택' })).toBeEnabled());
+    fireEvent.change(screen.getByRole('combobox', { name: '대상 선택' }), { target: { value: agentId } });
+    await waitFor(() => expect(within(screen.getByRole('combobox', { name: '게시된 Version' })).getByRole('option', { name: /v3/ })).toBeInTheDocument());
+    fireEvent.change(screen.getByRole('combobox', { name: '게시된 Version' }), { target: { value: versionId } });
+    fireEvent.change(screen.getByRole('textbox', { name: '이름' }), { target: { value: '아침 조회' } });
+    fireEvent.change(screen.getByRole('textbox', { name: 'Agent 업무 지시' }), { target: { value: '오늘 반려동물 목록을 조회해 줘' } });
+    fireEvent.change(screen.getByRole('combobox', { name: '예약 종류' }), { target: { value: 'CRON' } });
+    expect(screen.getByText(/0 9 \* \* \* = 매일 오전 9시/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '저장' }));
+    await waitFor(() => expect(mocks.create).toHaveBeenCalledWith(expect.objectContaining({
+      name: '아침 조회', target_type: 'AGENT_VERSION', target_id: versionId,
+      schedule_type: 'CRON', schedule_expression: '0 9 * * *', timezone: 'Asia/Seoul',
+      inputs: { request_text: '오늘 반려동물 목록을 조회해 줘' },
+      overlap_policy: 'SKIP', misfire_policy: 'SKIP', max_catch_up: 1,
+    })));
   });
 
   it('locks configuration on ACTIVE and sends metadata-only PATCH with lock version', async () => {

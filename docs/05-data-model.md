@@ -1670,7 +1670,7 @@ Unique `(schedule_id, scheduled_for)`로 중복 occurrence를 차단한다.
 - `executions.schedule_occurrence_id` → `schedule_occurrences.id` FK + unique partial index (migration `20261002_0023`). At most one Execution per Occurrence.
 - `ck_executions_schedule_occurrence_lineage` (migration `20261028_0038`): `SCHEDULE_OCCURRENCE` XOR
   - Workflow: `workflow_version_id NOT NULL` + agent/plan_validation NULL
-  - Agent (ONCE vertical): `agent_version_id` + `agent_request_id` + `plan_validation_run_id` NOT NULL + `workflow_version_id` NULL
+  - Agent (ONCE/CRON/INTERVAL): `agent_version_id` + `agent_request_id` + `plan_validation_run_id` NOT NULL + `workflow_version_id` NULL; 각 occurrence의 AgentRequest/Execution은 독립적이며 Version은 명시적으로 pin된다.
 
 ---
 

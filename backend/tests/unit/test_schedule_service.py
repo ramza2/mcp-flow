@@ -237,6 +237,66 @@ async def test_create_pins_agent_version(db_session: AsyncSession) -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("schedule_type", "expression"),
+    [
+        (ScheduleType.CRON, "0 9 * * *"),
+        (ScheduleType.INTERVAL, "PT1H"),
+    ],
+)
+async def test_agent_recurring_schedule_create_edit_and_activate(
+    db_session: AsyncSession, schedule_type: ScheduleType, expression: str
+) -> None:
+    owner_id = await _seed_schedule_manager(db_session)
+    version_id = await _seed_published_agent_version(db_session, owner_id)
+    service = ScheduleService(db_session)
+    created = await service.create(
+        _schedule_body(
+            target_type=ScheduleTargetType.AGENT_VERSION,
+            target_id=version_id,
+            schedule_type=schedule_type,
+            schedule_expression=expression,
+            inputs={"request_text": "  read pet list  "},
+        ),
+        owner_id=owner_id,
+    )
+    assert created.status == ScheduleStatus.PAUSED.value
+    assert created.input_template == {"request_text": "read pet list"}
+    patched = await service.update(
+        created.id,
+        ScheduleUpdate(inputs={"request_text": "read cats"}),
+        owner_id=owner_id,
+        expected_lock_version=created.lock_version,
+    )
+    assert patched.input_template == {"request_text": "read cats"}
+    assert patched.next_run_at is None
+    activated = await service.activate(patched.id, owner_id=owner_id)
+    assert activated.agent_version_id == version_id
+    assert activated.schedule_type == schedule_type.value
+    assert activated.next_run_at is not None
+
+
+@pytest.mark.asyncio
+async def test_agent_recurring_schedule_requires_request_text(
+    db_session: AsyncSession,
+) -> None:
+    owner_id = await _seed_schedule_manager(db_session)
+    version_id = await _seed_published_agent_version(db_session, owner_id)
+    with pytest.raises(AppError) as exc:
+        await ScheduleService(db_session).create(
+            _schedule_body(
+                target_type=ScheduleTargetType.AGENT_VERSION,
+                target_id=version_id,
+                schedule_type=ScheduleType.CRON,
+                schedule_expression="0 9 * * *",
+                inputs={"request_text": "  "},
+            ),
+            owner_id=owner_id,
+        )
+    assert exc.value.code == "VALIDATION_ERROR"
+
+
+@pytest.mark.asyncio
 async def test_create_pins_workflow_version(db_session: AsyncSession) -> None:
     owner_id = await _seed_schedule_manager(db_session)
     _wf_id, version_id = await _seed_workflow_target(db_session, owner_id)
