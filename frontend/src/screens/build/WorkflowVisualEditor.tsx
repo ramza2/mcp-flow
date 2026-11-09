@@ -1,0 +1,717 @@
+import { useEffect, useMemo, useState } from "react"
+import {
+  GitBranch,
+  Link2,
+  Plus,
+  ShieldAlert,
+  Trash2,
+  Wrench,
+} from "lucide-react"
+import { listMCPTools } from "../../api/mcp"
+import type { MCPToolDto, JsonValue } from "../../api/types"
+import { isAbortError } from "../../api/client"
+
+type Plan = Record<string, JsonValue>
+type Step = Record<string, JsonValue> & {
+  id: string
+  name: string
+  type: string
+  depends_on: string[]
+}
+type Binding = Record<string, JsonValue> & { kind: string }
+
+const STEP_LABELS: Record<string, string> = {
+  TOOL: "도구 실행",
+  CONDITION: "조건 분기",
+  JOIN: "병렬 합류",
+  APPROVAL: "승인 대기",
+  LOOP: "반복 실행",
+}
+const BINDING_KINDS = [
+  "LITERAL",
+  "PLAN_INPUT",
+  "STEP_OUTPUT",
+  "EXECUTION_CONTEXT",
+  "LOOP_CONTEXT",
+  "SECRET_REF",
+]
+
+function object(
+  value: JsonValue | undefined,
+): Record<string, JsonValue> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value
+    : null
+}
+
+export function getVisualSteps(plan: Plan): Step[] | null {
+  if (!Array.isArray(plan.steps)) return null
+  const result: Step[] = []
+  const ids = new Set<string>()
+  for (const value of plan.steps) {
+    const step = object(value)
+    if (
+      !step ||
+      typeof step.id !== "string" ||
+      typeof step.name !== "string" ||
+      typeof step.type !== "string" ||
+      !Array.isArray(step.depends_on) ||
+      !step.depends_on.every((id) => typeof id === "string") ||
+      ids.has(step.id)
+    )
+      return null
+    ids.add(step.id)
+    result.push(step as Step)
+  }
+  return result
+}
+
+export function causesDependencyCycle(
+  steps: Step[],
+  stepId: string,
+  candidateId: string,
+): boolean {
+  const byId = new Map(steps.map((step) => [step.id, step]))
+  const visit = (id: string, seen: Set<string>): boolean => {
+    if (id === stepId) return true
+    if (seen.has(id)) return false
+    seen.add(id)
+    return (byId.get(id)?.depends_on ?? []).some((parent) =>
+      visit(parent, seen),
+    )
+  }
+  return visit(candidateId, new Set())
+}
+
+export function addStepToPlan(
+  plan: Plan,
+  type: "TOOL" | "JOIN",
+  toolVersionId?: string,
+): Plan {
+  const steps = getVisualSteps(plan)
+  if (!steps || (type === "TOOL" && !toolVersionId)) return plan
+  const prefix = type.toLowerCase()
+  let ordinal = steps.length + 1
+  while (steps.some((step) => step.id === `${prefix}_${ordinal}`)) ordinal++
+  const id = `${prefix}_${ordinal}`
+  const step: Step = {
+    id,
+    name: type === "TOOL" ? `도구 실행 ${ordinal}` : `합류 ${ordinal}`,
+    type,
+    required: true,
+    depends_on: [],
+    when: null,
+    timeout_seconds: 30,
+    on_error: "FAIL_EXECUTION",
+    config:
+      type === "TOOL"
+        ? { tool_version_id: toolVersionId!, bindings: {} }
+        : { policy: "ALL_SUCCESS" },
+  }
+  return { ...plan, steps: [...steps, step] }
+}
+
+export function updateStepInPlan(
+  plan: Plan,
+  stepId: string,
+  change: (step: Step) => Step,
+): Plan {
+  const steps = getVisualSteps(plan)
+  if (!steps) return plan
+  return {
+    ...plan,
+    steps: steps.map((step) => (step.id === stepId ? change(step) : step)),
+  }
+}
+
+function toBinding(value: JsonValue | undefined): Binding | null {
+  const binding = object(value)
+  return binding && typeof binding.kind === "string" ? binding as Binding : null
+}
+
+function bindingForKind(kind: string): Binding {
+  switch (kind) {
+    case "SECRET_REF":
+      return { kind, secret_id: "" }
+    case "STEP_OUTPUT":
+      return { kind, step_id: "", path: "/" }
+    case "PLAN_INPUT":
+    case "EXECUTION_CONTEXT":
+    case "LOOP_CONTEXT":
+      return { kind, path: "/" }
+    default:
+      return { kind: "LITERAL", value: "" }
+  }
+}
+
+interface Props {
+  plan: Plan
+  onChange: (plan: Plan) => void
+  readOnly: boolean
+}
+
+/** Visual projection of the canonical Plan. Never rebuild unknown config or step fields. */
+export default function WorkflowVisualEditor({
+  plan,
+  onChange,
+  readOnly,
+}: Props) {
+  const steps = useMemo(() => getVisualSteps(plan), [plan])
+  const [selected, setSelected] = useState<string | null>(null)
+  const [tools, setTools] = useState<MCPToolDto[]>([])
+  const [toolId, setToolId] = useState("")
+  const [toolError, setToolError] = useState("")
+  const [warning, setWarning] = useState("")
+  const [newBindingName, setNewBindingName] = useState("")
+
+  useEffect(() => {
+    if (readOnly) return
+    const controller = new AbortController()
+    listMCPTools({
+      page: 1,
+      page_size: 100,
+      status: "ACTIVE",
+      signal: controller.signal,
+    })
+      .then((page) => {
+        setTools(page.items)
+        if (page.has_next)
+          setToolError(
+            "도구가 100개를 초과합니다. 추가 도구는 고급 편집에서 지정하세요.",
+          )
+      })
+      .catch((error) => {
+        if (!isAbortError(error))
+          setToolError(
+            "활성 도구 목록을 불러올 수 없습니다. 기존 실행 계획은 그대로 유지됩니다.",
+          )
+      })
+    return () => controller.abort()
+  }, [readOnly])
+
+  const active = steps?.find((step) => step.id === selected) ?? null
+  const config = object(active?.config)
+  const bindings = active?.type === "TOOL" ? object(config?.bindings) : null
+
+  const replace = (fn: (step: Step) => Step) => {
+    if (readOnly || !active) return
+    onChange(updateStepInPlan(plan, active.id, fn))
+  }
+  const updateConfig = (
+    change: (current: Record<string, JsonValue>) => Record<string, JsonValue>,
+  ) => {
+    replace((step) => ({ ...step, config: change(object(step.config) ?? {}) }))
+  }
+  const updateBinding = (name: string, value: JsonValue | undefined) => {
+    updateConfig((current) => {
+      const next = { ...(object(current.bindings) ?? {}) }
+      if (value === undefined) delete next[name]
+      else next[name] = value
+      return { ...current, bindings: next }
+    })
+  }
+
+  const addTool = () => {
+    const tool = tools.find((item) => item.id === toolId)
+    if (!tool?.current_version_id || readOnly) return
+    const next = addStepToPlan(plan, "TOOL", tool.current_version_id)
+    onChange(next)
+    setSelected(getVisualSteps(next)?.at(-1)?.id ?? null)
+    setWarning(
+      "추가한 단계의 입력 바인딩과 의존 관계를 설정한 후 저장·서버 검증하세요.",
+    )
+  }
+  const addJoin = () => {
+    if (!steps?.length || readOnly) return
+    const next = addStepToPlan(plan, "JOIN")
+    onChange(next)
+    setSelected(getVisualSteps(next)?.at(-1)?.id ?? null)
+    setWarning("합류 단계에는 상위 단계를 한 개 이상 연결해야 합니다.")
+  }
+  const deleteStep = () => {
+    if (!active || !steps || readOnly) return
+    if (!["TOOL", "JOIN"].includes(active.type)) {
+      setWarning(
+        "조건·승인·반복 단계의 안전한 제거는 고급 JSON에서 수행하세요.",
+      )
+      return
+    }
+    const referred = steps.some(
+      (step) =>
+        step.id !== active.id &&
+        (step.depends_on.includes(active.id) ||
+          (Array.isArray(object(step.config)?.body_step_ids) &&
+            (object(step.config)?.body_step_ids as JsonValue[]).includes(
+              active.id,
+            )) ||
+          // Conservative: block deletion if any other advanced config/when refers to this ID.
+          JSON.stringify({ config: step.config, when: step.when }).includes(
+            JSON.stringify(active.id),
+          )),
+    )
+    const completion = object(plan.completion)
+    if (
+      referred ||
+      (Array.isArray(completion?.response_step_ids) &&
+        completion.response_step_ids.includes(active.id))
+    ) {
+      setWarning(
+        "다른 단계 또는 완료 응답에서 참조하고 있습니다. 먼저 참조를 해제하세요.",
+      )
+      return
+    }
+    onChange({ ...plan, steps: steps.filter((step) => step.id !== active.id) })
+    setSelected(null)
+    setWarning("단계를 제거했습니다. 저장 전까지 서버에는 반영되지 않습니다.")
+  }
+
+  if (!steps)
+    return (
+      <p
+        role="alert"
+        className="p-4 rounded-lg bg-amber-50 text-amber-800 text-sm"
+      >
+        이 Plan의 단계 구조를 안전하게 해석할 수 없습니다. 고급 JSON에서만
+        확인해 주세요.
+      </p>
+    )
+
+  return (
+    <div className="grid grid-cols-1 lg:grid-cols-[220px_minmax(280px,1fr)_320px] min-h-[550px] gap-0 border border-slate-200 rounded-xl overflow-hidden bg-white">
+      <aside className="p-4 border-b lg:border-b-0 lg:border-r border-slate-200 bg-slate-50 space-y-3">
+        <h2 className="font-semibold text-sm text-slate-800">단계 추가</h2>
+        <label
+          className="text-xs font-medium text-slate-600 block"
+          htmlFor="visual-tool-select"
+        >
+          사용할 MCP 도구
+        </label>
+        <select
+          id="visual-tool-select"
+          disabled={readOnly}
+          value={toolId}
+          onChange={(event) => setToolId(event.target.value)}
+          className="w-full rounded-md border border-slate-300 p-2 text-xs"
+        >
+          <option value="">활성 도구 선택...</option>
+          {tools.map((tool) => (
+            <option
+              key={tool.id}
+              value={tool.id}
+              disabled={!tool.current_version_id}
+            >
+              {tool.display_name || tool.remote_name}
+            </option>
+          ))}
+        </select>
+        <button
+          type="button"
+          disabled={
+            readOnly ||
+            !tools.find((tool) => tool.id === toolId)?.current_version_id
+          }
+          onClick={addTool}
+          className="flex items-center justify-center gap-2 rounded-lg p-2 text-sm bg-indigo-600 text-white w-full disabled:opacity-40"
+        >
+          <Plus size={15} /> 도구 단계 추가
+        </button>
+        <button
+          type="button"
+          disabled={readOnly || steps.length === 0}
+          onClick={addJoin}
+          className="flex items-center justify-center gap-2 rounded-lg p-2 text-sm border border-slate-300 bg-white w-full disabled:opacity-40"
+        >
+          <GitBranch size={15} /> 합류 단계 추가
+        </button>
+        <p className="text-xs text-slate-500 leading-relaxed">
+          조건·승인·반복 단계는 시각적으로 조회할 수 있습니다. 복잡한 설정은
+          현재 고급 JSON에서 편집합니다.
+        </p>
+        {toolError && (
+          <p role="alert" className="text-xs text-amber-700">
+            {toolError}
+          </p>
+        )}
+      </aside>
+
+      <section
+        className="p-4 bg-slate-50/50 space-y-4"
+        aria-label="실행 단계 흐름"
+      >
+        <div className="flex items-center justify-between gap-2">
+          <h2 className="font-semibold text-sm text-slate-800">
+            실행 단계 ({steps.length})
+          </h2>
+          <span className="text-xs text-slate-500">
+            순서는 의존 관계로 결정됩니다
+          </span>
+        </div>
+        {steps.length === 0 && (
+          <p className="rounded-lg border border-dashed border-slate-300 bg-white p-8 text-sm text-slate-500 text-center">
+            실행 단계가 없습니다. 왼쪽에서 도구를 선택해 추가하세요.
+          </p>
+        )}
+        {steps.map((step, index) => (
+          <button
+            key={step.id}
+            type="button"
+            aria-label={`${step.name} 단계 선택`}
+            onClick={() => {
+              setSelected(step.id)
+              setWarning("")
+            }}
+            className={`block text-left rounded-xl p-4 w-full border-2 bg-white shadow-sm space-y-2 ${
+              selected === step.id
+                ? "border-indigo-500"
+                : "border-slate-200 hover:border-slate-300"
+            }`}
+          >
+            <div className="flex items-center gap-2">
+              <span className="rounded-md bg-indigo-50 text-indigo-700 p-1.5">
+                <Wrench size={16} />
+              </span>
+              <span className="font-medium text-sm text-slate-800">
+                {index + 1}. {step.name}
+              </span>
+              <span className="ml-auto text-xs text-slate-500">
+                {STEP_LABELS[step.type] ?? step.type}
+              </span>
+            </div>
+            <div className="text-xs text-slate-500">
+              <span className="font-mono">{step.id}</span>
+            </div>
+            <div className="flex items-start gap-1.5 text-xs text-slate-600">
+              <Link2 size={13} className="shrink-0" />
+              {step.depends_on.length
+                ? `선행 단계: ${step.depends_on.join(", ")}`
+                : "선행 단계 없음 · 병렬 시작 가능"}
+            </div>
+          </button>
+        ))}
+        {warning && (
+          <p
+            role="status"
+            className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg p-3"
+          >
+            {warning}
+          </p>
+        )}
+      </section>
+
+      <aside
+        className="p-4 border-t lg:border-t-0 lg:border-l border-slate-200 space-y-4"
+        aria-label="단계 설정"
+      >
+        {!active ? (
+          <p className="text-sm text-slate-500">
+            중앙의 단계를 선택해 이름·연결·도구 입력을 설정하세요.
+          </p>
+        ) : (
+          <>
+            <div className="flex justify-between items-center">
+              <h2 className="font-semibold text-sm text-slate-800">
+                단계 설정
+              </h2>
+              <span className="text-xs text-slate-500">
+                {STEP_LABELS[active.type] ?? active.type}
+              </span>
+            </div>
+            <label
+              htmlFor="visual-step-name"
+              className="block text-xs text-slate-600"
+            >
+              단계 이름
+            </label>
+            <input
+              id="visual-step-name"
+              className="w-full rounded-md border border-slate-300 p-2 text-sm"
+              disabled={readOnly}
+              value={active.name}
+              onChange={(event) =>
+                replace((step) => ({ ...step, name: event.target.value }))
+              }
+            />
+            <fieldset disabled={readOnly} className="space-y-2">
+              <legend className="font-medium text-xs text-slate-700 mb-2">
+                선행 단계 선택
+              </legend>
+              {steps
+                .filter((step) => step.id !== active.id)
+                .map((step) => (
+                  <label
+                    key={step.id}
+                    className="flex items-start gap-2 text-xs text-slate-600"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={active.depends_on.includes(step.id)}
+                      onChange={(event) => {
+                        if (
+                          event.target.checked &&
+                          causesDependencyCycle(steps, active.id, step.id)
+                        ) {
+                          setWarning(
+                            "순환 의존성이 만들어져 연결할 수 없습니다.",
+                          )
+                          return
+                        }
+                        replace((current) => ({
+                          ...current,
+                          depends_on: event.target.checked
+                            ? [...current.depends_on, step.id]
+                            : current.depends_on.filter((id) => id !== step.id),
+                        }))
+                        setWarning("")
+                      }}
+                    />
+                    {step.name} ({step.id})
+                  </label>
+                ))}
+              {steps.length <= 1 && (
+                <p className="text-xs text-slate-400">
+                  연결 가능한 다른 단계가 없습니다.
+                </p>
+              )}
+            </fieldset>
+            {active.type === "JOIN" && (
+              <>
+                <label
+                  htmlFor="visual-join-policy"
+                  className="block text-xs text-slate-600"
+                >
+                  합류 정책
+                </label>
+                <select
+                  id="visual-join-policy"
+                  disabled={readOnly}
+                  value={
+                    typeof config?.policy === "string" ? config.policy : ""
+                  }
+                  onChange={(event) =>
+                    updateConfig((current) => ({
+                      ...current,
+                      policy: event.target.value,
+                    }))
+                  }
+                  className="w-full rounded-md border border-slate-300 p-2 text-sm"
+                >
+                  <option value="ALL_SUCCESS">모든 단계 성공</option>
+                  <option value="ALL_COMPLETE">모든 단계 완료</option>
+                  <option value="ANY_SUCCESS">하나 이상 성공</option>
+                </select>
+              </>
+            )}
+            {active.type === "TOOL" && (
+              <>
+                <div className="text-xs bg-slate-50 rounded-md p-2 space-y-1">
+                  <p className="font-medium">고정 ToolVersion ID</p>
+                  <p className="font-mono break-all">
+                    {String(config?.tool_version_id ?? "미설정")}
+                  </p>
+                  <p>
+                    선택한 버전은 저장 후 고정됩니다. 변경은 고급 JSON에서
+                    가능합니다.
+                  </p>
+                </div>
+                <h3 className="font-semibold text-sm text-slate-800">
+                  입력 바인딩
+                </h3>
+                {bindings === null && (
+                  <p role="alert" className="text-xs text-amber-700">
+                    바인딩 구조를 읽을 수 없습니다. 고급 JSON에서 수정하세요.
+                  </p>
+                )}
+                {bindings &&
+                  Object.entries(bindings).map(([name, value]) => {
+                    const binding = toBinding(value)
+                    return (
+                      <div
+                        key={name}
+                        className="rounded-lg border border-slate-200 p-2 space-y-2"
+                      >
+                        <div className="flex justify-between items-center">
+                          <strong className="text-xs text-slate-700 break-all">
+                            {name}
+                          </strong>
+                          <button
+                            type="button"
+                            aria-label={`${name} 바인딩 제거`}
+                            disabled={readOnly}
+                            onClick={() => updateBinding(name, undefined)}
+                            className="text-slate-400 hover:text-red-600 disabled:opacity-40"
+                          >
+                            <Trash2 size={14} />
+                          </button>
+                        </div>
+                        {!binding ? (
+                          <p className="text-xs text-amber-700">
+                            지원하지 않는 바인딩 구조입니다. 고급 JSON에서
+                            수정하세요.
+                          </p>
+                        ) : (
+                          <>
+                            <select
+                              aria-label={`${name} 바인딩 종류`}
+                              className="w-full rounded-md border border-slate-300 p-2 text-xs"
+                              disabled={readOnly}
+                              value={binding.kind}
+                              onChange={(event) =>
+                                updateBinding(
+                                  name,
+                                  bindingForKind(event.target.value),
+                                )
+                              }
+                            >
+                              {!BINDING_KINDS.includes(binding.kind) && (
+                                <option value={binding.kind}>
+                                  {binding.kind} (고급)
+                                </option>
+                              )}
+                              {BINDING_KINDS.map((kind) => (
+                                <option key={kind} value={kind}>
+                                  {kind}
+                                </option>
+                              ))}
+                            </select>
+                            {binding.kind === "LITERAL" ? (
+                      <>
+                        <input
+                          aria-label={`${name} 값`}
+                          className="w-full rounded-md border border-slate-300 p-2 text-xs"
+                          disabled={readOnly || typeof binding.value !== "string"}
+                          value={
+                            typeof binding.value === "string"
+                              ? binding.value
+                              : JSON.stringify(binding.value ?? null)
+                          }
+                          onChange={(event) =>
+                            updateBinding(name, {
+                              ...binding,
+                              value: event.target.value,
+                            })
+                          }
+                          placeholder="문자열 값"
+                        />
+                        {typeof binding.value !== "string" && (
+                          <p className="text-xs text-amber-700">숫자·배열·객체 리터럴은 타입을 보존하도록 고급 JSON에서만 수정합니다.</p>
+                        )}
+                      </>
+                            ) : (
+                              <>
+                                {binding.kind === "STEP_OUTPUT" && (
+                                  <select
+                                    aria-label={`${name} 출력 단계`}
+                                    disabled={readOnly}
+                                    value={String(binding.step_id ?? "")}
+                                    onChange={(event) =>
+                                      updateBinding(name, {
+                                        ...binding,
+                                        step_id: event.target.value,
+                                      })
+                                    }
+                                    className="w-full rounded-md border border-slate-300 p-2 text-xs"
+                                  >
+                                    <option value="">출력 단계 선택</option>
+                                    {steps
+                                      .filter((step) =>
+                                        active.depends_on.includes(step.id),
+                                      )
+                                      .map((step) => (
+                                        <option key={step.id} value={step.id}>
+                                          {step.name}
+                                        </option>
+                                      ))}
+                                  </select>
+                                )}
+                                {binding.kind === "SECRET_REF" ? (
+                                  <input
+                                    aria-label={`${name} 비밀 참조 ID`}
+                                    disabled={readOnly}
+                                    value={String(binding.secret_id ?? "")}
+                                    onChange={(event) =>
+                                      updateBinding(name, {
+                                        ...binding,
+                                        secret_id: event.target.value,
+                                      })
+                                    }
+                                    className="w-full rounded-md border border-slate-300 p-2 text-xs"
+                                    placeholder="Secret UUID (원문 입력 금지)"
+                                  />
+                                ) : (
+                                  <input
+                                    aria-label={`${name} JSON Pointer`}
+                                    disabled={readOnly}
+                                    value={String(binding.path ?? "")}
+                                    onChange={(event) =>
+                                      updateBinding(name, {
+                                        ...binding,
+                                        path: event.target.value,
+                                      })
+                                    }
+                                    className="w-full rounded-md border border-slate-300 p-2 text-xs"
+                                    placeholder="/path"
+                                  />
+                                )}
+                              </>
+                            )}
+                          </>
+                        )}
+                      </div>
+                    )
+                  })}
+                {bindings && !readOnly && (
+                  <div className="flex gap-1">
+                    <input
+                      aria-label="새 바인딩 이름"
+                      className="min-w-0 flex-1 rounded-md border border-slate-300 p-2 text-xs"
+                      value={newBindingName}
+                      onChange={(event) =>
+                        setNewBindingName(event.target.value)
+                      }
+                      placeholder="파라미터 이름"
+                    />
+                    <button
+                      type="button"
+                      disabled={
+                        !newBindingName.trim() ||
+                        newBindingName.trim() in bindings
+                      }
+                      onClick={() => {
+                        updateBinding(
+                          newBindingName.trim(),
+                          bindingForKind("LITERAL"),
+                        )
+                        setNewBindingName("")
+                      }}
+                      className="rounded bg-indigo-50 px-2 text-xs text-indigo-700 disabled:opacity-40"
+                    >
+                      추가
+                    </button>
+                  </div>
+                )}
+              </>
+            )}
+            {!["TOOL", "JOIN"].includes(active.type) && (
+              <div className="text-xs rounded-md bg-amber-50 text-amber-900 p-3 flex gap-2">
+                <ShieldAlert size={15} className="shrink-0" />
+                <span>
+                  이 단계의 조건식·정책·반복 설정은 고급 JSON에서 편집하세요.
+                  현재 구성은 변경하지 않습니다.
+                </span>
+              </div>
+            )}
+            {!readOnly && (
+              <button
+                type="button"
+                className="text-xs text-red-600 flex items-center gap-2"
+                onClick={deleteStep}
+              >
+                <Trash2 size={14} /> 선택 단계 제거
+              </button>
+            )}
+          </>
+        )}
+      </aside>
+    </div>
+  )
+}

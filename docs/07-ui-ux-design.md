@@ -674,8 +674,10 @@ Tool Grant API는 Version 단위다.
 - 운영 경로 `/workflows`는 실제 `GET /api/v1/workflows` 목록으로 전환한다. 서버 필터/검색/페이지를 사용하고 예시 `mockWorkflows`를 운영 화면에 섞지 않는다.
 - 신규 등록(`/workflows/new`)은 사용자가 명시적으로 등록 버튼을 누를 때 `POST /workflows`를 실행한다. 이름/설명/공개 범위를 등록하고, 미저장 취소 시 Workflow 레코드를 생성하지 않는다.
 - 상세(`/workflows/:workflowId`)는 실제 `GET /workflows/{id}`와 버전 목록을 조회한다. 사용자가 명시적으로 요청할 때만 첫 DRAFT 버전을 생성하며, 게시 버전이 있으면 exact `source_version_id`로 복제한다.
-- 실제 버전 편집 경로(`/workflows/:id/versions/:versionId/edit`)는 임시 **고급 JSON 편집 화면**이다. `GET` 결과의 `plan_definition`을 손실 없이 표시하며, DRAFT에서만 `PUT /plan`으로 저장한다. 저장 직전 `content_hash`를 재조회하여 stale-tab 덮어쓰기를 예방한다(현 Backend에 원자적 If-Match 버전 검증은 없음). 저장 후 검증 상태가 초기화되는 사실을 안내하고, 변경 사항이 저장되어 있을 때만 별도 서버 `/validate`를 수행한다.
-- PUBLISHED/DEPRECATED 버전은 읽기 전용이다. 이 단계는 시각적 단계 선택/연결·게시·수동 실행 UI를 제공하지 않는다. 기존 mock 기반 디자이너 컴포넌트는 운영 라우트에서 제거하고 추후 Canonical Plan Step/config/binding 기반 시각 디자이너로 교체한다.
+- 실제 버전 편집 경로(`/workflows/:id/versions/:versionId/edit`)는 **시각 편집/고급 JSON 전환**을 지원한다. 모든 모드는 동일한 원본 `plan_definition`을 사용하며, 시각 편집은 인식한 필드만 부분 변경하고 알 수 없는 조건식·설정·메타데이터를 제거하지 않는다. DRAFT에서만 `PUT /plan`으로 저장한다. 저장 직전 `content_hash`를 재조회하여 stale-tab 덮어쓰기를 예방한다(현 Backend에 원자적 If-Match 버전 검증은 없음). 저장 후 검증 상태 초기화를 안내하며 저장된 내용만 별도 `/validate`한다.
+- 시각 편집에서는 실제 활성 MCP Tool의 current ToolVersion을 선택하여 TOOL Step을 추가하고, JOIN의 canonical `policy`, 단계명, 선행 단계, TOOL 입력 BindingKind를 편집한다. 순환 의존성 선택은 차단하며, 순서는 Canvas/카드 위치가 아닌 `depends_on`에 따른다. ToolVersion과 비밀값은 참조 ID만 표시/저장한다.
+- CONDITION·APPROVAL·LOOP의 기존 config/Predicate AST는 시각적으로 표시하되 복잡한 설정은 고급 JSON에서만 편집한다. 지원하지 않는 Plan 구조도 고급 JSON으로 돌아갈 수 있다. PARALLEL·END는 authorable Step으로 저장하지 않는다.
+- PUBLISHED/DEPRECATED 버전은 시각/JSON 모두 읽기 전용이다. 게시·수동 실행 UI는 후속 개발 대상이며, 기존 mock 기반 디자이너는 운영 라우트에서 사용하지 않는다.
 - 일정 설정의 기존 `listWorkflowTargets`/`listWorkflowTargetVersions` 호출 계약은 유지한다. Backend/DB/Workflow Runtime은 변경하지 않는다.
 
 ### 예시 화면 한국어 UX (2026-11-09)

@@ -8,8 +8,9 @@ import { getWorkflow, getWorkflowVersion, saveWorkflowPlan, validateWorkflowVers
 import { isAbortError, isApiError } from '../../api/client';
 import type { JsonValue } from '../../api/types';
 import { labelWorkflowVersionStatus } from '../../domain';
+import WorkflowVisualEditor from './WorkflowVisualEditor';
 
-/** Temporary advanced editor: exact backend Plan JSON is round-tripped without lossy UI projections. */
+/** Both editor modes round-trip the exact server Plan JSON; visual mode only patches known fields. */
 export default function WorkflowPlanEditor() {
   const { workflowId, versionId } = useParams();
   const navigate = useNavigate();
@@ -22,6 +23,7 @@ export default function WorkflowPlanEditor() {
   const [validating, setValidating] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
+  const [mode, setMode] = useState<'visual' | 'json'>('visual');
 
   useEffect(() => {
     if (!workflowId || !versionId) return;
@@ -48,6 +50,13 @@ export default function WorkflowPlanEditor() {
 
   const readOnly = version?.status !== 'DRAFT';
   const dirty = source !== savedSource;
+  const visualPlan = (() => {
+    try {
+      const parsed: unknown = JSON.parse(source);
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+        ? parsed as Record<string, JsonValue> : null;
+    } catch { return null; }
+  })();
 
   const parsePlan = (): Record<string, JsonValue> | null => {
     try {
@@ -138,15 +147,26 @@ export default function WorkflowPlanEditor() {
       <div className="p-6 space-y-4 max-w-6xl">
         {error && <InlineAlert type="error" message={error} />}
         {success && <div role="status" className="flex gap-2 text-sm text-green-700"><CheckCircle size={17} />{success}</div>}
-        <InlineAlert type="info" message="실제 서버에 연결된 실행 계획입니다. 현재는 고급 JSON 편집만 지원하며, 시각적 단계 디자이너는 후속 개발 예정입니다. Execution Plan v1 형식을 사용하고 비밀번호·토큰 등 비밀값은 직접 입력하지 마세요(SECRET_REF만 사용)." />
+        <InlineAlert type="info" message="실제 서버 Execution Plan v1입니다. 시각 편집은 지원되는 필드만 변경하고, 고급 JSON에서는 전체 계획을 편집할 수 있습니다. 비밀번호·토큰 등 비밀값은 직접 입력하지 마세요(SECRET_REF 사용)." />
         {readOnly && <InlineAlert type="warning" message="게시되었거나 폐기된 버전은 변경할 수 없습니다. 새 초안 버전을 생성하세요." />}
         {dirty && <InlineAlert type="warning" message="저장되지 않은 변경 사항이 있습니다. 서버 검증 전에 먼저 초안을 저장하세요." />}
-        <label htmlFor="workflow-plan-json" className="block text-sm font-semibold text-slate-700">실행 계획 JSON</label>
-        <textarea
-          id="workflow-plan-json" aria-label="실행 계획 JSON" spellCheck={false}
-          className="w-full min-h-96 rounded-md border border-slate-300 p-3 font-mono text-xs leading-relaxed focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 disabled:bg-slate-50"
-          value={source} disabled={readOnly || saving || validating} onChange={event => { setSource(event.target.value); setError(null); setSuccess(null); }}
-        />
+        <div className="flex gap-2" role="group" aria-label="편집 방식">
+          <button type="button" aria-pressed={mode === 'visual'} className={`rounded-md border px-3 py-2 text-sm ${mode === 'visual' ? 'bg-indigo-50 border-indigo-500 text-indigo-700' : 'border-slate-300'}`} onClick={() => setMode('visual')}>시각 편집</button>
+          <button type="button" aria-pressed={mode === 'json'} className={`rounded-md border px-3 py-2 text-sm ${mode === 'json' ? 'bg-indigo-50 border-indigo-500 text-indigo-700' : 'border-slate-300'}`} onClick={() => setMode('json')}>고급 JSON</button>
+        </div>
+        {mode === 'visual' ? (visualPlan ? (
+          <WorkflowVisualEditor
+            plan={visualPlan} readOnly={readOnly || saving || validating}
+            onChange={next => { setSource(JSON.stringify(next, null, 2)); setError(null); setSuccess(null); }}
+          />
+        ) : <InlineAlert type="warning" message="현재 JSON을 해석할 수 없어 시각 편집을 표시하지 못합니다. 고급 JSON에서 문법을 수정해 주세요." />) : <>
+          <label htmlFor="workflow-plan-json" className="block text-sm font-semibold text-slate-700">실행 계획 JSON</label>
+          <textarea
+            id="workflow-plan-json" aria-label="실행 계획 JSON" spellCheck={false}
+            className="w-full min-h-96 rounded-md border border-slate-300 p-3 font-mono text-xs leading-relaxed focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 disabled:bg-slate-50"
+            value={source} disabled={readOnly || saving || validating} onChange={event => { setSource(event.target.value); setError(null); setSuccess(null); }}
+          />
+        </>}
         {version.validation_report && <div className="rounded-xl border border-slate-200 p-4 bg-white">
           <h2 className="font-medium text-sm text-slate-800 mb-2">마지막 서버 검증 보고서</h2>
           <pre className="text-xs text-slate-600 whitespace-pre-wrap break-all">{JSON.stringify(version.validation_report, null, 2)}</pre>
