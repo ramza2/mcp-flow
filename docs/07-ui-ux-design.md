@@ -669,9 +669,18 @@ Tool Grant API는 Version 단위다.
 
 초기 Designer는 BPMN 전체가 아니라 Execution Plan v1만 표현한다.
 
+### Live Workflow registry 및 초안 JSON 편집 (2026-11-09)
+
+- 운영 경로 `/workflows`는 실제 `GET /api/v1/workflows` 목록으로 전환한다. 서버 필터/검색/페이지를 사용하고 예시 `mockWorkflows`를 운영 화면에 섞지 않는다.
+- 신규 등록(`/workflows/new`)은 사용자가 명시적으로 등록 버튼을 누를 때 `POST /workflows`를 실행한다. 이름/설명/공개 범위를 등록하고, 미저장 취소 시 Workflow 레코드를 생성하지 않는다.
+- 상세(`/workflows/:workflowId`)는 실제 `GET /workflows/{id}`와 버전 목록을 조회한다. 사용자가 명시적으로 요청할 때만 첫 DRAFT 버전을 생성하며, 게시 버전이 있으면 exact `source_version_id`로 복제한다.
+- 실제 버전 편집 경로(`/workflows/:id/versions/:versionId/edit`)는 임시 **고급 JSON 편집 화면**이다. `GET` 결과의 `plan_definition`을 손실 없이 표시하며, DRAFT에서만 `PUT /plan`으로 저장한다. 저장 직전 `content_hash`를 재조회하여 stale-tab 덮어쓰기를 예방한다(현 Backend에 원자적 If-Match 버전 검증은 없음). 저장 후 검증 상태가 초기화되는 사실을 안내하고, 변경 사항이 저장되어 있을 때만 별도 서버 `/validate`를 수행한다.
+- PUBLISHED/DEPRECATED 버전은 읽기 전용이다. 이 단계는 시각적 단계 선택/연결·게시·수동 실행 UI를 제공하지 않는다. 기존 mock 기반 디자이너 컴포넌트는 운영 라우트에서 제거하고 추후 Canonical Plan Step/config/binding 기반 시각 디자이너로 교체한다.
+- 일정 설정의 기존 `listWorkflowTargets`/`listWorkflowTargetVersions` 호출 계약은 유지한다. Backend/DB/Workflow Runtime은 변경하지 않는다.
+
 ### 예시 화면 한국어 UX (2026-11-09)
 
-- 현 `/workflows`, Workflow 상세, Designer는 `mockWorkflows` 등 예시 데이터 기반이며 실제 Workflow API 저장·게시·실행에 연동되지 않았다. 목록/상세/편집에서 그 제한을 명확히 알린다.
+- 이전 `/workflows`, Workflow 상세, Designer는 `mockWorkflows` 등 예시 데이터 기반이었다. 위 Live UI 연동 후 예시 디자이너는 운영 라우트에서 사용하지 않는다.
 - UI 표시는 워크플로·초안·게시·실행 단계·선행 단계·조건식·입력값 연결 등 한국어로 제공한다. Canonical Workflow/WorkflowVersion 상태, Step Type, Binding Kind, Predicate/Join/Loop option value는 변경하지 않는다.
 - 기존 Designer의 `Draft 저장`은 서버 요청 없이 화면만 이동하므로 저장 동작으로 표시하지 않는다. 화면 종료는 `시연 종료 (저장 안 됨)`으로 명시하고, 상세의 실제 게시 동작 없는 버튼은 비활성화한다.
 - 목록의 검색·상태 필터는 브라우저에 표시한 예시 데이터에만 적용한다. 이 UI 변경은 서버 기능의 구현 완료를 의미하지 않는다.

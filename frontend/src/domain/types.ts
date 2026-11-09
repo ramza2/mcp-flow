@@ -29,8 +29,14 @@ export type AgentVersionValidationStatus = (typeof AGENT_VERSION_VALIDATION_STAT
 export const WORKFLOW_STATUSES = ['DRAFT', 'ACTIVE', 'INACTIVE', 'ARCHIVED'] as const;
 export type WorkflowStatus = (typeof WORKFLOW_STATUSES)[number];
 
+export const WORKFLOW_VISIBILITIES = ['PRIVATE', 'RESTRICTED', 'INTERNAL'] as const;
+export type WorkflowVisibility = (typeof WORKFLOW_VISIBILITIES)[number];
+
 export const WORKFLOW_VERSION_STATUSES = ['DRAFT', 'PUBLISHED', 'DEPRECATED'] as const;
 export type WorkflowVersionStatus = (typeof WORKFLOW_VERSION_STATUSES)[number];
+
+export const WORKFLOW_VERSION_VALIDATION_STATUSES = ['VALID', 'INVALID'] as const;
+export type WorkflowVersionValidationStatus = (typeof WORKFLOW_VERSION_VALIDATION_STATUSES)[number];
 
 export const AGENT_REQUEST_STATUSES = [
   'RECEIVED',

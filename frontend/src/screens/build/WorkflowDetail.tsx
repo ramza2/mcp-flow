@@ -1,278 +1,165 @@
-import { useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { useNavigate, useParams } from 'react-router';
-import { ArrowLeft, Calendar, Eye, Pencil, Plus, Rocket } from 'lucide-react';
-import StatusBadge, { VersionBadge, RiskBadge, VerificationBadge } from '../../components/ui/StatusBadge';
+import { ArrowLeft, Eye, Pencil, Plus } from 'lucide-react';
+import StatusBadge, { VersionBadge } from '../../components/ui/StatusBadge';
 import { TabBar } from '../../components/ui/Tabs';
 import Button from '../../components/ui/Button';
 import DataTable, { Column } from '../../components/ui/DataTable';
-import { EmptyState, InlineAlert } from '../../components/ui/EmptyState';
-import { mockWorkflows, mockWorkflowFull } from '../../data/mock';
-import { labelWorkflowStatus, labelWorkflowVersionStatus } from '../../domain';
+import { EmptyState, ErrorState, InlineAlert, LoadingSkeleton } from '../../components/ui/EmptyState';
+import { createWorkflowVersion, getWorkflow, listWorkflowVersions, type WorkflowDto, type WorkflowVersionDto } from '../../api/workflows';
+import { isAbortError, isApiError } from '../../api/client';
+import { formatTimestamp, labelWorkflowStatus, labelWorkflowVersionStatus, labelWorkflowVisibility } from '../../domain';
 
-type VersionStatus = 'DRAFT' | 'PUBLISHED' | 'DEPRECATED';
+/** Initial server-side DRAFT is intentionally incomplete and must be edited + validated. */
+export function initialWorkflowPlan(workflow: WorkflowDto) {
+  return {
+    schema_version: '1.0',
+    goal: workflow.name,
+    source: { type: 'WORKFLOW', workflow_id: workflow.id },
+    inputs: {},
+    limits: { max_steps: 20, max_duration_seconds: 300, max_parallelism: 4, max_loop_iterations: 50 },
+    steps: [],
+    completion: { success_policy: 'ALL_REQUIRED', response_step_ids: [] },
+  };
+}
 
 export default function WorkflowDetail() {
   const { workflowId } = useParams();
   const navigate = useNavigate();
   const [tab, setTab] = useState('overview');
+  const [workflow, setWorkflow] = useState<WorkflowDto | null>(null);
+  const [versions, setVersions] = useState<WorkflowVersionDto[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<{ message: string; requestId?: string } | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
 
-  const existingWorkflow = mockWorkflows.find(w => w.id === workflowId);
-  const isNewLogicalWorkflow = !existingWorkflow && !!workflowId?.startsWith('wf-');
-  const unknownWorkflowId = !existingWorkflow && !isNewLogicalWorkflow;
+  const load = useCallback(() => {
+    if (!workflowId) return () => {};
+    const controller = new AbortController();
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+    Promise.all([getWorkflow(workflowId, controller.signal), listWorkflowVersions(workflowId, controller.signal)])
+      .then(([workflowResult, versionPage]) => {
+        if (cancelled) return;
+        setWorkflow(workflowResult);
+        setVersions(versionPage.items);
+      }).catch(err => {
+        if (cancelled || isAbortError(err)) return;
+        const apiErr = isApiError(err) ? err : null;
+        setError({ message: apiErr?.message ?? '워크플로 정보를 불러오지 못했습니다.', requestId: apiErr?.requestId ?? undefined });
+        setWorkflow(null);
+        setVersions([]);
+      }).finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; controller.abort(); };
+  }, [workflowId]);
 
-  const workflow = existingWorkflow ?? (isNewLogicalWorkflow
-    ? {
-      id: workflowId!,
-      name: '새 워크플로 (예시)',
-      status: 'DRAFT' as const,
-      publishedVersion: null as string | null,
-      steps: 0,
-      owner: 'admin',
-      lastPublished: null as string | null,
-      updatedAt: new Date().toISOString().slice(0, 10),
-    }
-    : null);
+  useEffect(() => load(), [load]);
 
-  const full = isNewLogicalWorkflow
-    ? {
-      description: '새 워크플로 예시 (서버에 저장되지 않음)',
-      owner: 'admin',
-      currentVersion: null as string | null,
-      toolCount: 0,
-      scheduleCount: 0,
-      createdAt: new Date().toISOString().slice(0, 10),
-      lastPublished: null as string | null,
-      versions: [{
-        version: 'v1',
-        status: 'DRAFT' as const,
-        steps: 0,
-        changeSummary: '초기 초안',
-        validation: null as 'VALID' | 'INVALID' | 'WARNING' | null,
-        createdBy: 'admin',
-        createdAt: new Date().toISOString().slice(0, 10),
-        publishedAt: null as string | null,
-      }],
-      tools: [] as typeof mockWorkflowFull['wf-001']['tools'],
-      schedules: [] as typeof mockWorkflowFull['wf-001']['schedules'],
-    }
-    : (workflow ? (mockWorkflowFull[workflow.id] ?? null) : null);
+  const draft = versions.find(version => version.status === 'DRAFT');
+  const current = versions.find(version => version.id === workflow?.current_version_id);
 
-  if (unknownWorkflowId || !workflow || !full) {
-    return (
-      <div className="p-6">
-        <InlineAlert type="warning" message={`워크플로를 찾을 수 없습니다: ${workflowId ?? '(ID 없음)'}`} />
-        <div className="mt-4">
-          <Button variant="outline" onClick={() => navigate('/workflows')}>워크플로 목록으로 돌아가기</Button>
-        </div>
-      </div>
-    );
-  }
-
-  const latest = full.versions[0];
-  const latestStatus = (latest?.status ?? 'DRAFT') as VersionStatus;
-
-  const handleLatestPrimary = () => {
-    if (!latest) {
-      navigate(`/workflows/${workflow.id}/versions/new/edit`);
+  const handleCreateOrEdit = async () => {
+    if (!workflow || busy) return;
+    if (draft) {
+      navigate(`/workflows/${workflow.id}/versions/${draft.id}/edit`);
       return;
     }
-    if (latestStatus === 'DRAFT') {
-      navigate(`/workflows/${workflow.id}/versions/${latest.version}/edit`);
-      return;
+    setBusy(true);
+    setActionError(null);
+    try {
+      const created = await createWorkflowVersion(workflow.id, current
+        ? { source_version_id: current.id, change_summary: '게시 버전에서 새 초안 생성' }
+        : { plan_definition: initialWorkflowPlan(workflow), change_summary: '초기 초안' });
+      navigate(`/workflows/${workflow.id}/versions/${created.id}/edit`);
+    } catch (err) {
+      setActionError(isApiError(err) ? err.message : '초안 버전 생성에 실패했습니다.');
+    } finally {
+      setBusy(false);
     }
-    navigate(`/workflows/${workflow.id}/versions/new/edit`);
   };
+
+  if (loading) return <div className="p-6"><LoadingSkeleton rows={7} /></div>;
+  if (error || !workflow) return (
+    <div className="p-6 space-y-4">
+      <ErrorState message={error?.message ?? '워크플로를 찾을 수 없습니다.'} requestId={error?.requestId} onRetry={() => { load(); }} />
+      <Button variant="outline" onClick={() => navigate('/workflows')}>목록으로 돌아가기</Button>
+    </div>
+  );
+
+  const columns: Column<WorkflowVersionDto>[] = [
+    { key: 'version', label: '버전', render: row => <VersionBadge version={`v${row.version_no}`} status={row.status} /> },
+    { key: 'status', label: '상태', render: row => <StatusBadge status={row.status} label={labelWorkflowVersionStatus(row.status)} size="sm" /> },
+    { key: 'validation', label: '검증', render: row => <StatusBadge status={row.validation_status} size="sm" /> },
+    { key: 'steps', label: '단계 수', align: 'center', render: row => <span className="text-sm text-slate-600">{Array.isArray(row.plan_definition.steps) ? row.plan_definition.steps.length : '—'}</span> },
+    { key: 'summary', label: '변경 내용', render: row => <span className="text-sm text-slate-600">{row.change_summary ?? '—'}</span> },
+    { key: 'created', label: '생성일', render: row => <span className="text-xs text-slate-400">{formatTimestamp(row.created_at)}</span> },
+    { key: 'actions', label: '', render: row => (
+      <button
+        title={row.status === 'DRAFT' ? '초안 편집' : '실행 계획 조회'}
+        onClick={event => { event.stopPropagation(); navigate(`/workflows/${workflow.id}/versions/${row.id}/edit`); }}
+        className="p-1.5 rounded text-slate-400 hover:text-indigo-600 hover:bg-indigo-50"
+      >
+        {row.status === 'DRAFT' ? <Pencil size={13} /> : <Eye size={13} />}
+      </button>
+    ) },
+  ];
 
   return (
     <div>
       <div className="bg-white border-b border-slate-200 px-6 py-4">
-        <button onClick={() => navigate('/workflows')} className="flex items-center gap-1.5 text-sm text-slate-500 hover:text-slate-700 mb-3">
-          <ArrowLeft size={14} /> 워크플로 관리
-        </button>
-        <div className="flex items-start justify-between">
+        <button onClick={() => navigate('/workflows')} className="flex items-center gap-1.5 text-sm text-slate-500 hover:text-slate-700 mb-3"><ArrowLeft size={14} /> 워크플로 관리</button>
+        <div className="flex items-start justify-between gap-4">
           <div>
             <h1 className="text-lg font-semibold text-slate-900">{workflow.name}</h1>
             <div className="flex items-center gap-3 mt-1">
               <StatusBadge status={workflow.status} label={labelWorkflowStatus(workflow.status)} />
-              {full.currentVersion && <VersionBadge version={full.currentVersion} status="PUBLISHED" />}
-              <span className="text-xs text-slate-400">{full.description}</span>
+              {current && <VersionBadge version={`v${current.version_no}`} status="PUBLISHED" />}
+              <span className="text-xs text-slate-400">{workflow.description}</span>
             </div>
           </div>
-          <div className="flex gap-2">
-            <Button
-              variant="outline"
-              size="sm"
-              icon={latestStatus === 'DRAFT' ? <Pencil size={13} /> : <Plus size={13} />}
-              onClick={handleLatestPrimary}
-            >
-              {latestStatus === 'DRAFT' ? '디자이너 열기' : '새 초안 예시 만들기'}
-            </Button>
-            <Button size="sm" icon={<Rocket size={13} />} disabled>
-              게시 (미지원)
-            </Button>
-          </div>
+          <Button size="sm" icon={draft ? <Pencil size={13} /> : <Plus size={13} />} loading={busy} onClick={() => { void handleCreateOrEdit(); }}>
+            {draft ? '초안 편집' : '새 초안 버전 생성'}
+          </Button>
         </div>
       </div>
 
       <div className="bg-white border-b border-slate-200 px-6">
-        <TabBar
-          tabs={[
-            { id: 'overview', label: '개요' },
-            { id: 'versions', label: '버전', badge: full.versions.length },
-            { id: 'tools', label: '연결 도구', badge: full.tools.length },
-            { id: 'schedules', label: '예약 실행', badge: full.schedules.length },
-          ]}
-          activeTab={tab}
-          onChange={setTab}
-        />
+        <TabBar tabs={[{ id: 'overview', label: '개요' }, { id: 'versions', label: '버전', badge: versions.length }]} activeTab={tab} onChange={setTab} />
       </div>
 
-      <div className="p-6">
-        <div className="mb-4 max-w-4xl">
-          <InlineAlert type="info" message="이 화면은 워크플로 예시 데이터입니다. 디자이너의 변경 사항은 저장되지 않고 게시·실행 기능도 아직 연결되어 있지 않습니다." />
-        </div>
+      <div className="p-6 space-y-4">
+        {actionError && <InlineAlert type="error" message={actionError} />}
+        <InlineAlert type="info" message="실제 서버에 등록된 워크플로입니다. 초안은 저장 후 별도로 검증해야 합니다. 시각 디자이너와 게시·실행 UI는 후속 개발 대상입니다." />
         {tab === 'overview' && (
-          <div className="grid grid-cols-2 gap-4 max-w-3xl">
-            <InfoCard title="기본 정보">
-              <Row label="소유자">{full.owner}</Row>
-              <Row label="현재 버전" mono>{full.currentVersion ?? '—'}</Row>
-              <Row label="단계 수">{latest.steps}</Row>
-              <Row label="도구 수">{full.toolCount}</Row>
-            </InfoCard>
-            <InfoCard title="발행 상태">
-              <Row label="게시 버전" mono>{workflow.publishedVersion ?? '—'}</Row>
-              <Row label="최근 게시일">{full.lastPublished ?? '—'}</Row>
-              <Row label="연결 예약 수">{full.scheduleCount}</Row>
-              <Row label="생성일">{full.createdAt}</Row>
-            </InfoCard>
-          </div>
-        )}
-
-        {tab === 'versions' && (
-          <div className="space-y-3 max-w-4xl">
-            <InlineAlert
-              type="info"
-              message="초안(DRAFT) 버전만 편집할 수 있습니다. 게시됨(PUBLISHED) 버전은 읽기 전용이며 새 초안으로 변경해야 합니다. 이전 버전(DEPRECATED)은 조회만 가능합니다."
-            />
-            <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
-              <DataTable
-                columns={versionCols(navigate, workflow.id)}
-                data={full.versions}
-                rowKey={r => r.version}
-                onRowClick={r => navigate(`/workflows/${workflow.id}/versions/${r.version}/edit`)}
-              />
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 max-w-3xl">
+            <div className="bg-white border border-slate-200 rounded-xl p-4 space-y-2 text-sm">
+              <h2 className="font-semibold text-slate-800 mb-3">기본 정보</h2>
+              <p>공개 범위: <span title={workflow.visibility}>{labelWorkflowVisibility(workflow.visibility)}</span></p>
+              <p>소유자 ID: <span className="font-mono text-xs">{workflow.owner_id ?? '—'}</span></p>
+              <p>생성일: {formatTimestamp(workflow.created_at)}</p>
+              <p>수정일: {formatTimestamp(workflow.updated_at)}</p>
+            </div>
+            <div className="bg-white border border-slate-200 rounded-xl p-4 space-y-2 text-sm">
+              <h2 className="font-semibold text-slate-800 mb-3">버전 정보</h2>
+              <p>현재 게시 버전: {current ? `v${current.version_no}` : '없음'}</p>
+              <p>전체 버전 수: {versions.length}</p>
+              <p>편집 가능한 초안: {draft ? `v${draft.version_no}` : '없음'}</p>
             </div>
           </div>
         )}
-
-        {tab === 'tools' && (
-          <div className="max-w-4xl bg-white rounded-xl border border-slate-200 overflow-hidden">
-            <DataTable
-              columns={toolCols}
-              data={full.tools}
-              rowKey={r => r.toolId}
-              emptyMessage="연결된 도구가 없습니다."
-            />
-          </div>
-        )}
-
-        {tab === 'schedules' && (
-          <div className="max-w-3xl">
-            {full.schedules.length === 0 ? (
-              <div className="bg-white rounded-xl border border-slate-200">
-                <EmptyState
-                  icon={<Calendar size={22} />}
-                  title="연결된 예약 실행이 없습니다"
-                  description="실제 워크플로가 등록된 후 예약 실행에서 게시된 버전을 대상으로 선택할 수 있습니다."
-                />
-              </div>
-            ) : (
-              <div className="space-y-2">
-                {full.schedules.map(s => (
-                  <div key={s.id} className="bg-white border border-slate-200 rounded-lg p-4 flex justify-between items-center">
-                    <div>
-                      <p className="text-sm font-medium text-slate-800">{s.name}</p>
-                      <p className="text-xs text-slate-400">{s.schedule} · {s.timezone} · 다음 실행(예시): {s.nextRun}</p>
-                    </div>
-                    <StatusBadge status={s.status} label={labelWorkflowStatus(s.status)} size="sm" />
-                  </div>
-                ))}
-              </div>
-            )}
+        {tab === 'versions' && (
+          <div className="max-w-5xl space-y-3">
+            <InlineAlert type="info" message="초안(DRAFT)만 수정 가능합니다. 게시됨(PUBLISHED)과 이전 버전(DEPRECATED)의 실행 계획은 읽기 전용입니다." />
+            <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
+              {versions.length ? (
+                <DataTable columns={columns} data={versions} rowKey={row => row.id} onRowClick={row => navigate(`/workflows/${workflow.id}/versions/${row.id}/edit`)} />
+              ) : <EmptyState title="아직 버전이 없습니다" description="새 초안 버전을 생성하여 실행 계획을 작성하세요." />}
+            </div>
           </div>
         )}
       </div>
-    </div>
-  );
-}
-
-function versionCols(navigate: (to: string) => void, workflowId: string): Column<typeof mockWorkflowFull['wf-001']['versions'][0]>[] {
-  return [
-    { key: 'version', label: '버전', render: r => <VersionBadge version={r.version} status={r.status} /> },
-    { key: 'status', label: '상태', render: r => <StatusBadge status={r.status} label={labelWorkflowVersionStatus(r.status)} size="sm" /> },
-    { key: 'steps', label: '단계 수', render: r => <span className="text-sm text-slate-600">{r.steps}</span>, align: 'center' },
-    { key: 'changeSummary', label: '변경 내용', render: r => <span className="text-sm text-slate-700">{r.changeSummary}</span> },
-    { key: 'createdBy', label: '작성자', render: r => <span className="text-xs text-slate-500">{r.createdBy}</span> },
-    { key: 'createdAt', label: '생성일', render: r => <span className="text-xs text-slate-400">{r.createdAt}</span> },
-    { key: 'actions', label: '', render: r => {
-      const status = r.status as VersionStatus;
-      return (
-        <div className="flex items-center gap-1" onClick={e => e.stopPropagation()}>
-          {(status === 'PUBLISHED' || status === 'DEPRECATED') && (
-            <button
-              onClick={() => navigate(`/workflows/${workflowId}/versions/${r.version}/edit`)}
-              className="p-1.5 rounded text-slate-400 hover:text-indigo-600 hover:bg-indigo-50"
-              title="조회"
-            >
-              <Eye size={13} />
-            </button>
-          )}
-          {status === 'DRAFT' && (
-            <button
-              onClick={() => navigate(`/workflows/${workflowId}/versions/${r.version}/edit`)}
-              className="p-1.5 rounded text-slate-400 hover:text-indigo-600 hover:bg-indigo-50"
-              title="편집"
-            >
-              <Pencil size={13} />
-            </button>
-          )}
-          {status === 'PUBLISHED' && (
-            <button
-              onClick={() => navigate(`/workflows/${workflowId}/versions/new/edit`)}
-              className="p-1.5 rounded text-slate-400 hover:text-indigo-600 hover:bg-indigo-50"
-              title="새 초안 예시 만들기"
-            >
-              <Plus size={13} />
-            </button>
-          )}
-        </div>
-      );
-    }},
-  ];
-}
-
-const toolCols: Column<typeof mockWorkflowFull['wf-001']['tools'][0]>[] = [
-  { key: 'step', label: '단계', render: r => <span className="text-xs font-medium text-slate-500">{r.step}</span> },
-  { key: 'toolName', label: '도구', render: r => <span className="font-medium text-slate-800">{r.toolName}</span> },
-  { key: 'serverName', label: 'MCP 서버', render: r => <span className="text-xs text-slate-500">{r.serverName}</span> },
-  { key: 'riskClass', label: '위험도', render: r => <RiskBadge risk={r.riskClass} /> },
-  { key: 'verification', label: '검증 상태', render: r => <VerificationBadge status={r.verification} /> },
-];
-
-function InfoCard({ title, children }: { title: string; children: React.ReactNode }) {
-  return (
-    <div className="bg-white rounded-xl border border-slate-200 p-4">
-      <h3 className="text-sm font-semibold text-slate-800 mb-3">{title}</h3>
-      <div className="space-y-2 text-sm">{children}</div>
-    </div>
-  );
-}
-
-function Row({ label, children, mono }: { label: string; children: React.ReactNode; mono?: boolean }) {
-  return (
-    <div className="flex gap-4">
-      <span className="text-slate-400 w-28 shrink-0 text-xs">{label}</span>
-      <span className={`text-slate-700 ${mono ? 'font-mono text-xs' : ''}`}>{children}</span>
     </div>
   );
 }
