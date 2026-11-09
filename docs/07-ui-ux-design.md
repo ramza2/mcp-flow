@@ -692,7 +692,7 @@ Designer 규칙:
 
 - `/schedules`는 실제 `GET /api/v1/schedules`를 조회한다. 이름 검색·상태 필터·페이지·새로고침·권한/오류 상태를 제공한다.
 - 목록이 열린 브라우저 탭에서는 15초마다 현재 검색·필터·페이지의 서버 상태(`next_run_at`, `last_run_at`, `status` 포함)를 조용히 재조회한다. 탭이 숨겨지면 주기 조회를 건너뛰고 복귀 시 즉시 재조회한다. 일시적 자동 갱신 실패는 기존 목록을 유지하고 경고·최근 갱신 시각을 표시하며, 수동 새로고침을 계속 제공한다.
-- 목록/설정 화면에서 `activate`·`pause`·`resume`은 사용자 클릭으로만 실행한다. Backend 상태 `ACTIVE/PAUSED/COMPLETED/ERROR`를 그대로 표시한다.
+- 목록/설정 화면에서 `activate`·`pause`·`resume`은 사용자 클릭으로만 실행한다. Backend 상태 `ACTIVE/PAUSED/COMPLETED/ERROR`는 불변이고, UI는 별도 한국어 표시 라벨(활성화됨/일시정지/실행 완료/오류)을 사용한다. 목록의 기술 상태 코드는 툴팁으로 확인한다. `ACTIVE`는 예약이 켜진 상태이며 개별 실행이 진행 중이라는 뜻이 아니다.
 - 신규 예약은 `POST /schedules`로 **PAUSED** 저장 후 별도 활성화한다. 자동으로 실행하지 않는다.
 - 대상은 실제 Agent/Workflow 목록 및 `PUBLISHED` + `VALID` Version에서 **명시적 Version ID**를 선택한다. 목업 ID·임의 latest 대체 불가.
 - `AGENT_VERSION`과 `WORKFLOW_VERSION` 모두 ONCE/CRON/INTERVAL을 선택할 수 있다. Agent 입력은 `inputs.request_text`(최대 4000자)이며 매 occurrence마다 독립 계획을 수행한다. Agent 수동 trigger는 지원하지 않는다.
@@ -700,6 +700,7 @@ Designer 규칙:
 - 설정 화면은 `GET /schedules/{id}/occurrences` 최근 20건과 연결된 Execution 상세로의 이동을 제공한다. 열린 탭에서는 이력만 15초마다 조용히 갱신하고, 탭 숨김 시 조회를 건너뛰며 복귀 시 즉시 갱신한다. 갱신 실패 시 기존 이력을 보존하고 경고·마지막 갱신 시각·수동 이력 새로고침을 제공한다. 이력 갱신으로 예약 편집 폼을 다시 불러오거나 변경 중인 입력값을 초기화하지 않는다.
 - 현 UI의 CRON 예시 텍스트는 실제 서버 계산 결과가 아니다. 서버 제공 preview API가 생기기 전까지 실행 예정 시각을 **추측 표시하지 않는다**.
 - `INTERVAL`은 숫자+분/시간/일 단위 입력을 기본으로 하고 기존 ISO-8601 표현식은 고급 입력으로 보존한다. `CRON`은 매일/평일/특정 요일+시간 선택과 고급 5필드 직접 입력을 제공하며, 저장 API는 기존 `schedule_expression` 형식을 그대로 사용한다. 알 수 없는 기존 복합 표현식은 고급 모드에서 손실 없이 보존한다.
+- 메인 사이드바의 메뉴는 한국어로 표기하되 기존 경로·권한은 유지한다. 예약 대상·주기·정책·최근 실행 이력은 초보자용 한국어로 설명하고, 정책의 `option.value`와 API 전송값은 기존 Canonical Code를 유지한다. 최근 실행 이력은 상태/판단 사유의 한국어 라벨을 표시하며 원본 코드를 툴팁으로 제공한다. 알 수 없는 판단 사유는 임의 번역하지 않고 원본 코드를 출력한다.
 
 Form:
 

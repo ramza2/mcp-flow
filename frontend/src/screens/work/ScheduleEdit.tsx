@@ -19,7 +19,7 @@ import {
   type ScheduleUpdateRequest,
 } from '../../api/schedules';
 import { listWorkflowTargets, listWorkflowTargetVersions } from '../../api/workflows';
-import { SCHEDULE_MISFIRE_POLICIES, SCHEDULE_OVERLAP_POLICIES, SCHEDULE_TARGET_TYPES, formatScheduleTimestamp, labelScheduleTarget, type ScheduleMisfirePolicy, type ScheduleOverlapPolicy, type ScheduleTargetType } from '../../domain';
+import { SCHEDULE_MISFIRE_POLICIES, SCHEDULE_OVERLAP_POLICIES, SCHEDULE_TARGET_TYPES, formatScheduleTimestamp, labelOccurrenceStatus, labelScheduleDecision, labelScheduleMisfire, labelScheduleOverlap, labelScheduleStatus, labelScheduleTarget, type ScheduleMisfirePolicy, type ScheduleOverlapPolicy, type ScheduleTargetType } from '../../domain';
 
 type TargetOption = { id: string; name: string };
 type VersionOption = { id: string; version_no: number };
@@ -254,7 +254,7 @@ export default function ScheduleEdit() {
     let inputs: Record<string, JsonValue>;
     if (targetType === 'AGENT_VERSION') {
       if (!requestText.trim() || requestText.trim().length > 4000) {
-        setFormError('Agent 업무 지시는 1~4000자로 입력해 주세요.'); return;
+        setFormError('에이전트 업무 지시는 1~4000자로 입력해 주세요.'); return;
       }
       inputs = { request_text: requestText.trim() };
     } else {
@@ -263,7 +263,7 @@ export default function ScheduleEdit() {
         if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('JSON object required');
         inputs = parsed as Record<string, JsonValue>;
       } catch {
-        setFormError('Workflow 입력은 JSON 객체 형식이어야 합니다.'); return;
+        setFormError('워크플로 입력은 JSON 객체 형식이어야 합니다.'); return;
       }
     }
     const payload = {
@@ -328,8 +328,8 @@ export default function ScheduleEdit() {
         </>}
       />
       <div className="p-6 max-w-3xl space-y-5">
-        {existing && <InlineAlert type="info" message={`현재 상태: ${existing.status}. ${configLocked ? '설정 변경은 일시정지 상태에서만 가능하며, 완료·오류 예약은 이름과 설명만 수정할 수 있습니다.' : '설정을 저장한 후 활성화해야 실제 실행됩니다.'}`} />}
-        {isNew && <InlineAlert type="info" message="새 예약은 일시정지(PAUSED) 상태로 저장됩니다. 안전하게 확인한 뒤 목록에서 활성화해 주세요. 대상은 선택한 Version ID로 고정됩니다." />}
+        {existing && <InlineAlert type="info" message={`현재 상태: ${labelScheduleStatus(existing.status)}. ${configLocked ? '설정 변경은 일시정지 상태에서만 가능하며, 완료·오류 예약은 이름과 설명만 수정할 수 있습니다.' : '설정을 저장한 후 활성화해야 실제 실행됩니다.'}`} />}
+        {isNew && <InlineAlert type="info" message="새 예약은 일시정지 상태로 저장되어 바로 실행되지 않습니다. 내용을 확인한 뒤 목록에서 활성화해 주세요. 실행 대상은 선택한 버전으로 고정됩니다." />}
         {notice && <InlineAlert type="info" message={notice} />}
         {formError && <InlineAlert type="error" message={formError} />}
         <Section title="기본 정보">
@@ -344,24 +344,24 @@ export default function ScheduleEdit() {
               </label>)}
             </div>
           </Field>
-          {existing && <div className="text-xs text-slate-600">현재 고정된 Version ID: <span className="font-mono break-all">{existing.target_id}</span></div>}
+          {existing && <div className="text-xs text-slate-600">현재 고정된 버전 ID: <span className="font-mono break-all">{existing.target_id}</span></div>}
           <Field label="대상 선택">
             <select aria-label="대상 선택" value={logicalTargetId} disabled={configLocked || targetLoading || readOnly} onChange={event => { setLogicalTargetId(event.target.value); setVersionId(''); }} className={inputClass}>
               <option value="">{existing ? '현재 버전 유지 (대상을 변경하려면 선택)' : '대상을 선택하세요'}</option>
               {targets.map(target => <option key={target.id} value={target.id}>{target.name}</option>)}
             </select>
           </Field>
-          <Field label="게시된 Version">
-            <select aria-label="게시된 Version" value={versionId} disabled={!logicalTargetId || configLocked || versionLoading || readOnly} onChange={event => setVersionId(event.target.value)} className={inputClass}>
+          <Field label="게시된 버전">
+            <select aria-label="게시된 버전" value={versionId} disabled={!logicalTargetId || configLocked || versionLoading || readOnly} onChange={event => setVersionId(event.target.value)} className={inputClass}>
               <option value="">{existing && !logicalTargetId ? '현재 버전 유지' : '실행할 게시 버전을 선택하세요'}</option>
               {versions.map(version => <option key={version.id} value={version.id}>v{version.version_no} · {version.id.slice(0, 8)}…</option>)}
             </select>
           </Field>
           {targetError && <InlineAlert type="warning" message={targetError} />}
-          {targetType === 'AGENT_VERSION' ? <Field label="Agent 업무 지시 (최대 4000자)">
-            <textarea aria-label="Agent 업무 지시" value={requestText} disabled={configLocked || readOnly} onChange={event => setRequestText(event.target.value)} rows={3} maxLength={4000} placeholder="예: 반려동물 목록을 조회해 줘. 데이터를 변경하지 마." className={`${inputClass} h-auto py-2`} />
-          </Field> : <Field label="Workflow 입력 (JSON object)">
-            <textarea aria-label="Workflow 입력" value={inputJson} disabled={configLocked || readOnly} onChange={event => setInputJson(event.target.value)} rows={4} className={`${inputClass} h-auto py-2 font-mono`} />
+          {targetType === 'AGENT_VERSION' ? <Field label="에이전트 업무 지시 (최대 4000자)">
+            <textarea aria-label="에이전트 업무 지시" value={requestText} disabled={configLocked || readOnly} onChange={event => setRequestText(event.target.value)} rows={3} maxLength={4000} placeholder="예: 반려동물 목록을 조회해 줘. 데이터를 변경하지 마." className={`${inputClass} h-auto py-2`} />
+          </Field> : <Field label="워크플로 입력 (JSON 객체)">
+            <textarea aria-label="워크플로 입력" value={inputJson} disabled={configLocked || readOnly} onChange={event => setInputJson(event.target.value)} rows={4} className={`${inputClass} h-auto py-2 font-mono`} />
           </Field>}
         </Section>
 
@@ -372,7 +372,7 @@ export default function ScheduleEdit() {
               <option value="CRON">반복 (CRON)</option>
               <option value="INTERVAL">간격 (INTERVAL)</option>
             </select>
-            {targetType === 'AGENT_VERSION' && <p className="text-xs text-slate-500 mt-1">반복 예약은 실행할 때마다 선택한 Agent 버전으로 업무 지시를 새로 분석합니다. 자동 실행은 안전한 조회 작업만 허용됩니다.</p>}
+            {targetType === 'AGENT_VERSION' && <p className="text-xs text-slate-500 mt-1">반복 예약은 실행할 때마다 선택한 에이전트 버전으로 업무 지시를 새로 분석합니다. 자동 실행은 안전한 조회 작업만 허용됩니다.</p>}
           </Field>
           {scheduleType === 'ONCE' ? <Field label="실행 시각 (선택한 시간대 기준)">
             <input aria-label="실행 시각" type="datetime-local" value={oneTimeAt} disabled={configLocked || readOnly} onChange={event => setOneTimeAt(event.target.value)} className={inputClass} />
@@ -441,15 +441,17 @@ export default function ScheduleEdit() {
         </Section>
 
         <Section title="실행 정책">
-          <Field label="동시 실행 정책 (Overlap)">
+          <Field label="이전 실행이 아직 끝나지 않았을 때">
             <select aria-label="동시 실행 정책" value={overlap} disabled={configLocked || readOnly} onChange={event => setOverlap(event.target.value as ScheduleOverlapPolicy)} className={inputClass}>
-              {SCHEDULE_OVERLAP_POLICIES.map(policy => <option key={policy} value={policy}>{policy}</option>)}
+              {SCHEDULE_OVERLAP_POLICIES.map(policy => <option key={policy} value={policy}>{labelScheduleOverlap(policy)}</option>)}
             </select>
+            <p className="text-xs text-slate-500 mt-1">예약이 겹치는 경우 새 실행을 처리하는 방식을 정합니다. 실행 중 작업의 취소가 필요한 경우에는 영향을 확인하세요.</p>
           </Field>
-          <Field label="실행 시각을 놓쳤을 때 (Misfire)">
+          <Field label="서버 중단 등으로 실행 시각을 놓쳤을 때">
             <select aria-label="미실행 처리 정책" value={misfire} disabled={configLocked || readOnly} onChange={event => setMisfire(event.target.value as ScheduleMisfirePolicy)} className={inputClass}>
-              {SCHEDULE_MISFIRE_POLICIES.map(policy => <option key={policy} value={policy}>{policy}</option>)}
+              {SCHEDULE_MISFIRE_POLICIES.map(policy => <option key={policy} value={policy}>{labelScheduleMisfire(policy)}</option>)}
             </select>
+            <p className="text-xs text-slate-500 mt-1">서버가 다시 실행될 때 지나간 예약 시각을 처리하는 방식을 정합니다.</p>
           </Field>
           {misfire === 'CATCH_UP_LIMITED' && <Field label="최대 보충 실행 횟수">
             <input aria-label="최대 보충 실행 횟수" type="number" min={1} max={100} value={maxCatchUp} disabled={configLocked || readOnly} onChange={event => setMaxCatchUp(Number(event.target.value))} className={inputClass} />
@@ -468,7 +470,9 @@ export default function ScheduleEdit() {
           {occurrences.length === 0 ? <p className="text-sm text-slate-500">실행 이력이 없습니다.</p> : (
             <ul className="space-y-2">
               {occurrences.map(occ => <li key={occ.id} className="border-b border-slate-100 pb-2 text-sm flex flex-wrap items-center justify-between gap-2">
-                <span>{formatScheduleTimestamp(occ.scheduled_for, timezone)} · {occ.status}{occ.decision_reason ? ` · ${occ.decision_reason}` : ''}</span>
+                <span title={`${occ.status}${occ.decision_reason ? ` · ${occ.decision_reason}` : ''}`}>
+                  {formatScheduleTimestamp(occ.scheduled_for, timezone)} · {labelOccurrenceStatus(occ.status)}{occ.decision_reason ? ` · ${labelScheduleDecision(occ.decision_reason)}` : ''}
+                </span>
                 {occ.execution_id && <Link className="text-indigo-700 hover:underline" to={`/executions/${occ.execution_id}`}>실행 상세</Link>}
               </li>)}
             </ul>

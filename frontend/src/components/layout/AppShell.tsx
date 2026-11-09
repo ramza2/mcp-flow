@@ -22,23 +22,23 @@ interface NavItem {
 }
 
 const navConfig: NavItem[] = [
-  { label: 'Dashboard', path: '/', icon: <LayoutDashboard size={16} /> },
+  { label: '대시보드', path: '/', icon: <LayoutDashboard size={16} /> },
   {
-    label: 'Work',
+    label: '업무 실행',
     icon: <Briefcase size={16} />,
     children: [
-      { label: 'Agent Run', path: '/run', icon: <Play size={14} /> },
-      { label: 'Executions', path: '/executions', icon: <Activity size={14} />, permission: 'execution.view' },
-      { label: 'Schedules', path: '/schedules', icon: <Calendar size={14} />, permission: 'schedule.view' },
-      { label: 'Approvals', path: '/approvals', icon: <CheckSquare size={14} />, permission: 'approval.view' },
+      { label: '에이전트 실행', path: '/run', icon: <Play size={14} /> },
+      { label: '실행 이력', path: '/executions', icon: <Activity size={14} />, permission: 'execution.view' },
+      { label: '예약 실행', path: '/schedules', icon: <Calendar size={14} />, permission: 'schedule.view' },
+      { label: '승인 요청', path: '/approvals', icon: <CheckSquare size={14} />, permission: 'approval.view' },
     ],
   },
   {
-    label: 'Build',
+    label: '구성 관리',
     icon: <Zap size={16} />,
     children: [
-      { label: 'Agents', path: '/agents', icon: <Bot size={14} />, permission: 'agent.view' },
-      { label: 'Workflows', path: '/workflows', icon: <GitBranch size={14} />, permission: 'workflow.view' },
+      { label: '에이전트 관리', path: '/agents', icon: <Bot size={14} />, permission: 'agent.view' },
+      { label: '워크플로 관리', path: '/workflows', icon: <GitBranch size={14} />, permission: 'workflow.view' },
     ],
   },
   {
@@ -46,10 +46,10 @@ const navConfig: NavItem[] = [
     icon: <Server size={16} />,
     permission: 'mcp.view',
     children: [
-      { label: 'MCP Servers', path: '/mcp/servers', icon: <Server size={14} />, permission: 'mcp.view' },
-      { label: 'MCP Tools', path: '/mcp/tools', icon: <Wrench size={14} />, permission: 'mcp.view' },
-      { label: 'External Discovery', path: '/mcp/discovery', icon: <Globe size={14} />, permission: 'mcp.view' },
-      { label: 'Tool Factory', path: '/tool-factory', icon: <Factory size={14} />, permission: 'mcp.view' },
+      { label: 'MCP 서버', path: '/mcp/servers', icon: <Server size={14} />, permission: 'mcp.view' },
+      { label: 'MCP 도구', path: '/mcp/tools', icon: <Wrench size={14} />, permission: 'mcp.view' },
+      { label: '외부 MCP 탐색', path: '/mcp/discovery', icon: <Globe size={14} />, permission: 'mcp.view' },
+      { label: '도구 생성', path: '/tool-factory', icon: <Factory size={14} />, permission: 'mcp.view' },
     ],
   },
   {
@@ -59,11 +59,11 @@ const navConfig: NavItem[] = [
     children: [
       { label: '사용자 관리', path: '/admin/users', icon: <Users size={14} />, permission: 'admin.view' },
       { label: '역할 및 권한', path: '/admin/roles', icon: <Shield size={14} />, permission: 'admin.view' },
-      { label: 'Approval Policies', path: '/admin/approval-policies', icon: <CheckSquare size={14} />, permission: 'admin.view' },
-      { label: 'Model Profiles', path: '/admin/model-profiles', icon: <Bot size={14} />, permission: 'admin.view' },
-      { label: 'Audit Logs', path: '/admin/audit-logs', icon: <ScrollText size={14} />, permission: 'admin.view' },
-      { label: 'Jobs', path: '/admin/jobs', icon: <Clock size={14} />, permission: 'admin.view' },
-      { label: 'System Settings', path: '/admin/settings', icon: <Settings size={14} />, permission: 'admin.view' },
+      { label: '승인 정책', path: '/admin/approval-policies', icon: <CheckSquare size={14} />, permission: 'admin.view' },
+      { label: '모델 설정', path: '/admin/model-profiles', icon: <Bot size={14} />, permission: 'admin.view' },
+      { label: '감사 기록', path: '/admin/audit-logs', icon: <ScrollText size={14} />, permission: 'admin.view' },
+      { label: '백그라운드 작업', path: '/admin/jobs', icon: <Clock size={14} />, permission: 'admin.view' },
+      { label: '시스템 설정', path: '/admin/settings', icon: <Settings size={14} />, permission: 'admin.view' },
     ],
   },
 ];
@@ -181,7 +181,7 @@ export default function AppShell() {
           {!collapsed && (
             <div className="min-w-0">
               <div className="text-sm font-semibold text-white">MCPFlow</div>
-              <div className="text-[10px] text-slate-400 truncate">AI Agent Platform</div>
+              <div className="text-[10px] text-slate-400 truncate">AI 업무 자동화 플랫폼</div>
             </div>
           )}
         </div>
@@ -197,6 +197,7 @@ export default function AppShell() {
         <div className="border-t border-slate-700/50 p-2">
           <button
             onClick={() => setCollapsed(v => !v)}
+            aria-label={collapsed ? '메뉴 펼치기' : '메뉴 접기'}
             className="w-full flex items-center justify-center p-2 rounded-md text-slate-400 hover:text-slate-100 hover:bg-slate-800 transition-colors"
           >
             {collapsed ? <ChevronRight size={14} /> : <ChevronLeft size={14} />}
@@ -212,7 +213,7 @@ export default function AppShell() {
             {/* breadcrumb injected by screens */}
           </div>
           <div className="flex items-center gap-2">
-            <button className="p-1.5 rounded-md text-slate-500 hover:text-slate-700 hover:bg-slate-100 relative">
+            <button aria-label="알림" className="p-1.5 rounded-md text-slate-500 hover:text-slate-700 hover:bg-slate-100 relative">
               <Bell size={16} />
               <span className="absolute top-1 right-1 w-1.5 h-1.5 bg-red-500 rounded-full" />
             </button>

@@ -45,6 +45,11 @@ import {
 import {
   labelDiscoveryMode,
   labelExecutionSource,
+  labelOccurrenceStatus,
+  labelScheduleDecision,
+  labelScheduleMisfire,
+  labelScheduleOverlap,
+  labelScheduleStatus,
   labelScheduleTarget,
 } from '../labels';
 
@@ -321,8 +326,19 @@ describe('Presentation labels — Domain values stay Canonical', () => {
   });
 
   it('maps Schedule target Canonical → label', () => {
-    expect(labelScheduleTarget('AGENT_VERSION')).toBe('Agent Version');
-    expect(labelScheduleTarget('WORKFLOW_VERSION')).toBe('Workflow Version');
+    expect(labelScheduleTarget('AGENT_VERSION')).toBe('에이전트 버전');
+    expect(labelScheduleTarget('WORKFLOW_VERSION')).toBe('워크플로 버전');
+  });
+
+  it('maps schedule policy/status/decision text without mutating Canonical codes', () => {
+    expect(labelScheduleStatus('PAUSED')).toBe('일시정지');
+    expect(labelOccurrenceStatus('SKIPPED')).toBe('건너뜀');
+    expect(labelScheduleOverlap('REPLACE')).toBe('이전 실행 취소 요청 후 교체');
+    expect(labelScheduleMisfire('CATCH_UP_LIMITED')).toBe('놓친 실행을 지정 횟수까지 보충');
+    expect(labelScheduleDecision('MISFIRE_SKIP')).toBe('놓친 실행 시각 건너뛰기');
+    expect(labelScheduleDecision('FUTURE_REASON')).toBe('FUTURE_REASON');
+    expect(SCHEDULE_STATUSES).toContain('PAUSED');
+    expect(SCHEDULE_MISFIRE_POLICIES).toContain('CATCH_UP_LIMITED');
   });
 
   it('maps MCP discovery Canonical → label', () => {

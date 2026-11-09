@@ -10,6 +10,10 @@ import type {
   MCPProtocolEra,
   MCPTransportType,
   RiskClass,
+  OccurrenceStatus,
+  ScheduleMisfirePolicy,
+  ScheduleOverlapPolicy,
+  ScheduleStatus,
   ScheduleTargetType,
 } from './types';
 
@@ -44,8 +48,57 @@ export const AUDIT_RESULT_LABELS: Record<AuditResult, string> = {
 };
 
 export const SCHEDULE_TARGET_LABELS: Record<ScheduleTargetType, string> = {
-  AGENT_VERSION: 'Agent Version',
-  WORKFLOW_VERSION: 'Workflow Version',
+  AGENT_VERSION: '에이전트 버전',
+  WORKFLOW_VERSION: '워크플로 버전',
+};
+
+export const SCHEDULE_STATUS_LABELS: Record<ScheduleStatus, string> = {
+  ACTIVE: '활성화됨',
+  PAUSED: '일시정지',
+  COMPLETED: '실행 완료',
+  ERROR: '오류',
+};
+
+export const OCCURRENCE_STATUS_LABELS: Record<OccurrenceStatus, string> = {
+  PLANNED: '실행 예정',
+  SKIPPED: '건너뜀',
+  ENQUEUED: '실행 대기열 등록',
+  RUNNING: '실행 중',
+  COMPLETED: '완료',
+  FAILED: '실패',
+};
+
+export const SCHEDULE_OVERLAP_LABELS: Record<ScheduleOverlapPolicy, string> = {
+  ALLOW: '동시 실행 허용',
+  SKIP: '이전 실행 중이면 건너뛰기 (기본값)',
+  QUEUE: '이전 실행 완료 후 대기 작업 실행',
+  REPLACE: '이전 실행 취소 요청 후 교체',
+};
+
+export const SCHEDULE_MISFIRE_LABELS: Record<ScheduleMisfirePolicy, string> = {
+  SKIP: '놓친 실행은 건너뛰기 (기본값)',
+  RUN_ONCE: '놓친 실행이 있으면 한 번 실행',
+  CATCH_UP_LIMITED: '놓친 실행을 지정 횟수까지 보충',
+};
+
+/** Scheduler decision reasons have no frontend canonical enum; unknown values remain visible. */
+const SCHEDULE_DECISION_LABELS: Record<string, string> = {
+  DUE: '예정된 시각에 실행',
+  MANUAL_TRIGGER: '수동 실행',
+  MISFIRE_SKIP: '놓친 실행 시각 건너뛰기',
+  MISFIRE_RUN_ONCE: '놓친 실행 한 번 실행',
+  MISFIRE_CATCH_UP: '놓친 실행 보충',
+  MISFIRE_COALESCED: '놓친 실행 합치기',
+  MISFIRE_CATCH_UP_LIMIT: '보충 실행 횟수 초과',
+  OVERLAP_SKIP: '이전 실행 중이어서 건너뛰기',
+  OVERLAP_QUEUE: '이전 실행 완료까지 대기',
+  OVERLAP_REPLACE: '이전 실행 교체',
+  OVERLAP_REPLACE_WAIT: '이전 실행 취소 대기',
+  REPLACE_SUPERSEDED: '더 최근 실행으로 대체됨',
+  TARGET_PRECONDITION_FAILED: '실행 대상 조건 미충족',
+  AUTHORIZATION_REVOKED: '실행 권한 철회됨',
+  AGENT_SCHEDULE_EXECUTION_UNSUPPORTED: '지원되지 않는 에이전트 예약 실행',
+  AGENT_PLAN_QUEUED: '에이전트 실행 계획 대기',
 };
 
 export const MCP_DISCOVERY_LABELS: Record<MCPDiscoveryMode, string> = {
@@ -128,6 +181,26 @@ export function formatDurationMs(ms: number | null | undefined): string {
 
 export function labelScheduleTarget(value: string): string {
   return SCHEDULE_TARGET_LABELS[value as ScheduleTargetType] ?? value;
+}
+
+export function labelScheduleStatus(value: string): string {
+  return SCHEDULE_STATUS_LABELS[value as ScheduleStatus] ?? value;
+}
+
+export function labelOccurrenceStatus(value: string): string {
+  return OCCURRENCE_STATUS_LABELS[value as OccurrenceStatus] ?? value;
+}
+
+export function labelScheduleOverlap(value: string): string {
+  return SCHEDULE_OVERLAP_LABELS[value as ScheduleOverlapPolicy] ?? value;
+}
+
+export function labelScheduleMisfire(value: string): string {
+  return SCHEDULE_MISFIRE_LABELS[value as ScheduleMisfirePolicy] ?? value;
+}
+
+export function labelScheduleDecision(value: string): string {
+  return SCHEDULE_DECISION_LABELS[value] ?? value;
 }
 
 export function labelDiscoveryMode(value: string): string {

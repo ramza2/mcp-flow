@@ -63,6 +63,9 @@ describe('Schedule live management', () => {
   it('shows live API rows (not mock examples) and invokes pause', async () => {
     renderWithRouter(<Schedules />, { path: '/schedules', route: '/schedules' });
     expect(await screen.findByText('정기 예약')).toBeInTheDocument();
+    expect(screen.getByText('한 번 실행')).toHaveAttribute('title', 'ONCE');
+    expect(screen.getByTitle('ACTIVE')).toHaveTextContent('활성화됨');
+    expect(within(screen.getByRole('combobox', { name: '상태' })).getByRole('option', { name: '일시정지' })).toHaveValue('PAUSED');
     expect(mocks.list).toHaveBeenCalled();
     fireEvent.click(screen.getByRole('button', { name: '일시정지' }));
     await waitFor(() => expect(mocks.status).toHaveBeenCalledWith(scheduleId, 'pause'));
@@ -113,13 +116,13 @@ describe('Schedule live management', () => {
     mocks.get.mockResolvedValueOnce({ ...existing, status: 'PAUSED' });
     mocks.occurrences.mockResolvedValueOnce(page([firstOccurrence])).mockResolvedValueOnce(page([nextOccurrence, firstOccurrence]));
     renderWithRouter(<ScheduleEdit />, { path: '/schedules/:id/edit', route: `/schedules/${scheduleId}/edit` });
-    expect(await screen.findByText(/13:49.*COMPLETED.*DUE/)).toBeInTheDocument();
+    expect(await screen.findByText(/13:49.*완료.*예정된 시각에 실행/)).toHaveAttribute('title', 'COMPLETED · DUE');
     expect(screen.getByRole('status')).toHaveTextContent('15초마다 자동 갱신');
     fireEvent.change(screen.getByRole('textbox', { name: '이름' }), { target: { value: '저장 전 수정한 이름' } });
     const tick = intervalSpy.mock.calls.find(([, delay]) => delay === 15_000)?.[0];
     expect(tick).toBeTypeOf('function');
     await act(async () => { (tick as () => void)(); });
-    expect(await screen.findByText(/13:52.*SKIPPED.*MISFIRE_SKIP/)).toBeInTheDocument();
+    expect(await screen.findByText(/13:52.*건너뜀.*놓친 실행 시각 건너뛰기/)).toHaveAttribute('title', 'SKIPPED · MISFIRE_SKIP');
     expect(screen.getByRole('textbox', { name: '이름' })).toHaveValue('저장 전 수정한 이름');
     expect(mocks.get).toHaveBeenCalledTimes(1);
     expect(mocks.occurrences).toHaveBeenCalledTimes(2);
@@ -131,14 +134,14 @@ describe('Schedule live management', () => {
     const visibilitySpy = vi.spyOn(document, 'visibilityState', 'get');
     mocks.occurrences.mockResolvedValueOnce(page([firstOccurrence])).mockResolvedValueOnce(page([nextOccurrence]));
     renderWithRouter(<ScheduleEdit />, { path: '/schedules/:id/edit', route: `/schedules/${scheduleId}/edit` });
-    expect(await screen.findByText(/13:49.*COMPLETED.*DUE/)).toBeInTheDocument();
+    expect(await screen.findByText(/13:49.*완료.*예정된 시각에 실행/)).toBeInTheDocument();
     const tick = intervalSpy.mock.calls.find(([, delay]) => delay === 15_000)?.[0];
     visibilitySpy.mockReturnValue('hidden');
     await act(async () => { (tick as () => void)(); });
     expect(mocks.occurrences).toHaveBeenCalledTimes(1);
     visibilitySpy.mockReturnValue('visible');
     await act(async () => { fireEvent(document, new Event('visibilitychange')); });
-    expect(await screen.findByText(/13:52.*SKIPPED.*MISFIRE_SKIP/)).toBeInTheDocument();
+    expect(await screen.findByText(/13:52.*건너뜀.*놓친 실행 시각 건너뛰기/)).toBeInTheDocument();
     expect(mocks.occurrences).toHaveBeenCalledTimes(2);
   });
 
@@ -148,13 +151,13 @@ describe('Schedule live management', () => {
       .mockRejectedValueOnce(new Error('network'))
       .mockResolvedValueOnce(page([nextOccurrence]));
     renderWithRouter(<ScheduleEdit />, { path: '/schedules/:id/edit', route: `/schedules/${scheduleId}/edit` });
-    expect(await screen.findByText(/13:49.*COMPLETED.*DUE/)).toBeInTheDocument();
+    expect(await screen.findByText(/13:49.*완료.*예정된 시각에 실행/)).toBeInTheDocument();
     const tick = intervalSpy.mock.calls.find(([, delay]) => delay === 15_000)?.[0];
     await act(async () => { (tick as () => void)(); });
-    expect(screen.getByText(/13:49.*COMPLETED.*DUE/)).toBeInTheDocument();
+    expect(screen.getByText(/13:49.*완료.*예정된 시각에 실행/)).toBeInTheDocument();
     expect(screen.getByText(/이력 자동 갱신에 실패했습니다/)).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: '이력 새로고침' }));
-    expect(await screen.findByText(/13:52.*SKIPPED.*MISFIRE_SKIP/)).toBeInTheDocument();
+    expect(await screen.findByText(/13:52.*건너뜀.*놓친 실행 시각 건너뛰기/)).toBeInTheDocument();
     expect(screen.queryByText(/이력 자동 갱신에 실패했습니다/)).not.toBeInTheDocument();
     expect(mocks.occurrences).toHaveBeenCalledTimes(3);
     expect(mocks.get).toHaveBeenCalledTimes(1);
@@ -172,32 +175,38 @@ describe('Schedule live management', () => {
     expect(mocks.occurrences).toHaveBeenCalledTimes(1);
   });
 
+  it('keeps unknown scheduler decision reasons visible instead of inventing a translation', async () => {
+    mocks.occurrences.mockResolvedValueOnce(page([{ ...firstOccurrence, decision_reason: 'NEW_SERVER_REASON' }]));
+    renderWithRouter(<ScheduleEdit />, { path: '/schedules/:id/edit', route: `/schedules/${scheduleId}/edit` });
+    expect(await screen.findByText(/완료.*NEW_SERVER_REASON/)).toHaveAttribute('title', 'COMPLETED · NEW_SERVER_REASON');
+  });
+
   it('offers published Agent versions, recurring schedules and canonical policies', async () => {
     renderWithRouter(<ScheduleEdit />, { path: '/schedules/new', route: '/schedules/new' });
-    expect(screen.getByText('Agent Version')).toBeInTheDocument();
-    expect(screen.getByText('Workflow Version')).toBeInTheDocument();
-    expect(screen.getByText(/일시정지\(PAUSED\) 상태로 저장/)).toBeInTheDocument();
+    expect(screen.getByText('에이전트 버전')).toBeInTheDocument();
+    expect(screen.getByText('워크플로 버전')).toBeInTheDocument();
+    expect(screen.getByText(/일시정지 상태로 저장되어 바로 실행되지 않습니다/)).toBeInTheDocument();
     expect(screen.queryByText('ACTIVE')).not.toBeInTheDocument();
 
     await waitFor(() => expect(within(screen.getByRole('combobox', { name: '대상 선택' })).getByRole('option', { name: 'Pets Agent' })).toBeInTheDocument());
     fireEvent.change(screen.getByRole('combobox', { name: '대상 선택' }), { target: { value: agentId } });
-    await waitFor(() => expect(within(screen.getByRole('combobox', { name: '게시된 Version' })).getByRole('option', { name: /v3/ })).toBeInTheDocument());
+    await waitFor(() => expect(within(screen.getByRole('combobox', { name: '게시된 버전' })).getByRole('option', { name: /v3/ })).toBeInTheDocument());
     expect(within(screen.getByRole('combobox', { name: '예약 종류' })).getByRole('option', { name: /CRON/ })).toBeInTheDocument();
     expect(within(screen.getByRole('combobox', { name: '예약 종류' })).getByRole('option', { name: /INTERVAL/ })).toBeInTheDocument();
     const overlap = screen.getByRole('combobox', { name: '동시 실행 정책' });
     const misfire = screen.getByRole('combobox', { name: '미실행 처리 정책' });
-    expect(within(overlap).getByRole('option', { name: 'REPLACE' })).toBeInTheDocument();
-    expect(within(misfire).getByRole('option', { name: 'CATCH_UP_LIMITED' })).toBeInTheDocument();
+    expect(within(overlap).getByRole('option', { name: '이전 실행 취소 요청 후 교체' })).toHaveValue('REPLACE');
+    expect(within(misfire).getByRole('option', { name: '놓친 실행을 지정 횟수까지 보충' })).toHaveValue('CATCH_UP_LIMITED');
   });
 
   it('creates an actual PAUSED Agent Schedule with the chosen Version ID', async () => {
     renderWithRouter(<ScheduleEdit />, { path: '/schedules/new', route: '/schedules/new' });
     await waitFor(() => expect(screen.getByRole('combobox', { name: '대상 선택' })).toBeEnabled());
     fireEvent.change(screen.getByRole('combobox', { name: '대상 선택' }), { target: { value: agentId } });
-    await waitFor(() => expect(within(screen.getByRole('combobox', { name: '게시된 Version' })).getByRole('option', { name: /v3/ })).toBeInTheDocument());
-    fireEvent.change(screen.getByRole('combobox', { name: '게시된 Version' }), { target: { value: versionId } });
+    await waitFor(() => expect(within(screen.getByRole('combobox', { name: '게시된 버전' })).getByRole('option', { name: /v3/ })).toBeInTheDocument());
+    fireEvent.change(screen.getByRole('combobox', { name: '게시된 버전' }), { target: { value: versionId } });
     fireEvent.change(screen.getByRole('textbox', { name: '이름' }), { target: { value: '내 예약' } });
-    fireEvent.change(screen.getByRole('textbox', { name: 'Agent 업무 지시' }), { target: { value: '반려동물 목록' } });
+    fireEvent.change(screen.getByRole('textbox', { name: '에이전트 업무 지시' }), { target: { value: '반려동물 목록' } });
     fireEvent.change(screen.getByLabelText('실행 시각'), { target: { value: '2026-12-10T09:00' } });
     fireEvent.click(screen.getByRole('button', { name: '저장' }));
     await waitFor(() => expect(mocks.create).toHaveBeenCalled());
@@ -213,10 +222,10 @@ describe('Schedule live management', () => {
     renderWithRouter(<ScheduleEdit />, { path: '/schedules/new', route: '/schedules/new' });
     await waitFor(() => expect(screen.getByRole('combobox', { name: '대상 선택' })).toBeEnabled());
     fireEvent.change(screen.getByRole('combobox', { name: '대상 선택' }), { target: { value: agentId } });
-    await waitFor(() => expect(within(screen.getByRole('combobox', { name: '게시된 Version' })).getByRole('option', { name: /v3/ })).toBeInTheDocument());
-    fireEvent.change(screen.getByRole('combobox', { name: '게시된 Version' }), { target: { value: versionId } });
+    await waitFor(() => expect(within(screen.getByRole('combobox', { name: '게시된 버전' })).getByRole('option', { name: /v3/ })).toBeInTheDocument());
+    fireEvent.change(screen.getByRole('combobox', { name: '게시된 버전' }), { target: { value: versionId } });
     fireEvent.change(screen.getByRole('textbox', { name: '이름' }), { target: { value: '아침 조회' } });
-    fireEvent.change(screen.getByRole('textbox', { name: 'Agent 업무 지시' }), { target: { value: '오늘 반려동물 목록을 조회해 줘' } });
+    fireEvent.change(screen.getByRole('textbox', { name: '에이전트 업무 지시' }), { target: { value: '오늘 반려동물 목록을 조회해 줘' } });
     fireEvent.change(screen.getByRole('combobox', { name: '예약 종류' }), { target: { value: 'CRON' } });
     expect(screen.getByRole('combobox', { name: '반복 규칙' })).toHaveValue('DAILY');
     expect(screen.getByLabelText('반복 실행 시간')).toHaveValue('09:00');
@@ -233,10 +242,10 @@ describe('Schedule live management', () => {
     renderWithRouter(<ScheduleEdit />, { path: '/schedules/new', route: '/schedules/new' });
     await waitFor(() => expect(screen.getByRole('combobox', { name: '대상 선택' })).toBeEnabled());
     fireEvent.change(screen.getByRole('combobox', { name: '대상 선택' }), { target: { value: agentId } });
-    await waitFor(() => expect(screen.getByRole('combobox', { name: '게시된 Version' })).toBeEnabled());
-    fireEvent.change(screen.getByRole('combobox', { name: '게시된 Version' }), { target: { value: versionId } });
+    await waitFor(() => expect(screen.getByRole('combobox', { name: '게시된 버전' })).toBeEnabled());
+    fireEvent.change(screen.getByRole('combobox', { name: '게시된 버전' }), { target: { value: versionId } });
     fireEvent.change(screen.getByRole('textbox', { name: '이름' }), { target: { value: '금요일 업무' } });
-    fireEvent.change(screen.getByRole('textbox', { name: 'Agent 업무 지시' }), { target: { value: '조회' } });
+    fireEvent.change(screen.getByRole('textbox', { name: '에이전트 업무 지시' }), { target: { value: '조회' } });
     fireEvent.change(screen.getByRole('combobox', { name: '예약 종류' }), { target: { value: 'CRON' } });
     fireEvent.change(screen.getByRole('combobox', { name: '반복 규칙' }), { target: { value: 'WEEKLY' } });
     fireEvent.change(screen.getByLabelText('반복 실행 시간'), { target: { value: '14:30' } });
@@ -251,10 +260,10 @@ describe('Schedule live management', () => {
     renderWithRouter(<ScheduleEdit />, { path: '/schedules/new', route: '/schedules/new' });
     await waitFor(() => expect(screen.getByRole('combobox', { name: '대상 선택' })).toBeEnabled());
     fireEvent.change(screen.getByRole('combobox', { name: '대상 선택' }), { target: { value: agentId } });
-    await waitFor(() => expect(screen.getByRole('combobox', { name: '게시된 Version' })).toBeEnabled());
-    fireEvent.change(screen.getByRole('combobox', { name: '게시된 Version' }), { target: { value: versionId } });
+    await waitFor(() => expect(screen.getByRole('combobox', { name: '게시된 버전' })).toBeEnabled());
+    fireEvent.change(screen.getByRole('combobox', { name: '게시된 버전' }), { target: { value: versionId } });
     fireEvent.change(screen.getByRole('textbox', { name: '이름' }), { target: { value: '3분 간격 조회' } });
-    fireEvent.change(screen.getByRole('textbox', { name: 'Agent 업무 지시' }), { target: { value: '조회' } });
+    fireEvent.change(screen.getByRole('textbox', { name: '에이전트 업무 지시' }), { target: { value: '조회' } });
     fireEvent.change(screen.getByRole('combobox', { name: '예약 종류' }), { target: { value: 'INTERVAL' } });
     fireEvent.change(screen.getByLabelText('반복 간격 숫자'), { target: { value: '3' } });
     fireEvent.change(screen.getByRole('combobox', { name: '반복 간격 단위' }), { target: { value: 'MINUTES' } });
