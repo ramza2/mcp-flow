@@ -18,6 +18,8 @@ import type {
   ScheduleOverlapPolicy,
   ScheduleStatus,
   ScheduleTargetType,
+  WorkflowStatus,
+  WorkflowVersionStatus,
 } from './types';
 
 /** Presentation labels — Domain values stay Canonical; UI maps separately. */
@@ -51,6 +53,27 @@ export function labelAgentVersionStatus(value: string): string {
 
 export function labelAgentVisibility(value: string): string {
   return AGENT_VISIBILITY_LABELS[value as AgentVisibility] ?? value;
+}
+
+export const WORKFLOW_STATUS_LABELS: Record<WorkflowStatus, string> = {
+  DRAFT: '초안',
+  ACTIVE: '활성',
+  INACTIVE: '비활성',
+  ARCHIVED: '보관됨',
+};
+
+export const WORKFLOW_VERSION_STATUS_LABELS: Record<WorkflowVersionStatus, string> = {
+  DRAFT: '초안',
+  PUBLISHED: '게시됨',
+  DEPRECATED: '이전 버전',
+};
+
+export function labelWorkflowStatus(value: string): string {
+  return WORKFLOW_STATUS_LABELS[value as WorkflowStatus] ?? value;
+}
+
+export function labelWorkflowVersionStatus(value: string): string {
+  return WORKFLOW_VERSION_STATUS_LABELS[value as WorkflowVersionStatus] ?? value;
 }
 
 export const EXECUTION_SOURCE_LABELS: Record<ExecutionSourceType, string> = {

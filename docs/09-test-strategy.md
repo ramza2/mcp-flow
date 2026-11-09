@@ -907,6 +907,10 @@ DRAFT → PUBLISHED → DEPRECATED
 
 동일 lifecycle을 사용한다.
 
+- 워크플로 예시 화면 한글화 회귀: 목록 검색·상태 필터가 예시 데이터에 적용되는지,
+  상태/버전/Join Policy 표시명과 Canonical Code가 분리되는지,
+  실제 저장·게시가 미연동임을 안내하는지, 가짜 `Draft 저장`을 제공하지 않는지 확인한다.
+
 - DRAFT plan 편집 (incomplete object save allowed; invalidates validation + tool refs)
 - Plan source ownership: WORKFLOW + matching workflow_id (AGENT / mismatch → INVALID)
 - `/validate` persists structured `validation_report`; INVALID leaves zero tool refs

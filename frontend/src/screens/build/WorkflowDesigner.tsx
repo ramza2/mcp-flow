@@ -69,20 +69,20 @@ type PaletteItem =
   | { kind: 'visual'; id: 'PARALLEL' | 'END'; label: string; hint: string; icon: React.ReactNode; color: string };
 
 const STEP_META: Record<AuthorableStepType, { label: string; icon: React.ReactNode; color: string }> = {
-  TOOL: { label: 'Tool', icon: <Zap size={14} />, color: 'text-indigo-600 bg-indigo-50' },
-  CONDITION: { label: 'Condition', icon: <Split size={14} />, color: 'text-amber-600 bg-amber-50' },
-  JOIN: { label: 'Join', icon: <GitBranch size={14} />, color: 'text-cyan-600 bg-cyan-50' },
-  APPROVAL: { label: 'Approval', icon: <CheckSquare size={14} />, color: 'text-green-600 bg-green-50' },
-  LOOP: { label: 'Loop', icon: <Repeat size={14} />, color: 'text-violet-600 bg-violet-50' },
+  TOOL: { label: '도구 실행', icon: <Zap size={14} />, color: 'text-indigo-600 bg-indigo-50' },
+  CONDITION: { label: '조건 분기', icon: <Split size={14} />, color: 'text-amber-600 bg-amber-50' },
+  JOIN: { label: '흐름 합치기', icon: <GitBranch size={14} />, color: 'text-cyan-600 bg-cyan-50' },
+  APPROVAL: { label: '승인 요청', icon: <CheckSquare size={14} />, color: 'text-green-600 bg-green-50' },
+  LOOP: { label: '반복 실행', icon: <Repeat size={14} />, color: 'text-violet-600 bg-violet-50' },
 };
 
 const PALETTE: PaletteItem[] = [
-  { kind: 'step', type: 'TOOL', label: 'Tool', icon: <Zap size={14} />, color: 'text-indigo-600 bg-indigo-50' },
-  { kind: 'step', type: 'CONDITION', label: 'Condition', icon: <Split size={14} />, color: 'text-amber-600 bg-amber-50' },
-  { kind: 'visual', id: 'PARALLEL', label: 'Parallel / Join', hint: 'JOIN step 추가 (PARALLEL 타입 아님)', icon: <GitBranch size={14} />, color: 'text-cyan-600 bg-cyan-50' },
-  { kind: 'step', type: 'APPROVAL', label: 'Approval', icon: <CheckSquare size={14} />, color: 'text-green-600 bg-green-50' },
-  { kind: 'step', type: 'LOOP', label: 'Loop', icon: <Repeat size={14} />, color: 'text-violet-600 bg-violet-50' },
-  { kind: 'visual', id: 'END', label: 'End', hint: '시각적 종료 표현 (persisted type 아님)', icon: <Circle size={14} />, color: 'text-slate-500 bg-slate-100' },
+  { kind: 'step', type: 'TOOL', label: '도구 실행', icon: <Zap size={14} />, color: 'text-indigo-600 bg-indigo-50' },
+  { kind: 'step', type: 'CONDITION', label: '조건 분기', icon: <Split size={14} />, color: 'text-amber-600 bg-amber-50' },
+  { kind: 'visual', id: 'PARALLEL', label: '흐름 합치기', hint: 'JOIN 단계만 추가합니다. PARALLEL은 별도 저장 타입이 아닙니다.', icon: <GitBranch size={14} />, color: 'text-cyan-600 bg-cyan-50' },
+  { kind: 'step', type: 'APPROVAL', label: '승인 요청', icon: <CheckSquare size={14} />, color: 'text-green-600 bg-green-50' },
+  { kind: 'step', type: 'LOOP', label: '반복 실행', icon: <Repeat size={14} />, color: 'text-violet-600 bg-violet-50' },
+  { kind: 'visual', id: 'END', label: '종료 표시', hint: '화면에만 표시하고 실제 단계로 저장하지 않습니다.', icon: <Circle size={14} />, color: 'text-slate-500 bg-slate-100' },
 ];
 
 const COMPARE_OPS: CompareOp[] = ['eq', 'ne', 'gt', 'gte', 'lt', 'lte', 'in', 'contains'];
@@ -90,6 +90,35 @@ const UNARY_OPS: UnaryOp[] = ['exists', 'is_null'];
 const PREDICATE_OPS: PredicateOp[] = [...COMPARE_OPS, ...UNARY_OPS, 'not', 'and', 'or'];
 const BINDING_KINDS: BindingKind[] = ['LITERAL', 'PLAN_INPUT', 'STEP_OUTPUT', 'EXECUTION_CONTEXT', 'LOOP_CONTEXT', 'SECRET_REF'];
 const JOIN_POLICIES: JoinPolicy[] = ['ALL_SUCCESS', 'ALL_COMPLETE', 'ANY_SUCCESS'];
+const JOIN_POLICY_LABELS: Record<JoinPolicy, string> = {
+  ALL_SUCCESS: '모두 성공해야 합치기',
+  ALL_COMPLETE: '모두 완료되면 합치기',
+  ANY_SUCCESS: '하나라도 성공하면 합치기',
+};
+const LOOP_MODE_LABELS: Record<LoopMode, string> = {
+  FOR_EACH: '목록의 각 항목마다 반복',
+  WHILE: '조건이 참인 동안 반복',
+};
+const BINDING_KIND_LABELS: Record<BindingKind, string> = {
+  LITERAL: '직접 입력한 값',
+  PLAN_INPUT: '워크플로 실행 입력값',
+  STEP_OUTPUT: '이전 단계의 결과',
+  EXECUTION_CONTEXT: '실행 정보',
+  LOOP_CONTEXT: '반복 실행 정보',
+  SECRET_REF: '비밀정보 참조',
+};
+const VALIDATION_LABELS: Record<ValidationCode, string> = {
+  'Circular Dependency': '순환 참조',
+  'Missing Tool': '도구 미선택',
+  'Inactive Tool': '비활성 도구',
+  'Invalid Tool Version': '도구 버전 또는 검증 상태 오류',
+  'Invalid Binding': '값 연결 오류',
+  'Missing Required Input': '필수 입력 누락',
+  'Invalid Predicate': '조건식 오류',
+  'Missing Approval Policy': '승인 정책 누락',
+  'Loop Without Limit': '반복 횟수 제한 누락',
+  'Disconnected Node': '연결되지 않은 단계',
+};
 
 const defaultBinding = (): BindingValue => ({ kind: 'LITERAL', value: '' });
 const defaultCompareLeft = (): BindingValue => ({ kind: 'STEP_OUTPUT', stepId: '', path: '' });
@@ -162,7 +191,7 @@ export default function WorkflowDesigner() {
       version: 'v1',
       status: 'DRAFT' as const,
       steps: 0,
-      changeSummary: 'Initial draft',
+      changeSummary: '초기 초안',
       validation: null as 'VALID' | 'INVALID' | 'WARNING' | null,
       createdBy: 'admin',
       createdAt: new Date().toISOString().slice(0, 10),
@@ -175,7 +204,7 @@ export default function WorkflowDesigner() {
   const workflow = existingWorkflow ?? (isNewLogicalWorkflow
     ? {
       id: workflowId!,
-      name: 'New Workflow',
+      name: '새 워크플로 (예시)',
       status: 'DRAFT' as const,
       publishedVersion: null as string | null,
       steps: 0,
@@ -185,7 +214,7 @@ export default function WorkflowDesigner() {
     }
     : {
       id: workflowId ?? 'unknown',
-      name: 'Unknown Workflow',
+      name: '알 수 없는 워크플로',
       status: 'DRAFT' as const,
       publishedVersion: null as string | null,
       steps: 0,
@@ -224,7 +253,6 @@ export default function WorkflowDesigner() {
   });
   const [selected, setSelected] = useState<string | null>(steps[0]?.id ?? null);
   const [showEndMarker, setShowEndMarker] = useState(true);
-  const [saving, setSaving] = useState(false);
 
   const updateStep = (id: string, patch: Partial<Step>) => {
     if (readOnly || publishedBlocked) return;
@@ -266,21 +294,14 @@ export default function WorkflowDesigner() {
 
   const validations = useMemo(() => validatePlan(steps), [steps]);
 
-  const handleSave = async () => {
-    setSaving(true);
-    await new Promise(r => setTimeout(r, 800));
-    setSaving(false);
-    navigate(`/workflows/${workflow.id}`);
-  };
-
   const selectedStep = steps.find(s => s.id === selected) ?? null;
 
   if (unknownWorkflowId) {
     return (
       <div className="p-6">
-        <InlineAlert type="warning" message={`Workflow를 찾을 수 없습니다: ${workflowId ?? '(missing id)'}`} />
+        <InlineAlert type="warning" message={`워크플로를 찾을 수 없습니다: ${workflowId ?? '(ID 없음)'}`} />
         <div className="mt-4">
-          <Button variant="outline" onClick={() => navigate('/workflows')}>Workflows로 돌아가기</Button>
+          <Button variant="outline" onClick={() => navigate('/workflows')}>워크플로 목록으로 돌아가기</Button>
         </div>
       </div>
     );
@@ -291,21 +312,21 @@ export default function WorkflowDesigner() {
       <div>
         <PageHeader
           breadcrumbs={[
-            { label: 'Workflows', to: '/workflows' },
+            { label: '워크플로 관리', to: '/workflows' },
             { label: workflow.name, to: `/workflows/${workflow.id}` },
             { label: `${versionId}` },
           ]}
-          title={`Workflow Version ${versionId}`}
+          title={`워크플로 버전 ${versionId}`}
           actions={<Button variant="outline" onClick={() => navigate(`/workflows/${workflow.id}`)}>닫기</Button>}
         />
         <div className="p-6 max-w-2xl space-y-4">
-          <InlineAlert type="warning" message="Published versions cannot be edited" />
+          <InlineAlert type="warning" message="게시된 버전은 편집할 수 없습니다." />
           <div className="bg-white rounded-xl border border-slate-200 p-6 space-y-3">
             <p className="text-sm text-slate-600">
-              PUBLISHED Workflow Version의 Execution Plan은 불변입니다. 변경이 필요하면 새 DRAFT Version을 생성하세요.
+              게시된 워크플로 버전의 실행 계획은 변경할 수 없습니다. 수정하려면 새 초안 버전을 만들어야 합니다.
             </p>
             <Button icon={<Plus size={13} />} onClick={() => navigate(`/workflows/${workflow.id}/versions/new/edit`)}>
-              Create New Draft Version
+              새 초안 예시 만들기
             </Button>
           </div>
         </div>
@@ -317,39 +338,43 @@ export default function WorkflowDesigner() {
     <div className="flex flex-col h-full">
       <PageHeader
         breadcrumbs={[
-          { label: 'Workflows', to: '/workflows' },
+          { label: '워크플로 관리', to: '/workflows' },
           { label: workflow.name, to: `/workflows/${workflow.id}` },
-          { label: readOnly ? `View (${versionId})` : `Designer (${versionId})` },
+          { label: readOnly ? `조회 (${versionId})` : `디자이너 (${versionId})` },
         ]}
         title={
           isNewLogicalWorkflow
-            ? 'New Workflow · Draft v1'
+            ? '새 워크플로 · 초안 v1 (예시)'
             : readOnly
-              ? 'Workflow Designer (View)'
-              : 'Workflow Designer'
+              ? '워크플로 디자이너 (조회)'
+              : '워크플로 디자이너'
         }
         description={
           isNewLogicalWorkflow
-            ? `${workflow.name} · DRAFT · empty plan`
-            : `${workflow.name} · ${steps.length} steps · Execution Plan v1`
+            ? `${workflow.name} · 초안 · 기본 단계 1개`
+            : `${workflow.name} · ${steps.length}개 단계 · 실행 계획 v1`
         }
         actions={
           <>
             <Button variant="outline" onClick={() => navigate(`/workflows/${workflow.id}`)}>{readOnly ? '닫기' : '취소'}</Button>
-            {!readOnly && <Button loading={saving} onClick={handleSave}>Draft 저장</Button>}
+            {!readOnly && <Button onClick={() => navigate(`/workflows/${workflow.id}`)}>시연 종료 (저장 안 됨)</Button>}
             {readOnly && (
               <Button icon={<Plus size={13} />} onClick={() => navigate(`/workflows/${workflow.id}/versions/new/edit`)}>
-                Create New Draft Version
+                새 초안 예시 만들기
               </Button>
             )}
           </>
         }
       />
 
+      <div className="px-4 pt-3 bg-white">
+        <InlineAlert type="info" message="현재 디자이너는 예시 편집 화면입니다. 단계 변경 및 검증은 브라우저에서만 수행되며, 서버 저장·게시·실제 실행은 연결되지 않았습니다." />
+      </div>
+
       <div className="flex flex-1 min-h-0">
         {/* Palette */}
         <div className="w-56 border-r border-slate-200 bg-white p-3 space-y-2 shrink-0 overflow-auto">
-          <p className="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1">Step Palette</p>
+          <p className="text-xs font-semibold text-slate-500 tracking-wide mb-1">단계 추가</p>
           {PALETTE.map(item => (
             <button
               key={item.kind === 'step' ? item.type : item.id}
@@ -370,7 +395,7 @@ export default function WorkflowDesigner() {
             </button>
           ))}
           <p className="text-[10px] text-slate-400 pt-2 leading-relaxed">
-            Canonical types: TOOL, CONDITION, JOIN, APPROVAL, LOOP. Parallel은 UI 편의이며 JOIN으로 저장됩니다.
+            실행 단계 유형은 TOOL, CONDITION, JOIN, APPROVAL, LOOP입니다. 종료 표시는 화면 전용입니다.
           </p>
         </div>
 
@@ -378,11 +403,11 @@ export default function WorkflowDesigner() {
         <div className="flex-1 overflow-auto bg-slate-50 p-6">
           <div className="max-w-lg mx-auto space-y-2">
             {readOnly && (
-              <InlineAlert type="info" message="DEPRECATED Version은 View만 가능합니다." />
+              <InlineAlert type="info" message="이전 버전(DEPRECATED)은 조회만 할 수 있습니다." />
             )}
             <InlineAlert
               type="info"
-              message="실행 순서는 Canvas 위치가 아니라 Step dependency / edge(depends_on)로 결정됩니다. 임의 JavaScript/Python expression은 사용할 수 없습니다."
+              message="실행 순서는 화면의 위아래 위치가 아닌 단계 간 의존 관계(depends_on)로 결정됩니다. 임의의 JavaScript/Python 코드는 입력할 수 없습니다."
             />
             {steps.map((step, i) => (
               <div key={step.id}>
@@ -400,7 +425,7 @@ export default function WorkflowDesigner() {
                     <div className="text-xs text-slate-400">
                       {STEP_META[step.type].label}
                       {step.toolId ? ` · ${mockTools.find(t => t.id === step.toolId)?.displayName ?? step.toolId}` : ''}
-                      {step.dependsOn.length > 0 ? ` · depends_on: ${step.dependsOn.join(', ')}` : ' · root'}
+                      {step.dependsOn.length > 0 ? ` · 선행 단계: ${step.dependsOn.join(', ')}` : ' · 시작 단계'}
                     </div>
                   </div>
                   {step.risk && <RiskBadge risk={step.risk} />}
@@ -408,6 +433,7 @@ export default function WorkflowDesigner() {
                     <button
                       onClick={e => { e.stopPropagation(); removeStep(step.id); }}
                       className="p-1.5 rounded text-slate-300 hover:text-red-500 hover:bg-red-50 shrink-0"
+                      title="단계 삭제"
                     >
                       <Trash2 size={13} />
                     </button>
@@ -426,14 +452,14 @@ export default function WorkflowDesigner() {
                     <Circle size={14} />
                   </span>
                   <div>
-                    <div className="text-sm font-medium">End</div>
-                    <div className="text-xs text-slate-400">시각적 종료 표현 · Canonical Step Type 아님</div>
+                    <div className="text-sm font-medium">종료 표시</div>
+                    <div className="text-xs text-slate-400">화면 표시용이며 실행 단계에 포함되지 않습니다.</div>
                   </div>
                 </div>
               </>
             )}
             {steps.length === 0 && (
-              <div className="text-center text-sm text-slate-400 py-12">왼쪽 팔레트에서 Step을 추가하세요.</div>
+              <div className="text-center text-sm text-slate-400 py-12">왼쪽의 단계 추가 메뉴에서 단계를 선택하세요.</div>
             )}
 
             {/* Validation Results */}
@@ -441,11 +467,11 @@ export default function WorkflowDesigner() {
               <div className="flex items-center gap-2 mb-3">
                 <AlertTriangle size={14} className={validations.length ? 'text-amber-500' : 'text-slate-400'} />
                 <p className="text-xs font-semibold text-slate-500 uppercase tracking-wide">
-                  Validation Results ({validations.length})
+                  화면 내 검증 결과 ({validations.length})
                 </p>
               </div>
               {validations.length === 0 ? (
-                <p className="text-sm text-slate-500">Blocking validation issue가 없습니다.</p>
+                <p className="text-sm text-slate-500">현재 화면에서 발견된 차단 오류가 없습니다. 서버 검증을 통과했다는 의미는 아닙니다.</p>
               ) : (
                 <ul className="space-y-1.5">
                   {validations.map((v, idx) => (
@@ -455,7 +481,7 @@ export default function WorkflowDesigner() {
                         onClick={() => v.stepId && setSelected(v.stepId)}
                         className="w-full text-left px-2.5 py-2 rounded-lg border border-red-100 bg-red-50/60 hover:bg-red-50 text-sm"
                       >
-                        <span className="font-medium text-red-700">{v.code}</span>
+                        <span className="font-medium text-red-700" title={v.code}>{VALIDATION_LABELS[v.code]}</span>
                         <span className="text-red-600/80"> — {v.message}</span>
                         {v.stepId && <span className="block text-[10px] text-red-400 mt-0.5 font-mono">{v.stepId}</span>}
                       </button>
@@ -469,10 +495,10 @@ export default function WorkflowDesigner() {
 
         {/* Inspector */}
         <div className="w-80 border-l border-slate-200 bg-white p-4 shrink-0 overflow-auto">
-          <p className="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-3">Step 설정</p>
+          <p className="text-xs font-semibold text-slate-500 tracking-wide mb-3">단계 설정</p>
           {selectedStep ? (
             <div className="space-y-4">
-              <Field label="Step 이름">
+              <Field label="단계 이름">
                 <input
                   value={selectedStep.name}
                   disabled={readOnly}
@@ -480,12 +506,12 @@ export default function WorkflowDesigner() {
                   className={inputClass}
                 />
               </Field>
-              <Field label="Type (Canonical)">
+              <Field label="단계 유형 (원본 코드 유지)">
                 <div className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-sm ${STEP_META[selectedStep.type].color}`}>
                   {STEP_META[selectedStep.type].icon} {STEP_META[selectedStep.type].label}
                 </div>
               </Field>
-              <Field label="depends_on">
+              <Field label="선행 단계 선택">
                 <select
                   multiple
                   disabled={readOnly}
@@ -500,12 +526,12 @@ export default function WorkflowDesigner() {
                     <option key={s.id} value={s.id}>{s.name} ({s.id})</option>
                   ))}
                 </select>
-                <p className="text-[10px] text-slate-400 mt-1">Ctrl/Cmd로 다중 선택. 실행 의미는 edge에 의해 결정됩니다.</p>
+                <p className="text-[10px] text-slate-400 mt-1">Ctrl/Cmd 키를 누르면 여러 단계를 선택할 수 있습니다. 선택한 단계의 완료 여부가 현재 단계의 실행 순서를 결정합니다.</p>
               </Field>
 
               {selectedStep.type === 'TOOL' && (
                 <>
-                  <Field label="Tool">
+                  <Field label="실행할 MCP 도구">
                     <select
                       value={selectedStep.toolId ?? ''}
                       disabled={readOnly}
@@ -519,13 +545,13 @@ export default function WorkflowDesigner() {
                       }}
                       className={inputClass}
                     >
-                      <option value="">Tool 선택...</option>
+                      <option value="">도구 선택...</option>
                       {mockTools.map(t => (
                         <option key={t.id} value={t.id}>{t.displayName} ({t.serverName})</option>
                       ))}
                     </select>
                   </Field>
-                  <Field label="Tool Version">
+                  <Field label="도구 버전">
                     <input
                       value={selectedStep.toolVersion ?? ''}
                       disabled={readOnly}
@@ -534,7 +560,7 @@ export default function WorkflowDesigner() {
                     />
                   </Field>
                   <BindingEditor
-                    label="Input Binding"
+                    label="도구 입력값 연결"
                     value={selectedStep.bindings?.input ?? defaultBinding()}
                     steps={steps}
                     disabled={readOnly}
@@ -555,27 +581,28 @@ export default function WorkflowDesigner() {
               )}
 
               {selectedStep.type === 'JOIN' && (
-                <Field label="Join Policy">
+                <Field label="흐름 합치기 정책">
                   <select
                     value={selectedStep.joinPolicy ?? 'ALL_SUCCESS'}
                     disabled={readOnly}
                     onChange={e => updateStep(selectedStep.id, { joinPolicy: e.target.value as JoinPolicy })}
                     className={inputClass}
                   >
-                    {JOIN_POLICIES.map(p => <option key={p} value={p}>{p}</option>)}
+                    {JOIN_POLICIES.map(p => <option key={p} value={p}>{JOIN_POLICY_LABELS[p]}</option>)}
                   </select>
+                  <p className="text-[10px] text-slate-400 mt-1">여러 선행 단계 중 어느 단계의 완료·성공을 기다릴지 선택합니다.</p>
                 </Field>
               )}
 
               {selectedStep.type === 'APPROVAL' && (
-                <Field label="Approval Policy">
+                <Field label="승인 정책">
                   <select
                     value={selectedStep.approvalPolicyId ?? ''}
                     disabled={readOnly}
                     onChange={e => updateStep(selectedStep.id, { approvalPolicyId: e.target.value })}
                     className={inputClass}
                   >
-                    <option value="">Policy 선택...</option>
+                    <option value="">승인 정책 선택...</option>
                     {mockApprovalPolicies.map(p => (
                       <option key={p.id} value={p.id}>{p.name} ({p.status})</option>
                     ))}
@@ -585,18 +612,18 @@ export default function WorkflowDesigner() {
 
               {selectedStep.type === 'LOOP' && (
                 <>
-                  <Field label="Loop Mode">
+                <Field label="반복 방식">
                     <select
                       value={selectedStep.loopMode ?? 'FOR_EACH'}
                       disabled={readOnly}
                       onChange={e => updateStep(selectedStep.id, { loopMode: e.target.value as LoopMode })}
                       className={inputClass}
                     >
-                      <option value="FOR_EACH">FOR_EACH</option>
-                      <option value="WHILE">WHILE</option>
+                      <option value="FOR_EACH">{LOOP_MODE_LABELS.FOR_EACH}</option>
+                      <option value="WHILE">{LOOP_MODE_LABELS.WHILE}</option>
                     </select>
                   </Field>
-                  <Field label="max_iterations (required)">
+                  <Field label="최대 반복 횟수 (필수)">
                     <input
                       type="number"
                       min={1}
@@ -607,11 +634,11 @@ export default function WorkflowDesigner() {
                       })}
                       className={inputClass}
                     />
-                    <p className="text-[10px] text-slate-400 mt-1">무제한 Loop는 허용되지 않습니다.</p>
+                    <p className="text-[10px] text-slate-400 mt-1">무제한 반복은 허용되지 않습니다. 1 이상의 횟수를 지정하세요.</p>
                   </Field>
                   {selectedStep.loopMode === 'FOR_EACH' && (
                     <BindingEditor
-                      label="Collection Binding"
+                      label="반복할 목록 입력값"
                       value={selectedStep.loopCollection ?? { kind: 'PLAN_INPUT', path: '/items' }}
                       steps={steps}
                       disabled={readOnly}
@@ -630,7 +657,7 @@ export default function WorkflowDesigner() {
               )}
             </div>
           ) : (
-            <p className="text-sm text-slate-400">Step을 선택하세요.</p>
+            <p className="text-sm text-slate-400">가운데에서 설정할 단계를 선택하세요.</p>
           )}
         </div>
       </div>
@@ -650,45 +677,45 @@ function BindingEditor({
   return (
     <div className="space-y-2 border border-slate-200 rounded-lg p-3">
       <p className="text-xs font-medium text-slate-600">{label}</p>
-      <Field label="Binding Kind">
+      <Field label="입력값 가져오는 위치">
         <select
           value={value.kind}
           disabled={disabled}
           onChange={e => onChange({ ...value, kind: e.target.value as BindingKind })}
           className={inputClass}
         >
-          {BINDING_KINDS.map(k => <option key={k} value={k}>{k}</option>)}
+          {BINDING_KINDS.map(k => <option key={k} value={k}>{BINDING_KIND_LABELS[k]}</option>)}
         </select>
       </Field>
       {value.kind === 'LITERAL' && (
-        <Field label="Value">
+        <Field label="직접 입력할 값">
           <input value={value.value ?? ''} disabled={disabled} onChange={e => onChange({ ...value, value: e.target.value })} className={inputClass} />
         </Field>
       )}
       {(value.kind === 'PLAN_INPUT' || value.kind === 'EXECUTION_CONTEXT' || value.kind === 'LOOP_CONTEXT') && (
-        <Field label="JSON Pointer path">
+        <Field label="JSON 경로 (예: /field)">
           <input value={value.path ?? ''} disabled={disabled} placeholder="/field" onChange={e => onChange({ ...value, path: e.target.value })} className={inputClass} />
         </Field>
       )}
       {value.kind === 'STEP_OUTPUT' && (
         <>
-          <Field label="Step">
+          <Field label="결과를 가져올 단계">
             <select value={value.stepId ?? ''} disabled={disabled} onChange={e => onChange({ ...value, stepId: e.target.value })} className={inputClass}>
-              <option value="">Step 선택...</option>
+              <option value="">단계 선택...</option>
               {steps.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
             </select>
           </Field>
-          <Field label="path">
+          <Field label="결과에서 가져올 JSON 경로">
             <input value={value.path ?? ''} disabled={disabled} placeholder="/structuredContent/..." onChange={e => onChange({ ...value, path: e.target.value })} className={inputClass} />
           </Field>
         </>
       )}
       {value.kind === 'SECRET_REF' && (
-        <Field label="Secret Ref">
+        <Field label="비밀정보 참조 주소">
           <input value={value.secretRef ?? ''} disabled={disabled} placeholder="secret://..." onChange={e => onChange({ ...value, secretRef: e.target.value })} className={inputClass} />
         </Field>
       )}
-      <p className="text-[10px] text-slate-400">임의 expression은 허용되지 않습니다. Canonical Binding만 사용합니다.</p>
+      <p className="text-[10px] text-slate-400">원본 연결 방식 코드는 유지됩니다. 임의 수식이나 스크립트는 사용할 수 없습니다.</p>
     </div>
   );
 }
@@ -706,11 +733,11 @@ function PredicateBuilder({
     <div className={`space-y-3 border border-slate-200 rounded-lg p-3 ${depth > 0 ? 'bg-slate-50/60' : ''}`}>
       {depth === 0 && (
         <>
-          <p className="text-xs font-medium text-slate-600">Predicate Builder</p>
-          <InlineAlert type="info" message="JavaScript/Python Editor는 사용할 수 없습니다. 제한된 Predicate AST만 지원합니다." />
+          <p className="text-xs font-medium text-slate-600">조건식 설정</p>
+          <InlineAlert type="info" message="왼쪽 값과 오른쪽 값을 비교하거나 조건을 묶어 판단합니다. JavaScript/Python 코드를 직접 입력할 수 없습니다." />
         </>
       )}
-      <Field label={depth === 0 ? 'Operator' : `Operator (depth ${depth})`}>
+      <Field label={depth === 0 ? '비교·논리 연산자' : `하위 연산자 (깊이 ${depth})`}>
         <div className="space-y-1.5">
           <div className="flex flex-wrap gap-1">
             {COMPARE_OPS.map(op => (
@@ -755,14 +782,14 @@ function PredicateBuilder({
       {COMPARE_OPS.includes(value.op as CompareOp) && (
         <>
           <BindingEditor
-            label="Left"
+            label="왼쪽 비교값"
             value={(value as Extract<PredicateNode, { left: BindingValue }>).left}
             steps={steps}
             disabled={disabled}
             onChange={left => onChange({ ...(value as Extract<PredicateNode, { left: BindingValue }>), left })}
           />
           <BindingEditor
-            label="Right"
+            label="오른쪽 비교값"
             value={(value as Extract<PredicateNode, { right: BindingValue }>).right}
             steps={steps}
             disabled={disabled}
@@ -773,7 +800,7 @@ function PredicateBuilder({
 
       {UNARY_OPS.includes(value.op as UnaryOp) && (
         <BindingEditor
-          label="Operand"
+          label="확인할 값"
           value={(value as Extract<PredicateNode, { operand: BindingValue }>).operand}
           steps={steps}
           disabled={disabled}
@@ -783,7 +810,7 @@ function PredicateBuilder({
 
       {value.op === 'not' && (
         <div className="space-y-2">
-          <p className="text-xs font-medium text-slate-600">Child Predicate</p>
+          <p className="text-xs font-medium text-slate-600">하위 조건식</p>
           <PredicateBuilder
             value={value.child}
             steps={steps}
@@ -797,14 +824,14 @@ function PredicateBuilder({
       {(value.op === 'and' || value.op === 'or') && (
         <div className="space-y-2">
           <div className="flex items-center justify-between">
-            <p className="text-xs font-medium text-slate-600">Children ({value.children.length})</p>
+            <p className="text-xs font-medium text-slate-600">하위 조건 ({value.children.length}개)</p>
             {!disabled && (
               <button
                 type="button"
                 onClick={() => onChange({ ...value, children: [...value.children, defaultPredicate()] })}
                 className="inline-flex items-center gap-1 text-xs text-indigo-600 hover:text-indigo-700"
               >
-                <Plus size={12} /> Child 추가
+                <Plus size={12} /> 조건 추가
               </button>
             )}
           </div>
@@ -818,7 +845,7 @@ function PredicateBuilder({
                     children: value.children.filter((_, i) => i !== idx),
                   })}
                   className="absolute -right-1 -top-1 z-10 p-1 rounded text-slate-400 hover:text-red-500 hover:bg-red-50 bg-white border border-slate-200"
-                  title="Child 삭제"
+                  title="조건 삭제"
                 >
                   <Trash2 size={11} />
                 </button>
@@ -837,7 +864,7 @@ function PredicateBuilder({
             </div>
           ))}
           {value.children.length === 0 && (
-            <p className="text-[10px] text-amber-600">{value.op.toUpperCase()}는 최소 1개의 child Predicate가 필요합니다.</p>
+            <p className="text-[10px] text-amber-600">{value.op.toUpperCase()} 연산에는 최소 하나의 하위 조건이 필요합니다.</p>
           )}
         </div>
       )}
