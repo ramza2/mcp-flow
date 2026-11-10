@@ -8,8 +8,13 @@ import WorkflowVisualEditor, {
   getResponseStepIds,
   getVisualSteps,
   setResponseStepInPlan,
+  setStepBranchWhenInPlan,
   updateStepInPlan,
 } from "@/screens/build/WorkflowVisualEditor"
+import {
+  branchConditionSources,
+  simpleBranchWhen,
+} from "@/screens/build/workflowGraphModel"
 import { listMCPTools } from "@/api/mcp"
 import type { JsonValue, MCPToolDto } from "@/api/types"
 
@@ -469,6 +474,132 @@ describe("Canonical visual workflow editor", () => {
     await user.click(screen.getByRole("button", { name: "목록" }))
     await user.click(screen.getByRole("button", { name: "그래프" }))
     expect(await screen.findByLabelText("워크플로 그래프")).toBeInTheDocument()
+    expect(onChange).not.toHaveBeenCalled()
+  })
+
+  it("edits only canonical Boolean CONDITION gates while preserving Plan and config", () => {
+    const plan: Plan = {
+      ...basePlan(),
+      marker: { keep: "yes" },
+      steps: [
+        { id: "probe", name: "조회", type: "TOOL", depends_on: [], config: { bindings: {} } },
+        { id: "cond", name: "조건", type: "CONDITION", depends_on: ["probe"], config: { predicate: { op: "exists", operand: { kind: "STEP_OUTPUT", step_id: "probe", path: "/" } } } },
+        { id: "branch", name: "후속", type: "TOOL", depends_on: ["cond"], when: null, config: { bindings: { topic: { kind: "LITERAL", value: "x" } }, custom: 15 } },
+      ],
+    }
+    expect(branchConditionSources(getVisualSteps(plan)!, "branch").map((item) => item.id)).toEqual(["cond"])
+    const whenTrue = setStepBranchWhenInPlan(plan, "branch", "cond")
+    const expected = {
+      op: "eq",
+      left: { kind: "STEP_OUTPUT", step_id: "cond", path: "/condition_result" },
+      right: { kind: "LITERAL", value: true },
+    }
+    expect(getVisualSteps(whenTrue)?.[2].when).toEqual(expected)
+    expect(simpleBranchWhen(getVisualSteps(whenTrue)?.[2].when)).toEqual({ conditionId: "cond", expected: true })
+    expect(whenTrue.marker).toEqual(plan.marker)
+    expect(getVisualSteps(whenTrue)?.[2].config).toEqual(getVisualSteps(plan)?.[2].config)
+    expect(plan.steps).not.toEqual(whenTrue.steps)
+    expect(setStepBranchWhenInPlan(whenTrue, "branch", "cond")).toBe(whenTrue)
+
+    const whenFalse = setStepBranchWhenInPlan(whenTrue, "branch", "cond", false)
+    expect(getVisualSteps(whenFalse)?.[2].when).toEqual({
+      ...expected, right: { kind: "LITERAL", value: false },
+    })
+    expect(getVisualSteps(setStepBranchWhenInPlan(whenFalse, "branch", null))?.[2].when).toBeNull()
+    expect(setStepBranchWhenInPlan(plan, "branch", "probe")).toBe(plan)
+    expect(setStepBranchWhenInPlan(plan, "probe", "cond")).toBe(plan)
+  })
+
+  it("does not rewrite advanced/malformed/foreign when or LOOP body gates", () => {
+    const plan: Plan = {
+      ...basePlan(),
+      steps: [
+        { id: "cond", name: "조건", type: "CONDITION", depends_on: [], config: { predicate: { op: "exists", operand: { kind: "LITERAL", value: "x" } } } },
+        { id: "advanced", name: "복합", type: "TOOL", depends_on: ["cond"], when: { op: "and", children: [{ op: "exists", operand: { kind: "PLAN_INPUT", path: "/x" } }] }, config: {} },
+        { id: "extra", name: "확장", type: "TOOL", depends_on: ["cond"], when: { op: "eq", left: { kind: "STEP_OUTPUT", step_id: "cond", path: "/condition_result" }, right: { kind: "LITERAL", value: true }, future: 1 }, config: {} },
+        { id: "foreign", name: "외부", type: "TOOL", depends_on: [], when: { op: "eq", left: { kind: "STEP_OUTPUT", step_id: "cond", path: "/condition_result" }, right: { kind: "LITERAL", value: true } }, config: {} },
+        { id: "loop", name: "반복", type: "LOOP", depends_on: [], config: { body_step_ids: ["inside"] } },
+        { id: "inside", name: "반복 본문", type: "TOOL", depends_on: ["cond"], when: null, config: {} },
+      ],
+    }
+    for (const id of ["advanced", "extra", "foreign", "inside", "loop"]) {
+      expect(setStepBranchWhenInPlan(plan, id, "cond")).toBe(plan)
+      expect(setStepBranchWhenInPlan(plan, id, null)).toBe(plan)
+    }
+    expect(simpleBranchWhen(getVisualSteps(plan)?.[2].when)).toBeNull()
+    expect(branchConditionSources(getVisualSteps(plan)!, "inside")).toEqual([])
+  })
+
+  it("sets true/false branch in the visual editor and shows it on the graph", async () => {
+    const user = userEvent.setup()
+    const onChange = vi.fn()
+    const plan: Plan = {
+      ...basePlan(),
+      steps: [
+        { id: "cond", name: "조건 판단", type: "CONDITION", depends_on: [], config: { predicate: { op: "exists", operand: { kind: "LITERAL", value: "x" } } } },
+        { id: "branch", name: "후속 도구", type: "TOOL", depends_on: ["cond"], when: null, config: { bindings: {} } },
+      ],
+    }
+    const { rerender } = render(<WorkflowVisualEditor plan={plan} readOnly={false} onChange={onChange} />)
+    await user.click(screen.getByRole("button", { name: "목록" }))
+    await user.click(screen.getByRole("button", { name: "후속 도구 단계 선택" }))
+    expect(screen.getByLabelText("조건 기준 단계")).toHaveValue("")
+    await user.selectOptions(screen.getByLabelText("조건 기준 단계"), "cond")
+    let current = onChange.mock.lastCall?.[0] as Plan
+    expect(simpleBranchWhen(getVisualSteps(current)?.[1].when)?.expected).toBe(true)
+    rerender(<WorkflowVisualEditor plan={current} readOnly={false} onChange={onChange} />)
+    await user.selectOptions(screen.getByLabelText("조건 결과"), "false")
+    current = onChange.mock.lastCall?.[0] as Plan
+    expect(simpleBranchWhen(getVisualSteps(current)?.[1].when)?.expected).toBe(false)
+    rerender(<WorkflowVisualEditor plan={current} readOnly={false} onChange={onChange} />)
+    expect(screen.getByLabelText("조건 결과")).toHaveValue("false")
+    await user.click(screen.getByRole("button", { name: "그래프" }))
+    expect(await screen.findByText("조건 판단: 거짓일 때 실행")).toBeInTheDocument()
+
+    await user.selectOptions(screen.getByLabelText("조건 기준 단계"), "")
+    current = onChange.mock.lastCall?.[0] as Plan
+    expect(getVisualSteps(current)?.[1].when).toBeNull()
+  })
+
+  it("keeps advanced when read-only and protects branch ancestry on disconnect", async () => {
+    const user = userEvent.setup()
+    const onChange = vi.fn()
+    const plan: Plan = {
+      ...basePlan(),
+      steps: [
+        { id: "cond", name: "조건", type: "CONDITION", depends_on: [], config: { predicate: { op: "exists", operand: { kind: "LITERAL", value: true } } } },
+        { id: "advanced", name: "복합", type: "TOOL", depends_on: ["cond"], when: { op: "not", child: { op: "exists", operand: { kind: "PLAN_INPUT", path: "/topic" } } }, config: {} },
+        { id: "simple", name: "기본", type: "TOOL", depends_on: ["cond"], when: { op: "eq", left: { kind: "STEP_OUTPUT", step_id: "cond", path: "/condition_result" }, right: { kind: "LITERAL", value: false } }, config: {} },
+      ],
+    }
+    render(<WorkflowVisualEditor plan={plan} readOnly={false} onChange={onChange} />)
+    await user.click(screen.getByRole("button", { name: "목록" }))
+    await user.click(screen.getByRole("button", { name: "복합 단계 선택" }))
+    expect(screen.getByText(/기존 복합·특수 when/)).toBeInTheDocument()
+    expect(screen.queryByLabelText("조건 기준 단계")).not.toBeInTheDocument()
+    await user.click(screen.getByRole("button", { name: "기본 단계 선택" }))
+    expect(screen.getByLabelText("조건 결과")).toHaveValue("false")
+    const dependencies = within(screen.getByRole("group", { name: "선행 단계 선택" }))
+    await user.click(dependencies.getByRole("checkbox", { name: "조건 (cond)" }))
+    expect(onChange).not.toHaveBeenCalled()
+    expect(screen.getByRole("status")).toHaveTextContent(/STEP_OUTPUT/)
+  })
+
+  it("shows existing branch details without allowing published-version edits", async () => {
+    const user = userEvent.setup()
+    const onChange = vi.fn()
+    const base: Plan = {
+      ...basePlan(),
+      steps: [
+        { id: "cond", name: "조건", type: "CONDITION", depends_on: [], config: {} },
+        { id: "branch", name: "후속", type: "TOOL", depends_on: ["cond"], when: { op: "eq", left: { kind: "STEP_OUTPUT", step_id: "cond", path: "/condition_result" }, right: { kind: "LITERAL", value: false } }, config: {} },
+      ],
+    }
+    render(<WorkflowVisualEditor plan={base} readOnly onChange={onChange} />)
+    await user.click(screen.getByRole("button", { name: "목록" }))
+    await user.click(screen.getByRole("button", { name: "후속 단계 선택" }))
+    expect(screen.getByLabelText("조건 기준 단계")).toBeDisabled()
+    expect(screen.getByLabelText("조건 결과")).toBeDisabled()
     expect(onChange).not.toHaveBeenCalled()
   })
 })

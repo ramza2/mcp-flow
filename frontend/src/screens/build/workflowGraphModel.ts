@@ -13,6 +13,53 @@ export interface GraphPosition {
   y: number
 }
 
+export interface SimpleBranchWhen {
+  conditionId: string
+  expected: boolean
+}
+
+function plainObject(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null
+}
+
+/** Only the exact canonical condition-result gate is safe for visual editing. */
+export function simpleBranchWhen(value: unknown): SimpleBranchWhen | null {
+  const when = plainObject(value)
+  if (!when || Object.keys(when).sort().join() !== "left,op,right" || when.op !== "eq")
+    return null
+  const left = plainObject(when.left)
+  const right = plainObject(when.right)
+  if (
+    !left || !right ||
+    Object.keys(left).sort().join() !== "kind,path,step_id" ||
+    Object.keys(right).sort().join() !== "kind,value" ||
+    left.kind !== "STEP_OUTPUT" || typeof left.step_id !== "string" ||
+    left.path !== "/condition_result" || right.kind !== "LITERAL" ||
+    typeof right.value !== "boolean"
+  ) return null
+  return { conditionId: left.step_id, expected: right.value }
+}
+
+/** Only upstream CONDITION nodes outside LOOP scope are branch sources. */
+export function branchConditionSources(steps: GraphStep[], stepId: string): GraphStep[] {
+  const byId = new Map(steps.map((step) => [step.id, step]))
+  const protectedIds = loopProtectedStepIds(steps)
+  if (!byId.has(stepId) || protectedIds.has(stepId)) return []
+  const ancestors = new Set<string>()
+  const visit = (id: string) => {
+    if (id === stepId || ancestors.has(id)) return
+    ancestors.add(id)
+    for (const parent of byId.get(id)?.depends_on ?? []) visit(parent)
+  }
+  for (const parent of byId.get(stepId)?.depends_on ?? []) visit(parent)
+  return steps.filter((step) =>
+    ancestors.has(step.id) && step.type === "CONDITION" &&
+    !protectedIds.has(step.id),
+  )
+}
+
 /** Layout is intentionally derived, never persisted as execution semantics. */
 export function layoutGraphSteps(
   steps: GraphStep[],
