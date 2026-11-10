@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useNavigate, useParams } from 'react-router';
-import { ArrowLeft, Eye, Pencil, Plus } from 'lucide-react';
+import { ArrowLeft, Eye, Pencil, Plus, Rocket } from 'lucide-react';
 import StatusBadge, { VersionBadge } from '../../components/ui/StatusBadge';
 import { TabBar } from '../../components/ui/Tabs';
 import Button from '../../components/ui/Button';
+import { ConfirmDialog } from '../../components/ui/Dialog';
 import DataTable, { Column } from '../../components/ui/DataTable';
 import { EmptyState, ErrorState, InlineAlert, LoadingSkeleton } from '../../components/ui/EmptyState';
-import { createWorkflowVersion, getWorkflow, listWorkflowVersions, type WorkflowDto, type WorkflowVersionDto } from '../../api/workflows';
+import { createWorkflowVersion, getWorkflow, getWorkflowVersion, listWorkflowVersions, publishWorkflowVersion, type WorkflowDto, type WorkflowVersionDto } from '../../api/workflows';
 import { isAbortError, isApiError } from '../../api/client';
 import { formatTimestamp, labelWorkflowStatus, labelWorkflowVersionStatus, labelWorkflowVisibility } from '../../domain';
 
@@ -31,8 +32,10 @@ export default function WorkflowDetail() {
   const [versions, setVersions] = useState<WorkflowVersionDto[]>([]);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
+  const [publishOpen, setPublishOpen] = useState(false);
   const [error, setError] = useState<{ message: string; requestId?: string } | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [actionSuccess, setActionSuccess] = useState<string | null>(null);
 
   const load = useCallback(() => {
     if (!workflowId) return () => {};
@@ -59,6 +62,9 @@ export default function WorkflowDetail() {
 
   const draft = versions.find(version => version.status === 'DRAFT');
   const current = versions.find(version => version.id === workflow?.current_version_id);
+  const canPublish = Boolean(draft && draft.validation_status === 'VALID'
+    && draft.validation_report?.valid === true
+    && draft.validation_report.content_hash === draft.content_hash);
 
   const handleCreateOrEdit = async () => {
     if (!workflow || busy) return;
@@ -68,6 +74,7 @@ export default function WorkflowDetail() {
     }
     setBusy(true);
     setActionError(null);
+    setActionSuccess(null);
     try {
       const created = await createWorkflowVersion(workflow.id, current
         ? { source_version_id: current.id, change_summary: '게시 버전에서 새 초안 생성' }
@@ -76,6 +83,40 @@ export default function WorkflowDetail() {
     } catch (err) {
       setActionError(isApiError(err) ? err.message : '초안 버전 생성에 실패했습니다.');
     } finally {
+      setBusy(false);
+    }
+  };
+
+  const handlePublish = async () => {
+    if (!workflow || !draft || !canPublish || busy) return;
+    setBusy(true);
+    setActionError(null);
+    setActionSuccess(null);
+    try {
+      // The backend rechecks the Plan and dependencies atomically at publish.
+      // This preflight also avoids publishing stale browser state by accident.
+      const [latestVersion, latestWorkflow] = await Promise.all([
+        getWorkflowVersion(workflow.id, draft.id), getWorkflow(workflow.id),
+      ]);
+      if (latestWorkflow.current_version_id !== workflow.current_version_id
+        || latestVersion.status !== 'DRAFT'
+        || latestVersion.content_hash !== draft.content_hash
+        || latestVersion.validation_status !== 'VALID'
+        || latestVersion.validation_report?.valid !== true
+        || latestVersion.validation_report.content_hash !== latestVersion.content_hash) {
+        setActionError('게시 상태 또는 검증 결과가 변경되었습니다. 최신 버전을 다시 확인해 주세요.');
+        load();
+        return;
+      }
+      await publishWorkflowVersion(workflow.id, draft.id);
+      setActionSuccess(`v${draft.version_no} 게시가 완료되었습니다. 실행하려면 별도 활성화 및 실행 절차가 필요합니다.`);
+      load();
+    } catch (err) {
+      const apiErr = isApiError(err) ? err : null;
+      setActionError(apiErr?.message ?? '게시하지 못했습니다. 서버 검증 상태를 확인해 주세요.');
+      load();
+    } finally {
+      setPublishOpen(false);
       setBusy(false);
     }
   };
@@ -119,9 +160,14 @@ export default function WorkflowDetail() {
               <span className="text-xs text-slate-400">{workflow.description}</span>
             </div>
           </div>
-          <Button size="sm" icon={draft ? <Pencil size={13} /> : <Plus size={13} />} loading={busy} onClick={() => { void handleCreateOrEdit(); }}>
-            {draft ? '초안 편집' : '새 초안 버전 생성'}
-          </Button>
+          <div className="flex gap-2">
+            <Button size="sm" variant="outline" icon={draft ? <Pencil size={13} /> : <Plus size={13} />} loading={busy} onClick={() => { void handleCreateOrEdit(); }}>
+              {draft ? '초안 편집' : '새 초안 버전 생성'}
+            </Button>
+            <Button size="sm" icon={<Rocket size={13} />} disabled={!canPublish || busy} title={canPublish ? '검증된 초안 게시' : '게시하려면 초안을 저장하고 서버 검증을 통과해야 합니다.'} onClick={() => setPublishOpen(true)}>
+              게시
+            </Button>
+          </div>
         </div>
       </div>
 
@@ -131,7 +177,8 @@ export default function WorkflowDetail() {
 
       <div className="p-6 space-y-4">
         {actionError && <InlineAlert type="error" message={actionError} />}
-        <InlineAlert type="info" message="실제 서버에 등록된 워크플로입니다. 초안은 저장 후 별도로 검증해야 합니다. 단계 흐름의 시각 편집과 고급 JSON 편집을 지원하며, 게시·실행 UI는 후속 개발 대상입니다." />
+        {actionSuccess && <div role="status" className="rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-800">{actionSuccess}</div>}
+        <InlineAlert type="info" message="초안은 저장 후 서버 검증을 통과해야 게시할 수 있습니다. 게시된 버전은 읽기 전용이며, 게시만으로 워크플로가 활성화되거나 실행되지는 않습니다. 활성화·수동 실행 UI는 후속 개발 대상입니다." />
         {tab === 'overview' && (
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4 max-w-3xl">
             <div className="bg-white border border-slate-200 rounded-xl p-4 space-y-2 text-sm">
@@ -160,6 +207,15 @@ export default function WorkflowDetail() {
           </div>
         )}
       </div>
+      <ConfirmDialog
+        open={publishOpen && canPublish}
+        onClose={() => { if (!busy) setPublishOpen(false); }}
+        onConfirm={() => { void handlePublish(); }}
+        loading={busy}
+        title="워크플로 버전 게시"
+        confirmLabel="게시 확정"
+        description={`v${draft?.version_no ?? '—'} 초안을 게시하시겠습니까? 게시 후에는 수정할 수 없으며${current ? ` 현재 게시된 v${current.version_no}은 이전 버전으로 전환됩니다.` : ' 현재 게시 버전으로 지정됩니다.'} 게시만으로 활성화되거나 실행되지는 않습니다.`}
+      />
     </div>
   );
 }
