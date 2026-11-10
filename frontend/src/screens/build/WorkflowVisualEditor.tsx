@@ -11,8 +11,10 @@ import { listMCPTools } from "../../api/mcp"
 import type { MCPToolDto, JsonValue } from "../../api/types"
 import { isAbortError } from "../../api/client"
 import {
+  branchConditionSources,
   connectionProblem,
   loopProtectedStepIds,
+  simpleBranchWhen,
   wouldBreakStepOutputAncestry,
 } from "./workflowGraphModel"
 
@@ -291,6 +293,37 @@ export function setResponseStepInPlan(
   }
 }
 
+const WHEN_EDITABLE_STEP_TYPES = ["TOOL", "CONDITION", "JOIN", "APPROVAL"]
+
+/** Change only the exact CONDITION result Boolean gate; fail closed for advanced when. */
+export function setStepBranchWhenInPlan(
+  plan: Plan,
+  stepId: string,
+  conditionId: string | null,
+  expected = true,
+): Plan {
+  const steps = getVisualSteps(plan)
+  const step = steps?.find((item) => item.id === stepId)
+  if (!steps || !step || !WHEN_EDITABLE_STEP_TYPES.includes(step.type) ||
+      loopProtectedStepIds(steps).has(stepId)) return plan
+  const existing = simpleBranchWhen(step.when)
+  const candidates = branchConditionSources(steps, stepId)
+  if (step.when != null && (!existing || !candidates.some((item) => item.id === existing.conditionId)))
+    return plan
+  if (conditionId !== null && !candidates.some((item) => item.id === conditionId)) return plan
+  if (conditionId === null && step.when == null) return plan
+  if (existing?.conditionId === conditionId && existing.expected === expected) return plan
+
+  return updateStepInPlan(plan, stepId, (current) => ({
+    ...current,
+    when: conditionId === null ? null : {
+      op: "eq",
+      left: { kind: "STEP_OUTPUT", step_id: conditionId, path: "/condition_result" },
+      right: { kind: "LITERAL", value: expected },
+    },
+  }))
+}
+
 function toBinding(value: JsonValue | undefined): Binding | null {
   const binding = object(value)
   return binding && typeof binding.kind === "string" ? binding as Binding : null
@@ -380,6 +413,14 @@ export default function WorkflowVisualEditor({
         : source.binding.step_id === condition.source.step_id),
     )?.id ?? ""
     : ""
+  const branchSources = active ? branchConditionSources(steps ?? [], active.id) : []
+  const branchWhen = simpleBranchWhen(active?.when)
+  const branchEditable = active !== null &&
+    WHEN_EDITABLE_STEP_TYPES.includes(active.type) &&
+    !responseBodyIds.has(active.id) &&
+    !loopProtectedStepIds(steps ?? []).has(active.id) &&
+    (active.when == null ||
+      (branchWhen !== null && branchSources.some((item) => item.id === branchWhen.conditionId)))
 
   const replace = (fn: (step: Step) => Step) => {
     if (readOnly || !active) return
@@ -424,7 +465,7 @@ export default function WorkflowVisualEditor({
     setNewConditionSource("")
     setSelected(getVisualSteps(next)?.at(-1)?.id ?? null)
     setWarning(
-      "조건 단계가 추가되었습니다. 기본값은 값 존재 여부 검사입니다. 조건 경로를 확인하고 하위 단계의 when 분기는 고급 JSON에서 지정한 뒤 서버 검증하세요.",
+      "조건 단계가 추가되었습니다. 조건 경로 확인 후 후속 단계에 연결하고, 후속 단계의 실행 조건에서 참/거짓 분기를 설정하세요.",
     )
   }
   const connectGraph = (sourceId: string, targetId: string) => {
@@ -443,7 +484,7 @@ export default function WorkflowVisualEditor({
     setSelected(targetId)
     setWarning(
       steps.find((step) => step.id === sourceId)?.type === "CONDITION"
-        ? "선행 연결만 추가했습니다. 실제 참/거짓 분기는 대상 단계의 when 조건을 고급 JSON에서 확인해야 합니다."
+        ? "선행 연결을 추가했습니다. 대상 단계의 실행 조건에서 참/거짓 분기를 선택하세요."
         : "연결을 추가했습니다. 저장 및 서버 검증 전까지 실행에는 적용되지 않습니다.",
     )
   }
@@ -599,8 +640,8 @@ export default function WorkflowVisualEditor({
           <Plus size={15} /> 조건 단계 추가
         </button>
         <p className="text-xs text-slate-500 leading-relaxed">
-          기본 조건은 화면에서 편집할 수 있습니다. 복합 조건·승인·반복 및
-          참/거짓 분기(when)는 고급 JSON에서 설정합니다.
+          기본 조건 및 참/거짓 실행 분기는 화면에서 편집할 수 있습니다.
+          복합 조건·승인·반복의 고급 설정은 JSON에서 유지됩니다.
         </p>
         <fieldset
           disabled={readOnly || responseStepIds === null}
@@ -711,9 +752,8 @@ export default function WorkflowVisualEditor({
         </p>
         {view === "graph" && steps.some((step) => step.type === "CONDITION") && (
           <p className="text-xs text-amber-800 bg-amber-50 rounded-md px-3 py-2">
-            조건 노드의 연결선은 선행 관계를 나타냅니다. 참/거짓 실행
-            조건은 각 단계의 when Predicate에 따라 결정되며, 고급 JSON에서
-            설정합니다.
+            연결선은 선행 관계만 나타냅니다. 참/거짓 실행 여부는
+            후속 단계의 실행 조건(when)으로 설정하며 노드에 표시합니다.
           </p>
         )}
         {view === "graph" ? (
@@ -859,6 +899,77 @@ export default function WorkflowVisualEditor({
                 </p>
               )}
             </fieldset>
+            {WHEN_EDITABLE_STEP_TYPES.includes(active.type) && (
+              <div className="space-y-2 rounded-lg border border-emerald-200 bg-emerald-50/60 p-3">
+                <h3 className="text-sm font-semibold text-emerald-900">실행 조건 (참/거짓 분기)</h3>
+                {!branchEditable ? (
+                  <p className="text-xs text-amber-800" role="status">
+                    기존 복합·특수 when 조건 또는 LOOP 범위는 화면에서 수정하지 않습니다.
+                    현재 값은 그대로 유지되며 고급 JSON에서 확인하세요.
+                  </p>
+                ) : (
+                  <>
+                    <label htmlFor="visual-when-condition" className="block text-xs text-slate-700">
+                      조건 기준 단계
+                    </label>
+                    <select
+                      id="visual-when-condition"
+                      disabled={readOnly || branchSources.length === 0}
+                      value={branchWhen?.conditionId ?? ""}
+                      onChange={(event) => {
+                        const next = setStepBranchWhenInPlan(
+                          plan, active.id, event.target.value || null,
+                        )
+                        if (next !== plan) {
+                          onChange(next)
+                          setWarning("실행 분기를 변경했습니다. 초안 저장 후 서버 검증하세요.")
+                        }
+                      }}
+                      className="w-full rounded-md border border-slate-300 bg-white p-2 text-xs disabled:opacity-60"
+                    >
+                      <option value="">조건 없음 (항상 실행)</option>
+                      {branchSources.map((step) => (
+                        <option key={step.id} value={step.id}>{step.name} ({step.id})</option>
+                      ))}
+                    </select>
+                    {branchWhen && (
+                      <>
+                        <label htmlFor="visual-when-result" className="block text-xs text-slate-700">
+                          조건 결과
+                        </label>
+                        <select
+                          id="visual-when-result"
+                          disabled={readOnly}
+                          value={branchWhen.expected ? "true" : "false"}
+                          onChange={(event) => {
+                            const next = setStepBranchWhenInPlan(
+                              plan, active.id, branchWhen.conditionId,
+                              event.target.value === "true",
+                            )
+                            if (next !== plan) {
+                              onChange(next)
+                              setWarning("참/거짓 분기를 변경했습니다. 초안 저장 후 서버 검증하세요.")
+                            }
+                          }}
+                          className="w-full rounded-md border border-slate-300 bg-white p-2 text-xs"
+                        >
+                          <option value="true">참일 때 실행</option>
+                          <option value="false">거짓일 때 실행</option>
+                        </select>
+                      </>
+                    )}
+                    {branchSources.length === 0 && (
+                      <p className="text-xs text-emerald-900">
+                        조건 분기 단계를 먼저 연결하면 실행 결과를 선택할 수 있습니다.
+                      </p>
+                    )}
+                    <p className="text-xs text-slate-600">
+                      연결과 실행 조건은 별개입니다. 분기 선택 후 저장·서버 검증하세요.
+                    </p>
+                  </>
+                )}
+              </div>
+            )}
             {active.type === "JOIN" && (
               <>
                 <label

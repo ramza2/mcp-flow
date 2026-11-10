@@ -14,12 +14,18 @@ import {
   type NodeProps,
 } from "@xyflow/react"
 import "@xyflow/react/dist/style.css"
-import { layoutGraphSteps, type GraphStep } from "./workflowGraphModel"
+import {
+  branchConditionSources,
+  layoutGraphSteps,
+  simpleBranchWhen,
+  type GraphStep,
+} from "./workflowGraphModel"
 
 type GraphNodeData = {
   label: string
   type: string
   dependencies: string[]
+  branchLabel?: string
 }
 
 type WorkflowGraphNode = Node<GraphNodeData, "workflow-step">
@@ -71,6 +77,11 @@ function StepNode({ id, data, selected }: NodeProps<WorkflowGraphNode>) {
           ? `선행 ${data.dependencies.length}개`
           : "선행 단계 없음"}
       </div>
+      {data.branchLabel && (
+        <div className="mt-2 rounded-md bg-emerald-50 px-2 py-1 text-[10px] font-medium text-emerald-900 break-words">
+          {data.branchLabel}
+        </div>
+      )}
       <Handle
         type="source"
         position={Position.Right}
@@ -105,17 +116,29 @@ export default function WorkflowGraphCanvas({
   const projected = useMemo(() => {
     const positions = layoutGraphSteps(steps)
     const ids = new Set(steps.map((step) => step.id))
-    const nodes: WorkflowGraphNode[] = steps.map((step) => ({
-      id: step.id,
-      type: "workflow-step",
-      position: positions.get(step.id) ?? { x: 0, y: 0 },
-      selected: step.id === selected,
-      data: {
-        label: step.name,
-        type: step.type,
-        dependencies: step.depends_on,
-      },
+    const branches = new Map(steps.map((step) => {
+      const branch = simpleBranchWhen(step.when)
+      const source = branchConditionSources(steps, step.id)
+        .find((item) => item.id === branch?.conditionId)
+      return [step.id, source && branch ? { source, expected: branch.expected } : null] as const
     }))
+    const nodes: WorkflowGraphNode[] = steps.map((step) => {
+      const branch = branches.get(step.id)
+      return {
+        id: step.id,
+        type: "workflow-step",
+        position: positions.get(step.id) ?? { x: 0, y: 0 },
+        selected: step.id === selected,
+        data: {
+          label: step.name,
+          type: step.type,
+          dependencies: step.depends_on,
+          branchLabel: branch
+            ? `${branch.source.name}: ${branch.expected ? "참" : "거짓"}일 때 실행`
+            : undefined,
+        },
+      }
+    })
     const edges: Edge[] = steps.flatMap((step) =>
       step.depends_on
         .filter((source) => ids.has(source))
@@ -126,6 +149,12 @@ export default function WorkflowGraphCanvas({
           deletable: !readOnly,
           type: "smoothstep",
           animated: false,
+          label: branches.get(step.id)?.source.id === source
+            ? (branches.get(step.id)?.expected ? "참" : "거짓") : undefined,
+          labelStyle: { fill: "#065f46", fontSize: 11, fontWeight: 600 },
+          labelBgStyle: { fill: "#ecfdf5" },
+          labelBgPadding: [5, 3] as [number, number],
+          labelBgBorderRadius: 4,
           style: { stroke: "#818cf8", strokeWidth: 2 },
           markerEnd: { type: MarkerType.ArrowClosed, color: "#818cf8" },
         })),
