@@ -97,6 +97,12 @@ export function validateWorkflowVersion(workflowId: string, versionId: string) {
   );
 }
 
+export function publishWorkflowVersion(workflowId: string, versionId: string) {
+  return apiRequest<WorkflowVersionDto>(
+    `/workflows/${workflowId}/versions/${versionId}/publish`, { method: 'POST' },
+  );
+}
+
 export function listWorkflowTargets(signal?: AbortSignal) {
   return listWorkflows({ page: 1, page_size: 100, signal });
 }

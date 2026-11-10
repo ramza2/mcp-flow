@@ -16,12 +16,13 @@ vi.mock('@/api/workflows', () => ({
   getWorkflowVersion: vi.fn(),
   saveWorkflowPlan: vi.fn(),
   validateWorkflowVersion: vi.fn(),
+  publishWorkflowVersion: vi.fn(),
 }));
 vi.mock('@/api/mcp', () => ({ listMCPTools: vi.fn() }));
 
 import {
   listWorkflows, createWorkflow, getWorkflow, listWorkflowVersions,
-  createWorkflowVersion, getWorkflowVersion, saveWorkflowPlan, validateWorkflowVersion,
+  createWorkflowVersion, getWorkflowVersion, saveWorkflowPlan, validateWorkflowVersion, publishWorkflowVersion,
   type WorkflowDto, type WorkflowVersionDto,
 } from '@/api/workflows';
 import { listMCPTools } from '@/api/mcp';
@@ -103,11 +104,100 @@ describe('Workflow real registry — no mock IDs or pretend save', () => {
       ],
     });
     expect(await screen.findByText('업무 자동화')).toBeInTheDocument();
-    expect(screen.getByText(/단계 흐름의 시각 편집과 고급 JSON 편집을 지원/)).toBeInTheDocument();
+    expect(screen.getByText(/초안은 저장 후 서버 검증을 통과해야 게시할 수 있습니다/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '게시' })).toBeDisabled();
+    expect(publishWorkflowVersion).not.toHaveBeenCalled();
     expect(createWorkflowVersion).not.toHaveBeenCalled();
     await user.click(screen.getByRole('button', { name: '초안 편집' }));
     expect(router.state.location.pathname).toBe(`/workflows/${wfId}/versions/${vId}/edit`);
     expect(createWorkflowVersion).not.toHaveBeenCalled();
+  });
+
+  it('requires explicit confirmation and publishes only a matching server-validated DRAFT', async () => {
+    const validDraft: WorkflowVersionDto = {
+      ...version,
+      validation_status: 'VALID',
+      validation_report: { valid: true, content_hash: version.content_hash },
+    };
+    vi.mocked(listWorkflowVersions).mockResolvedValue({ items: [validDraft], page: 1, page_size: 100, total: 1, has_next: false });
+    vi.mocked(getWorkflowVersion).mockResolvedValue(validDraft);
+    vi.mocked(publishWorkflowVersion).mockResolvedValue({ ...validDraft, status: 'PUBLISHED' });
+
+    const user = userEvent.setup();
+    renderWithRouter(<WorkflowDetail />, { path: '/workflows/:workflowId', route: `/workflows/${wfId}` });
+    await user.click(await screen.findByRole('button', { name: '게시' }));
+    expect(screen.getByText(/게시만으로 활성화되거나 실행되지는 않습니다/)).toBeInTheDocument();
+    expect(publishWorkflowVersion).not.toHaveBeenCalled();
+    await user.click(screen.getByRole('button', { name: '취소' }));
+    expect(publishWorkflowVersion).not.toHaveBeenCalled();
+    await user.click(screen.getByRole('button', { name: '게시' }));
+    await user.click(screen.getByRole('button', { name: '게시 확정' }));
+    await waitFor(() => expect(getWorkflowVersion).toHaveBeenCalledWith(wfId, vId));
+    await waitFor(() => expect(publishWorkflowVersion).toHaveBeenCalledTimes(1));
+    expect(publishWorkflowVersion).toHaveBeenCalledWith(wfId, vId);
+    expect(await screen.findByRole('status')).toHaveTextContent('v1 게시가 완료되었습니다');
+  });
+
+  it('refuses publish when the persisted version changed since the screen loaded', async () => {
+    const validDraft: WorkflowVersionDto = {
+      ...version,
+      validation_status: 'VALID',
+      validation_report: { valid: true, content_hash: version.content_hash },
+    };
+    vi.mocked(listWorkflowVersions).mockResolvedValue({ items: [validDraft], page: 1, page_size: 100, total: 1, has_next: false });
+    vi.mocked(getWorkflowVersion).mockResolvedValue({ ...validDraft, content_hash: 'changed' });
+    const user = userEvent.setup();
+    renderWithRouter(<WorkflowDetail />, { path: '/workflows/:workflowId', route: `/workflows/${wfId}` });
+    await user.click(await screen.findByRole('button', { name: '게시' }));
+    await user.click(screen.getByRole('button', { name: '게시 확정' }));
+    expect(await screen.findByText(/게시 상태 또는 검증 결과가 변경되었습니다/)).toBeInTheDocument();
+    expect(publishWorkflowVersion).not.toHaveBeenCalled();
+  });
+
+  it('refuses to replace a newly changed current published version', async () => {
+    const validDraft: WorkflowVersionDto = {
+      ...version, validation_status: 'VALID',
+      validation_report: { valid: true, content_hash: version.content_hash },
+    };
+    vi.mocked(listWorkflowVersions).mockResolvedValue({ items: [validDraft], page: 1, page_size: 100, total: 1, has_next: false });
+    vi.mocked(getWorkflowVersion).mockResolvedValue(validDraft);
+    vi.mocked(getWorkflow)
+      .mockResolvedValueOnce(workflow)
+      .mockResolvedValueOnce({ ...workflow, current_version_id: '33333333-3333-4333-8333-333333333333' });
+    const user = userEvent.setup();
+    renderWithRouter(<WorkflowDetail />, { path: '/workflows/:workflowId', route: `/workflows/${wfId}` });
+    await user.click(await screen.findByRole('button', { name: '게시' }));
+    await user.click(screen.getByRole('button', { name: '게시 확정' }));
+    expect(await screen.findByText(/게시 상태 또는 검증 결과가 변경되었습니다/)).toBeInTheDocument();
+    expect(publishWorkflowVersion).not.toHaveBeenCalled();
+  });
+
+  it('reports backend publish refusal without claiming success', async () => {
+    const validDraft: WorkflowVersionDto = {
+      ...version, validation_status: 'VALID',
+      validation_report: { valid: true, content_hash: version.content_hash },
+    };
+    vi.mocked(listWorkflowVersions).mockResolvedValue({ items: [validDraft], page: 1, page_size: 100, total: 1, has_next: false });
+    vi.mocked(getWorkflowVersion).mockResolvedValue(validDraft);
+    vi.mocked(publishWorkflowVersion).mockRejectedValue(new Error('Backend rejected stale dependency'));
+    const user = userEvent.setup();
+    renderWithRouter(<WorkflowDetail />, { path: '/workflows/:workflowId', route: `/workflows/${wfId}` });
+    await user.click(await screen.findByRole('button', { name: '게시' }));
+    await user.click(screen.getByRole('button', { name: '게시 확정' }));
+    expect(await screen.findByText(/게시하지 못했습니다. 서버 검증 상태를 확인해 주세요/)).toBeInTheDocument();
+    expect(screen.queryByRole('status')).not.toBeInTheDocument();
+    expect(publishWorkflowVersion).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not offer publish when there is only an immutable PUBLISHED version', async () => {
+    vi.mocked(getWorkflow).mockResolvedValue({ ...workflow, status: 'ACTIVE', current_version_id: vId });
+    vi.mocked(listWorkflowVersions).mockResolvedValue({
+      items: [{ ...version, status: 'PUBLISHED', validation_status: 'VALID' }],
+      page: 1, page_size: 100, total: 1, has_next: false,
+    });
+    renderWithRouter(<WorkflowDetail />, { path: '/workflows/:workflowId', route: `/workflows/${wfId}` });
+    expect(await screen.findByRole('button', { name: '게시' })).toBeDisabled();
+    expect(publishWorkflowVersion).not.toHaveBeenCalled();
   });
 
   it('creates a server DRAFT only when the user clicks, with owned initial Plan', async () => {
