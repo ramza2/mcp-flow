@@ -1,7 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest"
-import { render, screen, waitFor, within } from "@testing-library/react"
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import WorkflowVisualEditor, {
+  addConditionStepToPlan,
   addStepToPlan,
   causesDependencyCycle,
   getResponseStepIds,
@@ -91,6 +92,118 @@ describe("Canonical visual workflow editor", () => {
     expect(two.source).toEqual(base.source)
     expect(two.completion).toEqual(base.completion)
     expect(base.steps).toEqual([])
+  })
+
+  it("adds a CONDITION only from an explicit non-secret source and preserves the Plan", () => {
+    const base: Plan = {
+      ...basePlan(),
+      inputs: {
+        "user/topic": { type: "string", required: true, secret: false },
+        token: { type: "string", required: true, secret: true },
+      },
+      custom: { keep: true },
+    }
+    expect(addConditionStepToPlan(base, "")).toBe(base)
+    expect(addConditionStepToPlan(base, "input:token")).toBe(base)
+    const withInput = addConditionStepToPlan(base, "input:user/topic")
+    expect(getVisualSteps(withInput)?.[0]).toMatchObject({
+      id: "condition_1",
+      type: "CONDITION",
+      depends_on: [],
+      config: { predicate: { op: "exists", operand: { kind: "PLAN_INPUT", path: "/user~1topic" } } },
+    })
+    expect(withInput.custom).toEqual(base.custom)
+    expect(base.steps).toEqual([])
+
+    const withTool = addStepToPlan(base, "TOOL", toolVersionId)
+    const withOutput = addConditionStepToPlan(withTool, "step:tool_1")
+    expect(getVisualSteps(withOutput)?.at(-1)).toMatchObject({
+      type: "CONDITION",
+      depends_on: ["tool_1"],
+      config: { predicate: { op: "exists", operand: { kind: "STEP_OUTPUT", step_id: "tool_1", path: "/" } } },
+    })
+    const scoped: Plan = {
+      ...withTool,
+      steps: [
+        { id: "loop", name: "반복", type: "LOOP", depends_on: [], config: { body_step_ids: ["tool_1"] } },
+        ...getVisualSteps(withTool)!,
+      ],
+    }
+    expect(addConditionStepToPlan(scoped, "step:tool_1")).toBe(scoped)
+  })
+
+  it("edits only a simple CONDITION predicate and leaves when/extra Plan fields unchanged", async () => {
+    const user = userEvent.setup()
+    const onChange = vi.fn()
+    const plan: Plan = {
+      ...basePlan(),
+      inputs: { topic: { type: "string", required: true, secret: false } },
+      marker: { preserved: true },
+    }
+    const { rerender } = render(
+      <WorkflowVisualEditor plan={plan} readOnly={false} onChange={onChange} />,
+    )
+    expect(screen.getByRole("button", { name: "조건 단계 추가" })).toBeDisabled()
+    await user.selectOptions(screen.getByLabelText("새 조건의 판단 대상"), "input:topic")
+    await user.click(screen.getByRole("button", { name: "조건 단계 추가" }))
+    let current = onChange.mock.lastCall?.[0] as Plan
+    const conditionId = getVisualSteps(current)?.[0].id
+    expect(conditionId).toBe("condition_1")
+    rerender(<WorkflowVisualEditor plan={current} readOnly={false} onChange={onChange} />)
+    await user.selectOptions(screen.getByLabelText("판단 방법"), "eq")
+    current = onChange.mock.lastCall?.[0] as Plan
+    rerender(<WorkflowVisualEditor plan={current} readOnly={false} onChange={onChange} />)
+    fireEvent.change(screen.getByLabelText("비교할 문자열"), { target: { value: "ready" } })
+    current = onChange.mock.lastCall?.[0] as Plan
+    rerender(<WorkflowVisualEditor plan={current} readOnly={false} onChange={onChange} />)
+    expect(getVisualSteps(current)?.[0].config).toEqual({
+      predicate: { op: "eq", left: { kind: "PLAN_INPUT", path: "/topic" }, right: { kind: "LITERAL", value: "ready" } },
+    })
+    fireEvent.change(screen.getByLabelText("데이터 경로 (JSON Pointer)"), { target: { value: "/topic/status" } })
+    current = onChange.mock.lastCall?.[0] as Plan
+    expect(current.marker).toEqual(plan.marker)
+    expect(getVisualSteps(current)?.[0].when).toBeNull()
+    expect(getVisualSteps(current)?.[0].config).toMatchObject({
+      predicate: { op: "eq", left: { kind: "PLAN_INPUT", path: "/topic/status" }, right: { kind: "LITERAL", value: "ready" } },
+    })
+  })
+
+  it("never rewrites complex or typed CONDITION predicates from visual controls", async () => {
+    const user = userEvent.setup()
+    const onChange = vi.fn()
+    const plan: Plan = {
+      ...basePlan(),
+      steps: [
+        { id: "complex", name: "복합", type: "CONDITION", depends_on: [], config: { predicate: { op: "and", children: [{ op: "exists", operand: { kind: "PLAN_INPUT", path: "/a" } }] } } },
+        { id: "typed", name: "숫자", type: "CONDITION", depends_on: [], config: { predicate: { op: "eq", left: { kind: "PLAN_INPUT", path: "/a" }, right: { kind: "LITERAL", value: 2 } } } },
+      ],
+    }
+    render(<WorkflowVisualEditor plan={plan} readOnly={false} onChange={onChange} />)
+    await user.click(screen.getByRole("button", { name: "목록" }))
+    await user.click(screen.getByRole("button", { name: "복합 단계 선택" }))
+    expect(screen.getByText(/복합 조건식·특수 바인딩/)).toBeInTheDocument()
+    expect(screen.queryByLabelText("판단 방법")).not.toBeInTheDocument()
+    await user.click(screen.getByRole("button", { name: "숫자 단계 선택" }))
+    expect(screen.getByText(/복합 조건식·특수 바인딩/)).toBeInTheDocument()
+    expect(onChange).not.toHaveBeenCalled()
+  })
+
+  it("shows simple CONDITION settings read-only on a published version", async () => {
+    const user = userEvent.setup()
+    const onChange = vi.fn()
+    const plan: Plan = {
+      ...basePlan(),
+      inputs: { topic: { type: "string", required: true, secret: false } },
+    }
+    const added = addConditionStepToPlan(plan, "input:topic")
+    render(<WorkflowVisualEditor plan={added} readOnly onChange={onChange} />)
+    expect(screen.getByRole("button", { name: "조건 단계 추가" })).toBeDisabled()
+    await user.click(screen.getByRole("button", { name: "목록" }))
+    await user.click(screen.getByRole("button", { name: "조건 분기 1 단계 선택" }))
+    expect(screen.getByLabelText("판단 방법")).toBeDisabled()
+    expect(screen.getByLabelText("판단 대상")).toBeDisabled()
+    expect(screen.getByLabelText("데이터 경로 (JSON Pointer)")).toBeDisabled()
+    expect(onChange).not.toHaveBeenCalled()
   })
 
   it("patches response_step_ids only and preserves completion and Plan metadata", () => {
