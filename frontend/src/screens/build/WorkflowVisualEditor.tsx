@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react"
+import { lazy, Suspense, useEffect, useMemo, useState } from "react"
 import {
   GitBranch,
   Link2,
@@ -10,6 +10,14 @@ import {
 import { listMCPTools } from "../../api/mcp"
 import type { MCPToolDto, JsonValue } from "../../api/types"
 import { isAbortError } from "../../api/client"
+import {
+  connectionProblem,
+  loopProtectedStepIds,
+  wouldBreakStepOutputAncestry,
+} from "./workflowGraphModel"
+
+// Keep React Flow out of the initial application bundle until the editor opens.
+const WorkflowGraphCanvas = lazy(() => import("./WorkflowGraphCanvas"))
 
 type Plan = Record<string, JsonValue>
 type Step = Record<string, JsonValue> & {
@@ -163,6 +171,7 @@ export default function WorkflowVisualEditor({
   const [toolError, setToolError] = useState("")
   const [warning, setWarning] = useState("")
   const [newBindingName, setNewBindingName] = useState("")
+  const [view, setView] = useState<"graph" | "list">("graph")
 
   useEffect(() => {
     if (readOnly) return
@@ -228,6 +237,56 @@ export default function WorkflowVisualEditor({
     setSelected(getVisualSteps(next)?.at(-1)?.id ?? null)
     setWarning("합류 단계에는 상위 단계를 한 개 이상 연결해야 합니다.")
   }
+  const connectGraph = (sourceId: string, targetId: string) => {
+    if (readOnly || !steps) return
+    const problem = connectionProblem(steps, sourceId, targetId)
+    if (problem) {
+      setWarning(problem)
+      return
+    }
+    onChange(
+      updateStepInPlan(plan, targetId, (step) => ({
+        ...step,
+        depends_on: [...step.depends_on, sourceId],
+      })),
+    )
+    setSelected(targetId)
+    setWarning(
+      steps.find((step) => step.id === sourceId)?.type === "CONDITION"
+        ? "선행 연결만 추가했습니다. 실제 참/거짓 분기는 대상 단계의 when 조건을 고급 JSON에서 확인해야 합니다."
+        : "연결을 추가했습니다. 저장 및 서버 검증 전까지 실행에는 적용되지 않습니다.",
+    )
+  }
+  const disconnectGraph = (links: Array<{ source: string; target: string }>) => {
+    if (readOnly || !steps) return
+    let next = plan
+    let blocked = 0
+    for (const { source, target: targetId } of links) {
+      const latestSteps = getVisualSteps(next)
+      if (!latestSteps) continue
+      const target = latestSteps.find((step) => step.id === targetId)
+      if (!target?.depends_on.includes(source)) continue
+      const loopScoped = loopProtectedStepIds(latestSteps)
+      if (
+        loopScoped.has(targetId) ||
+        loopScoped.has(source) ||
+        wouldBreakStepOutputAncestry(latestSteps, source, targetId)
+      ) {
+        blocked++
+        continue
+      }
+      next = updateStepInPlan(next, targetId, (step) => ({
+        ...step,
+        depends_on: step.depends_on.filter((id) => id !== source),
+      }))
+    }
+    if (next !== plan) onChange(next)
+    setWarning(
+      blocked
+        ? "LOOP 범위 또는 하위 단계의 STEP_OUTPUT 참조가 영향을 받는 연결은 보호했습니다. 고급 JSON에서 안전하게 수정하세요."
+        : "연결을 제거했습니다. 저장 전 서버 검증으로 참조 관계를 확인하세요.",
+    )
+  }
   const deleteStep = () => {
     if (!active || !steps || readOnly) return
     if (!["TOOL", "JOIN"].includes(active.type)) {
@@ -277,7 +336,7 @@ export default function WorkflowVisualEditor({
     )
 
   return (
-    <div className="grid grid-cols-1 lg:grid-cols-[220px_minmax(280px,1fr)_320px] min-h-[550px] gap-0 border border-slate-200 rounded-xl overflow-hidden bg-white">
+    <div className="grid grid-cols-1 lg:grid-cols-[220px_minmax(440px,1fr)_320px] min-h-[550px] gap-0 border border-slate-200 rounded-xl overflow-hidden bg-white">
       <aside className="p-4 border-b lg:border-b-0 lg:border-r border-slate-200 bg-slate-50 space-y-3">
         <h2 className="font-semibold text-sm text-slate-800">단계 추가</h2>
         <label
@@ -342,52 +401,119 @@ export default function WorkflowVisualEditor({
           <h2 className="font-semibold text-sm text-slate-800">
             실행 단계 ({steps.length})
           </h2>
-          <span className="text-xs text-slate-500">
-            순서는 의존 관계로 결정됩니다
-          </span>
+          <div
+            className="flex items-center gap-1"
+            role="group"
+            aria-label="단계 표현 방식"
+          >
+            <button
+              type="button"
+              aria-pressed={view === "graph"}
+              onClick={() => setView("graph")}
+              className={`rounded-md px-2 py-1 text-xs border ${
+                view === "graph"
+                  ? "border-indigo-400 bg-indigo-50 text-indigo-700"
+                  : "border-slate-300"
+              }`}
+            >
+              그래프
+            </button>
+            <button
+              type="button"
+              aria-pressed={view === "list"}
+              onClick={() => setView("list")}
+              className={`rounded-md px-2 py-1 text-xs border ${
+                view === "list"
+                  ? "border-indigo-400 bg-indigo-50 text-indigo-700"
+                  : "border-slate-300"
+              }`}
+            >
+              목록
+            </button>
+          </div>
         </div>
-        {steps.length === 0 && (
-          <p className="rounded-lg border border-dashed border-slate-300 bg-white p-8 text-sm text-slate-500 text-center">
-            실행 단계가 없습니다. 왼쪽에서 도구를 선택해 추가하세요.
+        <p className="text-xs text-slate-500">
+          실행 순서는 노드 위치가 아닌 선행 단계 관계로 결정됩니다.
+          {view === "graph" &&
+            !readOnly &&
+            " 오른쪽 핸들에서 왼쪽 핸들로 선을 연결하고, 선을 선택해 Delete로 제거할 수 있습니다."}
+        </p>
+        {view === "graph" && steps.some((step) => step.type === "CONDITION") && (
+          <p className="text-xs text-amber-800 bg-amber-50 rounded-md px-3 py-2">
+            조건 노드의 연결선은 선행 관계를 나타냅니다. 참/거짓 실행
+            조건은 각 단계의 when Predicate에 따라 결정되며, 고급 JSON에서
+            설정합니다.
           </p>
         )}
-        {steps.map((step, index) => (
-          <button
-            key={step.id}
-            type="button"
-            aria-label={`${step.name} 단계 선택`}
-            onClick={() => {
-              setSelected(step.id)
-              setWarning("")
-            }}
-            className={`block text-left rounded-xl p-4 w-full border-2 bg-white shadow-sm space-y-2 ${
-              selected === step.id
-                ? "border-indigo-500"
-                : "border-slate-200 hover:border-slate-300"
-            }`}
+        {view === "graph" ? (
+          <Suspense
+            fallback={
+              <div className="flex h-[570px] items-center justify-center rounded-lg border border-slate-200 text-sm text-slate-500">
+                그래프를 불러오는 중입니다.
+              </div>
+            }
           >
-            <div className="flex items-center gap-2">
-              <span className="rounded-md bg-indigo-50 text-indigo-700 p-1.5">
-                <Wrench size={16} />
-              </span>
-              <span className="font-medium text-sm text-slate-800">
-                {index + 1}. {step.name}
-              </span>
-              <span className="ml-auto text-xs text-slate-500">
-                {STEP_LABELS[step.type] ?? step.type}
-              </span>
-            </div>
-            <div className="text-xs text-slate-500">
-              <span className="font-mono">{step.id}</span>
-            </div>
-            <div className="flex items-start gap-1.5 text-xs text-slate-600">
-              <Link2 size={13} className="shrink-0" />
-              {step.depends_on.length
-                ? `선행 단계: ${step.depends_on.join(", ")}`
-                : "선행 단계 없음 · 병렬 시작 가능"}
-            </div>
-          </button>
-        ))}
+            <WorkflowGraphCanvas
+              steps={steps}
+              selected={selected}
+              readOnly={readOnly}
+              onSelect={(id) => {
+                setSelected(id)
+                setWarning("")
+              }}
+              onConnect={connectGraph}
+              onDisconnect={disconnectGraph}
+              canConnect={(source, target) =>
+                connectionProblem(steps, source, target) === null
+              }
+            />
+          </Suspense>
+        ) : (
+          <div className="space-y-3">
+            {steps.length === 0 && (
+              <p className="rounded-lg border border-dashed border-slate-300 bg-white p-8 text-sm text-slate-500 text-center">
+                실행 단계가 없습니다. 왼쪽에서 도구를 선택해 추가하세요.
+              </p>
+            )}
+            {steps.map((step, index) => (
+              <button
+                key={step.id}
+                type="button"
+                aria-label={`${step.name} 단계 선택`}
+                onClick={() => {
+                  setSelected(step.id)
+                  setWarning("")
+                }}
+                className={`block text-left rounded-xl p-4 w-full border-2 bg-white shadow-sm space-y-2 ${
+                  selected === step.id
+                    ? "border-indigo-500"
+                    : "border-slate-200 hover:border-slate-300"
+                }`}
+              >
+                <div className="flex items-center gap-2">
+                  <span className="rounded-md bg-indigo-50 text-indigo-700 p-1.5">
+                    <Wrench size={16} />
+                  </span>
+                  <span className="font-medium text-sm text-slate-800">
+                    {index + 1}. {step.name}
+                  </span>
+                  <span className="ml-auto text-xs text-slate-500">
+                    {STEP_LABELS[step.type] ?? step.type}
+                  </span>
+                </div>
+                <div className="text-xs text-slate-500">
+                  <span className="font-mono">{step.id}</span>
+                </div>
+                <div className="flex items-start gap-1.5 text-xs text-slate-600">
+                  <Link2 size={13} className="shrink-0" />
+                  {step.depends_on.length
+                    ? `선행 단계: ${step.depends_on.join(", ")}`
+                    : "선행 단계 없음 · 병렬 시작 가능"}
+                </div>
+              </button>
+            ))}
+          </div>
+        )}
         {warning && (
           <p
             role="status"
@@ -446,22 +572,11 @@ export default function WorkflowVisualEditor({
                       type="checkbox"
                       checked={active.depends_on.includes(step.id)}
                       onChange={(event) => {
-                        if (
-                          event.target.checked &&
-                          causesDependencyCycle(steps, active.id, step.id)
-                        ) {
-                          setWarning(
-                            "순환 의존성이 만들어져 연결할 수 없습니다.",
-                          )
-                          return
+                        if (event.target.checked) {
+                          connectGraph(step.id, active.id)
+                        } else {
+                          disconnectGraph([{ source: step.id, target: active.id }])
                         }
-                        replace((current) => ({
-                          ...current,
-                          depends_on: event.target.checked
-                            ? [...current.depends_on, step.id]
-                            : current.depends_on.filter((id) => id !== step.id),
-                        }))
-                        setWarning("")
                       }}
                     />
                     {step.name} ({step.id})
@@ -574,28 +689,34 @@ export default function WorkflowVisualEditor({
                               ))}
                             </select>
                             {binding.kind === "LITERAL" ? (
-                      <>
-                        <input
-                          aria-label={`${name} 값`}
-                          className="w-full rounded-md border border-slate-300 p-2 text-xs"
-                          disabled={readOnly || typeof binding.value !== "string"}
-                          value={
-                            typeof binding.value === "string"
-                              ? binding.value
-                              : JSON.stringify(binding.value ?? null)
-                          }
-                          onChange={(event) =>
-                            updateBinding(name, {
-                              ...binding,
-                              value: event.target.value,
-                            })
-                          }
-                          placeholder="문자열 값"
-                        />
-                        {typeof binding.value !== "string" && (
-                          <p className="text-xs text-amber-700">숫자·배열·객체 리터럴은 타입을 보존하도록 고급 JSON에서만 수정합니다.</p>
-                        )}
-                      </>
+                              <>
+                                <input
+                                  aria-label={`${name} 값`}
+                                  className="w-full rounded-md border border-slate-300 p-2 text-xs"
+                                  disabled={
+                                    readOnly ||
+                                    typeof binding.value !== "string"
+                                  }
+                                  value={
+                                    typeof binding.value === "string"
+                                      ? binding.value
+                                      : JSON.stringify(binding.value ?? null)
+                                  }
+                                  onChange={(event) =>
+                                    updateBinding(name, {
+                                      ...binding,
+                                      value: event.target.value,
+                                    })
+                                  }
+                                  placeholder="문자열 값"
+                                />
+                                {typeof binding.value !== "string" && (
+                                  <p className="text-xs text-amber-700">
+                                    숫자·배열·객체 리터럴은 타입을 보존하도록
+                                    고급 JSON에서만 수정합니다.
+                                  </p>
+                                )}
+                              </>
                             ) : (
                               <>
                                 {binding.kind === "STEP_OUTPUT" && (

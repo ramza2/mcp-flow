@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest"
-import { render, screen, waitFor } from "@testing-library/react"
+import { render, screen, waitFor, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import WorkflowVisualEditor, {
   addStepToPlan,
@@ -11,6 +11,16 @@ import { listMCPTools } from "@/api/mcp"
 import type { JsonValue, MCPToolDto } from "@/api/types"
 
 vi.mock("@/api/mcp", () => ({ listMCPTools: vi.fn() }))
+
+// React Flow measures nodes in the browser; jsdom needs a no-op observer.
+vi.stubGlobal(
+  "ResizeObserver",
+  class {
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  },
+)
 
 type Plan = Record<string, JsonValue>
 
@@ -214,8 +224,58 @@ describe("Canonical visual workflow editor", () => {
     expect(
       screen.getByRole("button", { name: "도구 단계 추가" }),
     ).toBeDisabled()
+    await user.click(screen.getByRole("button", { name: "목록" }))
     await user.click(screen.getByRole("button", { name: /도구 실행/ }))
     expect(screen.getByRole("textbox", { name: "단계 이름" })).toBeDisabled()
+    expect(onChange).not.toHaveBeenCalled()
+  })
+
+  it("applies the graph connection guards to right-hand dependency checkboxes", async () => {
+    const user = userEvent.setup()
+    const onChange = vi.fn()
+    const plan: Plan = {
+      ...basePlan(),
+      steps: [
+        { id: "a", name: "첫 단계", type: "TOOL", depends_on: [], config: { bindings: {} } },
+        { id: "b", name: "둘째 단계", type: "TOOL", depends_on: ["a"], config: { bindings: { input: { kind: "STEP_OUTPUT", step_id: "a", path: "/value" } } } },
+        { id: "c", name: "셋째 단계", type: "TOOL", depends_on: [], config: { bindings: {} } },
+      ],
+    }
+    render(<WorkflowVisualEditor plan={plan} readOnly={false} onChange={onChange} />)
+    await user.click(screen.getByRole("button", { name: "목록" }))
+    await user.click(screen.getByRole("button", { name: "둘째 단계 단계 선택" }))
+
+    await user.click(screen.getByRole("checkbox", { name: "셋째 단계 (c)" }))
+    expect(onChange).not.toHaveBeenCalled()
+    expect(screen.getByRole("status")).toHaveTextContent(/다중 선행/)
+
+    await user.click(screen.getByRole("checkbox", { name: "첫 단계 (a)" }))
+    expect(onChange).not.toHaveBeenCalled()
+    expect(screen.getByRole("status")).toHaveTextContent(/STEP_OUTPUT/)
+  })
+
+  it("shows canonical branch nodes in graph mode without modifying the Plan", async () => {
+    const user = userEvent.setup()
+    const onChange = vi.fn()
+    const plan: Plan = {
+      ...basePlan(),
+      steps: [
+        { id: "probe", name: "도구 조회", type: "TOOL", depends_on: [], config: {} },
+        { id: "condition", name: "조건 판단", type: "CONDITION", depends_on: ["probe"], config: { predicate: { op: "exists", operand: { kind: "PLAN_INPUT", path: "/topic" } } } },
+        { id: "true", name: "참 분기", type: "TOOL", depends_on: ["condition"], config: {} },
+        { id: "false", name: "거짓 분기", type: "TOOL", depends_on: ["condition"], config: {} },
+        { id: "join", name: "합류", type: "JOIN", depends_on: ["true", "false"], config: { policy: "ALL_COMPLETE" } },
+      ],
+    }
+    render(<WorkflowVisualEditor plan={plan} readOnly={false} onChange={onChange} />)
+    const graph = await screen.findByLabelText("워크플로 그래프")
+    expect(within(graph).getByText("조건 판단")).toBeInTheDocument()
+    expect(within(graph).getByText("참 분기")).toBeInTheDocument()
+    expect(within(graph).getByText("거짓 분기")).toBeInTheDocument()
+    expect(within(graph).getByText("합류")).toBeInTheDocument()
+    await user.click(screen.getByRole("button", { name: "목록" }))
+    await user.click(screen.getByRole("button", { name: "그래프" }))
+    expect(await screen.findByLabelText("워크플로 그래프")).toBeInTheDocument()
     expect(onChange).not.toHaveBeenCalled()
   })
 })

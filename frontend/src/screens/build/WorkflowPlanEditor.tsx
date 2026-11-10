@@ -144,7 +144,7 @@ export default function WorkflowPlanEditor() {
           </div>
         )}
       />
-      <div className="p-6 space-y-4 max-w-6xl">
+      <div className={`p-6 space-y-4 ${mode === 'visual' ? 'max-w-[1800px]' : 'max-w-6xl'}`}>
         {error && <InlineAlert type="error" message={error} />}
         {success && <div role="status" className="flex gap-2 text-sm text-green-700"><CheckCircle size={17} />{success}</div>}
         <InlineAlert type="info" message="실제 서버 Execution Plan v1입니다. 시각 편집은 지원되는 필드만 변경하고, 고급 JSON에서는 전체 계획을 편집할 수 있습니다. 비밀번호·토큰 등 비밀값은 직접 입력하지 마세요(SECRET_REF 사용)." />

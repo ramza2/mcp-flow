@@ -910,6 +910,7 @@ DRAFT → PUBLISHED → DEPRECATED
 - Live Workflow registry UI: GET 목록의 server-side status/q/page, 오류/빈 목록 표시, 새 등록 시 명시적 클릭만 POST, detail의 exact UUID 버전 목록, DRAFT 생성 시 WORKFLOW owning source, PUBLISHED/DEPRECATED 읽기 전용 검증.
 - 시각 편집/고급 JSON Plan 화면: DRAFT만 저장, 저장되지 않은 내용은 validate 금지, malformed JSON은 클라이언트에서 차단, 서버 content_hash preflight로 이미 변경된 버전의 덮어쓰기 거절(원자적 If-Match 미지원 한계 명시), 저장 후 INVALID 초기화 및 별도 `/validate` 결과 표시, 임의 Plan Step Type/Status 변환 금지.
 - 시각 편집 회귀: 활성 MCP Tool의 immutable ToolVersion만 신규 TOOL에 설정, JOIN canonical policy, 선행 단계 cycle 차단, TOOL BindingKind canonical 집합, PUBLISHED 읽기 전용, 편집 모드 전환 시 복잡한 기존 Predicate/Loop/when/Plan metadata 손실 없음. 서버 PUT 전까지 모든 변경은 클라이언트 로컬 초안으로 유지한다.
+- React Flow 그래프 회귀: 동일 Step ID 및 `depends_on` DAG의 노드/선 렌더, 조건 분기 fan-out/JOIN fan-in, 자기 연결·중복·cycle·TOOL 직접 fan-in·LOOP 본문 범위 차단, 전이적 STEP_OUTPUT 참조가 깨지는 선행 관계 제거 보호, 오른쪽 체크박스의 동일 규칙 준수, 노드 위치가 Plan에 영속화되지 않음, PUBLISHED 연결 편집 차단, 목록·고급 JSON 모드 전환 시 기존 Plan 유지.
 
 - 워크플로 예시 화면 한글화 회귀: 목록 검색·상태 필터가 예시 데이터에 적용되는지,
   상태/버전/Join Policy 표시명과 Canonical Code가 분리되는지,
