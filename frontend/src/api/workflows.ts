@@ -63,6 +63,13 @@ export function getWorkflow(workflowId: string, signal?: AbortSignal) {
   return apiRequest<WorkflowDto>(`/workflows/${workflowId}`, { signal });
 }
 
+/** Optimistic concurrency is enforced by the server's Workflow.lock_version. */
+export function changeWorkflowStatus(workflowId: string, status: WorkflowStatus, lockVersion: number) {
+  return apiRequest<WorkflowDto>(`/workflows/${workflowId}`, {
+    method: 'PATCH', body: { status, lock_version: lockVersion },
+  });
+}
+
 export function createWorkflow(body: { name: string; description?: string | null; visibility: WorkflowVisibility }) {
   return apiRequest<WorkflowDto>('/workflows', { method: 'POST', body });
 }
@@ -101,6 +108,29 @@ export function publishWorkflowVersion(workflowId: string, versionId: string) {
   return apiRequest<WorkflowVersionDto>(
     `/workflows/${workflowId}/versions/${versionId}/publish`, { method: 'POST' },
   );
+}
+
+export interface WorkflowExecutionCreateResult {
+  id: string;
+  status: string;
+  source_type: 'WORKFLOW_VERSION';
+  trigger_type: string;
+  workflow_version_id: string;
+  plan_hash: string;
+  requested_at: string;
+  step_count: number;
+}
+
+/** Explicitly pinned published version; a stable key must be reused on uncertain retries. */
+export function createWorkflowExecution(
+  workflowId: string,
+  versionId: string,
+  inputs: Record<string, JsonValue>,
+  idempotencyKey: string,
+) {
+  return apiRequest<WorkflowExecutionCreateResult>(`/workflows/${workflowId}/versions/${versionId}/executions`, {
+    method: 'POST', body: { inputs }, headers: { 'Idempotency-Key': idempotencyKey },
+  });
 }
 
 export function listWorkflowTargets(signal?: AbortSignal) {

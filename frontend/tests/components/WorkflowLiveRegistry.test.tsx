@@ -17,18 +17,22 @@ vi.mock('@/api/workflows', () => ({
   saveWorkflowPlan: vi.fn(),
   validateWorkflowVersion: vi.fn(),
   publishWorkflowVersion: vi.fn(),
+  changeWorkflowStatus: vi.fn(),
+  createWorkflowExecution: vi.fn(),
 }));
 vi.mock('@/api/mcp', () => ({ listMCPTools: vi.fn() }));
 
 import {
   listWorkflows, createWorkflow, getWorkflow, listWorkflowVersions,
   createWorkflowVersion, getWorkflowVersion, saveWorkflowPlan, validateWorkflowVersion, publishWorkflowVersion,
+  changeWorkflowStatus, createWorkflowExecution,
   type WorkflowDto, type WorkflowVersionDto,
 } from '@/api/workflows';
 import { listMCPTools } from '@/api/mcp';
 
 const wfId = '11111111-1111-4111-8111-111111111111';
 const vId = '22222222-2222-4222-8222-222222222222';
+const execId = '44444444-4444-4444-8444-444444444444';
 
 const workflow: WorkflowDto = {
   id: wfId, code: 'wf-test', name: '업무 자동화', description: '매일 검토', status: 'DRAFT',
@@ -47,6 +51,8 @@ const version: WorkflowVersionDto = {
   created_at: '2026-11-09T00:00:00Z', created_by: null,
 };
 
+const publishedVersion: WorkflowVersionDto = { ...version, status: 'PUBLISHED', validation_status: 'VALID' };
+
 describe('Workflow real registry — no mock IDs or pretend save', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -62,6 +68,11 @@ describe('Workflow real registry — no mock IDs or pretend save', () => {
     });
     vi.mocked(createWorkflowVersion).mockResolvedValue(version);
     vi.mocked(createWorkflow).mockResolvedValue(workflow);
+    vi.mocked(changeWorkflowStatus).mockResolvedValue({ ...workflow, status: 'ACTIVE', lock_version: 2 });
+    vi.mocked(createWorkflowExecution).mockResolvedValue({
+      id: execId, status: 'QUEUED', source_type: 'WORKFLOW_VERSION', trigger_type: 'MANUAL',
+      workflow_version_id: vId, plan_hash: 'hash', requested_at: '2026-11-10T00:00:00Z', step_count: 1,
+    });
   });
 
   it('loads live data and maps filter to API canonical values', async () => {
@@ -198,6 +209,127 @@ describe('Workflow real registry — no mock IDs or pretend save', () => {
     renderWithRouter(<WorkflowDetail />, { path: '/workflows/:workflowId', route: `/workflows/${wfId}` });
     expect(await screen.findByRole('button', { name: '게시' })).toBeDisabled();
     expect(publishWorkflowVersion).not.toHaveBeenCalled();
+  });
+
+  it('activates a published valid workflow only after explicit confirmation', async () => {
+    vi.mocked(getWorkflow).mockResolvedValue({ ...workflow, status: 'INACTIVE', current_version_id: vId });
+    vi.mocked(listWorkflowVersions).mockResolvedValue({
+      items: [publishedVersion], page: 1, page_size: 100, total: 1, has_next: false,
+    });
+    const user = userEvent.setup();
+    renderWithRouter(<WorkflowDetail />, { path: '/workflows/:workflowId', route: `/workflows/${wfId}` });
+    await user.click(await screen.findByRole('button', { name: '활성화' }));
+    expect(changeWorkflowStatus).not.toHaveBeenCalled();
+    await user.click(screen.getByRole('button', { name: '취소' }));
+    expect(changeWorkflowStatus).not.toHaveBeenCalled();
+    await user.click(screen.getByRole('button', { name: '활성화' }));
+    await user.click(screen.getByRole('button', { name: '활성화 확정' }));
+    await waitFor(() => expect(changeWorkflowStatus).toHaveBeenCalledWith(wfId, 'ACTIVE', 1));
+    expect(await screen.findByRole('status')).toHaveTextContent('워크플로가 활성화되었습니다');
+    expect(createWorkflowExecution).not.toHaveBeenCalled();
+  });
+
+  it('deactivates active workflows but refuses a stale lock_version', async () => {
+    const active = { ...workflow, status: 'ACTIVE' as const, current_version_id: vId };
+    vi.mocked(getWorkflow).mockResolvedValueOnce(active).mockResolvedValueOnce({ ...active, lock_version: 2 }).mockResolvedValue(active);
+    vi.mocked(listWorkflowVersions).mockResolvedValue({
+      items: [publishedVersion], page: 1, page_size: 100, total: 1, has_next: false,
+    });
+    const user = userEvent.setup();
+    renderWithRouter(<WorkflowDetail />, { path: '/workflows/:workflowId', route: `/workflows/${wfId}` });
+    await user.click(await screen.findByRole('button', { name: '비활성화' }));
+    await user.click(screen.getByRole('button', { name: '비활성화 확정' }));
+    expect(await screen.findByText(/다른 곳에서 변경되었습니다/)).toBeInTheDocument();
+    expect(changeWorkflowStatus).not.toHaveBeenCalled();
+  });
+
+  it('runs only the exact ACTIVE published version with a stable idempotency key', async () => {
+    const active = { ...workflow, status: 'ACTIVE' as const, current_version_id: vId };
+    vi.mocked(getWorkflow).mockResolvedValue(active);
+    vi.mocked(getWorkflowVersion).mockResolvedValue(publishedVersion);
+    vi.mocked(listWorkflowVersions).mockResolvedValue({
+      items: [publishedVersion], page: 1, page_size: 100, total: 1, has_next: false,
+    });
+    const user = userEvent.setup();
+    const { router } = renderWithRouter(<WorkflowDetail />, {
+      route: `/workflows/${wfId}`,
+      routes: [
+        { path: '/workflows/:workflowId', element: <WorkflowDetail /> },
+        { path: '/executions/:executionId', element: <div>실행 상세</div> },
+      ],
+    });
+    await user.click(await screen.findByRole('button', { name: '수동 실행' }));
+    expect(createWorkflowExecution).not.toHaveBeenCalled();
+    await user.click(screen.getByRole('button', { name: '실행 확정' }));
+    await waitFor(() => expect(createWorkflowExecution).toHaveBeenCalledWith(wfId, vId, {}, expect.any(String)));
+    expect(vi.mocked(createWorkflowExecution).mock.calls[0][3]).toMatch(/^[0-9a-f-]{36}$/i);
+    await waitFor(() => expect(router.state.location.pathname).toBe(`/executions/${execId}`));
+  });
+
+  it('refuses a run when the published version changed after the screen loaded', async () => {
+    const active = { ...workflow, status: 'ACTIVE' as const, current_version_id: vId };
+    vi.mocked(getWorkflow).mockResolvedValue(active);
+    vi.mocked(getWorkflowVersion).mockResolvedValue({ ...publishedVersion, content_hash: 'changed-on-server' });
+    vi.mocked(listWorkflowVersions).mockResolvedValue({
+      items: [publishedVersion], page: 1, page_size: 100, total: 1, has_next: false,
+    });
+    const user = userEvent.setup();
+    renderWithRouter(<WorkflowDetail />, { path: '/workflows/:workflowId', route: `/workflows/${wfId}` });
+    await user.click(await screen.findByRole('button', { name: '수동 실행' }));
+    await user.click(screen.getByRole('button', { name: '실행 확정' }));
+    expect(await screen.findByText(/워크플로 또는 게시 버전 상태가 변경되었습니다/)).toBeInTheDocument();
+    expect(createWorkflowExecution).not.toHaveBeenCalled();
+  });
+
+  it('retries a failed manual run with the same idempotency key', async () => {
+    vi.mocked(getWorkflow).mockResolvedValue({ ...workflow, status: 'ACTIVE', current_version_id: vId });
+    vi.mocked(getWorkflowVersion).mockResolvedValue(publishedVersion);
+    vi.mocked(listWorkflowVersions).mockResolvedValue({
+      items: [publishedVersion], page: 1, page_size: 100, total: 1, has_next: false,
+    });
+    vi.mocked(createWorkflowExecution).mockRejectedValueOnce(new Error('temporary request failure'));
+    const user = userEvent.setup();
+    renderWithRouter(<WorkflowDetail />, {
+      route: `/workflows/${wfId}`,
+      routes: [
+        { path: '/workflows/:workflowId', element: <WorkflowDetail /> },
+        { path: '/executions/:executionId', element: <div>실행 상세</div> },
+      ],
+    });
+    await user.click(await screen.findByRole('button', { name: '수동 실행' }));
+    await user.click(screen.getByRole('button', { name: '실행 확정' }));
+    expect(await screen.findByText(/동일한 요청 키로 재시도할 수 있습니다/)).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: '실행 확정' }));
+    await waitFor(() => expect(createWorkflowExecution).toHaveBeenCalledTimes(2));
+    const calls = vi.mocked(createWorkflowExecution).mock.calls;
+    expect(calls[0][3]).toBe(calls[1][3]);
+  });
+
+  it('keeps the run confirmation open on invalid input and never POSTs', async () => {
+    vi.mocked(getWorkflow).mockResolvedValue({ ...workflow, status: 'ACTIVE', current_version_id: vId });
+    vi.mocked(listWorkflowVersions).mockResolvedValue({
+      items: [{ ...publishedVersion, plan_definition: { ...publishedVersion.plan_definition,
+        inputs: { report_name: { type: 'string', required: true, secret: false } },
+      } }], page: 1, page_size: 100, total: 1, has_next: false,
+    });
+    const user = userEvent.setup();
+    renderWithRouter(<WorkflowDetail />, { path: '/workflows/:workflowId', route: `/workflows/${wfId}` });
+    await user.click(await screen.findByRole('button', { name: '수동 실행' }));
+    await user.click(screen.getByRole('button', { name: '실행 확정' }));
+    expect(await screen.findByText(/필수 입력값이 없습니다: report_name/)).toBeInTheDocument();
+    expect(createWorkflowExecution).not.toHaveBeenCalled();
+  });
+
+  it('never enables a manual run for inactive or invalid published workflows', async () => {
+    vi.mocked(getWorkflow).mockResolvedValue({ ...workflow, status: 'INACTIVE', current_version_id: vId });
+    vi.mocked(listWorkflowVersions).mockResolvedValue({
+      items: [{ ...publishedVersion, validation_status: 'INVALID' }],
+      page: 1, page_size: 100, total: 1, has_next: false,
+    });
+    renderWithRouter(<WorkflowDetail />, { path: '/workflows/:workflowId', route: `/workflows/${wfId}` });
+    expect(await screen.findByRole('button', { name: '수동 실행' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: '활성화' })).toBeDisabled();
+    expect(createWorkflowExecution).not.toHaveBeenCalled();
   });
 
   it('creates a server DRAFT only when the user clicks, with owned initial Plan', async () => {
