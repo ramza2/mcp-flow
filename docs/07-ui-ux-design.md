@@ -677,6 +677,7 @@ Tool Grant API는 Version 단위다.
 - 실제 버전 편집 경로(`/workflows/:id/versions/:versionId/edit`)는 **시각 편집/고급 JSON 전환**을 지원한다. 모든 모드는 동일한 원본 `plan_definition`을 사용하며, 시각 편집은 인식한 필드만 부분 변경하고 알 수 없는 조건식·설정·메타데이터를 제거하지 않는다. DRAFT에서만 `PUT /plan`으로 저장한다. 저장 직전 `content_hash`를 재조회하여 stale-tab 덮어쓰기를 예방한다(현 Backend에 원자적 If-Match 버전 검증은 없음). 저장 후 검증 상태 초기화를 안내하며 저장된 내용만 별도 `/validate`한다.
 - 시각 편집에서는 실제 활성 MCP Tool의 current ToolVersion을 선택하여 TOOL Step을 추가하고, JOIN의 canonical `policy`, 단계명, 선행 단계, TOOL 입력 BindingKind를 편집한다. 순환 의존성 선택은 차단하며, 순서는 Canvas/카드 위치가 아닌 `depends_on`에 따른다. ToolVersion과 비밀값은 참조 ID만 표시/저장한다.
 - CONDITION·APPROVAL·LOOP의 기존 config/Predicate AST는 시각적으로 표시하되 복잡한 설정은 고급 JSON에서만 편집한다. 지원하지 않는 Plan 구조도 고급 JSON으로 돌아갈 수 있다. PARALLEL·END는 authorable Step으로 저장하지 않는다.
+- React Flow 기반 그래프/목록 전환(2026-11-10): 그래프 노드는 기존 canonical Step ID로 식별하고 연결선은 `depends_on`만 표현한다. 노드 배치 좌표는 UI 세션의 시각 정보이고 Plan JSON에 저장하지 않는다. 새 연결은 자기 참조·중복·DAG cycle·직접 TOOL fan-in을 차단하며, 그래프와 오른쪽 선행 단계 체크박스가 동일한 규칙을 적용한다. LOOP 본문 범위 편집 및 선행 관계 해제 시 하위 Step의 전이적 STEP_OUTPUT 참조가 깨지는 작업은 차단하고 고급 JSON으로 안내한다. 조건 분기 선은 실행 조건 자체를 나타내지 않으며 Predicate와 `when`은 그대로 유지한다. 연결 편집은 DRAFT에서만 가능하고 저장/검증은 기존 독립 버튼으로 처리한다.
 - PUBLISHED/DEPRECATED 버전은 시각/JSON 모두 읽기 전용이다. 게시·수동 실행 UI는 후속 개발 대상이며, 기존 mock 기반 디자이너는 운영 라우트에서 사용하지 않는다.
 - 일정 설정의 기존 `listWorkflowTargets`/`listWorkflowTargetVersions` 호출 계약은 유지한다. Backend/DB/Workflow Runtime은 변경하지 않는다.
 
