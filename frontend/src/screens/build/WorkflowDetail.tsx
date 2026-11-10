@@ -131,7 +131,7 @@ export default function WorkflowDetail() {
 
       <div className="p-6 space-y-4">
         {actionError && <InlineAlert type="error" message={actionError} />}
-        <InlineAlert type="info" message="실제 서버에 등록된 워크플로입니다. 초안은 저장 후 별도로 검증해야 합니다. 시각 디자이너와 게시·실행 UI는 후속 개발 대상입니다." />
+        <InlineAlert type="info" message="실제 서버에 등록된 워크플로입니다. 초안은 저장 후 별도로 검증해야 합니다. 단계 흐름의 시각 편집과 고급 JSON 편집을 지원하며, 게시·실행 UI는 후속 개발 대상입니다." />
         {tab === 'overview' && (
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4 max-w-3xl">
             <div className="bg-white border border-slate-200 rounded-xl p-4 space-y-2 text-sm">

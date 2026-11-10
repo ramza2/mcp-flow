@@ -17,12 +17,14 @@ vi.mock('@/api/workflows', () => ({
   saveWorkflowPlan: vi.fn(),
   validateWorkflowVersion: vi.fn(),
 }));
+vi.mock('@/api/mcp', () => ({ listMCPTools: vi.fn() }));
 
 import {
   listWorkflows, createWorkflow, getWorkflow, listWorkflowVersions,
   createWorkflowVersion, getWorkflowVersion, saveWorkflowPlan, validateWorkflowVersion,
   type WorkflowDto, type WorkflowVersionDto,
 } from '@/api/workflows';
+import { listMCPTools } from '@/api/mcp';
 
 const wfId = '11111111-1111-4111-8111-111111111111';
 const vId = '22222222-2222-4222-8222-222222222222';
@@ -47,6 +49,7 @@ const version: WorkflowVersionDto = {
 describe('Workflow real registry — no mock IDs or pretend save', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.mocked(listMCPTools).mockResolvedValue({ items: [], page: 1, page_size: 100, total: 0, has_next: false });
     vi.mocked(listWorkflows).mockResolvedValue({ items: [workflow], page: 1, page_size: 20, total: 1, has_next: false });
     vi.mocked(getWorkflow).mockResolvedValue(workflow);
     vi.mocked(listWorkflowVersions).mockResolvedValue({ items: [version], page: 1, page_size: 100, total: 1, has_next: false });
@@ -100,7 +103,7 @@ describe('Workflow real registry — no mock IDs or pretend save', () => {
       ],
     });
     expect(await screen.findByText('업무 자동화')).toBeInTheDocument();
-    expect(screen.getByText(/시각 디자이너와 게시·실행 UI는 후속 개발 대상/)).toBeInTheDocument();
+    expect(screen.getByText(/단계 흐름의 시각 편집과 고급 JSON 편집을 지원/)).toBeInTheDocument();
     expect(createWorkflowVersion).not.toHaveBeenCalled();
     await user.click(screen.getByRole('button', { name: '초안 편집' }));
     expect(router.state.location.pathname).toBe(`/workflows/${wfId}/versions/${vId}/edit`);
@@ -124,7 +127,8 @@ describe('Workflow real registry — no mock IDs or pretend save', () => {
       path: '/workflows/:workflowId/versions/:versionId/edit',
       route: `/workflows/${wfId}/versions/${vId}/edit`,
     });
-    const input = await screen.findByRole('textbox', { name: '실행 계획 JSON' });
+    await user.click(await screen.findByRole('button', { name: '고급 JSON' }));
+    const input = screen.getByRole('textbox', { name: '실행 계획 JSON' });
     fireEvent.change(input, { target: { value: JSON.stringify({ ...version.plan_definition, goal: '새 목표' }) } });
     expect(screen.getByRole('button', { name: '서버 검증' })).toBeDisabled();
     await user.click(screen.getByRole('button', { name: '초안 저장' }));
@@ -141,7 +145,8 @@ describe('Workflow real registry — no mock IDs or pretend save', () => {
       path: '/workflows/:workflowId/versions/:versionId/edit',
       route: `/workflows/${wfId}/versions/${vId}/edit`,
     });
-    const input = await screen.findByRole('textbox', { name: '실행 계획 JSON' });
+    await user.click(await screen.findByRole('button', { name: '고급 JSON' }));
+    const input = screen.getByRole('textbox', { name: '실행 계획 JSON' });
     fireEvent.change(input, { target: { value: '{not-json' } });
     await user.click(screen.getByRole('button', { name: '초안 저장' }));
     expect(screen.getByText(/JSON 문법이 잘못되었습니다/)).toBeInTheDocument();
@@ -158,7 +163,7 @@ describe('Workflow real registry — no mock IDs or pretend save', () => {
       path: '/workflows/:workflowId/versions/:versionId/edit',
       route: `/workflows/${wfId}/versions/${vId}/edit`,
     });
-    await screen.findByRole('textbox', { name: '실행 계획 JSON' });
+    await screen.findByRole('button', { name: '시각 편집' });
     await user.click(screen.getByRole('button', { name: '서버 검증' }));
     await waitFor(() => expect(validateWorkflowVersion).toHaveBeenCalledWith(wfId, vId));
     expect(await screen.findByText(/서버 검증을 통과했습니다/)).toBeInTheDocument();
@@ -170,7 +175,9 @@ describe('Workflow real registry — no mock IDs or pretend save', () => {
       path: '/workflows/:workflowId/versions/:versionId/edit',
       route: `/workflows/${wfId}/versions/${vId}/edit`,
     });
-    expect(await screen.findByRole('textbox', { name: '실행 계획 JSON' })).toBeDisabled();
+    await screen.findByRole('button', { name: '고급 JSON' });
+    fireEvent.click(screen.getByRole('button', { name: '고급 JSON' }));
+    expect(screen.getByRole('textbox', { name: '실행 계획 JSON' })).toBeDisabled();
     expect(screen.queryByRole('button', { name: '초안 저장' })).not.toBeInTheDocument();
     expect(saveWorkflowPlan).not.toHaveBeenCalled();
     expect(validateWorkflowVersion).not.toHaveBeenCalled();
