@@ -4,7 +4,9 @@ import userEvent from "@testing-library/user-event"
 import WorkflowVisualEditor, {
   addStepToPlan,
   causesDependencyCycle,
+  getResponseStepIds,
   getVisualSteps,
+  setResponseStepInPlan,
   updateStepInPlan,
 } from "@/screens/build/WorkflowVisualEditor"
 import { listMCPTools } from "@/api/mcp"
@@ -89,6 +91,83 @@ describe("Canonical visual workflow editor", () => {
     expect(two.source).toEqual(base.source)
     expect(two.completion).toEqual(base.completion)
     expect(base.steps).toEqual([])
+  })
+
+  it("patches response_step_ids only and preserves completion and Plan metadata", () => {
+    const base = addStepToPlan(addStepToPlan(basePlan(), "TOOL", toolVersionId), "TOOL", toolVersionId)
+    const plan: Plan = {
+      ...base,
+      completion: {
+        success_policy: "ALL_REQUIRED",
+        response_step_ids: ["tool_1"],
+        custom_metadata: { retain: true },
+      },
+      extensions: { also_retain: true },
+    }
+    const selected = setResponseStepInPlan(plan, "tool_2", true)
+    expect(getResponseStepIds(selected)).toEqual(["tool_1", "tool_2"])
+    expect(selected.extensions).toEqual(plan.extensions)
+    expect((selected.completion as Record<string, JsonValue>).custom_metadata).toEqual({ retain: true })
+    expect(selected.steps).toEqual(plan.steps)
+    expect(setResponseStepInPlan(selected, "tool_1", false)).toMatchObject({
+      completion: { response_step_ids: ["tool_2"] },
+    })
+    expect(setResponseStepInPlan(plan, "missing", true)).toBe(plan)
+    expect(setResponseStepInPlan(plan, "tool_1", true)).toBe(plan)
+  })
+
+  it("fails closed for malformed completion and protects LOOP body templates", () => {
+    const plan: Plan = {
+      ...basePlan(),
+      steps: [
+        { id: "loop", name: "반복", type: "LOOP", depends_on: [], config: { body_step_ids: ["inside"] } },
+        { id: "inside", name: "본문", type: "TOOL", depends_on: [], config: { bindings: {} } },
+        { id: "after", name: "완료", type: "TOOL", depends_on: ["loop"], config: { bindings: {} } },
+      ],
+    }
+    expect(setResponseStepInPlan(plan, "inside", true)).toBe(plan)
+    expect(getResponseStepIds(setResponseStepInPlan(plan, "after", true))).toEqual(["after"])
+
+    const unsupported = { ...plan, completion: { response_step_ids: "after", future: true } }
+    expect(getResponseStepIds(unsupported)).toBeNull()
+    expect(setResponseStepInPlan(unsupported, "after", true)).toBe(unsupported)
+  })
+
+  it("lets users choose the final response step without editing JSON", async () => {
+    const user = userEvent.setup()
+    const onChange = vi.fn()
+    const plan = addStepToPlan(addStepToPlan(basePlan(), "TOOL", toolVersionId), "TOOL", toolVersionId)
+    const { rerender } = render(
+      <WorkflowVisualEditor plan={plan} readOnly={false} onChange={onChange} />,
+    )
+    expect(screen.getByText(/응답 단계가 지정되지 않았습니다/)).toBeInTheDocument()
+    await user.click(screen.getByRole("checkbox", { name: "응답 단계: 도구 실행 2 (tool_2)" }))
+    const selected = onChange.mock.lastCall?.[0] as Plan
+    expect(getResponseStepIds(selected)).toEqual(["tool_2"])
+
+    rerender(<WorkflowVisualEditor plan={selected} readOnly={false} onChange={onChange} />)
+    expect(screen.getByRole("checkbox", { name: "응답 단계: 도구 실행 2 (tool_2)" })).toBeChecked()
+    expect(screen.queryByText(/응답 단계가 지정되지 않았습니다/)).not.toBeInTheDocument()
+    expect(screen.getByRole("status")).toHaveTextContent(/초안 저장 후 서버 검증/)
+  })
+
+  it("shows response selection read-only and blocks unsupported JSON structure", () => {
+    const plan = addStepToPlan(basePlan(), "TOOL", toolVersionId)
+    const onChange = vi.fn()
+    const { rerender } = render(
+      <WorkflowVisualEditor plan={plan} readOnly onChange={onChange} />,
+    )
+    expect(screen.getByRole("checkbox", { name: "응답 단계: 도구 실행 1 (tool_1)" })).toBeDisabled()
+    rerender(
+      <WorkflowVisualEditor
+        plan={{ ...plan, completion: { response_step_ids: false } }}
+        readOnly={false}
+        onChange={onChange}
+      />,
+    )
+    expect(screen.getByText(/완료 응답 구조를 읽을 수 없습니다/)).toBeInTheDocument()
+    expect(screen.queryByRole("checkbox", { name: "응답 단계: 도구 실행 1 (tool_1)" })).not.toBeInTheDocument()
+    expect(onChange).not.toHaveBeenCalled()
   })
 
   it("preserves unknown complex predicates, loop config and plan metadata on visual edits", () => {
@@ -245,11 +324,12 @@ describe("Canonical visual workflow editor", () => {
     await user.click(screen.getByRole("button", { name: "목록" }))
     await user.click(screen.getByRole("button", { name: "둘째 단계 단계 선택" }))
 
-    await user.click(screen.getByRole("checkbox", { name: "셋째 단계 (c)" }))
+    const dependencies = within(screen.getByRole("group", { name: "선행 단계 선택" }))
+    await user.click(dependencies.getByRole("checkbox", { name: "셋째 단계 (c)" }))
     expect(onChange).not.toHaveBeenCalled()
     expect(screen.getByRole("status")).toHaveTextContent(/다중 선행/)
 
-    await user.click(screen.getByRole("checkbox", { name: "첫 단계 (a)" }))
+    await user.click(dependencies.getByRole("checkbox", { name: "첫 단계 (a)" }))
     expect(onChange).not.toHaveBeenCalled()
     expect(screen.getByRole("status")).toHaveTextContent(/STEP_OUTPUT/)
   })

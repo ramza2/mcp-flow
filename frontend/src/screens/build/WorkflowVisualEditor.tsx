@@ -132,6 +132,52 @@ export function updateStepInPlan(
   }
 }
 
+export function getResponseStepIds(plan: Plan): string[] | null {
+  const completion = object(plan.completion)
+  const ids = completion?.response_step_ids
+  return Array.isArray(ids) && ids.every((id) => typeof id === "string")
+    ? ids as string[]
+    : null
+}
+
+function loopBodyTemplateIds(steps: Step[]): Set<string> {
+  const ids = new Set<string>()
+  for (const step of steps) {
+    if (step.type !== "LOOP") continue
+    const body = object(step.config)?.body_step_ids
+    if (!Array.isArray(body)) continue
+    for (const id of body) if (typeof id === "string") ids.add(id)
+  }
+  return ids
+}
+
+/** Patch only response selection; preserve all other canonical/unknown Plan data. */
+export function setResponseStepInPlan(
+  plan: Plan,
+  stepId: string,
+  selected: boolean,
+): Plan {
+  const steps = getVisualSteps(plan)
+  const current = getResponseStepIds(plan)
+  const completion = object(plan.completion)
+  if (
+    !steps || !completion || !current ||
+    !steps.some((step) => step.id === stepId) ||
+    loopBodyTemplateIds(steps).has(stepId) ||
+    current.includes(stepId) === selected
+  ) return plan
+
+  return {
+    ...plan,
+    completion: {
+      ...completion,
+      response_step_ids: selected
+        ? [...current, stepId]
+        : current.filter((id) => id !== stepId),
+    },
+  }
+}
+
 function toBinding(value: JsonValue | undefined): Binding | null {
   const binding = object(value)
   return binding && typeof binding.kind === "string" ? binding as Binding : null
@@ -199,6 +245,8 @@ export default function WorkflowVisualEditor({
   }, [readOnly])
 
   const active = steps?.find((step) => step.id === selected) ?? null
+  const responseStepIds = getResponseStepIds(plan)
+  const responseBodyIds = steps ? loopBodyTemplateIds(steps) : new Set<string>()
   const config = object(active?.config)
   const bindings = active?.type === "TOOL" ? object(config?.bindings) : null
 
@@ -386,6 +434,61 @@ export default function WorkflowVisualEditor({
           조건·승인·반복 단계는 시각적으로 조회할 수 있습니다. 복잡한 설정은
           현재 고급 JSON에서 편집합니다.
         </p>
+        <fieldset
+          disabled={readOnly || responseStepIds === null}
+          className="space-y-2 border-t border-slate-200 pt-3"
+          aria-label="완료 응답 단계 선택"
+        >
+          <legend className="font-semibold text-sm text-slate-800">
+            완료 응답 단계
+          </legend>
+          <p className="text-xs text-slate-600 leading-relaxed">
+            실행 결과로 반환할 단계를 하나 이상 선택하세요. 선행 연결과는
+            별개의 설정입니다.
+          </p>
+          {responseStepIds === null ? (
+            <p role="alert" className="text-xs text-amber-700">
+              완료 응답 구조를 읽을 수 없습니다. 고급 JSON에서 수정하세요.
+            </p>
+          ) : (
+            <>
+              <div className="max-h-48 overflow-y-auto space-y-2">
+                {steps.map((step) => (
+                  <label
+                    key={step.id}
+                    className="flex items-start gap-2 text-xs text-slate-700"
+                  >
+                    <input
+                      type="checkbox"
+                      aria-label={`응답 단계: ${step.name} (${step.id})`}
+                      disabled={responseBodyIds.has(step.id)}
+                      checked={responseStepIds.includes(step.id)}
+                      onChange={(event) => {
+                        const next = setResponseStepInPlan(
+                          plan, step.id, event.target.checked,
+                        )
+                        if (next === plan) return
+                        onChange(next)
+                        setWarning(
+                          "완료 응답 단계를 변경했습니다. 초안 저장 후 서버 검증하세요.",
+                        )
+                      }}
+                    />
+                    <span className="break-words min-w-0">
+                      {step.name} ({step.id})
+                      {responseBodyIds.has(step.id) && " · 반복 본문(선택 불가)"}
+                    </span>
+                  </label>
+                ))}
+              </div>
+              {steps.length > 0 && responseStepIds.length === 0 && (
+                <p role="alert" className="text-xs text-amber-700">
+                  응답 단계가 지정되지 않았습니다. 서버 검증 전에 하나 이상 선택하세요.
+                </p>
+              )}
+            </>
+          )}
+        </fieldset>
         {toolError && (
           <p role="alert" className="text-xs text-amber-700">
             {toolError}

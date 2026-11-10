@@ -678,6 +678,7 @@ Tool Grant API는 Version 단위다.
 - 시각 편집에서는 실제 활성 MCP Tool의 current ToolVersion을 선택하여 TOOL Step을 추가하고, JOIN의 canonical `policy`, 단계명, 선행 단계, TOOL 입력 BindingKind를 편집한다. 순환 의존성 선택은 차단하며, 순서는 Canvas/카드 위치가 아닌 `depends_on`에 따른다. ToolVersion과 비밀값은 참조 ID만 표시/저장한다.
 - CONDITION·APPROVAL·LOOP의 기존 config/Predicate AST는 시각적으로 표시하되 복잡한 설정은 고급 JSON에서만 편집한다. 지원하지 않는 Plan 구조도 고급 JSON으로 돌아갈 수 있다. PARALLEL·END는 authorable Step으로 저장하지 않는다.
 - React Flow 기반 그래프/목록 전환(2026-11-10): 그래프 노드는 기존 canonical Step ID로 식별하고 연결선은 `depends_on`만 표현한다. 노드 배치 좌표는 UI 세션의 시각 정보이고 Plan JSON에 저장하지 않는다. 새 연결은 자기 참조·중복·DAG cycle·직접 TOOL fan-in을 차단하며, 그래프와 오른쪽 선행 단계 체크박스가 동일한 규칙을 적용한다. LOOP 본문 범위 편집 및 선행 관계 해제 시 하위 Step의 전이적 STEP_OUTPUT 참조가 깨지는 작업은 차단하고 고급 JSON으로 안내한다. 조건 분기 선은 실행 조건 자체를 나타내지 않으며 Predicate와 `when`은 그대로 유지한다. 연결 편집은 DRAFT에서만 가능하고 저장/검증은 기존 독립 버튼으로 처리한다.
+- 완료 응답 단계 선택(2026-11-10): 시각 편집에서 `completion.response_step_ids`를 다중 선택한다. 단계가 있을 때 최소 한 개를 선택하도록 안내하고, LOOP 본문 템플릿은 선택하지 못한다. 기존 `completion`의 다른 필드·미지 구조·Plan 메타데이터는 유지하며, 해석 불가능한 완료 응답 구조는 고급 JSON에서만 수정한다. 게시된 버전은 읽기 전용으로 유지하고 선택 변경도 기존 DRAFT 저장·서버 검증 절차를 거친다.
 - PUBLISHED/DEPRECATED 버전은 시각/JSON 모두 읽기 전용이다. 게시·수동 실행 UI는 후속 개발 대상이며, 기존 mock 기반 디자이너는 운영 라우트에서 사용하지 않는다.
 - 일정 설정의 기존 `listWorkflowTargets`/`listWorkflowTargetVersions` 호출 계약은 유지한다. Backend/DB/Workflow Runtime은 변경하지 않는다.
 
