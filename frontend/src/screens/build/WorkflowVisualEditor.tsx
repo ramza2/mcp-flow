@@ -43,6 +43,8 @@ const BINDING_KINDS = [
   "LOOP_CONTEXT",
   "SECRET_REF",
 ]
+const SIMPLE_CONDITION_OPS = ["exists", "is_null", "eq", "ne"] as const
+type SimpleConditionOp = (typeof SIMPLE_CONDITION_OPS)[number]
 
 function object(
   value: JsonValue | undefined,
@@ -117,6 +119,117 @@ export function addStepToPlan(
         : { policy: "ALL_SUCCESS" },
   }
   return { ...plan, steps: [...steps, step] }
+}
+
+function pointerToken(value: string): string {
+  return value.replace(/~/g, "~0").replace(/\//g, "~1")
+}
+
+interface ConditionSource {
+  id: string
+  label: string
+  binding: Binding
+  dependsOn: string[]
+}
+
+function conditionSources(plan: Plan, steps: Step[]): ConditionSource[] {
+  const inputs = object(plan.inputs) ?? {}
+  const protectedIds = loopProtectedStepIds(steps)
+  const inputSources = Object.entries(inputs)
+    .filter(([name, definition]) => {
+      const input = object(definition)
+      return name.length > 0 && !name.includes("#") && input !== null &&
+        typeof input.type === "string" && typeof input.required === "boolean" &&
+        input.secret !== true
+    })
+    .map(([name]): ConditionSource => ({
+      id: `input:${name}`,
+      label: `실행 입력: ${name}`,
+      binding: { kind: "PLAN_INPUT", path: `/${pointerToken(name)}` },
+      dependsOn: [],
+    }))
+  const stepSources = steps
+    .filter((step) =>
+      ["TOOL", "CONDITION"].includes(step.type) &&
+      !protectedIds.has(step.id),
+    )
+    .map((step): ConditionSource => ({
+      id: `step:${step.id}`,
+      label: `이전 단계 결과: ${step.name} (${step.id})`,
+      binding: { kind: "STEP_OUTPUT", step_id: step.id, path: "/" },
+      dependsOn: [step.id],
+    }))
+  return [...inputSources, ...stepSources]
+}
+
+/** An explicit source is required: never create an implicit always-true gate. */
+export function addConditionStepToPlan(plan: Plan, sourceId: string): Plan {
+  const steps = getVisualSteps(plan)
+  if (!steps) return plan
+  const source = conditionSources(plan, steps).find((item) => item.id === sourceId)
+  if (!source) return plan
+  let ordinal = steps.length + 1
+  while (steps.some((step) => step.id === `condition_${ordinal}`)) ordinal++
+  const step: Step = {
+    id: `condition_${ordinal}`,
+    name: `조건 분기 ${ordinal}`,
+    type: "CONDITION",
+    required: true,
+    depends_on: source.dependsOn,
+    when: null,
+    timeout_seconds: 30,
+    on_error: "FAIL_EXECUTION",
+    config: { predicate: { op: "exists", operand: source.binding } },
+  }
+  return { ...plan, steps: [...steps, step] }
+}
+
+interface SimpleCondition {
+  op: SimpleConditionOp
+  source: Binding
+  value: string
+}
+
+/** Only the small canonical subset is editable. Recursive/typed conditions remain intact. */
+function simpleCondition(value: JsonValue | undefined): SimpleCondition | null {
+  const predicate = object(value)
+  if (!predicate || !SIMPLE_CONDITION_OPS.includes(predicate.op as SimpleConditionOp))
+    return null
+  const op = predicate.op as SimpleConditionOp
+  const unary = op === "exists" || op === "is_null"
+  const keys = Object.keys(predicate)
+  if (!keys.every((key) => (unary ? ["op", "operand"] : ["op", "left", "right"]).includes(key)))
+    return null
+  const source = toBinding(unary ? predicate.operand : predicate.left)
+  if (!source || !["PLAN_INPUT", "STEP_OUTPUT"].includes(source.kind) ||
+      typeof source.path !== "string") return null
+  const expectedSourceKeys = source.kind === "STEP_OUTPUT"
+    ? ["kind", "step_id", "path"] : ["kind", "path"]
+  if (!Object.keys(source).every((key) => expectedSourceKeys.includes(key)) ||
+      (source.kind === "STEP_OUTPUT" && typeof source.step_id !== "string")) return null
+  const right = unary ? null : toBinding(predicate.right)
+  if (!unary && (!right || right.kind !== "LITERAL" ||
+      typeof right.value !== "string" || Object.keys(right).some((key) => !["kind", "value"].includes(key))))
+    return null
+  return { op, source, value: right ? right.value as string : "" }
+}
+
+function simplePredicate(op: SimpleConditionOp, source: Binding, value: string): JsonValue {
+  return op === "exists" || op === "is_null"
+    ? { op, operand: source }
+    : { op, left: source, right: { kind: "LITERAL", value } }
+}
+
+function ancestorStepIds(steps: Step[], stepId: string): Set<string> {
+  const byId = new Map(steps.map((step) => [step.id, step]))
+  const ancestors = new Set<string>()
+  const visit = (id: string) => {
+    if (ancestors.has(id) || id === stepId) return
+    ancestors.add(id)
+    for (const parent of byId.get(id)?.depends_on ?? []) visit(parent)
+  }
+  for (const parent of byId.get(stepId)?.depends_on ?? []) visit(parent)
+  return ancestors
 }
 
 export function updateStepInPlan(
@@ -217,6 +330,7 @@ export default function WorkflowVisualEditor({
   const [toolError, setToolError] = useState("")
   const [warning, setWarning] = useState("")
   const [newBindingName, setNewBindingName] = useState("")
+  const [newConditionSource, setNewConditionSource] = useState("")
   const [view, setView] = useState<"graph" | "list">("graph")
 
   useEffect(() => {
@@ -249,6 +363,23 @@ export default function WorkflowVisualEditor({
   const responseBodyIds = steps ? loopBodyTemplateIds(steps) : new Set<string>()
   const config = object(active?.config)
   const bindings = active?.type === "TOOL" ? object(config?.bindings) : null
+  const sources = conditionSources(plan, steps ?? [])
+  const condition = active?.type === "CONDITION" && !responseBodyIds.has(active.id)
+    ? simpleCondition(config?.predicate) : null
+  const ancestors = active ? ancestorStepIds(steps ?? [], active.id) : new Set<string>()
+  const availableSources = sources.filter((source) =>
+    source.dependsOn.every((id) => ancestors.has(id)),
+  )
+  const currentConditionSource = condition
+    ? availableSources.find((source) =>
+      source.binding.kind === condition.source.kind &&
+      (source.binding.kind === "PLAN_INPUT"
+        ? typeof condition.source.path === "string" &&
+          (condition.source.path === source.binding.path ||
+            condition.source.path.startsWith(`${source.binding.path}/`))
+        : source.binding.step_id === condition.source.step_id),
+    )?.id ?? ""
+    : ""
 
   const replace = (fn: (step: Step) => Step) => {
     if (readOnly || !active) return
@@ -284,6 +415,17 @@ export default function WorkflowVisualEditor({
     onChange(next)
     setSelected(getVisualSteps(next)?.at(-1)?.id ?? null)
     setWarning("합류 단계에는 상위 단계를 한 개 이상 연결해야 합니다.")
+  }
+  const addCondition = () => {
+    if (readOnly) return
+    const next = addConditionStepToPlan(plan, newConditionSource)
+    if (next === plan) return
+    onChange(next)
+    setNewConditionSource("")
+    setSelected(getVisualSteps(next)?.at(-1)?.id ?? null)
+    setWarning(
+      "조건 단계가 추가되었습니다. 기본값은 값 존재 여부 검사입니다. 조건 경로를 확인하고 하위 단계의 when 분기는 고급 JSON에서 지정한 뒤 서버 검증하세요.",
+    )
   }
   const connectGraph = (sourceId: string, targetId: string) => {
     if (readOnly || !steps) return
@@ -337,7 +479,7 @@ export default function WorkflowVisualEditor({
   }
   const deleteStep = () => {
     if (!active || !steps || readOnly) return
-    if (!["TOOL", "JOIN"].includes(active.type)) {
+    if (!["TOOL", "JOIN", "CONDITION"].includes(active.type)) {
       setWarning(
         "조건·승인·반복 단계의 안전한 제거는 고급 JSON에서 수행하세요.",
       )
@@ -430,9 +572,35 @@ export default function WorkflowVisualEditor({
         >
           <GitBranch size={15} /> 합류 단계 추가
         </button>
+        <label
+          className="text-xs font-medium text-slate-600 block"
+          htmlFor="visual-condition-source"
+        >
+          새 조건의 판단 대상
+        </label>
+        <select
+          id="visual-condition-source"
+          disabled={readOnly || sources.length === 0}
+          value={newConditionSource}
+          onChange={(event) => setNewConditionSource(event.target.value)}
+          className="w-full rounded-md border border-slate-300 p-2 text-xs"
+        >
+          <option value="">입력값 또는 이전 단계 선택...</option>
+          {sources.map((source) => (
+            <option key={source.id} value={source.id}>{source.label}</option>
+          ))}
+        </select>
+        <button
+          type="button"
+          disabled={readOnly || !sources.some((source) => source.id === newConditionSource)}
+          onClick={addCondition}
+          className="flex items-center justify-center gap-2 rounded-lg p-2 text-sm border border-amber-300 bg-amber-50 text-amber-900 w-full disabled:opacity-40"
+        >
+          <Plus size={15} /> 조건 단계 추가
+        </button>
         <p className="text-xs text-slate-500 leading-relaxed">
-          조건·승인·반복 단계는 시각적으로 조회할 수 있습니다. 복잡한 설정은
-          현재 고급 JSON에서 편집합니다.
+          기본 조건은 화면에서 편집할 수 있습니다. 복합 조건·승인·반복 및
+          참/거짓 분기(when)는 고급 JSON에서 설정합니다.
         </p>
         <fieldset
           disabled={readOnly || responseStepIds === null}
@@ -719,6 +887,93 @@ export default function WorkflowVisualEditor({
                 </select>
               </>
             )}
+            {active.type === "CONDITION" && (
+              <div className="space-y-2 border border-amber-200 bg-amber-50/60 rounded-lg p-3">
+                <h3 className="font-semibold text-sm text-amber-900">기본 조건식</h3>
+                {!condition ? (
+                  <p className="text-xs text-amber-800">
+                    복합 조건식·특수 바인딩 또는 반복 본문 조건은 고급 JSON에서만 수정합니다. 기존 값은 유지됩니다.
+                  </p>
+                ) : (
+                  <>
+                    <label htmlFor="visual-condition-op" className="block text-xs text-slate-700">판단 방법</label>
+                    <select
+                      id="visual-condition-op"
+                      disabled={readOnly}
+                      value={condition.op}
+                      onChange={(event) => updateConfig((current) => ({
+                        ...current,
+                        predicate: simplePredicate(
+                          event.target.value as SimpleConditionOp,
+                          condition.source,
+                          condition.value,
+                        ),
+                      }))}
+                      className="w-full rounded-md border border-slate-300 bg-white p-2 text-xs"
+                    >
+                      <option value="exists">값이 존재함</option>
+                      <option value="is_null">값이 null임</option>
+                      <option value="eq">문자열 값과 같음</option>
+                      <option value="ne">문자열 값과 다름</option>
+                    </select>
+                    <label htmlFor="visual-condition-binding" className="block text-xs text-slate-700">판단 대상</label>
+                    <select
+                      id="visual-condition-binding"
+                      disabled={readOnly || availableSources.length === 0}
+                      value={currentConditionSource}
+                      onChange={(event) => {
+                        const source = availableSources.find((item) => item.id === event.target.value)
+                        if (!source) return
+                        updateConfig((current) => ({
+                          ...current,
+                          predicate: simplePredicate(condition.op, source.binding, condition.value),
+                        }))
+                      }}
+                      className="w-full rounded-md border border-slate-300 bg-white p-2 text-xs"
+                    >
+                      <option value="">기존 참조(선택 항목 외)</option>
+                      {availableSources.map((source) => (
+                        <option key={source.id} value={source.id}>{source.label}</option>
+                      ))}
+                    </select>
+                    <label htmlFor="visual-condition-path" className="block text-xs text-slate-700">데이터 경로 (JSON Pointer)</label>
+                    <input
+                      id="visual-condition-path"
+                      disabled={readOnly}
+                      value={String(condition.source.path)}
+                      onChange={(event) => updateConfig((current) => ({
+                        ...current,
+                        predicate: simplePredicate(
+                          condition.op,
+                          { ...condition.source, path: event.target.value },
+                          condition.value,
+                        ),
+                      }))}
+                      className="w-full rounded-md border border-slate-300 bg-white p-2 text-xs"
+                      placeholder="/structured_content/value"
+                    />
+                    {(condition.op === "eq" || condition.op === "ne") && (
+                      <>
+                        <label htmlFor="visual-condition-value" className="block text-xs text-slate-700">비교할 문자열</label>
+                        <input
+                          id="visual-condition-value"
+                          disabled={readOnly}
+                          value={condition.value}
+                          onChange={(event) => updateConfig((current) => ({
+                            ...current,
+                            predicate: simplePredicate(condition.op, condition.source, event.target.value),
+                          }))}
+                          className="w-full rounded-md border border-slate-300 bg-white p-2 text-xs"
+                        />
+                      </>
+                    )}
+                    <p className="text-xs text-amber-800">
+                      단계 결과는 /structured_content 등 실제 반환 구조를 확인하세요. 저장 후 서버 검증이 필요합니다.
+                    </p>
+                  </>
+                )}
+              </div>
+            )}
             {active.type === "TOOL" && (
               <>
                 <div className="text-xs bg-slate-50 rounded-md p-2 space-y-1">
@@ -915,7 +1170,7 @@ export default function WorkflowVisualEditor({
                 )}
               </>
             )}
-            {!["TOOL", "JOIN"].includes(active.type) && (
+            {!["TOOL", "JOIN", "CONDITION"].includes(active.type) && (
               <div className="text-xs rounded-md bg-amber-50 text-amber-900 p-3 flex gap-2">
                 <ShieldAlert size={15} className="shrink-0" />
                 <span>
