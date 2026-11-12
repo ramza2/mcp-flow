@@ -657,7 +657,7 @@ export default function WorkflowVisualEditor({
     )
 
   return (
-    <div className="grid grid-cols-1 xl:grid-cols-[250px_minmax(420px,1fr)_310px] 2xl:grid-cols-[280px_minmax(460px,1fr)_340px] min-h-[550px] gap-0 border border-slate-200 rounded-xl overflow-hidden bg-white>
+    <div className="grid grid-cols-1 xl:grid-cols-[250px_minmax(420px,1fr)_310px] 2xl:grid-cols-[280px_minmax(460px,1fr)_340px] min-h-[550px] gap-0 border border-slate-200 rounded-xl overflow-hidden bg-white">
       <aside className="min-w-0 p-3 xl:p-4 border-b xl:border-b-0 xl:border-r border-slate-200 bg-slate-50 space-y-3 xl:max-h-[min(80vh,920px)] xl:overflow-y-auto" aria-label="단계 추가 및 완료 응답">
         <h2 className="font-semibold text-sm text-slate-800">단계 추가</h2>
         <p className="text-xs text-slate-500">추가할 단계 종류를 선택하세요. 설정은 선택한 종류만 표시됩니다.</p>
