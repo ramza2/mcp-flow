@@ -38,6 +38,9 @@ describe('MCPTools — API list + lifecycle', () => {
 
     expect(await screen.findByText('Search Docs')).toBeInTheDocument();
     expect(screen.getAllByText('Docs MCP').length).toBeGreaterThan(0);
+    expect(screen.getByRole('heading', { name: 'MCP 도구 관리' })).toBeInTheDocument();
+    expect(screen.getByText('도구 사용 전 확인하세요')).toBeInTheDocument();
+    expect(screen.getByRole('combobox', { name: '도구 상태' }).querySelector('option[value="ACTIVE"]')).toHaveTextContent('활성');
   });
 
   it('shows Activate for DISCOVERED/INACTIVE and Deactivate for ACTIVE; disables MISSING/BLOCKED', async () => {
@@ -61,8 +64,8 @@ describe('MCPTools — API list + lifecycle', () => {
     renderWithRouter(<MCPTools />, { path: '/mcp/tools', route: '/mcp/tools' });
     expect((await screen.findAllByText('Search Docs')).length).toBeGreaterThan(0);
 
-    expect(screen.getAllByRole('button', { name: 'Activate' }).length).toBe(2);
-    expect(screen.getByRole('button', { name: 'Deactivate' })).toBeInTheDocument();
+    expect(screen.getAllByRole('button', { name: '활성화' }).length).toBe(2);
+    expect(screen.getByRole('button', { name: '비활성화' })).toBeInTheDocument();
     expect(screen.getAllByRole('button', { name: '—' }).length).toBe(2);
   });
 
@@ -93,10 +96,10 @@ describe('MCPTools — API list + lifecycle', () => {
 
     renderWithRouter(<MCPTools />, { path: '/mcp/tools', route: '/mcp/tools' });
     await screen.findByText('Search Docs');
-    await user.click(screen.getByRole('button', { name: 'Activate' }));
+    await user.click(screen.getByRole('button', { name: '활성화' }));
 
     await waitFor(() => {
-      expect(screen.getByRole('button', { name: 'Deactivate' })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: '비활성화' })).toBeInTheDocument();
     });
   });
 
@@ -141,11 +144,11 @@ describe('MCPTools — API list + lifecycle', () => {
 
     renderWithRouter(<MCPTools />, { path: '/mcp/tools', route: '/mcp/tools' });
     await screen.findByText('Search Docs');
-    await user.click(screen.getByRole('button', { name: 'Activate' }));
+    await user.click(screen.getByRole('button', { name: '활성화' }));
 
     expect(await screen.findByText(/다른 작업으로 Tool 상태가 변경되었습니다/i)).toBeInTheDocument();
     await waitFor(() => {
-      expect(screen.getByRole('button', { name: 'Activate' })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: '활성화' })).toBeInTheDocument();
     });
   });
 
@@ -262,21 +265,21 @@ describe('MCPTools — API list + lifecycle', () => {
     await screen.findByText('Tool A Docs');
     await screen.findByText('Tool B Active');
 
-    const activateBtn = screen.getByRole('button', { name: 'Activate' });
-    const deactivateBtn = screen.getByRole('button', { name: 'Deactivate' });
+    const activateBtn = screen.getByRole('button', { name: '활성화' });
+    const deactivateBtn = screen.getByRole('button', { name: '비활성화' });
     await user.click(activateBtn);
     await user.click(deactivateBtn);
 
     await waitFor(() => {
-      expect(screen.getByRole('button', { name: 'Activate' })).toBeDisabled();
-      expect(screen.getByRole('button', { name: 'Deactivate' })).toBeDisabled();
+      expect(screen.getByRole('button', { name: '활성화' })).toBeDisabled();
+      expect(screen.getByRole('button', { name: '비활성화' })).toBeDisabled();
     });
 
     resolveActivate(jsonResponse({ ...toolA, status: 'ACTIVE', lock_version: 2 }));
 
     // A finished → its new Deactivate is enabled; B's pending Deactivate stays disabled.
     await waitFor(() => {
-      const deactivateButtons = screen.getAllByRole('button', { name: 'Deactivate' });
+      const deactivateButtons = screen.getAllByRole('button', { name: '비활성화' });
       expect(deactivateButtons).toHaveLength(2);
       expect(deactivateButtons.filter(btn => (btn as HTMLButtonElement).disabled)).toHaveLength(1);
       expect(deactivateButtons.filter(btn => !(btn as HTMLButtonElement).disabled)).toHaveLength(1);
@@ -285,8 +288,8 @@ describe('MCPTools — API list + lifecycle', () => {
     resolveDeactivate(jsonResponse({ ...toolB, status: 'INACTIVE', lock_version: 3 }));
 
     await waitFor(() => {
-      expect(screen.getByRole('button', { name: 'Deactivate' })).toBeEnabled();
-      expect(screen.getByRole('button', { name: 'Activate' })).toBeEnabled();
+      expect(screen.getByRole('button', { name: '비활성화' })).toBeEnabled();
+      expect(screen.getByRole('button', { name: '활성화' })).toBeEnabled();
     });
   });
 
@@ -323,7 +326,7 @@ describe('MCPTools — API list + lifecycle', () => {
     renderWithRouter(<MCPTools />, { path: '/mcp/tools', route: '/mcp/tools' });
     await screen.findByText('Search Docs');
 
-    const btn = screen.getByRole('button', { name: 'Activate' });
+    const btn = screen.getByRole('button', { name: '활성화' });
     await user.click(btn);
     await user.click(btn);
     await user.click(btn);
@@ -333,7 +336,7 @@ describe('MCPTools — API list + lifecycle', () => {
 
     resolveActivate(jsonResponse({ ...discoveredTool, status: 'ACTIVE', lock_version: 2 }));
     await waitFor(() => {
-      expect(screen.getByRole('button', { name: 'Deactivate' })).toBeEnabled();
+      expect(screen.getByRole('button', { name: '비활성화' })).toBeEnabled();
     });
     expect(activatePosts).toBe(1);
   });
