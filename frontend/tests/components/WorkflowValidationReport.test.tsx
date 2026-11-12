@@ -1,4 +1,5 @@
 import { render, screen } from '@testing-library/react';
+import type { JsonValue } from '@/api/types';
 import { describe, expect, it } from 'vitest';
 import WorkflowValidationReport, {
   isCurrentWorkflowValidation,
@@ -50,7 +51,7 @@ describe('Workflow validation result — Korean beginner view', () => {
   });
 
   it('summarizes server errors without dropping unknown report fields', () => {
-    const report = {
+    const report: Record<string, JsonValue> = {
       valid: false,
       content_hash: hash,
       checks: { plan_schema: 'OK', static_plan: 'FAILED', other_check: { reason: 'needs-review' } },
