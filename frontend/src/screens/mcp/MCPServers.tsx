@@ -16,6 +16,7 @@ import {
   labelProtocolEra,
   labelTransport,
   labelCheckStatus,
+  labelMCPServerStatus,
   formatTimestamp,
   MCP_SERVER_STATUSES,
   MCP_TRANSPORT_TYPES,
@@ -124,12 +125,12 @@ export default function MCPServers() {
   const columns: Column<MCPServerDto>[] = [
     {
       key: 'name',
-      label: 'Name',
+      label: '서버 이름',
       render: r => <span className="font-medium text-slate-800">{r.name}</span>,
     },
     {
       key: 'transport',
-      label: 'Transport',
+      label: '연결 방식',
       render: r => (
         <span className="text-xs font-mono bg-slate-100 px-2 py-0.5 rounded text-slate-600">
           {labelTransport(r.transport_type)}
@@ -139,19 +140,19 @@ export default function MCPServers() {
     { key: 'status', label: '상태', render: r => <StatusBadge status={r.status} size="sm" /> },
     {
       key: 'protocol',
-      label: 'Protocol era',
+      label: '프로토콜 구분',
       render: r => <span className="text-xs text-slate-600">{labelProtocolEra(r.protocol_era)}</span>,
     },
     {
       key: 'version',
-      label: 'Version',
+      label: '프로토콜 버전',
       render: r => (
         <span className="font-mono text-xs text-slate-500">{r.negotiated_protocol_version ?? '—'}</span>
       ),
     },
     {
       key: 'discoveryMode',
-      label: 'Discovery Mode',
+      label: '도구 탐색 방식',
       render: r => (
         <span className="text-xs text-slate-500">
           {r.discovery_mode ? labelDiscoveryMode(r.discovery_mode) : '—'}
@@ -160,12 +161,12 @@ export default function MCPServers() {
     },
     {
       key: 'lastHealth',
-      label: 'Last Health',
+      label: '마지막 정상 연결',
       render: r => <span className="text-xs text-slate-400">{formatTimestamp(r.last_healthy_at)}</span>,
     },
     {
       key: 'updatedAt',
-      label: 'Updated At',
+      label: '수정 시각',
       render: r => <span className="text-xs text-slate-400">{formatTimestamp(r.updated_at)}</span>,
     },
     {
@@ -218,15 +219,20 @@ export default function MCPServers() {
   return (
     <div>
       <PageHeader
-        title="MCP Servers"
-        description="등록된 MCP Server와 Tool Discovery 상태를 관리합니다."
+        title="MCP 서버 관리"
+        description="MCP 서버를 등록하고 연결 상태 및 사용할 수 있는 도구를 관리합니다."
         actions={
           <Button icon={<Plus size={14} />} onClick={() => navigate('/mcp/servers/new')}>
-            Register MCP Server
+            MCP 서버 등록
           </Button>
         }
       />
       <div className="p-6 space-y-4">
+        <section aria-label="MCP 서버 시작 안내" className="rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600">
+          <p className="font-semibold text-slate-800">처음 사용하나요?</p>
+          <p className="mt-1">MCP 서버 등록 → 연결 테스트 → 도구 탐색 미리보기 → 탐색 결과 적용 → 필요한 도구 활성화 순서로 진행하세요.</p>
+          <p className="mt-1 text-xs text-slate-500">연결 테스트는 서버에 접속할 수 있는지 확인하며, 도구 탐색 결과를 적용해야 도구 목록에 반영됩니다.</p>
+        </section>
         <FilterBar
           search
           searchPlaceholder="서버 이름 검색..."
@@ -235,11 +241,11 @@ export default function MCPServers() {
             {
               key: 'status',
               label: '상태',
-              options: MCP_SERVER_STATUSES.map(v => ({ value: v, label: v })),
+              options: MCP_SERVER_STATUSES.map(v => ({ value: v, label: labelMCPServerStatus(v) })),
             },
             {
               key: 'transport',
-              label: 'Transport',
+              label: '연결 방식',
               options: MCP_TRANSPORT_TYPES.map(v => ({ value: v, label: labelTransport(v) })),
             },
           ]}
@@ -251,7 +257,10 @@ export default function MCPServers() {
           ) : error ? (
             <ErrorState message={error.message} requestId={error.requestId} onRetry={loadServers} />
           ) : servers.length === 0 ? (
-            <EmptyState title="등록된 MCP Server가 없습니다" description="새 서버를 등록해 보세요." />
+            <EmptyState
+              title={debouncedQ || statusFilter || transportFilter ? '조건에 맞는 MCP 서버가 없습니다' : '등록된 MCP 서버가 없습니다'}
+              description={debouncedQ || statusFilter || transportFilter ? '검색어 또는 필터를 변경해 보세요.' : '먼저 MCP 서버를 등록한 뒤 연결 테스트를 진행하세요.'}
+            />
           ) : (
             <>
               <DataTable
