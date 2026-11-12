@@ -320,6 +320,87 @@ describe('Workflow real registry — no mock IDs or pretend save', () => {
     expect(createWorkflowExecution).not.toHaveBeenCalled();
   });
 
+  it('renders typed form inputs and submits the parsed values via the existing execution API', async () => {
+    const active = { ...workflow, status: 'ACTIVE' as const, current_version_id: vId };
+    const withInputs = { ...publishedVersion, plan_definition: {
+      ...publishedVersion.plan_definition,
+      inputs: {
+        title: { type: 'string', required: true, secret: false },
+        count: { type: 'integer', required: true, secret: false },
+        dry_run: { type: 'boolean', required: true, secret: false },
+        optional_note: { type: 'string', required: false, secret: false },
+      },
+    } };
+    vi.mocked(getWorkflow).mockResolvedValue(active);
+    vi.mocked(getWorkflowVersion).mockResolvedValue(withInputs);
+    vi.mocked(listWorkflowVersions).mockResolvedValue({ items: [withInputs], page: 1, page_size: 100, total: 1, has_next: false });
+    const user = userEvent.setup();
+    renderWithRouter(<WorkflowDetail />, {
+      route: `/workflows/${wfId}`,
+      routes: [
+        { path: '/workflows/:workflowId', element: <WorkflowDetail /> },
+        { path: '/executions/:executionId', element: <div>실행 상세</div> },
+      ],
+    });
+    await user.click(await screen.findByRole('button', { name: '수동 실행' }));
+    expect(screen.queryByRole('textbox', { name: '입력값 JSON 객체' })).not.toBeInTheDocument();
+    await user.type(screen.getByRole('textbox', { name: 'title' }), '일일 보고');
+    await user.type(screen.getByRole('textbox', { name: 'count' }), '2');
+    await user.selectOptions(screen.getByRole('combobox', { name: 'dry_run' }), 'false');
+    await user.click(screen.getByRole('checkbox', { name: 'optional_note 입력 사용' }));
+    await user.type(screen.getByRole('textbox', { name: 'optional_note' }), '메모');
+    await user.click(screen.getByRole('button', { name: '실행 확정' }));
+    await waitFor(() => expect(createWorkflowExecution).toHaveBeenCalledWith(wfId, vId, {
+      title: '일일 보고', count: 2, dry_run: false, optional_note: '메모',
+    }, expect.any(String)));
+  });
+
+  it('preserves values when toggling between the form and advanced JSON mode', async () => {
+    const withInputs = { ...publishedVersion, plan_definition: {
+      ...publishedVersion.plan_definition, inputs: {
+        title: { type: 'string', required: true, secret: false },
+      },
+    } };
+    vi.mocked(getWorkflow).mockResolvedValue({ ...workflow, status: 'ACTIVE', current_version_id: vId });
+    vi.mocked(listWorkflowVersions).mockResolvedValue({ items: [withInputs], page: 1, page_size: 100, total: 1, has_next: false });
+    const user = userEvent.setup();
+    renderWithRouter(<WorkflowDetail />, { path: '/workflows/:workflowId', route: `/workflows/${wfId}` });
+    await user.click(await screen.findByRole('button', { name: '수동 실행' }));
+    await user.type(screen.getByRole('textbox', { name: 'title' }), '기존 값');
+    await user.click(screen.getByRole('button', { name: '고급 JSON 입력' }));
+    const jsonInput = screen.getByRole('textbox', { name: '입력값 JSON 객체' }) as HTMLTextAreaElement;
+    expect(JSON.parse(jsonInput.value)).toEqual({ title: '기존 값' });
+    fireEvent.change(jsonInput, { target: { value: '{"title":"JSON 수정"}' } });
+    await user.click(screen.getByRole('button', { name: '폼 입력으로 돌아가기' }));
+    expect(screen.getByRole('textbox', { name: 'title' })).toHaveValue('JSON 수정');
+    expect(createWorkflowExecution).not.toHaveBeenCalled();
+  });
+
+  it('blocks invalid typed input without creating an execution', async () => {
+    const withInputs = { ...publishedVersion, plan_definition: {
+      ...publishedVersion.plan_definition, inputs: {
+        count: { type: 'integer', required: true, secret: false },
+        credential: { type: 'string', required: false, secret: true },
+      },
+    } };
+    vi.mocked(getWorkflow).mockResolvedValue({ ...workflow, status: 'ACTIVE', current_version_id: vId });
+    vi.mocked(listWorkflowVersions).mockResolvedValue({ items: [withInputs], page: 1, page_size: 100, total: 1, has_next: false });
+    const user = userEvent.setup();
+    renderWithRouter(<WorkflowDetail />, { path: '/workflows/:workflowId', route: `/workflows/${wfId}` });
+    await user.click(await screen.findByRole('button', { name: '수동 실행' }));
+    await user.type(screen.getByRole('textbox', { name: 'count' }), '1.2');
+    await user.click(screen.getByRole('button', { name: '실행 확정' }));
+    expect(await screen.findByText(/count: 올바른 정수/)).toBeInTheDocument();
+    expect(createWorkflowExecution).not.toHaveBeenCalled();
+    await user.clear(screen.getByRole('textbox', { name: 'count' }));
+    await user.type(screen.getByRole('textbox', { name: 'count' }), '2');
+    await user.click(screen.getByRole('checkbox', { name: 'credential 입력 사용' }));
+    await user.type(screen.getByRole('textbox', { name: 'credential' }), 'plaintext');
+    await user.click(screen.getByRole('button', { name: '실행 확정' }));
+    expect(await screen.findByText(/credential: 등록된 Secret의 UUID/)).toBeInTheDocument();
+    expect(createWorkflowExecution).not.toHaveBeenCalled();
+  });
+
   it('never enables a manual run for inactive or invalid published workflows', async () => {
     vi.mocked(getWorkflow).mockResolvedValue({ ...workflow, status: 'INACTIVE', current_version_id: vId });
     vi.mocked(listWorkflowVersions).mockResolvedValue({
