@@ -122,7 +122,7 @@ describe('Ops screens real API wiring', () => {
     expect(screen.getByText('종료된 실행 8건 기준')).toBeInTheDocument();
     expect(screen.getByText('입력·승인 대기')).toBeInTheDocument();
     expect(screen.getByText('평균 실행 시간')).toBeInTheDocument();
-    expect(screen.getByText('승인 대기')).toBeInTheDocument();
+    expect(screen.getAllByText('승인 대기').length).toBeGreaterThan(0);
     expect(screen.getByText('예약 실행 현황')).toBeInTheDocument();
     expect(screen.getByText('Ops Workflow')).toBeInTheDocument();
     expect(screen.getByText('MCP 서버 현황')).toBeInTheDocument();
@@ -153,7 +153,7 @@ describe('Ops screens real API wiring', () => {
     ).toBeInTheDocument();
     expect(screen.getByText('My Agent')).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: '대시보드' })).toBeInTheDocument();
-    expect(screen.getByText('내 최근 실행')).toBeInTheDocument();
+    expect(screen.getAllByText('내 최근 실행').length).toBeGreaterThan(0);
     expect(screen.getByText(/본인의 최근 실행만 표시됩니다/)).toBeInTheDocument();
     expect(screen.getByText(/권한이 없습니다/i)).toBeInTheDocument();
     expect(String(fetchMock.mock.calls[1][0])).toContain('/api/v1/executions?');
