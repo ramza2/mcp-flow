@@ -324,6 +324,50 @@ export function setStepBranchWhenInPlan(
   }))
 }
 
+/** Guided tool creation uses only canonical depends_on and Boolean when fields. */
+export function addGuidedToolStepToPlan(
+  plan: Plan,
+  toolVersionId: string,
+  predecessorId: string | null = null,
+  branchExpected: boolean | null = null,
+  displayName = "",
+): Plan {
+  const steps = getVisualSteps(plan)
+  if (!steps || !toolVersionId) return plan
+  const predecessor = predecessorId
+    ? steps.find((step) => step.id === predecessorId)
+    : null
+  if (predecessorId && (!predecessor || loopProtectedStepIds(steps).has(predecessorId)))
+    return plan
+  if ((branchExpected !== null && predecessor?.type !== "CONDITION") ||
+      (predecessor?.type === "CONDITION" && branchExpected === null))
+    return plan
+
+  let next = addStepToPlan(plan, "TOOL", toolVersionId)
+  const created = getVisualSteps(next)?.at(-1)
+  if (!created || next === plan) return plan
+
+  if (predecessor) {
+    const problem = connectionProblem(getVisualSteps(next)!, predecessor.id, created.id)
+    if (problem) return plan
+    next = updateStepInPlan(next, created.id, (step) => ({
+      ...step, depends_on: [predecessor.id],
+    }))
+    if (predecessor.type === "CONDITION") {
+      const branched = setStepBranchWhenInPlan(next, created.id, predecessor.id, branchExpected!)
+      if (branched === next) return plan
+      next = branched
+    }
+  }
+  if (displayName.trim()) {
+    const name = displayName.trim().slice(0, 120)
+    next = updateStepInPlan(next, created.id, (step) => ({
+      ...step, name: `${name} 실행`,
+    }))
+  }
+  return next
+}
+
 function toBinding(value: JsonValue | undefined): Binding | null {
   const binding = object(value)
   return binding && typeof binding.kind === "string" ? binding as Binding : null
@@ -360,6 +404,14 @@ export default function WorkflowVisualEditor({
   const [selected, setSelected] = useState<string | null>(null)
   const [tools, setTools] = useState<MCPToolDto[]>([])
   const [toolId, setToolId] = useState("")
+  const [toolSearch, setToolSearch] = useState("")
+  const [appliedToolSearch, setAppliedToolSearch] = useState("")
+  const [toolPage, setToolPage] = useState(1)
+  const [toolHasNext, setToolHasNext] = useState(false)
+  const [toolTotal, setToolTotal] = useState(0)
+  const [toolLoading, setToolLoading] = useState(false)
+  const [predecessorId, setPredecessorId] = useState("")
+  const [branchSelection, setBranchSelection] = useState("")
   const [toolError, setToolError] = useState("")
   const [warning, setWarning] = useState("")
   const [newBindingName, setNewBindingName] = useState("")
@@ -369,29 +421,45 @@ export default function WorkflowVisualEditor({
   useEffect(() => {
     if (readOnly) return
     const controller = new AbortController()
+    setToolLoading(true)
+    setToolError("")
     listMCPTools({
-      page: 1,
+      page: toolPage,
       page_size: 100,
       status: "ACTIVE",
+      q: appliedToolSearch || undefined,
       signal: controller.signal,
     })
       .then((page) => {
+        if (controller.signal.aborted) return
         setTools(page.items)
-        if (page.has_next)
-          setToolError(
-            "도구가 100개를 초과합니다. 추가 도구는 고급 편집에서 지정하세요.",
-          )
+        setToolHasNext(page.has_next)
+        setToolTotal(page.total)
+        setToolId((previous) => page.items.some((tool) => tool.id === previous) ? previous : "")
       })
       .catch((error) => {
-        if (!isAbortError(error))
-          setToolError(
-            "활성 도구 목록을 불러올 수 없습니다. 기존 실행 계획은 그대로 유지됩니다.",
-          )
+        if (controller.signal.aborted || isAbortError(error)) return
+        setTools([])
+        setToolId("")
+        setToolHasNext(false)
+        setToolError(
+          "활성 도구 목록을 불러올 수 없습니다. 기존 실행 계획은 그대로 유지됩니다.",
+        )
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setToolLoading(false)
       })
     return () => controller.abort()
-  }, [readOnly])
+  }, [readOnly, toolPage, appliedToolSearch])
 
   const active = steps?.find((step) => step.id === selected) ?? null
+  const selectedTool = tools.find((tool) => tool.id === toolId)
+  const selectedPredecessor = steps?.find((step) => step.id === predecessorId)
+  const predecessorOptions = (steps ?? []).filter(
+    (step) => !loopProtectedStepIds(steps ?? []).has(step.id),
+  )
+  const toolAddDisabled = readOnly || toolLoading || !selectedTool?.current_version_id ||
+    (selectedPredecessor?.type === "CONDITION" && !["true", "false"].includes(branchSelection))
   const responseStepIds = getResponseStepIds(plan)
   const responseBodyIds = steps ? loopBodyTemplateIds(steps) : new Set<string>()
   const config = object(active?.config)
@@ -441,13 +509,24 @@ export default function WorkflowVisualEditor({
   }
 
   const addTool = () => {
-    const tool = tools.find((item) => item.id === toolId)
-    if (!tool?.current_version_id || readOnly) return
-    const next = addStepToPlan(plan, "TOOL", tool.current_version_id)
+    if (!selectedTool?.current_version_id || toolAddDisabled) return
+    const next = addGuidedToolStepToPlan(
+      plan,
+      selectedTool.current_version_id,
+      predecessorId || null,
+      selectedPredecessor?.type === "CONDITION" ? branchSelection === "true" : null,
+      selectedTool.display_name || selectedTool.remote_name,
+    )
+    if (next === plan) {
+      setWarning("선행 단계·조건 연결을 안전하게 구성할 수 없습니다. 기존 계획은 유지됩니다.")
+      return
+    }
     onChange(next)
     setSelected(getVisualSteps(next)?.at(-1)?.id ?? null)
+    setPredecessorId("")
+    setBranchSelection("")
     setWarning(
-      "추가한 단계의 입력 바인딩과 의존 관계를 설정한 후 저장·서버 검증하세요.",
+      "도구 단계가 추가되었습니다. 입력 바인딩·완료 응답을 확인한 후 초안 저장·서버 검증하세요.",
     )
   }
   const addJoin = () => {
@@ -570,41 +649,106 @@ export default function WorkflowVisualEditor({
     <div className="grid grid-cols-1 lg:grid-cols-[220px_minmax(440px,1fr)_320px] min-h-[550px] gap-0 border border-slate-200 rounded-xl overflow-hidden bg-white">
       <aside className="p-4 border-b lg:border-b-0 lg:border-r border-slate-200 bg-slate-50 space-y-3">
         <h2 className="font-semibold text-sm text-slate-800">단계 추가</h2>
-        <label
-          className="text-xs font-medium text-slate-600 block"
-          htmlFor="visual-tool-select"
-        >
+        <label htmlFor="visual-tool-search" className="text-xs font-medium text-slate-600 block">
+          MCP 도구 검색
+        </label>
+        <div className="flex gap-1">
+          <input id="visual-tool-search" aria-label="도구 검색어" type="search"
+            value={toolSearch} disabled={readOnly}
+            onChange={(event) => setToolSearch(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key !== "Enter") return
+              event.preventDefault()
+              setToolPage(1)
+              setAppliedToolSearch(toolSearch.trim())
+            }}
+            placeholder="도구 이름 또는 기능"
+            className="w-full min-w-0 rounded-md border border-slate-300 p-2 text-xs" />
+          <button type="button" disabled={readOnly} onClick={() => {
+              setToolPage(1)
+              setAppliedToolSearch(toolSearch.trim())
+            }}
+            className="shrink-0 rounded-md border border-slate-300 bg-white px-2 text-xs">
+            검색
+          </button>
+        </div>
+        <label className="text-xs font-medium text-slate-600 block" htmlFor="visual-tool-select">
           사용할 MCP 도구
         </label>
-        <select
-          id="visual-tool-select"
-          disabled={readOnly}
+        <select id="visual-tool-select"
+          disabled={readOnly || toolLoading}
           value={toolId}
           onChange={(event) => setToolId(event.target.value)}
-          className="w-full rounded-md border border-slate-300 p-2 text-xs"
-        >
+          className="w-full rounded-md border border-slate-300 p-2 text-xs">
           <option value="">활성 도구 선택...</option>
           {tools.map((tool) => (
-            <option
-              key={tool.id}
-              value={tool.id}
-              disabled={!tool.current_version_id}
-            >
-              {tool.display_name || tool.remote_name}
+            <option key={tool.id} value={tool.id} disabled={!tool.current_version_id}>
+              {tool.display_name || tool.remote_name}{tool.display_name && tool.remote_name !== tool.display_name ? ` · ${tool.remote_name}` : ""}
             </option>
           ))}
         </select>
-        <button
-          type="button"
-          disabled={
-            readOnly ||
-            !tools.find((tool) => tool.id === toolId)?.current_version_id
-          }
+        <div className="flex items-center justify-between gap-1 text-xs text-slate-500">
+          <span>{toolLoading ? "조회 중..." : `검색 결과 ${toolTotal}건 · ${toolPage}페이지`}</span>
+          <div className="flex items-center gap-1">
+            <button type="button" aria-label="이전 도구 페이지"
+              disabled={readOnly || toolLoading || toolPage <= 1}
+              className="rounded border px-1.5 py-0.5 disabled:opacity-40"
+              onClick={() => setToolPage((page) => Math.max(1, page - 1))}>이전</button>
+            <button type="button" aria-label="다음 도구 페이지"
+              disabled={readOnly || toolLoading || !toolHasNext}
+              className="rounded border px-1.5 py-0.5 disabled:opacity-40"
+              onClick={() => setToolPage((page) => page + 1)}>다음</button>
+          </div>
+        </div>
+        {selectedTool && (
+          <div className="rounded-md border border-indigo-100 bg-indigo-50/70 p-2 text-xs text-slate-700 space-y-1">
+            <p className="font-medium break-words">{selectedTool.display_name || selectedTool.remote_name}</p>
+            {selectedTool.description_override && <p>{selectedTool.description_override}</p>}
+            <p className="break-all">도구 ID: {selectedTool.remote_name}</p>
+            <p>현재 활성 버전: {selectedTool.current_version_id ? "있음" : "없음"}</p>
+          </div>
+        )}
+        <label htmlFor="visual-tool-predecessor" className="text-xs font-medium text-slate-600 block">
+          이전에 실행할 단계 (선택)
+        </label>
+        <select id="visual-tool-predecessor" disabled={readOnly || steps.length === 0}
+          value={predecessorId} onChange={(event) => {
+            setPredecessorId(event.target.value)
+            setBranchSelection("")
+          }}
+          className="w-full rounded-md border border-slate-300 p-2 text-xs">
+          <option value="">연결 안 함 (독립 실행)</option>
+          {predecessorOptions.map((step) => (
+            <option key={step.id} value={step.id}>
+              {step.name} ({STEP_LABELS[step.type] ?? step.type})
+            </option>
+          ))}
+        </select>
+        {selectedPredecessor?.type === "CONDITION" && (
+          <>
+            <label htmlFor="visual-tool-branch" className="text-xs font-medium text-slate-600 block">
+              어떤 조건 결과에서 실행할까요?
+            </label>
+            <select id="visual-tool-branch" value={branchSelection}
+              disabled={readOnly} onChange={(event) => setBranchSelection(event.target.value)}
+              className="w-full rounded-md border border-amber-300 bg-amber-50 p-2 text-xs">
+              <option value="">참/거짓을 선택하세요</option>
+              <option value="true">참일 때 실행</option>
+              <option value="false">거짓일 때 실행</option>
+            </select>
+            <p className="text-xs text-amber-800">
+              선택한 조건 단계와 선행 연결 및 실행 분기를 함께 설정합니다.
+            </p>
+          </>
+        )}
+        <button type="button" disabled={toolAddDisabled}
           onClick={addTool}
-          className="flex items-center justify-center gap-2 rounded-lg p-2 text-sm bg-indigo-600 text-white w-full disabled:opacity-40"
-        >
+          className="flex items-center justify-center gap-2 rounded-lg p-2 text-sm bg-indigo-600 text-white w-full disabled:opacity-40">
           <Plus size={15} /> 도구 단계 추가
         </button>
+        <p className="text-xs text-slate-500">
+          단계를 추가한 뒤 입력 바인딩과 완료 응답을 확인하고 저장·검증해야 실행할 수 있습니다.
+        </p>
         <button
           type="button"
           disabled={readOnly || steps.length === 0}
