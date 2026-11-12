@@ -1,5 +1,6 @@
 import { lazy, Suspense, useEffect, useMemo, useState } from "react"
 import {
+  ChevronDown,
   GitBranch,
   Link2,
   Plus,
@@ -417,6 +418,8 @@ export default function WorkflowVisualEditor({
   const [newBindingName, setNewBindingName] = useState("")
   const [newConditionSource, setNewConditionSource] = useState("")
   const [view, setView] = useState<"graph" | "list">("graph")
+  const [addSection, setAddSection] = useState<"tool" | "condition" | "join">("tool")
+  const [responseExpanded, setResponseExpanded] = useState(false)
 
   useEffect(() => {
     if (readOnly) return
@@ -646,9 +649,29 @@ export default function WorkflowVisualEditor({
     )
 
   return (
-    <div className="grid grid-cols-1 lg:grid-cols-[220px_minmax(440px,1fr)_320px] min-h-[550px] gap-0 border border-slate-200 rounded-xl overflow-hidden bg-white">
-      <aside className="p-4 border-b lg:border-b-0 lg:border-r border-slate-200 bg-slate-50 space-y-3">
+    <div className="grid grid-cols-1 xl:grid-cols-[250px_minmax(420px,1fr)_310px] 2xl:grid-cols-[280px_minmax(460px,1fr)_340px] min-h-[550px] gap-0 border border-slate-200 rounded-xl overflow-hidden bg-white>
+      <aside className="min-w-0 p-3 xl:p-4 border-b xl:border-b-0 xl:border-r border-slate-200 bg-slate-50 space-y-3 xl:max-h-[min(80vh,920px)] xl:overflow-y-auto" aria-label="단계 추가 및 완료 응답">
         <h2 className="font-semibold text-sm text-slate-800">단계 추가</h2>
+        <p className="text-xs text-slate-500">추가할 단계 종류를 선택하세요. 설정은 선택한 종류만 표시됩니다.</p>
+        <div role="group" aria-label="추가할 단계 종류" className="grid grid-cols-3 gap-1">
+          {([
+            ["tool", "도구"],
+            ["condition", "조건"],
+            ["join", "합류"],
+          ] as const).map(([kind, label]) => (
+            <button key={kind} type="button" aria-pressed={addSection === kind}
+              onClick={() => setAddSection(kind)}
+              className={`rounded-lg border px-1.5 py-2 text-xs font-medium focus-visible:outline-2 focus-visible:outline-indigo-600 ${
+                addSection === kind
+                  ? "border-indigo-400 bg-indigo-100 text-indigo-800"
+                  : "border-slate-300 bg-white text-slate-700 hover:bg-slate-100"
+              }`}>
+              {label}
+            </button>
+          ))}
+        </div>
+        {addSection === "tool" && (
+          <section aria-label="도구 단계 추가 설정" className="space-y-3">
         <label htmlFor="visual-tool-search" className="text-xs font-medium text-slate-600 block">
           MCP 도구 검색
         </label>
@@ -749,14 +772,13 @@ export default function WorkflowVisualEditor({
         <p className="text-xs text-slate-500">
           단계를 추가한 뒤 입력 바인딩과 완료 응답을 확인하고 저장·검증해야 실행할 수 있습니다.
         </p>
-        <button
-          type="button"
-          disabled={readOnly || steps.length === 0}
-          onClick={addJoin}
-          className="flex items-center justify-center gap-2 rounded-lg p-2 text-sm border border-slate-300 bg-white w-full disabled:opacity-40"
-        >
-          <GitBranch size={15} /> 합류 단계 추가
-        </button>
+          </section>
+        )}
+        {addSection === "condition" && (
+          <section aria-label="조건 단계 추가 설정" className="space-y-3">
+            <p className="text-xs text-slate-600">
+              어떤 입력값이나 이전 단계 결과를 판단할지 선택하세요.
+            </p>
         <label
           className="text-xs font-medium text-slate-600 block"
           htmlFor="visual-condition-source"
@@ -787,6 +809,40 @@ export default function WorkflowVisualEditor({
           기본 조건 및 참/거짓 실행 분기는 화면에서 편집할 수 있습니다.
           복합 조건·승인·반복의 고급 설정은 JSON에서 유지됩니다.
         </p>
+          </section>
+        )}
+        {addSection === "join" && (
+          <section aria-label="합류 단계 추가 설정" className="space-y-3">
+            <p className="text-xs text-slate-600">
+              여러 선행 단계의 결과를 합칠 때 사용합니다. 단계를 추가한 뒤 오른쪽에서 연결과 합류 정책을 설정하세요.
+            </p>
+        <button
+          type="button"
+          disabled={readOnly || steps.length === 0}
+          onClick={addJoin}
+          className="flex items-center justify-center gap-2 rounded-lg p-2 text-sm border border-slate-300 bg-white w-full disabled:opacity-40"
+        >
+          <GitBranch size={15} /> 합류 단계 추가
+        </button>
+          </section>
+        )}
+        <div className="border-t border-slate-200 pt-3 space-y-2">
+          <button type="button"
+            aria-expanded={responseExpanded}
+            aria-controls="visual-response-steps"
+            onClick={() => setResponseExpanded((current) => !current)}
+            className="flex w-full items-center justify-between gap-2 rounded-lg py-1 text-left text-sm font-semibold text-slate-800 focus-visible:outline-2 focus-visible:outline-indigo-600">
+            <span>완료 응답 설정 ({responseStepIds?.length ?? 0}개)</span>
+            <ChevronDown size={16} aria-hidden="true"
+              className={responseExpanded ? "rotate-180 transition-transform" : "transition-transform"} />
+          </button>
+          {!responseExpanded && steps.length > 0 && responseStepIds?.length === 0 && (
+            <p className="text-xs text-amber-700">
+              응답 단계가 없습니다. 설정을 펼쳐 하나 이상 선택하세요.
+            </p>
+          )}
+          {responseExpanded && (
+            <div id="visual-response-steps">
         <fieldset
           disabled={readOnly || responseStepIds === null}
           className="space-y-2 border-t border-slate-200 pt-3"
@@ -842,6 +898,9 @@ export default function WorkflowVisualEditor({
             </>
           )}
         </fieldset>
+            </div>
+          )}
+        </div>
         {toolError && (
           <p role="alert" className="text-xs text-amber-700">
             {toolError}
