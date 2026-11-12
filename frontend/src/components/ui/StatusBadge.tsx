@@ -82,7 +82,7 @@ interface StatusBadgeProps {
 }
 
 export default function StatusBadge({ status, label: labelOverride, size = 'md', animate = true }: StatusBadgeProps) {
-  const info = STATUS_MAP[status] ?? { category: 'neutral' as StatusCategory };
+  const info = STATUS_MAP[status] ?? { category: 'neutral' as StatusCategory, label: undefined };
   const styles = CATEGORY_STYLES[info.category];
   const icon = CATEGORY_ICONS[info.category];
   const label = labelOverride ?? info.label ?? status.replace(/_/g, ' ');
