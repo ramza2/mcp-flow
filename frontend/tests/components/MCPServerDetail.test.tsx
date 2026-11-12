@@ -131,7 +131,7 @@ describe('MCPServerDetail — API detail', () => {
     });
 
     await screen.findByText('Docs MCP');
-    await user.click(screen.getByRole('button', { name: /^Activate$/i }));
+    await user.click(screen.getByRole('button', { name: /^활성화$/i }));
 
     await waitFor(() => {
       expect(fetchMock).toHaveBeenCalledWith(
@@ -174,7 +174,7 @@ describe('MCPServerDetail — API detail', () => {
     });
 
     await screen.findByText('Docs MCP');
-    await user.click(screen.getByRole('button', { name: /^Activate$/i }));
+    await user.click(screen.getByRole('button', { name: /^활성화$/i }));
 
     expect(await screen.findByText(/Server cannot be activated from current status/i)).toBeInTheDocument();
     expect(screen.getByText(/Request ID: req-conflict-1/i)).toBeInTheDocument();
@@ -215,7 +215,7 @@ describe('MCPServerDetail — API detail', () => {
     expect(await screen.findByRole('heading', { name: 'Docs MCP' })).toBeInTheDocument();
     expect(screen.getByText('활성')).toBeInTheDocument();
 
-    await user.click(screen.getByRole('button', { name: /^Tools/i }));
+    await user.click(screen.getByRole('button', { name: /^도구$/i }));
     expect(await screen.findByText(/tools boom/i)).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: 'Docs MCP' })).toBeInTheDocument();
   });
@@ -292,14 +292,14 @@ describe('MCPServerDetail — API detail', () => {
     });
 
     await screen.findByText('Docs MCP');
-    await user.click(screen.getByRole('button', { name: /Discovery Preview/i }));
-    expect(await screen.findByText(/Discovery Preview — Success/i)).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: /도구 탐색 미리보기/i }));
+    expect(await screen.findByText(/도구 탐색 미리보기 — 성공/i)).toBeInTheDocument();
     await waitFor(() => {
       expect(serverGets).toBeGreaterThanOrEqual(2);
     });
 
-    await user.click(screen.getByRole('button', { name: /Apply Discovery/i }));
-    await user.click(screen.getByRole('button', { name: /^Apply$/i }));
+    await user.click(screen.getByRole('button', { name: /탐색 결과 적용/i }));
+    await user.click(screen.getByRole('button', { name: /^적용$/i }));
 
     await waitFor(() => {
       expect(fetchMock).toHaveBeenCalledWith(
