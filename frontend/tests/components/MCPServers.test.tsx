@@ -28,6 +28,9 @@ describe('MCPServers — API list', () => {
     await waitFor(() => {
       expect(screen.getByText('Docs MCP')).toBeInTheDocument();
       expect(screen.getByText('Weather MCP')).toBeInTheDocument();
+      expect(screen.getByRole('heading', { name: 'MCP 서버 관리' })).toBeInTheDocument();
+      expect(screen.getByText('처음 사용하나요?')).toBeInTheDocument();
+      expect(screen.getByRole('combobox', { name: '상태' }).querySelector('option[value="ACTIVE"]')).toHaveTextContent('활성');
     });
   });
 
@@ -55,7 +58,7 @@ describe('MCPServers — API list', () => {
 
     renderWithRouter(<MCPServers />, { path: '/mcp/servers', route: '/mcp/servers' });
 
-    expect(await screen.findByText(/등록된 MCP Server가 없습니다/i)).toBeInTheDocument();
+    expect(await screen.findByText(/등록된 MCP 서버가 없습니다/i)).toBeInTheDocument();
   });
 
   it('runs per-row connection test and shows SUCCEEDED status', async () => {
@@ -75,7 +78,7 @@ describe('MCPServers — API list', () => {
     const testButtons = screen.getAllByTitle('연결 테스트');
     await user.click(testButtons[0]);
 
-    expect(await screen.findByText('Succeeded')).toBeInTheDocument();
+    expect(await screen.findByText('연결 성공')).toBeInTheDocument();
   });
 
   it('shows FAILED status from connection test response', async () => {
@@ -94,6 +97,6 @@ describe('MCPServers — API list', () => {
     await screen.findByText('Docs MCP');
     await user.click(screen.getByTitle('연결 테스트'));
 
-    expect(await screen.findByText('Failed')).toBeInTheDocument();
+    expect(await screen.findByText('연결 실패')).toBeInTheDocument();
   });
 });
