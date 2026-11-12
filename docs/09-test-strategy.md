@@ -909,6 +909,7 @@ DRAFT → PUBLISHED → DEPRECATED
 
 - Live Workflow registry UI: GET 목록의 server-side status/q/page, 오류/빈 목록 표시, 새 등록 시 명시적 클릭만 POST, detail의 exact UUID 버전 목록, DRAFT 생성 시 WORKFLOW owning source, PUBLISHED/DEPRECATED 읽기 전용 검증.
 - 시각 편집/고급 JSON Plan 화면: DRAFT만 저장, 저장되지 않은 내용은 validate 금지, malformed JSON은 클라이언트에서 차단, 서버 content_hash preflight로 이미 변경된 버전의 덮어쓰기 거절(원자적 If-Match 미지원 한계 명시), 저장 후 INVALID 초기화 및 별도 `/validate` 결과 표시, 임의 Plan Step Type/Status 변환 금지.
+- 운영 대시보드 한국어 회귀: 전역 운영 지표 조회 성공 시 실행 성공률·종료 건수·입력 및 승인 대기 합산·MCP 서버/도구·예약 실행의 표시는 한국어, 수치 및 API 호출/경로 불변을 확인한다. 403 시 `/executions` 본인 이력 fallback과 권한 안내를 유지하며 전역 데이터는 추가로 요청하거나 가짜 값을 만들지 않는다.
 - 워크플로 서버 검증 보고서 UI 회귀: 저장된 버전의 `validation_status=VALID` + `validation_report.valid=true` + `content_hash` 정확한 일치에서만 통과, 보고서 불일치/미지 구조/저장하지 않은 편집에 통과 표시 금지, 실패 원인·미지 checks·오류 목록 요약, 원본 JSON 기본 접힘 및 무손실 표시, DRAFT/게시 버전의 서버 검증 및 편집 권한 동작 불변을 확인한다.
 - 단계 추가 집중형 UI 회귀: 도구/조건/합류 설정 중 하나만 표시, 탭 전환 시 미완료 도구·조건 선택값 보존, 완료 응답 접기/펼치기의 미저장 Plan 불변, DRAFT에서만 편집, 기존 완료 응답·조건·TOOL/JOIN 동작 유지, BindingKind 한국어 레이블과 canonical 저장 값 일치, 고정 ToolVersion 정보의 기본 접힘/접근 가능성을 확인한다.
 - 도구 단계 추가 안내형 UI 회귀: 활성 Tool 서버 측 검색·페이지 이동, 검색어 변경 시 페이지 1 복귀, current ToolVersion 고정, 일반 선행 연결과 CONDITION 참/거짓 Branch의 canonical `depends_on`/`when` 생성, 조건 결과 미선택 시 추가 차단, 존재하지 않는/LOOP 보호 선행 단계 차단, 읽기 전용 PUBLISHED 변경 금지, 입력 바인딩·Plan metadata 원본 보존.
