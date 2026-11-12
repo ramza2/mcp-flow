@@ -1,6 +1,6 @@
 import type { JsonValue } from '../../api/types';
 
-type InputDefinition = { type: string; required: boolean; secret: boolean };
+export type InputDefinition = { type: string; required: boolean; secret: boolean };
 
 export function planInputDefinitions(plan: Record<string, JsonValue>): Record<string, InputDefinition> {
   const raw = plan.inputs;
