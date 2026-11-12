@@ -596,7 +596,7 @@ describe('MCPToolDetail — API detail', () => {
     expect(await screen.findByText(/다른 작업에서 Policy가 생성되었습니다/i)).toBeInTheDocument();
     expect(screen.getByText(/Request ID: req-pol-create/i)).toBeInTheDocument();
     expect(await screen.findByText(/from-other-create/i)).toBeInTheDocument();
-    expect(screen.getByText(/Idempotent Write/i)).toBeInTheDocument();
+    expect(screen.getByText(/멱등 쓰기/i)).toBeInTheDocument();
   });
 
   it('keeps stale Policy update 409 feedback after refetch', async () => {
