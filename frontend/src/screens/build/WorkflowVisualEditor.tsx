@@ -46,6 +46,14 @@ const BINDING_KINDS = [
   "LOOP_CONTEXT",
   "SECRET_REF",
 ]
+const BINDING_LABELS: Record<string, string> = {
+  LITERAL: "직접 입력",
+  PLAN_INPUT: "실행 시 입력값",
+  STEP_OUTPUT: "이전 단계 결과",
+  EXECUTION_CONTEXT: "실행 정보",
+  LOOP_CONTEXT: "반복 실행 정보",
+  SECRET_REF: "등록된 비밀값 참조",
+}
 const SIMPLE_CONDITION_OPS = ["exists", "is_null", "eq", "ne"] as const
 type SimpleConditionOp = (typeof SIMPLE_CONDITION_OPS)[number]
 
@@ -1290,19 +1298,23 @@ export default function WorkflowVisualEditor({
             )}
             {active.type === "TOOL" && (
               <>
-                <div className="text-xs bg-slate-50 rounded-md p-2 space-y-1">
-                  <p className="font-medium">고정 ToolVersion ID</p>
-                  <p className="font-mono break-all">
+                <details className="rounded-md border border-slate-200 bg-slate-50 p-2 text-xs text-slate-600">
+                  <summary className="cursor-pointer font-medium text-slate-700">
+                    도구 버전 정보 (고급)
+                  </summary>
+                  <p className="mt-2 font-mono break-all">
                     {String(config?.tool_version_id ?? "미설정")}
                   </p>
-                  <p>
-                    선택한 버전은 저장 후 고정됩니다. 변경은 고급 JSON에서
-                    가능합니다.
+                  <p className="mt-1">
+                    선택한 ToolVersion ID는 저장 후 고정됩니다. 변경은 고급 JSON에서 가능합니다.
                   </p>
-                </div>
+                </details>
                 <h3 className="font-semibold text-sm text-slate-800">
-                  입력 바인딩
+                  도구 입력값
                 </h3>
+                <p className="text-xs text-slate-500">
+                  직접 입력하거나 실행 입력값·이전 단계 결과를 연결하세요. 입력 항목의 이름은 도구가 요구하는 이름을 사용합니다.
+                </p>
                 {bindings === null && (
                   <p role="alert" className="text-xs text-amber-700">
                     바인딩 구조를 읽을 수 없습니다. 고급 JSON에서 수정하세요.
@@ -1356,7 +1368,7 @@ export default function WorkflowVisualEditor({
                               )}
                               {BINDING_KINDS.map((kind) => (
                                 <option key={kind} value={kind}>
-                                  {kind}
+                                  {BINDING_LABELS[kind]}
                                 </option>
                               ))}
                             </select>
