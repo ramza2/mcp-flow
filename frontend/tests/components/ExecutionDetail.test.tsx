@@ -308,7 +308,7 @@ describe('ExecutionDetail SSE + polling fallback', () => {
       expect(detailCalls).toBeGreaterThan(detailCallsBefore);
     });
     // Still RUNNING from REST authority (mock unchanged).
-    const runningBadges = screen.getAllByText('RUNNING');
+    const runningBadges = screen.getAllByText('실행 중');
     expect(runningBadges.length).toBeGreaterThan(0);
     expect(screen.queryByText('CREATED')).not.toBeInTheDocument();
   });
