@@ -251,7 +251,7 @@ describe('MCPServerDetail — API detail', () => {
     await screen.findByText('Docs MCP');
     await user.click(screen.getByRole('button', { name: /연결 테스트/i }));
 
-    expect(await screen.findByText(/Succeeded/i)).toBeInTheDocument();
+    expect(await screen.findByText(/연결 성공/i)).toBeInTheDocument();
     expect(screen.getByText(/42ms/)).toBeInTheDocument();
     await waitFor(() => {
       expect(serverGets).toBeGreaterThanOrEqual(2);
