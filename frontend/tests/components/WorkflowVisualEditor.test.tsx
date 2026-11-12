@@ -555,6 +555,32 @@ describe("Canonical visual workflow editor", () => {
     ))
   })
 
+  it("shows plain Korean binding options without changing canonical binding data", async () => {
+    const user = userEvent.setup()
+    const onChange = vi.fn()
+    const plan = addStepToPlan(basePlan(), "TOOL", toolVersionId)
+    const { rerender } = render(<WorkflowVisualEditor plan={plan} readOnly={false} onChange={onChange} />)
+    await user.click(screen.getByRole("button", { name: "목록" }))
+    await user.click(screen.getByRole("button", { name: "도구 실행 1 단계 선택" }))
+    const details = screen.getByText("도구 버전 정보 (고급)").closest("details")
+    expect(details).not.toBeNull()
+    expect(details).not.toHaveAttribute("open")
+    expect(screen.getByText("도구 입력값")).toBeInTheDocument()
+    await user.type(screen.getByRole("textbox", { name: "새 바인딩 이름" }), "topic")
+    await user.click(screen.getByRole("button", { name: "추가" }))
+    const withBinding = onChange.mock.lastCall?.[0] as Plan
+    rerender(<WorkflowVisualEditor plan={withBinding} readOnly={false} onChange={onChange} />)
+    expect(screen.getByRole("option", { name: "직접 입력" })).toHaveValue("LITERAL")
+    expect(screen.getByRole("option", { name: "실행 시 입력값" })).toHaveValue("PLAN_INPUT")
+    expect(screen.getByRole("option", { name: "이전 단계 결과" })).toHaveValue("STEP_OUTPUT")
+    await user.selectOptions(screen.getByRole("combobox", { name: "topic 바인딩 종류" }), "PLAN_INPUT")
+    const updated = onChange.mock.lastCall?.[0] as Plan
+    expect(getVisualSteps(updated)?.[0].config).toEqual({
+      tool_version_id: toolVersionId,
+      bindings: { topic: { kind: "PLAN_INPUT", path: "/" } },
+    })
+  })
+
   it("never permits writes from the visual editor for a published version", async () => {
     const user = userEvent.setup()
     const onChange = vi.fn()
