@@ -82,6 +82,51 @@ describe("Canonical visual workflow editor", () => {
     })
   })
 
+  it("shows one step-creation section at a time and preserves unfinished selections", async () => {
+    const user = userEvent.setup()
+    const onChange = vi.fn()
+    const plan = {
+      ...basePlan(),
+      inputs: { topic: { type: "string", required: true, secret: false } },
+    } as Plan
+    render(<WorkflowVisualEditor plan={plan} readOnly={false} onChange={onChange} />)
+
+    expect(screen.getByRole("button", { name: "도구" })).toHaveAttribute("aria-pressed", "true")
+    expect(screen.getByLabelText("사용할 MCP 도구")).toBeInTheDocument()
+    expect(screen.queryByLabelText("새 조건의 판단 대상")).not.toBeInTheDocument()
+    expect(screen.queryByRole("button", { name: "합류 단계 추가" })).not.toBeInTheDocument()
+    expect(screen.getByRole("button", { name: /완료 응답 설정/ })).toHaveAttribute("aria-expanded", "false")
+
+    await screen.findByRole("option", { name: /날씨 확인/ })
+    await user.selectOptions(screen.getByLabelText("사용할 MCP 도구"), activeTool.id)
+    await user.click(screen.getByRole("button", { name: "조건" }))
+    expect(screen.getByRole("button", { name: "조건" })).toHaveAttribute("aria-pressed", "true")
+    await user.selectOptions(screen.getByLabelText("새 조건의 판단 대상"), "input:topic")
+    await user.click(screen.getByRole("button", { name: "합류" }))
+    expect(screen.getByRole("button", { name: "합류 단계 추가" })).toBeDisabled()
+    expect(screen.queryByLabelText("도구 검색어")).not.toBeInTheDocument()
+
+    await user.click(screen.getByRole("button", { name: "조건" }))
+    expect(screen.getByLabelText("새 조건의 판단 대상")).toHaveValue("input:topic")
+    await user.click(screen.getByRole("button", { name: "도구" }))
+    expect(screen.getByLabelText("사용할 MCP 도구")).toHaveValue(activeTool.id)
+    expect(onChange).not.toHaveBeenCalled()
+  })
+
+  it("collapses completion settings independently of step creation", async () => {
+    const user = userEvent.setup()
+    const onChange = vi.fn()
+    const plan = addStepToPlan(basePlan(), "TOOL", toolVersionId)
+    render(<WorkflowVisualEditor plan={plan} readOnly={false} onChange={onChange} />)
+    expect(screen.getByText(/응답 단계가 없습니다/)).toBeInTheDocument()
+    await user.click(screen.getByRole("button", { name: /완료 응답 설정/ }))
+    expect(screen.getByRole("button", { name: /완료 응답 설정/ })).toHaveAttribute("aria-expanded", "true")
+    expect(screen.getByRole("checkbox", { name: "응답 단계: 도구 실행 1 (tool_1)" })).toBeInTheDocument()
+    await user.click(screen.getByRole("button", { name: /완료 응답 설정/ }))
+    expect(screen.queryByRole("checkbox", { name: "응답 단계: 도구 실행 1 (tool_1)" })).not.toBeInTheDocument()
+    expect(onChange).not.toHaveBeenCalled()
+  })
+
   it("adds canonical TOOL/JOIN without introducing persisted PARALLEL or END", () => {
     const base = basePlan()
     const one = addStepToPlan(base, "TOOL", toolVersionId)
@@ -149,6 +194,7 @@ describe("Canonical visual workflow editor", () => {
     const { rerender } = render(
       <WorkflowVisualEditor plan={plan} readOnly={false} onChange={onChange} />,
     )
+    await user.click(screen.getByRole("button", { name: "조건" }))
     expect(screen.getByRole("button", { name: "조건 단계 추가" })).toBeDisabled()
     await user.selectOptions(screen.getByLabelText("새 조건의 판단 대상"), "input:topic")
     await user.click(screen.getByRole("button", { name: "조건 단계 추가" }))
@@ -203,6 +249,7 @@ describe("Canonical visual workflow editor", () => {
     }
     const added = addConditionStepToPlan(plan, "input:topic")
     render(<WorkflowVisualEditor plan={added} readOnly onChange={onChange} />)
+    await user.click(screen.getByRole("button", { name: "조건" }))
     expect(screen.getByRole("button", { name: "조건 단계 추가" })).toBeDisabled()
     await user.click(screen.getByRole("button", { name: "목록" }))
     await user.click(screen.getByRole("button", { name: "조건 분기 1 단계 선택" }))
@@ -259,6 +306,8 @@ describe("Canonical visual workflow editor", () => {
     const { rerender } = render(
       <WorkflowVisualEditor plan={plan} readOnly={false} onChange={onChange} />,
     )
+    expect(screen.queryByRole("checkbox", { name: "응답 단계: 도구 실행 2 (tool_2)" })).not.toBeInTheDocument()
+    await user.click(screen.getByRole("button", { name: /완료 응답 설정/ }))
     expect(screen.getByText(/응답 단계가 지정되지 않았습니다/)).toBeInTheDocument()
     await user.click(screen.getByRole("checkbox", { name: "응답 단계: 도구 실행 2 (tool_2)" }))
     const selected = onChange.mock.lastCall?.[0] as Plan
@@ -270,12 +319,14 @@ describe("Canonical visual workflow editor", () => {
     expect(screen.getByRole("status")).toHaveTextContent(/초안 저장 후 서버 검증/)
   })
 
-  it("shows response selection read-only and blocks unsupported JSON structure", () => {
+  it("shows response selection read-only and blocks unsupported JSON structure", async () => {
+    const user = userEvent.setup()
     const plan = addStepToPlan(basePlan(), "TOOL", toolVersionId)
     const onChange = vi.fn()
     const { rerender } = render(
       <WorkflowVisualEditor plan={plan} readOnly onChange={onChange} />,
     )
+    await user.click(screen.getByRole("button", { name: /완료 응답 설정/ }))
     expect(screen.getByRole("checkbox", { name: "응답 단계: 도구 실행 1 (tool_1)" })).toBeDisabled()
     rerender(
       <WorkflowVisualEditor
@@ -502,6 +553,32 @@ describe("Canonical visual workflow editor", () => {
     await waitFor(() => expect(listMCPTools).toHaveBeenCalledWith(
       expect.objectContaining({ page: 1, q: "날씨", status: "ACTIVE" }),
     ))
+  })
+
+  it("shows plain Korean binding options without changing canonical binding data", async () => {
+    const user = userEvent.setup()
+    const onChange = vi.fn()
+    const plan = addStepToPlan(basePlan(), "TOOL", toolVersionId)
+    const { rerender } = render(<WorkflowVisualEditor plan={plan} readOnly={false} onChange={onChange} />)
+    await user.click(screen.getByRole("button", { name: "목록" }))
+    await user.click(screen.getByRole("button", { name: "도구 실행 1 단계 선택" }))
+    const details = screen.getByText("도구 버전 정보 (고급)").closest("details")
+    expect(details).not.toBeNull()
+    expect(details).not.toHaveAttribute("open")
+    expect(screen.getByText("도구 입력값")).toBeInTheDocument()
+    await user.type(screen.getByRole("textbox", { name: "새 바인딩 이름" }), "topic")
+    await user.click(screen.getByRole("button", { name: "추가" }))
+    const withBinding = onChange.mock.lastCall?.[0] as Plan
+    rerender(<WorkflowVisualEditor plan={withBinding} readOnly={false} onChange={onChange} />)
+    expect(screen.getByRole("option", { name: "직접 입력" })).toHaveValue("LITERAL")
+    expect(screen.getByRole("option", { name: "실행 시 입력값" })).toHaveValue("PLAN_INPUT")
+    expect(screen.getByRole("option", { name: "이전 단계 결과" })).toHaveValue("STEP_OUTPUT")
+    await user.selectOptions(screen.getByRole("combobox", { name: "topic 바인딩 종류" }), "PLAN_INPUT")
+    const updated = onChange.mock.lastCall?.[0] as Plan
+    expect(getVisualSteps(updated)?.[0].config).toEqual({
+      tool_version_id: toolVersionId,
+      bindings: { topic: { kind: "PLAN_INPUT", path: "/" } },
+    })
   })
 
   it("never permits writes from the visual editor for a published version", async () => {
