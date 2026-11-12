@@ -178,7 +178,7 @@ describe('MCPServerDetail — API detail', () => {
 
     expect(await screen.findByText(/Server cannot be activated from current status/i)).toBeInTheDocument();
     expect(screen.getByText(/Request ID: req-conflict-1/i)).toBeInTheDocument();
-    expect(screen.getByText('DRAFT')).toBeInTheDocument();
+    expect(screen.getByText('초안')).toBeInTheDocument();
   });
 
   it('keeps Overview when Tools secondary API fails', async () => {
@@ -213,7 +213,7 @@ describe('MCPServerDetail — API detail', () => {
     });
 
     expect(await screen.findByRole('heading', { name: 'Docs MCP' })).toBeInTheDocument();
-    expect(screen.getByText('ACTIVE')).toBeInTheDocument();
+    expect(screen.getByText('활성')).toBeInTheDocument();
 
     await user.click(screen.getByRole('button', { name: /^Tools/i }));
     expect(await screen.findByText(/tools boom/i)).toBeInTheDocument();
