@@ -417,16 +417,15 @@ export default function MCPServerDetail() {
             </div>
           </div>
           <div className="flex gap-2 flex-wrap justify-end">
-            {canActivate && (
-              <Button variant="primary" size="sm" loading={statusMutating} onClick={handleActivate}>
-                활성화
-              </Button>
-            )}
-            {canDeactivate && (
-              <Button variant="outline" size="sm" loading={statusMutating} onClick={handleDeactivate}>
-                비활성화
-              </Button>
-            )}
+            <Button
+              variant="secondary"
+              size="sm"
+              icon={<RefreshCw size={13} />}
+              loading={testing}
+              onClick={runConnectionTest}
+            >
+              연결 테스트
+            </Button>
             <Button
               variant="outline"
               size="sm"
@@ -444,15 +443,16 @@ export default function MCPServerDetail() {
             >
               탐색 결과 적용
             </Button>
-            <Button
-              variant="secondary"
-              size="sm"
-              icon={<RefreshCw size={13} />}
-              loading={testing}
-              onClick={runConnectionTest}
-            >
-              연결 테스트
-            </Button>
+            {canActivate && (
+              <Button variant="primary" size="sm" loading={statusMutating} onClick={handleActivate}>
+                활성화
+              </Button>
+            )}
+            {canDeactivate && (
+              <Button variant="outline" size="sm" loading={statusMutating} onClick={handleDeactivate}>
+                비활성화
+              </Button>
+            )}
           </div>
         </div>
         {mutationError && (
