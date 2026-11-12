@@ -146,7 +146,7 @@ describe('MCPTools — API list + lifecycle', () => {
     await screen.findByText('Search Docs');
     await user.click(screen.getByRole('button', { name: '활성화' }));
 
-    expect(await screen.findByText(/다른 작업으로 Tool 상태가 변경되었습니다/i)).toBeInTheDocument();
+    expect(await screen.findByText(/다른 작업으로 도구 상태가 변경되었습니다/i)).toBeInTheDocument();
     await waitFor(() => {
       expect(screen.getByRole('button', { name: '활성화' })).toBeInTheDocument();
     });
@@ -187,7 +187,7 @@ describe('MCPTools — API list + lifecycle', () => {
 
     renderWithRouter(<MCPTools />, { path: '/mcp/tools', route: '/mcp/tools' });
 
-    expect(await screen.findByText(/등록된 MCP Tool이 없습니다/i)).toBeInTheDocument();
+    expect(await screen.findByText(/등록된 MCP 도구가 없습니다/i)).toBeInTheDocument();
   });
 
   it('passes status filter to API', async () => {
