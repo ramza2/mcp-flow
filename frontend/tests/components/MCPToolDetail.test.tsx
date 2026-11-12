@@ -46,7 +46,7 @@ describe('MCPToolDetail — API detail', () => {
 
     expect(await screen.findByRole('heading', { name: 'Search Docs' })).toBeInTheDocument();
     expect(screen.getAllByText('VALID').length).toBeGreaterThan(0);
-    expect(screen.getAllByText('DISCOVERED').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('발견됨').length).toBeGreaterThan(0);
   });
 
   it('shows 404 for missing tool', async () => {
@@ -216,7 +216,7 @@ describe('MCPToolDetail — API detail', () => {
 
     expect(await screen.findByText(/version detail failed/i)).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: 'Search Docs' })).toBeInTheDocument();
-    expect(screen.getByText('DISCOVERED')).toBeInTheDocument();
+    expect(screen.getByText('발견됨')).toBeInTheDocument();
   });
 
   it('shows Test Call tab with Run Test (no Verification auto-create)', async () => {
@@ -323,7 +323,7 @@ describe('MCPToolDetail — API detail', () => {
     await screen.findByRole('heading', { name: 'Search Docs' });
     await user.click(screen.getByRole('button', { name: 'Activate' }));
     expect(await screen.findByRole('button', { name: 'Deactivate' })).toBeInTheDocument();
-    expect(screen.getAllByText('ACTIVE').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('활성').length).toBeGreaterThan(0);
   });
 
   it('metadata edit PATCHes canonical body with If-Match', async () => {
@@ -531,7 +531,7 @@ describe('MCPToolDetail — API detail', () => {
     });
 
     await screen.findByRole('heading', { name: 'Search Docs' });
-    expect(screen.getAllByText('ACTIVE').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('활성').length).toBeGreaterThan(0);
     expect(screen.getAllByText('INVALID').length).toBeGreaterThan(0);
   });
 
@@ -596,7 +596,7 @@ describe('MCPToolDetail — API detail', () => {
     expect(await screen.findByText(/다른 작업에서 Policy가 생성되었습니다/i)).toBeInTheDocument();
     expect(screen.getByText(/Request ID: req-pol-create/i)).toBeInTheDocument();
     expect(await screen.findByText(/from-other-create/i)).toBeInTheDocument();
-    expect(screen.getByText(/Idempotent Write/i)).toBeInTheDocument();
+    expect(screen.getByText(/멱등 쓰기/i)).toBeInTheDocument();
   });
 
   it('keeps stale Policy update 409 feedback after refetch', async () => {

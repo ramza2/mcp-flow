@@ -308,7 +308,7 @@ describe('ExecutionDetail SSE + polling fallback', () => {
       expect(detailCalls).toBeGreaterThan(detailCallsBefore);
     });
     // Still RUNNING from REST authority (mock unchanged).
-    const runningBadges = screen.getAllByText('RUNNING');
+    const runningBadges = screen.getAllByText('실행 중');
     expect(runningBadges.length).toBeGreaterThan(0);
     expect(screen.queryByText('CREATED')).not.toBeInTheDocument();
   });
@@ -374,8 +374,8 @@ describe('ExecutionDetail SSE + polling fallback', () => {
     await user.click(screen.getByRole('button', { name: /^Events$/i }));
     const rows = await screen.findAllByTestId('execution-event-row');
     expect(rows).toHaveLength(2);
-    expect(within(rows[0]).getByText('RUNNING')).toBeInTheDocument();
-    expect(within(rows[1]).getByText('FAILED')).toBeInTheDocument();
+    expect(within(rows[0]).getByText('실행 중')).toBeInTheDocument();
+    expect(within(rows[1]).getByText('실패')).toBeInTheDocument();
     expect(rows[0].querySelector('.animate-spin')).toBeNull();
     expect(rows[1].querySelector('.animate-spin')).toBeNull();
   });
@@ -588,7 +588,7 @@ describe('ExecutionDetail SSE + polling fallback', () => {
       await vi.advanceTimersByTimeAsync(4000);
     });
     await waitFor(() => {
-      expect(screen.getByText('SUCCEEDED')).toBeInTheDocument();
+      expect(screen.getByText('성공')).toHaveAttribute('title', 'SUCCEEDED');
     });
 
     const callsAtTerminal = fetchMock.mock.calls.length;

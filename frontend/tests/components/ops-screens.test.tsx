@@ -117,6 +117,8 @@ describe('Ops screens real API wiring', () => {
 
     expect(await screen.findByText('총 실행 건수')).toBeInTheDocument();
     expect(screen.getByText('63%')).toBeInTheDocument();
+    expect(screen.getByText('95%가 48s 이내 완료 (p95)')).toBeInTheDocument();
+    expect(screen.getByText('성공')).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: '대시보드' })).toBeInTheDocument();
     expect(screen.getByText('실행 성공률')).toBeInTheDocument();
     expect(screen.getByText('종료된 실행 8건 기준')).toBeInTheDocument();
@@ -129,6 +131,21 @@ describe('Ops screens real API wiring', () => {
     expect(screen.getByText('MCP 도구 현황')).toBeInTheDocument();
     expect(screen.getByText('점검 필요')).toBeInTheDocument();
     expect(screen.queryByText('Report MCP')).not.toBeInTheDocument();
+    expect(String(fetchMock.mock.calls[0][0])).toContain('/ops/dashboard/summary');
+  });
+
+  it('Dashboard labels a scheduled execution without a source name in Korean', async () => {
+    const summary = dashboardSummary();
+    summary.recent_executions = [
+      executionItem({ source_type: 'SCHEDULE_OCCURRENCE', source: null }),
+    ];
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(summary));
+    vi.stubGlobal('fetch', fetchMock);
+
+    renderWithRouter(<Dashboard />);
+
+    expect(await screen.findByText('예약 실행')).toBeInTheDocument();
+    expect(screen.getByText('성공')).toBeInTheDocument();
     expect(String(fetchMock.mock.calls[0][0])).toContain('/ops/dashboard/summary');
   });
 

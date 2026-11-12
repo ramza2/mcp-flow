@@ -690,6 +690,7 @@ Tool Grant API는 Version 단위다.
 ### 예시 화면 한국어 UX (2026-11-09)
 
 - 이전 `/workflows`, Workflow 상세, Designer는 `mockWorkflows` 등 예시 데이터 기반이었다. 위 Live UI 연동 후 예시 디자이너는 운영 라우트에서 사용하지 않는다.
+- 공통 상태·위험도 배지 한국어 표시(2026-11-12): 실행·승인·도구 검증·에이전트·워크플로·MCP 서버/도구 화면의 `StatusBadge`와 `RiskBadge`, `VerificationBadge`에서 canonical 상태·위험도 코드를 한국어로 보여주며 원본 코드는 hover/title에서 확인할 수 있다. 알 수 없는 상태값은 무리하게 추정하거나 신규 상태로 변환하지 않고 원문을 표시한다. 실행 출처(Agent/Workflow/Schedule/테스트) 표시 역시 한국어로 바꾸되 persisted/API 원본 enum은 보존한다. 대시보드의 p95 수치는 실행의 95%가 해당 시간 이내 완료됨을 설명한다. 역할 권한·상태 판단·필터 API value·실행 동작은 변경하지 않는다.
 - 운영 대시보드 한국어 표시(2026-11-12): 전체 사용자와 본인만 조회 가능한 사용자 모두 화면 제목·실행/승인/MCP/예약 지표·집계 기간·빈 상태·권한 안내를 한국어로 표시한다. 403 시 기존대로 본인의 최근 실행 목록만 조회하고, 전역 집계는 권한 없이 추정/가공해 표시하지 않는다. 서버의 `DashboardSummaryDto` 필드와 집계 계산, 경로·권한은 변경하지 않는다.
 - UI 표시는 워크플로·초안·게시·실행 단계·선행 단계·조건식·입력값 연결 등 한국어로 제공한다. Canonical Workflow/WorkflowVersion 상태, Step Type, Binding Kind, Predicate/Join/Loop option value는 변경하지 않는다.
 - 기존 Designer의 `Draft 저장`은 서버 요청 없이 화면만 이동하므로 저장 동작으로 표시하지 않는다. 화면 종료는 `시연 종료 (저장 안 됨)`으로 명시하고, 상세의 실제 게시 동작 없는 버튼은 비활성화한다.

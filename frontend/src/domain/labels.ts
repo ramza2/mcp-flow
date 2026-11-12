@@ -88,11 +88,11 @@ export function labelWorkflowVisibility(value: string): string {
 }
 
 export const EXECUTION_SOURCE_LABELS: Record<ExecutionSourceType, string> = {
-  AGENT_REQUEST: 'Agent',
-  WORKFLOW_VERSION: 'Workflow',
-  SCHEDULE_OCCURRENCE: 'Schedule',
-  MANUAL_TOOL_TEST: 'Manual Tool Test',
-  FACTORY_TEST: 'Factory Test',
+  AGENT_REQUEST: '에이전트',
+  WORKFLOW_VERSION: '워크플로',
+  SCHEDULE_OCCURRENCE: '예약 실행',
+  MANUAL_TOOL_TEST: '도구 수동 테스트',
+  FACTORY_TEST: '도구 생성 테스트',
 };
 
 export const EXECUTION_TRIGGER_LABELS: Record<ExecutionTriggerType, string> = {
@@ -213,11 +213,11 @@ export function labelExternalMCPReviewState(value: string): string {
 }
 
 export const RISK_CLASS_LABELS: Record<RiskClass, string> = {
-  READ_ONLY: 'Read only',
-  IDEMPOTENT_WRITE: 'Idempotent write',
-  NON_IDEMPOTENT_WRITE: 'Non-idempotent write',
-  DESTRUCTIVE: 'Destructive',
-  UNKNOWN: 'Unknown',
+  READ_ONLY: '읽기 전용',
+  IDEMPOTENT_WRITE: '멱등 쓰기',
+  NON_IDEMPOTENT_WRITE: '중복 실행 위험',
+  DESTRUCTIVE: '파괴적 작업',
+  UNKNOWN: '위험도 미확인',
 };
 
 export function labelExecutionSource(value: string): string {

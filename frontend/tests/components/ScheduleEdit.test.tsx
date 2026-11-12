@@ -64,7 +64,7 @@ describe('Schedule live management', () => {
     renderWithRouter(<Schedules />, { path: '/schedules', route: '/schedules' });
     expect(await screen.findByText('정기 예약')).toBeInTheDocument();
     expect(screen.getByText('한 번 실행')).toHaveAttribute('title', 'ONCE');
-    expect(screen.getByTitle('ACTIVE')).toHaveTextContent('활성화됨');
+    expect(screen.getAllByTitle('ACTIVE').some(element => element.textContent?.includes('활성화됨'))).toBe(true);
     expect(within(screen.getByRole('combobox', { name: '상태' })).getByRole('option', { name: '일시정지' })).toHaveValue('PAUSED');
     expect(mocks.list).toHaveBeenCalled();
     fireEvent.click(screen.getByRole('button', { name: '일시정지' }));

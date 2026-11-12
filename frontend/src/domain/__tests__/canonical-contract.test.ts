@@ -318,11 +318,12 @@ describe('Negative Canonical Contract — forbidden Domain values', () => {
 
 describe('Presentation labels — Domain values stay Canonical', () => {
   it('maps Execution source Canonical → label without replacing Domain keys', () => {
-    expect(labelExecutionSource('AGENT_REQUEST')).toBe('Agent');
-    expect(labelExecutionSource('WORKFLOW_VERSION')).toBe('Workflow');
-    expect(labelExecutionSource('SCHEDULE_OCCURRENCE')).toBe('Schedule');
+    expect(labelExecutionSource('AGENT_REQUEST')).toBe('에이전트');
+    expect(labelExecutionSource('WORKFLOW_VERSION')).toBe('워크플로');
+    expect(labelExecutionSource('SCHEDULE_OCCURRENCE')).toBe('예약 실행');
     expect(EXECUTION_SOURCE_TYPES).toContain('AGENT_REQUEST');
     expect(EXECUTION_SOURCE_TYPES).not.toContain('Agent');
+    expect(labelExecutionSource('SOME_UNKNOWN_SOURCE')).toBe('SOME_UNKNOWN_SOURCE');
   });
 
   it('maps Schedule target Canonical → label', () => {

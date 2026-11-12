@@ -270,7 +270,7 @@ export default function Dashboard() {
         <MetricCard
           label="평균 실행 시간"
           value={formatDurationMs(s.avg_duration_ms)}
-          sub={`p95: ${formatDurationMs(s.p95_duration_ms)}`}
+          sub={`95%가 ${formatDurationMs(s.p95_duration_ms)} 이내 완료 (p95)`}
           icon={<Clock size={14} />}
           color="bg-indigo-100 text-indigo-600"
         />
