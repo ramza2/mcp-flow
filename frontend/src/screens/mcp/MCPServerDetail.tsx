@@ -419,12 +419,12 @@ export default function MCPServerDetail() {
           <div className="flex gap-2 flex-wrap justify-end">
             {canActivate && (
               <Button variant="primary" size="sm" loading={statusMutating} onClick={handleActivate}>
-                Activate
+                활성화
               </Button>
             )}
             {canDeactivate && (
               <Button variant="outline" size="sm" loading={statusMutating} onClick={handleDeactivate}>
-                Deactivate
+                비활성화
               </Button>
             )}
             <Button
@@ -434,7 +434,7 @@ export default function MCPServerDetail() {
               loading={discovering}
               onClick={runDiscoveryPreview}
             >
-              Discovery Preview
+              도구 탐색 미리보기
             </Button>
             <Button
               variant="secondary"
@@ -442,7 +442,7 @@ export default function MCPServerDetail() {
               disabled={!previewResult?.success}
               onClick={() => setApplyOpen(true)}
             >
-              Apply Discovery
+              탐색 결과 적용
             </Button>
             <Button
               variant="secondary"
@@ -536,7 +536,7 @@ export default function MCPServerDetail() {
                   ? '—'
                   : server.auth_secret_id
                     ? `설정됨 (${shortenId(server.auth_secret_id)})`
-                    : 'not configured'}
+                    : '미설정'}
               </Row>
             </InfoCard>
           </div>
@@ -623,7 +623,7 @@ export default function MCPServerDetail() {
 
         {tab === 'health' && (
           <div className="max-w-xl space-y-4">
-            <InfoCard title="서버 Health 요약">
+            <InfoCard title="서버 연결 상태 요약">
               <Row label="최근 정상 연결">{formatTimestamp(server.last_healthy_at)}</Row>
               <Row label="최근 연결 오류">{formatTimestamp(server.last_error_at)}</Row>
             </InfoCard>
@@ -639,7 +639,7 @@ export default function MCPServerDetail() {
               </div>
             ) : null}
             <EmptyState
-              title="연결 테스트 이력 API 미제공"
+              title="연결 테스트 이력 조회 미지원"
               description="과거 연결 테스트 이력 조회는 아직 지원하지 않습니다. 이 화면에서 실행한 연결 테스트 결과만 볼 수 있습니다."
             />
           </div>
