@@ -218,7 +218,7 @@ describe('MCPServerDetail — API detail', () => {
     expect(await screen.findByRole('heading', { name: 'Docs MCP' })).toBeInTheDocument();
     expect(screen.getByText('활성')).toBeInTheDocument();
 
-    await user.click(screen.getByRole('button', { name: /^도구/i }));
+    await user.click(screen.getByRole('button', { name: /^도구\s*\d+$/i }));
     expect(await screen.findByText(/tools boom/i)).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: 'Docs MCP' })).toBeInTheDocument();
   });
