@@ -3,6 +3,7 @@ import { fireEvent, render, screen, waitFor, within } from "@testing-library/rea
 import userEvent from "@testing-library/user-event"
 import WorkflowVisualEditor, {
   addConditionStepToPlan,
+  addGuidedToolStepToPlan,
   addStepToPlan,
   causesDependencyCycle,
   getResponseStepIds,
@@ -406,6 +407,101 @@ describe("Canonical visual workflow editor", () => {
       tool_version_id: toolVersionId,
       bindings: { topic: { kind: "LITERAL", value: "" } },
     })
+  })
+
+  it("adds guided TOOL steps with canonical predecessors and true/false branches", () => {
+    const base = addStepToPlan(basePlan(), "TOOL", toolVersionId)
+    const condition = addConditionStepToPlan(base, "step:tool_1")
+    const conditionId = getVisualSteps(condition)?.[1].id
+    expect(conditionId).toBe("condition_2")
+
+    const linked = addGuidedToolStepToPlan(base, toolVersionId, "tool_1", null, "날씨 확인")
+    expect(getVisualSteps(linked)?.[1]).toMatchObject({
+      name: "날씨 확인 실행", depends_on: ["tool_1"], when: null,
+      config: { tool_version_id: toolVersionId, bindings: {} },
+    })
+
+    const truePlan = addGuidedToolStepToPlan(condition, toolVersionId, conditionId, true, "조회")
+    const trueStep = getVisualSteps(truePlan)?.at(-1)
+    expect(trueStep?.depends_on).toEqual([conditionId])
+    expect(simpleBranchWhen(trueStep?.when)).toEqual({ conditionId, expected: true })
+
+    const falsePlan = addGuidedToolStepToPlan(condition, toolVersionId, conditionId, false)
+    expect(simpleBranchWhen(getVisualSteps(falsePlan)?.at(-1)?.when)).toEqual({
+      conditionId, expected: false,
+    })
+    expect(falsePlan.inputs).toEqual(base.inputs)
+    expect(falsePlan.completion).toEqual(base.completion)
+    expect(condition.steps).toHaveLength(2)
+    expect(addGuidedToolStepToPlan(condition, toolVersionId, conditionId, null)).toBe(condition)
+    expect(addGuidedToolStepToPlan(condition, toolVersionId, "missing", true)).toBe(condition)
+    expect(addGuidedToolStepToPlan(condition, "", "tool_1")).toBe(condition)
+    expect(addGuidedToolStepToPlan(base, toolVersionId, "tool_1", true)).toBe(base)
+
+    const scoped: Plan = { ...basePlan(), steps: [
+      { id: "loop", name: "반복", type: "LOOP", depends_on: [], config: { body_step_ids: ["inside"] } },
+      { id: "inside", name: "내부", type: "TOOL", depends_on: [], config: {} },
+    ] }
+    expect(addGuidedToolStepToPlan(scoped, toolVersionId, "loop")).toBe(scoped)
+    expect(addGuidedToolStepToPlan(scoped, toolVersionId, "inside")).toBe(scoped)
+  })
+
+  it("guides a non-expert through adding a true-branch tool without editing JSON", async () => {
+    const user = userEvent.setup()
+    const plan = addConditionStepToPlan(
+      addStepToPlan(basePlan(), "TOOL", toolVersionId), "step:tool_1",
+    )
+    const onChange = vi.fn()
+    render(<WorkflowVisualEditor plan={plan} readOnly={false} onChange={onChange} />)
+    await screen.findByRole("option", { name: /날씨 확인/ })
+    await user.selectOptions(screen.getByLabelText("사용할 MCP 도구"), activeTool.id)
+    await user.selectOptions(screen.getByLabelText("이전에 실행할 단계 (선택)"), "condition_2")
+    expect(screen.getByRole("button", { name: "도구 단계 추가" })).toBeDisabled()
+    await user.selectOptions(screen.getByLabelText("어떤 조건 결과에서 실행할까요?"), "true")
+    await user.click(screen.getByRole("button", { name: "도구 단계 추가" }))
+    const updated = onChange.mock.lastCall?.[0] as Plan
+    const step = getVisualSteps(updated)?.at(-1)
+    expect(step?.depends_on).toEqual(["condition_2"])
+    expect(simpleBranchWhen(step?.when)).toEqual({ conditionId: "condition_2", expected: true })
+    expect(step?.name).toBe("날씨 확인 실행")
+    expect(screen.getByLabelText("이전에 실행할 단계 (선택)")).toHaveValue("")
+    expect(screen.queryByLabelText("어떤 조건 결과에서 실행할까요?")).not.toBeInTheDocument()
+  })
+
+  it("searches active tools server-side and pages through results", async () => {
+    const user = userEvent.setup()
+    const secondTool = {
+      ...activeTool,
+      id: "55555555-5555-4555-8555-555555555555",
+      remote_name: "list_tasks",
+      display_name: "업무 목록",
+      current_version_id: "66666666-6666-4666-8666-666666666666",
+    }
+    vi.mocked(listMCPTools).mockImplementation(async (params) => ({
+      items: params.page === 2 ? [secondTool] : [activeTool],
+      page: params.page ?? 1,
+      page_size: 100,
+      total: 101,
+      has_next: params.page === 1,
+    }))
+    const onChange = vi.fn()
+    render(<WorkflowVisualEditor plan={basePlan()} readOnly={false} onChange={onChange} />)
+    await waitFor(() => expect(screen.getByRole("button", { name: "다음 도구 페이지" })).toBeEnabled())
+    await user.click(screen.getByRole("button", { name: "다음 도구 페이지" }))
+    await waitFor(() => expect(listMCPTools).toHaveBeenCalledWith(
+      expect.objectContaining({ page: 2, status: "ACTIVE" }),
+    ))
+    await screen.findByRole("option", { name: /업무 목록/ })
+    await user.selectOptions(screen.getByLabelText("사용할 MCP 도구"), secondTool.id)
+    await user.click(screen.getByRole("button", { name: "도구 단계 추가" }))
+    expect(getVisualSteps(onChange.mock.lastCall?.[0] as Plan)?.[0].config).toEqual({
+      tool_version_id: secondTool.current_version_id, bindings: {},
+    })
+    await user.type(screen.getByLabelText("도구 검색어"), "날씨")
+    await user.click(screen.getByRole("button", { name: "검색" }))
+    await waitFor(() => expect(listMCPTools).toHaveBeenCalledWith(
+      expect.objectContaining({ page: 1, q: "날씨", status: "ACTIVE" }),
+    ))
   })
 
   it("never permits writes from the visual editor for a published version", async () => {
