@@ -14,10 +14,7 @@ function jsonResponse(body: unknown, status = 200) {
 }
 
 function footerNext(container: HTMLElement): HTMLButtonElement {
-  const buttons = within(container).getAllByRole('button', { name: /^다음$/ });
-  const enabled = buttons.find(b => !(b as HTMLButtonElement).disabled) as HTMLButtonElement;
-  if (!enabled) throw new Error('No enabled Next button');
-  return enabled;
+  return within(container).getByRole('button', { name: /^다음$/ }) as HTMLButtonElement;
 }
 
 describe('MCPServerNew — API wizard', () => {
@@ -25,37 +22,30 @@ describe('MCPServerNew — API wizard', () => {
     vi.unstubAllGlobals();
   });
 
-  it('shows Current MCP protocol info without connection test gate', async () => {
+  it('guides through 3 honest steps and requires the name and endpoint', async () => {
     const user = userEvent.setup();
     const view = renderWithRouter(<MCPServerNew />, {
       path: '/mcp/servers/new',
       route: '/mcp/servers/new',
     });
 
-    await user.click(footerNext(view.container));
-    await user.click(footerNext(view.container));
+    expect(screen.getByRole('heading', { name: 'MCP 서버 등록' })).toBeInTheDocument();
+    expect(footerNext(view.container)).toBeDisabled();
+
+    await user.type(screen.getByRole('textbox', { name: '서버 이름' }), 'Test MCP');
     await user.click(footerNext(view.container));
 
-    expect(within(view.container).getByText(/Connection Test는 DRAFT 서버 등록 후/i)).toBeInTheDocument();
-    expect(within(view.container).queryByRole('button', { name: /연결 테스트 실행/i })).not.toBeInTheDocument();
+    expect(screen.getByText(/Streamable HTTP \(현재 지원\)/)).toBeInTheDocument();
+    expect(footerNext(view.container)).toBeDisabled();
+    expect(screen.getByText(/토큰이나 API 키가 필요한 서버는 여기서 연결할 수 없으며/)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '연결 테스트 실행' })).not.toBeInTheDocument();
 
-    await user.click(footerNext(view.container));
-    expect(within(view.container).getByText(CURRENT_MCP_PROTOCOL_VERSION)).toBeInTheDocument();
-    expect(within(view.container).getByText(/server\/discover는 optional/i)).toBeInTheDocument();
-  });
-
-  it('shows NONE auth only and disabled secret auth types', async () => {
-    const user = userEvent.setup();
-    const view = renderWithRouter(<MCPServerNew />, {
-      path: '/mcp/servers/new',
-      route: '/mcp/servers/new',
-    });
-
-    await user.click(footerNext(view.container));
+    await user.type(screen.getByRole('textbox', { name: 'MCP 서버 주소 (URL)' }), 'https://example.com/mcp');
     await user.click(footerNext(view.container));
 
-    expect(within(view.container).getByText('None')).toBeInTheDocument();
-    expect(within(view.container).getAllByText(/Secret Store 연동 후 사용 가능/i).length).toBeGreaterThan(0);
+    expect(screen.getByText(new RegExp(CURRENT_MCP_PROTOCOL_VERSION))).toBeInTheDocument();
+    expect(screen.getByText(/등록 후 서버 상세 화면으로 이동합니다/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '서버 등록' })).toBeEnabled();
   });
 
   it('POST createMCPServer and navigates to detail on success', async () => {
@@ -82,9 +72,7 @@ describe('MCPServerNew — API wizard', () => {
     await user.click(footerNext(view.container));
     await user.type(screen.getByPlaceholderText('https://mcp.example.com/mcp'), 'https://example.com/mcp');
 
-    for (let i = 0; i < 5; i++) {
-      await user.click(footerNext(view.container));
-    }
+    await user.click(footerNext(view.container));
 
     await user.click(screen.getByRole('button', { name: /서버 등록/i }));
 
@@ -121,9 +109,7 @@ describe('MCPServerNew — API wizard', () => {
     await user.click(footerNext(view.container));
     await user.type(screen.getByPlaceholderText('https://mcp.example.com/mcp'), 'https://example.com/mcp');
 
-    for (let i = 0; i < 5; i++) {
-      await user.click(footerNext(view.container));
-    }
+    await user.click(footerNext(view.container));
 
     await user.click(screen.getByRole('button', { name: /서버 등록/i }));
     expect(await screen.findByText('name is required')).toBeInTheDocument();

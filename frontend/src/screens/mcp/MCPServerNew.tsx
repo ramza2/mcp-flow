@@ -2,25 +2,12 @@ import { useState } from 'react';
 import { useNavigate } from 'react-router';
 import { ArrowLeft, Check, ChevronRight } from 'lucide-react';
 import Button from '../../components/ui/Button';
-import { EmptyState, InlineAlert } from '../../components/ui/EmptyState';
+import { InlineAlert } from '../../components/ui/EmptyState';
 import { createMCPServer } from '../../api/mcp';
-import { ApiError, isApiError } from '../../api/client';
-import {
-  CURRENT_MCP_PROTOCOL_VERSION,
-  MCP_AUTH_TYPES,
-  labelAuthType,
-  type MCPAuthType,
-} from '../../domain';
+import { isApiError } from '../../api/client';
+import { CURRENT_MCP_PROTOCOL_VERSION } from '../../domain';
 
-const STEPS = [
-  'Basic',
-  'Transport',
-  'Authentication',
-  'Connection Test',
-  'Protocol / Capability',
-  'Tool Preview',
-  'Review & Register',
-];
+const STEPS = ['기본 정보', '연결 설정', '확인 및 등록'];
 
 export default function MCPServerNew() {
   const navigate = useNavigate();
@@ -28,7 +15,6 @@ export default function MCPServerNew() {
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
   const [endpointUrl, setEndpointUrl] = useState('');
-  const [authType, setAuthType] = useState<MCPAuthType>('NONE');
   const [registering, setRegistering] = useState(false);
   const [registerError, setRegisterError] = useState<string | null>(null);
 
@@ -64,9 +50,10 @@ export default function MCPServerNew() {
           onClick={() => navigate('/mcp/servers')}
           className="flex items-center gap-1.5 text-sm text-slate-500 hover:text-slate-700 mb-3"
         >
-          <ArrowLeft size={14} /> MCP Servers
+          <ArrowLeft size={14} /> MCP 서버 목록
         </button>
-        <h1 className="text-lg font-semibold text-slate-900">MCP Server 등록</h1>
+        <h1 className="text-lg font-semibold text-slate-900">MCP 서버 등록</h1>
+        <p className="text-sm text-slate-500 mt-1">기본 정보를 입력해 서버를 등록한 다음 상세 화면에서 연결 확인과 도구 탐색을 진행합니다.</p>
       </div>
 
       <div className="bg-white border-b border-slate-200 px-6 py-4">
@@ -92,142 +79,72 @@ export default function MCPServerNew() {
         </div>
       </div>
 
-      <div className="p-6 max-w-lg space-y-4">
+      <div className="p-6 max-w-2xl space-y-4">
         {step === 0 && (
-          <Section title="기본 정보">
-            <Field label="서버 이름">
+          <Section title="1. 서버 기본 정보">
+            <Field label="서버 이름" htmlFor="mcp-server-name">
               <input
+                id="mcp-server-name"
                 placeholder="Weather MCP"
                 className={inputClass}
                 value={name}
                 onChange={e => setName(e.target.value)}
               />
             </Field>
-            <Field label="설명">
+            <Field label="설명 (선택)" htmlFor="mcp-server-description">
               <textarea
-                placeholder="서버 설명 입력..."
+                id="mcp-server-description"
+                placeholder="서버가 제공하는 기능을 간단히 입력하세요."
                 rows={2}
                 className={inputClass}
                 value={description}
                 onChange={e => setDescription(e.target.value)}
               />
             </Field>
+            <p className="text-xs text-slate-500">목록에서 쉽게 찾을 수 있는 이름을 입력하세요.</p>
           </Section>
         )}
 
         {step === 1 && (
-          <Section title="Transport">
-            <Field label="Transport Type">
-              <div className="space-y-2">
-                <label
-                  className="flex items-start gap-3 p-3 rounded-lg border cursor-pointer transition-colors border-indigo-300 bg-indigo-50"
-                >
-                  <input type="radio" checked readOnly className="mt-0.5 accent-indigo-600" />
-                  <div>
-                    <p className="text-sm font-medium text-slate-800">Streamable HTTP</p>
-                    <p className="text-xs text-slate-400">현재 MCP 표준 Transport</p>
-                  </div>
-                </label>
-                <label className="flex items-start gap-3 p-3 rounded-lg border border-slate-200 bg-slate-50 opacity-60 cursor-not-allowed">
-                  <input type="radio" disabled className="mt-0.5" />
-                  <div>
-                    <p className="text-sm font-medium text-slate-800">STDIO</p>
-                    <p className="text-xs text-slate-400">Manifest 연동 후 사용 가능 (deferred)</p>
-                  </div>
-                </label>
-                <label className="flex items-start gap-3 p-3 rounded-lg border border-slate-200 bg-slate-50 opacity-60 cursor-not-allowed">
-                  <input type="radio" disabled className="mt-0.5" />
-                  <div>
-                    <p className="text-sm font-medium text-slate-800">Legacy HTTP/SSE</p>
-                    <p className="text-xs text-slate-400">Legacy MCP 지원 — deferred</p>
-                  </div>
-                </label>
+          <Section title="2. 서버 연결 설정">
+            <Field label="연결 방식">
+              <div className="rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-2">
+                <p className="text-sm font-medium text-slate-800">Streamable HTTP (현재 지원)</p>
+                <p className="text-xs text-slate-600 mt-1">STDIO 및 이전 HTTP/SSE 방식은 이 등록 화면에서 사용할 수 없습니다.</p>
               </div>
             </Field>
-            <Field label="Server URL">
+            <Field label="MCP 서버 주소 (URL)" htmlFor="mcp-endpoint-url">
               <input
+                id="mcp-endpoint-url"
+                type="url"
                 placeholder="https://mcp.example.com/mcp"
                 className={inputClass}
                 value={endpointUrl}
                 onChange={e => setEndpointUrl(e.target.value)}
               />
             </Field>
+            <p className="text-xs text-slate-500">MCP 서버에서 제공한 접속 주소를 입력하세요. 실제 연결 가능 여부는 등록 후 확인합니다.</p>
+            <InlineAlert
+              type="info"
+              message="현재 이 화면에서는 인증 없는 서버만 등록할 수 있습니다. 토큰이나 API 키가 필요한 서버는 여기서 연결할 수 없으며, 비밀번호를 URL에 입력하지 마세요."
+            />
           </Section>
         )}
 
         {step === 2 && (
-          <Section title="Authentication">
-            <Field label="인증 방식">
-              <div className="space-y-2">
-                <label className="flex items-start gap-3 p-3 rounded-lg border border-indigo-300 bg-indigo-50 cursor-pointer">
-                  <input type="radio" checked readOnly className="mt-0.5 accent-indigo-600" />
-                  <div>
-                    <p className="text-sm font-medium text-slate-800">{labelAuthType('NONE')}</p>
-                  </div>
-                </label>
-                {MCP_AUTH_TYPES.filter(t => t !== 'NONE').map(t => (
-                  <label
-                    key={t}
-                    className="flex items-start gap-3 p-3 rounded-lg border border-slate-200 bg-slate-50 opacity-60 cursor-not-allowed"
-                  >
-                    <input type="radio" disabled className="mt-0.5" />
-                    <div>
-                      <p className="text-sm font-medium text-slate-800">{labelAuthType(t)}</p>
-                      <p className="text-xs text-slate-400">Secret Store 연동 후 사용 가능</p>
-                    </div>
-                  </label>
-                ))}
-              </div>
-            </Field>
-          </Section>
-        )}
-
-        {step === 3 && (
-          <Section title="Connection Test">
-            <InlineAlert
-              type="info"
-              message="Connection Test는 DRAFT 서버 등록 후 상세 페이지에서 실행할 수 있습니다. 이 단계에서는 연결 테스트를 수행하지 않습니다."
-            />
-          </Section>
-        )}
-
-        {step === 4 && (
-          <Section title="Protocol / Capability">
-            <div className="space-y-2 text-sm">
-              <Row label="Protocol">Current MCP</Row>
-              <Row label="Protocol Version">{CURRENT_MCP_PROTOCOL_VERSION}</Row>
-              <Row label="Protocol Era">CURRENT</Row>
-              <Row label="Discovery Mode">
-                미결정 — Discovery 실행 후 EXPLICIT_DISCOVERY 또는 INFERRED_CURRENT
-              </Row>
-              <Row label="server/discover">Optional — Current MCP에서는 명시적 Discovery가 선택사항입니다</Row>
-            </div>
-            <InlineAlert
-              type="info"
-              message="Current MCP: server/discover는 optional입니다. Explicit discovery 없이도 self-describing Current 요청이 정상 동작하면 INFERRED_CURRENT로 호환 가능합니다."
-            />
-          </Section>
-        )}
-
-        {step === 5 && (
-          <Section title="Tool Preview">
-            <EmptyState
-              title="등록 후 Discovery 필요"
-              description="Tool 목록은 서버 등록 후 Discovery를 실행하면 표시됩니다."
-            />
-          </Section>
-        )}
-
-        {step === 6 && (
-          <Section title="Review & Register">
+          <Section title="3. 확인 및 등록">
             <div className="space-y-2 text-sm">
               <Row label="이름">{name || '—'}</Row>
               <Row label="설명">{description || '—'}</Row>
-              <Row label="Transport">Streamable HTTP</Row>
-              <Row label="Endpoint">{endpointUrl || '—'}</Row>
-              <Row label="인증">{labelAuthType(authType)}</Row>
-              <Row label="Protocol">Current MCP ({CURRENT_MCP_PROTOCOL_VERSION})</Row>
+              <Row label="연결 방식">Streamable HTTP</Row>
+              <Row label="서버 주소">{endpointUrl || '—'}</Row>
+              <Row label="인증">없음 (NONE)</Row>
+              <Row label="프로토콜">Current MCP ({CURRENT_MCP_PROTOCOL_VERSION})</Row>
             </div>
+            <InlineAlert
+              type="info"
+              message="등록 후 서버 상세 화면으로 이동합니다. 그곳에서 ① 연결 테스트 ② 도구 탐색 미리보기 ③ 탐색 결과 적용 ④ 필요한 도구 활성화를 진행하세요. 등록만으로 도구가 활성화되지는 않습니다."
+            />
             {registerError && <InlineAlert type="error" message={registerError} />}
             <Button
               loading={registering}
@@ -245,7 +162,12 @@ export default function MCPServerNew() {
             이전
           </Button>
           {step < STEPS.length - 1 ? (
-            <Button onClick={() => setStep(step + 1)}>다음</Button>
+            <Button
+              onClick={() => setStep(step + 1)}
+              disabled={step === 0 ? !name.trim() : !endpointUrl.trim()}
+            >
+              다음
+            </Button>
           ) : null}
         </div>
       </div>
@@ -262,10 +184,10 @@ function Section({ title, children }: { title: string; children: React.ReactNode
   );
 }
 
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
+function Field({ label, htmlFor, children }: { label: string; htmlFor?: string; children: React.ReactNode }) {
   return (
     <div>
-      <label className="block text-xs font-medium text-slate-600 mb-1.5">{label}</label>
+      <label htmlFor={htmlFor} className="block text-xs font-medium text-slate-600 mb-1.5">{label}</label>
       {children}
     </div>
   );

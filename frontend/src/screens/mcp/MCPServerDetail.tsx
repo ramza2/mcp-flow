@@ -114,7 +114,7 @@ export default function MCPServerDetail() {
         setToolsHasNext(toolsData.has_next);
       } catch (err) {
         if (isAbortError(err) || signal?.aborted || !mountedRef.current) return;
-        setToolsError(toFeedbackError(err, 'Tool 목록을 불러오지 못했습니다.'));
+        setToolsError(toFeedbackError(err, '도구 목록을 불러오지 못했습니다.'));
       } finally {
         if (!signal?.aborted && mountedRef.current) setToolsLoading(false);
       }
@@ -139,7 +139,7 @@ export default function MCPServerDetail() {
         setDiscHasNext(discData.has_next);
       } catch (err) {
         if (isAbortError(err) || signal?.aborted || !mountedRef.current) return;
-        setDiscoveriesError(toFeedbackError(err, 'Discovery 이력을 불러오지 못했습니다.'));
+        setDiscoveriesError(toFeedbackError(err, '도구 탐색 이력을 불러오지 못했습니다.'));
       } finally {
         if (!signal?.aborted && mountedRef.current) setDiscoveriesLoading(false);
       }
@@ -205,7 +205,7 @@ export default function MCPServerDetail() {
       setServer(updated);
     } catch (err) {
       if (!mountedRef.current) return;
-      setMutationError(toFeedbackError(err, 'Activate에 실패했습니다.'));
+      setMutationError(toFeedbackError(err, '서버 활성화에 실패했습니다.'));
     } finally {
       if (mountedRef.current) setStatusMutating(false);
     }
@@ -221,7 +221,7 @@ export default function MCPServerDetail() {
       setServer(updated);
     } catch (err) {
       if (!mountedRef.current) return;
-      setMutationError(toFeedbackError(err, 'Deactivate에 실패했습니다.'));
+      setMutationError(toFeedbackError(err, '서버 비활성화에 실패했습니다.'));
     } finally {
       if (mountedRef.current) setStatusMutating(false);
     }
@@ -294,7 +294,7 @@ export default function MCPServerDetail() {
           capabilities: null,
         });
       } else {
-        setMutationError(toFeedbackError(err, 'Discovery Preview에 실패했습니다.'));
+        setMutationError(toFeedbackError(err, '도구 탐색 미리보기에 실패했습니다.'));
       }
     } finally {
       if (mountedRef.current) setDiscovering(false);
@@ -309,7 +309,7 @@ export default function MCPServerDetail() {
       const result = await createDiscovery(serverId, { apply_changes: true });
       if (!mountedRef.current) return;
       if (!result.success) {
-        setApplyError(result.error_message ?? 'Discovery 적용에 실패했습니다.');
+        setApplyError(result.error_message ?? '도구 탐색 결과 적용에 실패했습니다.');
         return;
       }
       setApplyOpen(false);
@@ -317,7 +317,7 @@ export default function MCPServerDetail() {
       await Promise.all([reloadServer(), reloadTools(), reloadDiscoveries()]);
     } catch (err) {
       if (!mountedRef.current) return;
-      setApplyError(isApiError(err) ? err.message : 'Discovery 적용에 실패했습니다.');
+      setApplyError(isApiError(err) ? err.message : '도구 탐색 결과 적용에 실패했습니다.');
     } finally {
       if (mountedRef.current) setApplying(false);
     }
@@ -377,20 +377,20 @@ export default function MCPServerDetail() {
   const toolCols: Column<MCPToolDto>[] = [
     {
       key: 'displayName',
-      label: 'Display Name',
+      label: '표시 이름',
       render: r => (
         <span className="font-medium text-slate-800">{r.display_name ?? r.remote_name}</span>
       ),
     },
     {
       key: 'sourceName',
-      label: 'Source Name',
+      label: '원본 도구 이름',
       render: r => <span className="font-mono text-xs text-slate-500">{r.remote_name}</span>,
     },
     { key: 'status', label: '상태', render: r => <StatusBadge status={r.status} size="sm" /> },
     {
       key: 'updatedAt',
-      label: 'Updated',
+      label: '수정 시각',
       render: r => <span className="text-xs text-slate-400">{formatTimestamp(r.updated_at)}</span>,
     },
   ];
@@ -402,7 +402,7 @@ export default function MCPServerDetail() {
           onClick={() => navigate('/mcp/servers')}
           className="flex items-center gap-1.5 text-sm text-slate-500 hover:text-slate-700 mb-3"
         >
-          <ArrowLeft size={14} /> MCP Servers
+          <ArrowLeft size={14} /> MCP 서버 목록
         </button>
         <div className="flex items-start justify-between">
           <div>
@@ -417,33 +417,6 @@ export default function MCPServerDetail() {
             </div>
           </div>
           <div className="flex gap-2 flex-wrap justify-end">
-            {canActivate && (
-              <Button variant="primary" size="sm" loading={statusMutating} onClick={handleActivate}>
-                Activate
-              </Button>
-            )}
-            {canDeactivate && (
-              <Button variant="outline" size="sm" loading={statusMutating} onClick={handleDeactivate}>
-                Deactivate
-              </Button>
-            )}
-            <Button
-              variant="outline"
-              size="sm"
-              icon={<RefreshCw size={13} />}
-              loading={discovering}
-              onClick={runDiscoveryPreview}
-            >
-              Discovery Preview
-            </Button>
-            <Button
-              variant="secondary"
-              size="sm"
-              disabled={!previewResult?.success}
-              onClick={() => setApplyOpen(true)}
-            >
-              Apply Discovery
-            </Button>
             <Button
               variant="secondary"
               size="sm"
@@ -453,6 +426,33 @@ export default function MCPServerDetail() {
             >
               연결 테스트
             </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              icon={<RefreshCw size={13} />}
+              loading={discovering}
+              onClick={runDiscoveryPreview}
+            >
+              도구 탐색 미리보기
+            </Button>
+            <Button
+              variant="secondary"
+              size="sm"
+              disabled={!previewResult?.success}
+              onClick={() => setApplyOpen(true)}
+            >
+              탐색 결과 적용
+            </Button>
+            {canActivate && (
+              <Button variant="primary" size="sm" loading={statusMutating} onClick={handleActivate}>
+                활성화
+              </Button>
+            )}
+            {canDeactivate && (
+              <Button variant="outline" size="sm" loading={statusMutating} onClick={handleDeactivate}>
+                비활성화
+              </Button>
+            )}
           </div>
         </div>
         {mutationError && (
@@ -470,7 +470,7 @@ export default function MCPServerDetail() {
               <span className="text-slate-500 ml-2">{lastTest.latency_ms}ms</span>
             )}
             {lastTest.protocol_version && (
-              <span className="text-slate-500 ml-2">protocol {lastTest.protocol_version}</span>
+              <span className="text-slate-500 ml-2">프로토콜 {lastTest.protocol_version}</span>
             )}
             {lastTest.error_message && (
               <p className="text-red-600 text-xs mt-1">{lastTest.error_message}</p>
@@ -480,12 +480,12 @@ export default function MCPServerDetail() {
         {previewResult && (
           <div className="mt-3 p-3 rounded-lg border border-slate-200 bg-slate-50 text-sm">
             <p className="font-medium">
-              Discovery Preview — {previewResult.success ? 'Success' : 'Failed'}
+              도구 탐색 미리보기 — {previewResult.success ? '성공' : '실패'}
             </p>
             {previewResult.success ? (
               <p className="text-xs text-slate-600 mt-1">
-                added {previewResult.diff.added} · changed {previewResult.diff.changed} · missing{' '}
-                {previewResult.diff.missing} · unchanged {previewResult.diff.unchanged}
+                추가 {previewResult.diff.added} · 변경 {previewResult.diff.changed} · 누락{' '}
+                {previewResult.diff.missing} · 변경 없음 {previewResult.diff.unchanged}
               </p>
             ) : (
               <p className="text-xs text-red-600 mt-1">{previewResult.error_message}</p>
@@ -495,14 +495,20 @@ export default function MCPServerDetail() {
         {applyError && <InlineAlert type="error" message={applyError} />}
       </div>
 
+      <section aria-label="서버 등록 후 작업 안내" className="border-b border-slate-200 bg-slate-50 px-6 py-3 text-sm text-slate-600">
+        <p className="font-medium text-slate-800">서버 등록 후 이용 순서</p>
+        <p className="mt-1">① 연결 테스트로 접속 확인 → ② 도구 탐색 미리보기로 변경 사항 확인 → ③ 탐색 결과 적용 → ④ 도구 상세에서 필요한 도구 활성화</p>
+        <p className="mt-1 text-xs text-slate-500">도구 탐색 미리보기만으로 도구가 등록되지는 않습니다. 결과 적용 전 변경 내용을 확인하세요.</p>
+      </section>
+
       <div className="bg-white border-b border-slate-200 px-6">
         <TabBar
           tabs={[
-            { id: 'overview', label: 'Overview' },
-            { id: 'tools', label: 'Tools', badge: toolsTotal },
-            { id: 'discovery', label: 'Discovery History' },
-            { id: 'health', label: 'Health' },
-            { id: 'audit', label: 'Audit' },
+            { id: 'overview', label: '기본 정보' },
+            { id: 'tools', label: '도구', badge: toolsTotal },
+            { id: 'discovery', label: '탐색 이력' },
+            { id: 'health', label: '연결 상태' },
+            { id: 'audit', label: '감사 이력' },
           ]}
           activeTab={tab}
           onChange={setTab}
@@ -513,24 +519,24 @@ export default function MCPServerDetail() {
         {tab === 'overview' && (
           <div className="grid grid-cols-2 gap-4 max-w-2xl">
             <InfoCard title="연결 정보">
-              <Row label="Transport">{labelTransport(server.transport_type)}</Row>
-              <Row label="Endpoint" mono>{server.endpoint_url ?? '—'}</Row>
-              <Row label="Protocol">{labelProtocolEra(server.protocol_era)}</Row>
-              <Row label="Version" mono>{server.negotiated_protocol_version ?? '—'}</Row>
-              <Row label="Discovery">
+              <Row label="연결 방식">{labelTransport(server.transport_type)}</Row>
+              <Row label="서버 주소" mono>{server.endpoint_url ?? '—'}</Row>
+              <Row label="프로토콜">{labelProtocolEra(server.protocol_era)}</Row>
+              <Row label="프로토콜 버전" mono>{server.negotiated_protocol_version ?? '—'}</Row>
+              <Row label="탐색 방식">
                 {server.discovery_mode ? labelDiscoveryMode(server.discovery_mode) : '—'}
               </Row>
-              <Row label="Last Health">{formatTimestamp(server.last_healthy_at)}</Row>
-              <Row label="Last Error">{formatTimestamp(server.last_error_at)}</Row>
+              <Row label="최근 정상 연결">{formatTimestamp(server.last_healthy_at)}</Row>
+              <Row label="최근 연결 오류">{formatTimestamp(server.last_error_at)}</Row>
             </InfoCard>
             <InfoCard title="인증">
               <Row label="방식">{labelAuthType(server.auth_type)}</Row>
-              <Row label="Secret Reference">
+              <Row label="인증 정보">
                 {server.auth_type === 'NONE'
                   ? '—'
                   : server.auth_secret_id
-                    ? `configured (${shortenId(server.auth_secret_id)})`
-                    : 'not configured'}
+                    ? `설정됨 (${shortenId(server.auth_secret_id)})`
+                    : '미설정'}
               </Row>
             </InfoCard>
           </div>
@@ -548,7 +554,7 @@ export default function MCPServerDetail() {
             )}
             {!toolsLoading && !toolsError && tools.length === 0 && (
               <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
-                <EmptyState title="이 서버에 등록된 Tool이 없습니다" description="Discovery를 실행해 Tool을 가져오세요." />
+                <EmptyState title="이 서버에 등록된 도구가 없습니다" description="도구 탐색 미리보기를 확인한 후 결과를 적용하세요." />
               </div>
             )}
             {!toolsLoading && !toolsError && tools.length > 0 && (
@@ -582,7 +588,7 @@ export default function MCPServerDetail() {
               />
             )}
             {!discoveriesLoading && !discoveriesError && discoveries.length === 0 && (
-              <EmptyState title="Discovery 이력이 없습니다" />
+              <EmptyState title="도구 탐색 이력이 없습니다" />
             )}
             {!discoveriesLoading && !discoveriesError && discoveries.length > 0 && (
               <div className="space-y-2">
@@ -596,8 +602,8 @@ export default function MCPServerDetail() {
                         {formatTimestamp(d.finished_at ?? d.started_at)}
                       </p>
                       <p className="text-xs text-slate-400">
-                        added {d.diff.added} · changed {d.diff.changed} · missing {d.diff.missing}
-                        {d.apply_changes ? ' · applied' : ' · preview'}
+                        추가 {d.diff.added} · 변경 {d.diff.changed} · 누락 {d.diff.missing}
+                        {d.apply_changes ? ' · 적용됨' : ' · 미리보기'}
                       </p>
                     </div>
                     <StatusBadge status={d.success ? 'SUCCEEDED' : 'FAILED'} size="sm" />
@@ -617,14 +623,14 @@ export default function MCPServerDetail() {
 
         {tab === 'health' && (
           <div className="max-w-xl space-y-4">
-            <InfoCard title="서버 Health 요약">
-              <Row label="Last Healthy">{formatTimestamp(server.last_healthy_at)}</Row>
-              <Row label="Last Error">{formatTimestamp(server.last_error_at)}</Row>
+            <InfoCard title="서버 연결 상태 요약">
+              <Row label="최근 정상 연결">{formatTimestamp(server.last_healthy_at)}</Row>
+              <Row label="최근 연결 오류">{formatTimestamp(server.last_error_at)}</Row>
             </InfoCard>
             {lastTest ? (
               <div className="bg-white border border-slate-200 rounded-lg px-4 py-3 flex items-center justify-between">
                 <span className="text-xs font-mono text-slate-500">
-                  {formatTimestamp(lastTest.checked_at)} (session)
+                  {formatTimestamp(lastTest.checked_at)} (현재 화면)
                 </span>
                 <span className="text-sm font-mono text-slate-600">
                   {lastTest.latency_ms != null ? `${lastTest.latency_ms}ms` : '—'}
@@ -633,16 +639,16 @@ export default function MCPServerDetail() {
               </div>
             ) : null}
             <EmptyState
-              title="연결 테스트 이력 API 미제공"
-              description="Health check history API는 아직 제공되지 않습니다. 상세 페이지에서 실행한 연결 테스트 결과만 표시됩니다."
+              title="연결 테스트 이력 조회 미지원"
+              description="과거 연결 테스트 이력 조회는 아직 지원하지 않습니다. 이 화면에서 실행한 연결 테스트 결과만 볼 수 있습니다."
             />
           </div>
         )}
 
         {tab === 'audit' && (
           <EmptyState
-            title="Audit 로그 deferred"
-            description="서버 Audit 이력 API는 아직 제공되지 않습니다."
+            title="감사 이력 조회 미지원"
+            description="서버 감사 이력 조회 기능은 아직 지원하지 않습니다."
           />
         )}
       </div>
@@ -651,9 +657,9 @@ export default function MCPServerDetail() {
         open={applyOpen}
         onClose={() => setApplyOpen(false)}
         onConfirm={runDiscoveryApply}
-        title="Discovery 변경 적용"
-        description="Preview된 Discovery diff를 서버 Tool registry에 적용합니다. 계속하시겠습니까?"
-        confirmLabel="Apply"
+        title="도구 탐색 결과 적용"
+        description="미리 확인한 탐색 결과를 서버의 도구 목록에 반영합니다. 추가·변경·누락 항목에 영향을 줄 수 있습니다. 계속하시겠습니까?"
+        confirmLabel="적용"
         loading={applying}
       />
     </div>
