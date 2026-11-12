@@ -12,6 +12,8 @@ import { isAbortError, isApiError } from '../../api/client';
 import { formatTimestamp, labelWorkflowStatus, labelWorkflowVersionStatus, labelWorkflowVisibility } from '../../domain';
 import type { WorkflowStatus } from '../../domain/types';
 import { parseWorkflowRunInputs, planInputDefinitions } from './workflowRunInputs';
+import { canUseWorkflowInputForm, parseWorkflowInputForm, workflowInputsToForm } from './workflowRunInputForm';
+import WorkflowRunInputForm from './WorkflowRunInputForm';
 
 /** Initial server-side DRAFT is intentionally incomplete and must be edited + validated. */
 export function initialWorkflowPlan(workflow: WorkflowDto) {
@@ -38,6 +40,9 @@ export default function WorkflowDetail() {
   const [statusTarget, setStatusTarget] = useState<WorkflowStatus | null>(null);
   const [runOpen, setRunOpen] = useState(false);
   const [runInputs, setRunInputs] = useState('{}');
+  const [runMode, setRunMode] = useState<'form' | 'json'>('form');
+  const [runFormValues, setRunFormValues] = useState<Record<string, string>>({});
+  const [runFormIncluded, setRunFormIncluded] = useState<Record<string, boolean>>({});
   const [runKey, setRunKey] = useState('');
   const [runInputError, setRunInputError] = useState<string | null>(null);
   const [error, setError] = useState<{ message: string; requestId?: string } | null>(null);
@@ -76,6 +81,7 @@ export default function WorkflowDetail() {
   const canActivate = Boolean(hasPublishedCurrent && (workflow?.status === 'DRAFT' || workflow?.status === 'INACTIVE'));
   const canRun = Boolean(workflow?.status === 'ACTIVE' && hasPublishedCurrent);
   const inputDefinitions = current ? planInputDefinitions(current.plan_definition) : {};
+  const runFormSupported = current ? canUseWorkflowInputForm(current.plan_definition) : false;
 
   const handleCreateOrEdit = async () => {
     if (!workflow || busy) return;
@@ -157,9 +163,29 @@ export default function WorkflowDetail() {
     }
   };
 
+  const switchRunMode = () => {
+    if (!current || busy) return;
+    if (runMode === 'form') {
+      const parsed = parseWorkflowInputForm(runFormValues, runFormIncluded, current.plan_definition);
+      if (!parsed.ok) { setRunInputError(parsed.error); return; }
+      setRunInputs(JSON.stringify(parsed.value, null, 2));
+      setRunMode('json');
+    } else {
+      const parsed = parseWorkflowRunInputs(runInputs, current.plan_definition);
+      if (!parsed.ok) { setRunInputError(parsed.error); return; }
+      const form = workflowInputsToForm(parsed.value, current.plan_definition);
+      setRunFormValues(form.values);
+      setRunFormIncluded(form.included);
+      setRunMode('form');
+    }
+    setRunInputError(null);
+  };
+
   const handleRun = async () => {
     if (!workflow || !current || !canRun || !runKey || busy) return;
-    const parsed = parseWorkflowRunInputs(runInputs, current.plan_definition);
+    const parsed = runMode === 'form'
+      ? parseWorkflowInputForm(runFormValues, runFormIncluded, current.plan_definition)
+      : parseWorkflowRunInputs(runInputs, current.plan_definition);
     if (!parsed.ok) {
       setRunInputError(parsed.error);
       return;
@@ -251,7 +277,15 @@ export default function WorkflowDetail() {
             )}
             <Button size="sm" icon={<Play size={13} />} disabled={!canRun || busy}
               title={canRun ? '현재 게시 버전 수동 실행' : 'ACTIVE 워크플로의 검증된 게시 버전만 실행할 수 있습니다.'}
-              onClick={() => { setRunInputs('{}'); setRunInputError(null); setRunKey(crypto.randomUUID()); setRunOpen(true); }}>
+              onClick={() => {
+                setRunInputs('{}');
+                setRunFormValues({});
+                setRunFormIncluded({});
+                setRunMode(runFormSupported ? 'form' : 'json');
+                setRunInputError(null);
+                setRunKey(crypto.randomUUID());
+                setRunOpen(true);
+              }}>
               수동 실행
             </Button>
           </div>
@@ -324,20 +358,37 @@ export default function WorkflowDetail() {
           <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-md p-2">
             실행 시 연결된 MCP 도구가 외부 시스템에 실제 변경을 수행할 수 있습니다. 입력값과 실행 대상을 확인하세요.
           </p>
-          <p className="text-xs text-slate-600">필요한 입력 항목 (계획 정의 기준)</p>
-          {Object.keys(inputDefinitions).length ? (
-            <ul className="space-y-1 text-xs text-slate-600 list-disc pl-4">
-              {Object.entries(inputDefinitions).map(([name, definition]) => (
-                <li key={name}><span className="font-mono">{name}</span> · {definition.type} · {definition.required ? '필수' : '선택'}{definition.secret ? ' · SECRET_REF만 허용' : ''}</li>
-              ))}
-            </ul>
-          ) : <p className="text-xs text-slate-500">추가 입력이 없는 워크플로입니다.</p>}
-          <label htmlFor="workflow-run-inputs" className="block text-xs font-medium text-slate-700">입력값 JSON 객체</label>
-          <textarea id="workflow-run-inputs" aria-label="입력값 JSON 객체" value={runInputs}
-            onChange={event => { setRunInputs(event.target.value); setRunInputError(null); }}
-            spellCheck={false} rows={6}
-            className="w-full rounded-md border border-slate-300 p-2 text-xs font-mono focus:ring-2 focus:ring-indigo-500" />
-          <p className="text-xs text-slate-500">비밀 입력은 원문 대신 등록된 Secret의 UUID를 담은 SECRET_REF 객체로 전달해야 합니다.</p>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <p className="text-xs text-slate-600">현재 게시 버전 입력 항목 ({Object.keys(inputDefinitions).length}개)</p>
+            {runFormSupported && (
+              <button type="button" className="text-xs text-indigo-600 underline hover:text-indigo-800"
+                disabled={busy} onClick={switchRunMode}>
+                {runMode === 'form' ? '고급 JSON 입력' : '폼 입력으로 돌아가기'}
+              </button>
+            )}
+          </div>
+          {!runFormSupported && <InlineAlert type="info" message="지원하지 않는 입력 유형이 있어 고급 JSON 입력을 사용합니다. 서버에서 최종 검증합니다." />}
+          {runMode === 'form' && runFormSupported ? (
+            <WorkflowRunInputForm definitions={inputDefinitions} values={runFormValues}
+              included={runFormIncluded} busy={busy}
+              onValueChange={(name, value) => {
+                setRunFormValues(previous => ({ ...previous, [name]: value }));
+                setRunInputError(null);
+              }}
+              onIncludeChange={(name, enabled) => {
+                setRunFormIncluded(previous => ({ ...previous, [name]: enabled }));
+                setRunInputError(null);
+              }} />
+          ) : (
+            <>
+              <label htmlFor="workflow-run-inputs" className="block text-xs font-medium text-slate-700">입력값 JSON 객체</label>
+              <textarea id="workflow-run-inputs" aria-label="입력값 JSON 객체" value={runInputs}
+                onChange={event => { setRunInputs(event.target.value); setRunInputError(null); }}
+                disabled={busy} spellCheck={false} rows={6}
+                className="w-full rounded-md border border-slate-300 p-2 text-xs font-mono focus:ring-2 focus:ring-indigo-500" />
+              <p className="text-xs text-slate-500">비밀 입력은 원문 대신 등록된 Secret UUID를 담은 SECRET_REF 객체로 전달해야 합니다.</p>
+            </>
+          )}
           {runInputError && <InlineAlert type="error" message={runInputError} />}
         </div>
       </Dialog>
