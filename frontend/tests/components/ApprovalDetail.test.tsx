@@ -11,9 +11,9 @@ describe('ApprovalDetail contract regression', () => {
       route: '/approvals/apr-001',
     });
 
-    expect(screen.getByText('PENDING')).toBeInTheDocument();
+    expect(screen.getByText('대기')).toHaveAttribute('title', 'PENDING');
     // WAITING_APPROVAL may appear in explanatory copy about Execution, but badge must be PENDING.
-    const badges = screen.getAllByText('PENDING');
+    const badges = screen.getAllByText('대기');
     expect(badges.length).toBeGreaterThan(0);
     expect(screen.queryByText('WAITING_APPROVAL')).not.toBeInTheDocument();
   });
@@ -35,7 +35,7 @@ describe('ApprovalDetail contract regression', () => {
     await user.click(confirm);
 
     expect(await screen.findByText(/거절 완료/i)).toBeInTheDocument();
-    expect(screen.getByText('REJECTED')).toBeInTheDocument();
+    expect(screen.getByText('거절됨')).toHaveAttribute('title', 'REJECTED');
     expect(screen.queryByText('APPROVED')).not.toBeInTheDocument();
     expect(screen.queryByText(/승인 완료/i)).not.toBeInTheDocument();
   });
