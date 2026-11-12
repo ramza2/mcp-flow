@@ -92,7 +92,7 @@ export function workflowInputsToForm(
     } else if (typeof value === 'string') {
       values[name] = value;
     } else {
-      values[name] = JSON.stringify(value, null, 2);
+      values[name] = JSON.stringify(value, null, 2) ?? '';
     }
   }
   return { values, included };
