@@ -14,10 +14,7 @@ function jsonResponse(body: unknown, status = 200) {
 }
 
 function footerNext(container: HTMLElement): HTMLButtonElement {
-  const buttons = within(container).getAllByRole('button', { name: /^다음$/ });
-  const enabled = buttons.find(b => !(b as HTMLButtonElement).disabled) as HTMLButtonElement;
-  if (!enabled) throw new Error('No enabled Next button');
-  return enabled;
+  return within(container).getByRole('button', { name: /^다음$/ }) as HTMLButtonElement;
 }
 
 describe('MCPServerNew — API wizard', () => {
