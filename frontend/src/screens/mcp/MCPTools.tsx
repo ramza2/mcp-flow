@@ -10,7 +10,7 @@ import { EmptyState, ErrorState, InlineAlert, LoadingSkeleton } from '../../comp
 import { activateMCPTool, deactivateMCPTool, getMCPTool, listMCPServers, listMCPTools } from '../../api/mcp';
 import { isAbortError, isApiError } from '../../api/client';
 import type { MCPServerDto, MCPToolDto } from '../../api/types';
-import { formatTimestamp, MCP_TOOL_STATUSES } from '../../domain';
+import { formatTimestamp, MCP_TOOL_STATUSES, labelMCPToolStatus } from '../../domain';
 import {
   isLifecycleActionDisabled,
   isVersionConflict,
@@ -80,7 +80,7 @@ export default function MCPTools() {
       })
       .catch(err => {
         if (isAbortError(err) || cancelled) return;
-        setError(toFeedbackError(err, 'Tool 목록을 불러오지 못했습니다.'));
+        setError(toFeedbackError(err, '도구 목록을 불러오지 못했습니다.'));
         setTools([]);
         setTotal(0);
         setHasNext(false);
@@ -116,7 +116,7 @@ export default function MCPTools() {
       if (isVersionConflict(err)) {
         setActionError({
           message:
-            '다른 작업으로 Tool 상태가 변경되었습니다. 최신 상태를 다시 불러옵니다. ' +
+            '다른 작업으로 도구 상태가 변경되었습니다. 최신 상태를 다시 불러옵니다. ' +
             (isApiError(err) ? err.message : ''),
           requestId: isApiError(err) ? err.requestId ?? undefined : undefined,
           code: isApiError(err) ? err.code : undefined,
@@ -128,7 +128,7 @@ export default function MCPTools() {
           loadTools();
         }
       } else {
-        setActionError(toFeedbackError(err, `${action}에 실패했습니다.`));
+        setActionError(toFeedbackError(err, `${action === 'activate' ? '활성화' : '비활성화'}에 실패했습니다.`));
       }
     } finally {
       mutatingIdsRef.current.delete(tool.id);
@@ -139,19 +139,19 @@ export default function MCPTools() {
   const columns: Column<MCPToolDto>[] = [
     {
       key: 'displayName',
-      label: 'Display Name',
+      label: '표시 이름',
       render: r => (
         <span className="font-medium text-slate-800">{r.display_name ?? r.remote_name}</span>
       ),
     },
     {
       key: 'sourceName',
-      label: 'Source Name',
+      label: '원본 도구 이름',
       render: r => <span className="font-mono text-xs text-slate-500">{r.remote_name}</span>,
     },
     {
       key: 'serverName',
-      label: 'Server',
+      label: 'MCP 서버',
       render: r => <span className="text-sm text-slate-600">{serverName(r.mcp_server_id)}</span>,
     },
     { key: 'status', label: '상태', render: r => <StatusBadge status={r.status} size="sm" /> },
@@ -162,7 +162,7 @@ export default function MCPTools() {
     },
     {
       key: 'actions',
-      label: 'Action',
+      label: '작업',
       width: 'w-28',
       render: r => {
         const action = toolLifecycleAction(r.status);
@@ -191,7 +191,7 @@ export default function MCPTools() {
               void runLifecycle(r, action);
             }}
           >
-            {action === 'activate' ? 'Activate' : 'Deactivate'}
+            {action === 'activate' ? '활성화' : '비활성화'}
           </Button>
         );
       },
@@ -206,21 +206,26 @@ export default function MCPTools() {
 
   return (
     <div>
-      <PageHeader title="MCP Tools" description="등록된 MCP Tool의 상태와 정책을 관리합니다." />
+      <PageHeader title="MCP 도구 관리" description="서버에서 탐색한 도구의 상태와 사용 정책을 확인합니다." />
       <div className="p-6 space-y-4">
+        <section aria-label="MCP 도구 이용 안내" className="rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600">
+          <p className="font-semibold text-slate-800">도구 사용 전 확인하세요</p>
+          <p className="mt-1">서버에서 도구를 탐색한 뒤 필요한 도구만 활성화하세요. 도구 상세에서 설명·위험도·실행 정책과 검증 결과를 먼저 확인하는 것이 좋습니다.</p>
+          <p className="mt-1 text-xs text-slate-500">활성화 버튼은 도구 상태를 변경하며, 실제 실행 가능 여부는 서버의 권한 및 정책 검사에 따라 결정됩니다.</p>
+        </section>
         <FilterBar
           search
-          searchPlaceholder="Tool 이름, 서버 검색..."
+          searchPlaceholder="도구 이름, 서버 이름 검색..."
           onSearch={setSearchInput}
           filters={[
             {
               key: 'status',
-              label: 'Tool Status',
-              options: MCP_TOOL_STATUSES.map(v => ({ value: v, label: v })),
+              label: '도구 상태',
+              options: MCP_TOOL_STATUSES.map(v => ({ value: v, label: labelMCPToolStatus(v) })),
             },
             {
               key: 'server',
-              label: 'Server',
+              label: 'MCP 서버',
               options: servers.map(s => ({ value: s.id, label: s.name })),
             },
           ]}
@@ -240,7 +245,10 @@ export default function MCPTools() {
           ) : error ? (
             <ErrorState message={error.message} requestId={error.requestId} onRetry={loadTools} />
           ) : tools.length === 0 ? (
-            <EmptyState title="등록된 MCP Tool이 없습니다" description="서버에서 Discovery를 실행해 Tool을 가져오세요." />
+            <EmptyState
+              title={debouncedQ || statusFilter || serverFilter ? '조건에 맞는 MCP 도구가 없습니다' : '등록된 MCP 도구가 없습니다'}
+              description={debouncedQ || statusFilter || serverFilter ? '검색어 또는 필터를 변경해 보세요.' : 'MCP 서버에서 도구 탐색 결과를 미리 확인하고 적용해 주세요.'}
+            />
           ) : (
             <>
               <DataTable

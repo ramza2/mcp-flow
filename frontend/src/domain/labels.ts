@@ -9,6 +9,8 @@ import type {
   ExternalMCPReviewState,
   MCPAuthType,
   MCPCheckStatus,
+  MCPServerStatus,
+  MCPToolStatus,
   MCPDiscoveryMode,
   MCPProtocolEra,
   MCPTransportType,
@@ -197,10 +199,34 @@ export const MCP_PROTOCOL_ERA_LABELS: Record<MCPProtocolEra, string> = {
 };
 
 export const MCP_CHECK_STATUS_LABELS: Record<MCPCheckStatus, string> = {
-  SUCCEEDED: 'Succeeded',
-  FAILED: 'Failed',
-  TIMED_OUT: 'Timed Out',
+  SUCCEEDED: '연결 성공',
+  FAILED: '연결 실패',
+  TIMED_OUT: '응답 시간 초과',
 };
+
+/** MCP status labels are presentation only; persisted and filter values remain canonical. */
+export const MCP_SERVER_STATUS_LABELS: Record<MCPServerStatus, string> = {
+  DRAFT: '초안',
+  ACTIVE: '활성',
+  INACTIVE: '비활성',
+  ERROR: '오류',
+};
+
+export const MCP_TOOL_STATUS_LABELS: Record<MCPToolStatus, string> = {
+  DISCOVERED: '발견됨',
+  ACTIVE: '활성',
+  INACTIVE: '비활성',
+  MISSING: '누락',
+  BLOCKED: '차단됨',
+};
+
+export function labelMCPServerStatus(value: string): string {
+  return MCP_SERVER_STATUS_LABELS[value as MCPServerStatus] ?? value;
+}
+
+export function labelMCPToolStatus(value: string): string {
+  return MCP_TOOL_STATUS_LABELS[value as MCPToolStatus] ?? value;
+}
 
 export const EXTERNAL_MCP_REVIEW_STATE_LABELS: Record<ExternalMCPReviewState, string> = {
   UNREVIEWED: 'Unreviewed',
