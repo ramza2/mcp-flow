@@ -9,6 +9,7 @@ import { isAbortError, isApiError } from '../../api/client';
 import type { JsonValue } from '../../api/types';
 import { labelWorkflowVersionStatus } from '../../domain';
 import WorkflowVisualEditor from './WorkflowVisualEditor';
+import WorkflowValidationReport, { isCurrentWorkflowValidation } from './WorkflowValidationReport';
 
 /** Both editor modes round-trip the exact server Plan JSON; visual mode only patches known fields. */
 export default function WorkflowPlanEditor() {
@@ -50,6 +51,9 @@ export default function WorkflowPlanEditor() {
 
   const readOnly = version?.status !== 'DRAFT';
   const dirty = source !== savedSource;
+  const currentValidation = version
+    ? isCurrentWorkflowValidation(version.validation_status, version.validation_report, version.content_hash)
+    : false;
   const visualPlan = (() => {
     try {
       const parsed: unknown = JSON.parse(source);
@@ -133,7 +137,7 @@ export default function WorkflowPlanEditor() {
     <div>
       <PageHeader
         title={`${workflow.name} · v${version.version_no} ${readOnly ? '조회' : '초안 편집'}`}
-        description={`버전 상태: ${labelWorkflowVersionStatus(version.status)} · 서버 검증: ${version.validation_status}`}
+        description={`버전 상태: ${labelWorkflowVersionStatus(version.status)} · 서버 검증: ${dirty ? '미저장 변경 사항' : currentValidation ? '통과' : '검증 필요'}`}
         actions={(
           <div className="flex gap-2">
             <Button variant="outline" icon={<ArrowLeft size={13} />} onClick={() => navigate(`/workflows/${workflowId}`)}>상세로</Button>
@@ -167,10 +171,14 @@ export default function WorkflowPlanEditor() {
             value={source} disabled={readOnly || saving || validating} onChange={event => { setSource(event.target.value); setError(null); setSuccess(null); }}
           />
         </>}
-        {version.validation_report && <div className="rounded-xl border border-slate-200 p-4 bg-white">
-          <h2 className="font-medium text-sm text-slate-800 mb-2">마지막 서버 검증 보고서</h2>
-          <pre className="text-xs text-slate-600 whitespace-pre-wrap break-all">{JSON.stringify(version.validation_report, null, 2)}</pre>
-        </div>}
+        {version.validation_report && (
+          <WorkflowValidationReport
+            report={version.validation_report}
+            status={version.validation_status}
+            contentHash={version.content_hash}
+            dirty={dirty}
+          />
+        )}
       </div>
     </div>
   );
