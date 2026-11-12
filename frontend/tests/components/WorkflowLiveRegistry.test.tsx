@@ -460,6 +460,36 @@ describe('Workflow real registry — no mock IDs or pretend save', () => {
     expect(saveWorkflowPlan).not.toHaveBeenCalled();
   });
 
+  it('shows the exact saved server report as a concise Korean result without new network requests', async () => {
+    vi.mocked(getWorkflowVersion).mockResolvedValue({
+      ...version, validation_status: 'VALID',
+      validation_report: {
+        valid: true, content_hash: version.content_hash,
+        checks: { plan_schema: 'OK', static_plan: 'OK', tool_versions: 'OK', approval_policies: 'OK' },
+        errors: [], schema_version: '1.0',
+      },
+    });
+    const user = userEvent.setup();
+    renderWithRouter(<WorkflowPlanEditor />, {
+      path: '/workflows/:workflowId/versions/:versionId/edit',
+      route: `/workflows/${wfId}/versions/${vId}/edit`,
+    });
+    expect(await screen.findByRole('heading', { name: '워크플로 검증 완료' })).toBeInTheDocument();
+    expect(screen.getByText(/서버 검증: 통과/)).toBeInTheDocument();
+    expect(screen.getByText('도구 버전')).toBeInTheDocument();
+    const summary = screen.getByText('전체 서버 검증 보고서 (JSON)');
+    expect(summary.closest('details')).not.toHaveAttribute('open');
+    expect(validateWorkflowVersion).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole('button', { name: '고급 JSON' }));
+    fireEvent.change(screen.getByRole('textbox', { name: '실행 계획 JSON' }), {
+      target: { value: JSON.stringify({ ...version.plan_definition, goal: '초안 수정 중' }) },
+    });
+    expect(screen.getByText('변경된 초안은 아직 검증되지 않았습니다')).toBeInTheDocument();
+    expect(screen.getByText(/서버 검증: 미저장 변경 사항/)).toBeInTheDocument();
+    expect(validateWorkflowVersion).not.toHaveBeenCalled();
+  });
+
   it('uses the server validator only for unchanged DRAFT, without publishing', async () => {
     const user = userEvent.setup();
     renderWithRouter(<WorkflowPlanEditor />, {
