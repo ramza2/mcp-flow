@@ -20,8 +20,8 @@ export function parseWorkflowInputForm(
   const definitions = planInputDefinitions(plan);
   const output: Record<string, JsonValue> = Object.create(null);
   for (const [name, definition] of Object.entries(definitions)) {
-    if (!definition.required && included[name] !== true) continue;
-    const raw = values[name] ?? '';
+    if (!definition.required && !(Object.prototype.hasOwnProperty.call(included, name) && included[name] === true)) continue;
+    const raw = Object.prototype.hasOwnProperty.call(values, name) ? (values[name] ?? '') : '';
     if (definition.required && raw.trim() === '') {
       return { ok: false, error: `필수 입력값이 없습니다: ${name}` };
     }
