@@ -478,11 +478,11 @@ describe("Canonical visual workflow editor", () => {
       current_version_id: "66666666-6666-4666-8666-666666666666",
     }
     vi.mocked(listMCPTools).mockImplementation(async (params) => ({
-      items: params.page === 2 ? [secondTool] : [activeTool],
-      page: params.page ?? 1,
+      items: params?.page === 2 ? [secondTool] : [activeTool],
+      page: params?.page ?? 1,
       page_size: 100,
       total: 101,
-      has_next: params.page === 1,
+      has_next: params?.page === 1,
     }))
     const onChange = vi.fn()
     render(<WorkflowVisualEditor plan={basePlan()} readOnly={false} onChange={onChange} />)
