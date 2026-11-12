@@ -909,6 +909,7 @@ DRAFT → PUBLISHED → DEPRECATED
 
 - Live Workflow registry UI: GET 목록의 server-side status/q/page, 오류/빈 목록 표시, 새 등록 시 명시적 클릭만 POST, detail의 exact UUID 버전 목록, DRAFT 생성 시 WORKFLOW owning source, PUBLISHED/DEPRECATED 읽기 전용 검증.
 - 시각 편집/고급 JSON Plan 화면: DRAFT만 저장, 저장되지 않은 내용은 validate 금지, malformed JSON은 클라이언트에서 차단, 서버 content_hash preflight로 이미 변경된 버전의 덮어쓰기 거절(원자적 If-Match 미지원 한계 명시), 저장 후 INVALID 초기화 및 별도 `/validate` 결과 표시, 임의 Plan Step Type/Status 변환 금지.
+- 도구 단계 추가 안내형 UI 회귀: 활성 Tool 서버 측 검색·페이지 이동, 검색어 변경 시 페이지 1 복귀, current ToolVersion 고정, 일반 선행 연결과 CONDITION 참/거짓 Branch의 canonical `depends_on`/`when` 생성, 조건 결과 미선택 시 추가 차단, 존재하지 않는/LOOP 보호 선행 단계 차단, 읽기 전용 PUBLISHED 변경 금지, 입력 바인딩·Plan metadata 원본 보존.
 - 시각 편집 회귀: 활성 MCP Tool의 immutable ToolVersion만 신규 TOOL에 설정, JOIN canonical policy, 선행 단계 cycle 차단, TOOL BindingKind canonical 집합, PUBLISHED 읽기 전용, 편집 모드 전환 시 복잡한 기존 Predicate/Loop/when/Plan metadata 손실 없음. 서버 PUT 전까지 모든 변경은 클라이언트 로컬 초안으로 유지한다.
 - CONDITION 시각 편집 회귀: 명시적인 비밀정보 외 입력값/기존 TOOL 결과만 기본 조건 생성에 이용하고, 표준 `exists`/`is_null`/문자열 `eq`/`ne` Predicate shape와 JSON Pointer를 유지한다. 기존 복합 `and/or/not`, 숫자·객체 리터럴, LOOP 본문 Predicate, 미지원 `when`, Plan 확장 메타데이터는 자동으로 다시 쓰지 않는다. 서버 검증 전까지 로컬 초안만 변경하며 PUBLISHED에서는 편집 불가다.
 - 참/거짓 실행 분기 회귀: 후속 Step의 전이적 선행 CONDITION만 기준으로 허용하고, `eq(STEP_OUTPUT(condition_id, /condition_result), LITERAL(bool))`를 정확히 생성·변경·해제한다. 기존 복합/확장/잘못된 `when`과 LOOP/본문, 없는 선행 조건은 보존·차단한다. 그래프에 분기 레이블은 표시하되 `depends_on` 외 별도 Edge 실행 의미를 저장하지 않고, 해당 참조가 필요한 Edge 해제는 차단한다. PUBLISHED의 설정은 읽기 전용이다.
