@@ -6,6 +6,7 @@ import { EmptyState, ErrorState, InlineAlert, LoadingSkeleton } from '../../comp
 import { getFactoryBuild, type FactoryBuildDto } from '../../api/factory';
 import { isAbortError, isApiError } from '../../api/client';
 import { formatTimestamp } from '../../domain';
+import FactoryBuildPackages from './FactoryBuildPackages';
 
 export default function FactoryBuildRecord() {
   const { buildId } = useParams();
@@ -56,7 +57,7 @@ export default function FactoryBuildRecord() {
       <div className="p-6 max-w-4xl space-y-4">
         <InlineAlert
           type="warning"
-          message="Build 정의 저장만 완료된 상태입니다. 실행 가능한 패키지 생성, 보안·계약 테스트, 승인, 게시 및 Tool 활성화는 이 화면에서 실행되거나 완료되지 않습니다."
+          message="Build 정의는 패키지와 구분됩니다. 아래에서 명시적으로 패키지를 생성할 수 있지만 보안·계약 테스트, 승인, 게시 및 도구 활성화는 각각 별도 절차가 필요합니다."
         />
         {loading ? (
           <LoadingSkeleton rows={4} />
@@ -86,6 +87,7 @@ export default function FactoryBuildRecord() {
                 ))}
               </ul>
             </section>
+            <FactoryBuildPackages buildId={record.id} />
           </>
         ) : (
           <EmptyState title="Build 기록을 찾을 수 없습니다" />
