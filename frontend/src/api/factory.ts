@@ -175,3 +175,105 @@ export function createFactoryBuild(jobId: string, candidateIds: string[], idempo
 export function getFactoryBuild(buildId: string, signal?: AbortSignal) {
   return apiRequest<FactoryBuildDto>(`/factory/builds/${encodeURIComponent(buildId)}`, { signal });
 }
+
+/** Persisted declarative Tool package (not a published or active MCP Tool). */
+export interface FactoryPackageDto {
+  id: string;
+  artifact_type: 'GENERATED_PACKAGE';
+  build_id: string;
+  job_id: string;
+  package_content_sha256: string;
+  package_size_bytes: number;
+  generator_version: string;
+  package_schema_version: string;
+  tool_count: number;
+  tools: Array<{
+    candidate_id: string;
+    operation_key: string;
+    method: string;
+    path: string;
+    operation_id: string | null;
+    summary: string | null;
+    deprecated: boolean;
+  }>;
+  created_at: string;
+}
+
+export interface FactoryPackagePage {
+  items: FactoryPackageDto[];
+  build_id: string;
+  page: number;
+  page_size: number;
+  total: number;
+  has_next: boolean;
+}
+
+export interface FactoryTestRunDto {
+  id: string;
+  generated_package_id: string;
+  build_id: string;
+  job_id: string;
+  status: string;
+  result: 'PASS' | 'FAIL' | null;
+  security_policy_version: string;
+  contract_policy_version: string;
+  security_result: JsonValue | null;
+  contract_result: JsonValue | null;
+  evidence_hash: string | null;
+  error_code: string | null;
+  error_message: string | null;
+  created_at: string;
+  queued_at: string | null;
+  started_at: string | null;
+  finished_at: string | null;
+}
+
+export interface FactoryTestRunPage {
+  items: FactoryTestRunDto[];
+  generated_package_id: string;
+  page: number;
+  page_size: number;
+  total: number;
+  has_next: boolean;
+}
+
+export function listFactoryPackages(buildId: string, signal?: AbortSignal) {
+  return apiRequest<FactoryPackagePage>(`/factory/builds/${encodeURIComponent(buildId)}/artifacts`, {
+    query: { page: 1, page_size: 20, sort: '-created_at' },
+    signal,
+  });
+}
+
+export function generateFactoryPackage(buildId: string, idempotencyKey: string) {
+  return apiRequest<FactoryPackageDto>(`/factory/builds/${encodeURIComponent(buildId)}/generate`, {
+    method: 'POST',
+    headers: { 'Idempotency-Key': idempotencyKey },
+  });
+}
+
+export function getFactoryPackage(packageId: string, signal?: AbortSignal) {
+  return apiRequest<FactoryPackageDto>(`/factory/artifacts/${encodeURIComponent(packageId)}`, {
+    signal,
+  });
+}
+
+export function listFactoryPackageTests(packageId: string, signal?: AbortSignal) {
+  return apiRequest<FactoryTestRunPage>(`/factory/artifacts/${encodeURIComponent(packageId)}/tests`, {
+    query: { page: 1, page_size: 20, sort: '-created_at' },
+    signal,
+  });
+}
+
+/** Enqueues a real asynchronous sandbox test; never synthesizes a PASS outcome. */
+export function startFactoryPackageTest(packageId: string, idempotencyKey: string) {
+  return apiRequest<FactoryTestRunDto>(`/factory/artifacts/${encodeURIComponent(packageId)}/tests`, {
+    method: 'POST',
+    headers: { 'Idempotency-Key': idempotencyKey },
+  });
+}
+
+export function getFactoryTestRun(testRunId: string, signal?: AbortSignal) {
+  return apiRequest<FactoryTestRunDto>(`/factory/test-runs/${encodeURIComponent(testRunId)}`, {
+    signal,
+  });
+}
