@@ -268,7 +268,7 @@ describe('MCPToolDetail — API detail', () => {
     expect(await screen.findByRole('button', { name: /^테스트 실행$/ })).toBeInTheDocument();
     expect(screen.queryByText(/Test Call deferred/i)).not.toBeInTheDocument();
     expect(screen.getByText(/VERIFIED/i)).toBeInTheDocument();
-    expect(screen.getByText(/자동 생성되지 않습니다/i)).toBeInTheDocument();
+    expect(screen.getByText(/자동 생성되지는 않습니다/i)).toBeInTheDocument();
     expect(screen.getByText(/외부 MCP 도구를 호출할 수 있으므로/)).toBeInTheDocument();
     expect(screen.getByText(/JSON 인수를 실제 값으로 수정하세요/)).toBeInTheDocument();
 
