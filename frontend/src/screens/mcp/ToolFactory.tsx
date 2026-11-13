@@ -42,6 +42,7 @@ export default function ToolFactory() {
           도구 생성 화면의 실제 Factory API 연동은 별도 구현이 필요합니다.
         </p>
         <div className="flex flex-wrap gap-2">
+          <Button variant="outline" onClick={() => navigate('/tool-factory/jobs')}>실제 Factory 분석 작업</Button>
           <Button variant="outline" onClick={() => navigate('/mcp/servers/new')}>실제 MCP 서버 등록</Button>
         </div>
         <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
