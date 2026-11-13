@@ -1,93 +1,69 @@
 import { useNavigate, useParams } from 'react-router';
-import { ArrowLeft, Check, AlertTriangle, X } from 'lucide-react';
 import PageHeader from '../../components/ui/PageHeader';
 import StatusBadge from '../../components/ui/StatusBadge';
+import Button from '../../components/ui/Button';
+import { EmptyState, InlineAlert } from '../../components/ui/EmptyState';
 import { mockToolFactoryProjects } from '../../data/mock';
 
 export default function FactoryBuildDetail() {
   const { buildId } = useParams();
   const navigate = useNavigate();
-  const project = mockToolFactoryProjects.find(p => p.id === buildId) ?? mockToolFactoryProjects[1];
+  const project = mockToolFactoryProjects.find(item => item.id === buildId);
+
+  if (!project) {
+    return (
+      <div>
+        <PageHeader title="예시 프로젝트를 찾을 수 없습니다" />
+        <EmptyState
+          title="요청한 예시 프로젝트가 없습니다"
+          description="이 경로는 실제 Factory 작업 조회 API와 연결되지 않았습니다."
+          action={{ label: '시연 목록으로', onClick: () => navigate('/tool-factory') }}
+        />
+      </div>
+    );
+  }
+
+  const stages = [
+    { label: '빌드 예시', status: project.buildStatus },
+    { label: '테스트 예시', status: project.testStatus },
+    { label: '검토 예시', status: project.reviewStatus },
+    { label: '게시 예시', status: project.publishStatus },
+  ];
 
   return (
     <div>
       <PageHeader
-        breadcrumbs={[{ label: 'Tool Factory', to: '/tool-factory' }, { label: project.project }]}
-        title={project.project}
-        description={`Source Type: ${project.sourceType}`}
+        breadcrumbs={[{ label: '도구 생성 (시연 화면)', to: '/tool-factory' }, { label: project.project }]}
+        title={`${project.project} (예시)`}
+        description={`소스 유형: ${project.sourceType} · 고정된 샘플 데이터`}
       />
       <div className="p-6 max-w-3xl space-y-4">
-        {/* Pipeline */}
-        <div className="bg-white rounded-xl border border-slate-200 p-4">
-          <h3 className="text-sm font-semibold text-slate-800 mb-3">Build Pipeline</h3>
-          <div className="flex items-center gap-3">
-            {[
-              { label: 'Build', status: project.buildStatus },
-              { label: 'Test', status: project.testStatus },
-              { label: 'Review', status: project.reviewStatus },
-              { label: 'Publish', status: project.publishStatus },
-            ].map((stage, i) => (
-              <div key={stage.label} className="flex items-center gap-2">
-                <div className="text-center">
-                  <p className="text-xs text-slate-400 mb-1">{stage.label}</p>
-                  {stage.status ? <StatusBadge status={stage.status} size="sm" /> : <span className="text-xs text-slate-300">–</span>}
-                </div>
-                {i < 3 && <span className="text-slate-200">→</span>}
+        <InlineAlert
+          type="warning"
+          message="아래 상태는 실제 빌드·테스트·검토·게시 결과가 아닌 화면 예시입니다. 운영 작업 기록·보안 검증 증빙·생성된 MCP 도구를 조회하지 않습니다."
+        />
+        <section className="rounded-xl border border-slate-200 bg-white p-4">
+          <h2 className="text-sm font-semibold text-slate-800 mb-4">예시 진행 상태</h2>
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+            {stages.map(stage => (
+              <div key={stage.label} className="rounded-lg border border-slate-100 p-3 space-y-2">
+                <p className="text-xs text-slate-500">{stage.label}</p>
+                {stage.status
+                  ? <StatusBadge status={stage.status} size="sm" />
+                  : <span className="text-xs text-slate-400">기록 없음 (예시)</span>}
               </div>
             ))}
           </div>
-        </div>
-
-        {/* Generated Tools */}
-        <div className="bg-white rounded-xl border border-slate-200 p-4">
-          <h3 className="text-sm font-semibold text-slate-800 mb-3">생성된 Tool</h3>
-          <div className="space-y-2">
-            {[
-              { name: 'get_finance_report', status: 'SUCCEEDED' },
-              { name: 'export_report_pdf', status: 'SUCCEEDED' },
-            ].map(t => (
-              <div key={t.name} className="flex items-center gap-3 p-2.5 rounded-lg bg-slate-50">
-                <Check size={13} className="text-green-500" />
-                <span className="font-mono text-sm text-slate-700">{t.name}</span>
-              </div>
-            ))}
-          </div>
-          <p className="text-xs text-amber-600 mt-3">생성 성공이 Tool 활성화 성공을 의미하지 않습니다. MCP Server에 등록 후 활성화하세요.</p>
-        </div>
-
-        {/* Build Logs */}
-        <div className="bg-white rounded-xl border border-slate-200 p-4">
-          <h3 className="text-sm font-semibold text-slate-800 mb-3">Build Logs</h3>
-          <div className="font-mono text-xs bg-slate-900 text-slate-300 rounded-lg p-4 space-y-1 overflow-auto max-h-40">
-            <div className="text-slate-400">[2026-09-02 14:00:01] Build started: Finance Report Tools</div>
-            <div>[2026-09-02 14:00:02] Parsing OpenAPI spec...</div>
-            <div className="text-green-400">[2026-09-02 14:00:03] Extracted 2 endpoints</div>
-            <div>[2026-09-02 14:00:04] Generating MCP Tool definitions...</div>
-            <div className="text-green-400">[2026-09-02 14:00:05] Build SUCCEEDED: 2 tools generated</div>
-          </div>
-        </div>
-
-        {/* Security Test */}
-        <div className="bg-white rounded-xl border border-slate-200 p-4">
-          <h3 className="text-sm font-semibold text-slate-800 mb-3">Security Test</h3>
-          <div className="space-y-2">
-            <TestRow type="ok" label="입력 검증 테스트" />
-            <TestRow type="ok" label="출력 크기 제한 테스트" />
-            <TestRow type="ok" label="인젝션 방어 테스트" />
-          </div>
+        </section>
+        <p className="text-sm text-slate-600">
+          실제 Factory 빌드 로그와 검증 결과는 연동이 완료되기 전까지 이 화면에 표시되지 않습니다.
+          MCP 서버 연결은 서버 등록 화면에서 진행할 수 있습니다.
+        </p>
+        <div className="flex flex-wrap gap-2">
+          <Button variant="outline" onClick={() => navigate('/tool-factory')}>시연 목록으로</Button>
+          <Button onClick={() => navigate('/mcp/servers/new')}>실제 MCP 서버 등록</Button>
         </div>
       </div>
-    </div>
-  );
-}
-
-function TestRow({ type, label }: { type: 'ok' | 'warn' | 'fail'; label: string }) {
-  return (
-    <div className="flex items-center gap-2 text-sm">
-      {type === 'ok' && <Check size={13} className="text-green-500" />}
-      {type === 'warn' && <AlertTriangle size={13} className="text-amber-500" />}
-      {type === 'fail' && <X size={13} className="text-red-500" />}
-      <span className="text-slate-700">{label}</span>
     </div>
   );
 }
