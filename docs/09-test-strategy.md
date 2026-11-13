@@ -1717,6 +1717,12 @@ Accuracy = Correct Top-1 / Valid Evaluation Cases × 100
 
 ## 28. Factory 시험
 
+### Factory 실제 분석 작업 읽기 전용 API 화면 (2026-11-13)
+
+- `/tool-factory/jobs`: GET `/factory/jobs?page=1&page_size=20&sort=-created_at` 실제 응답 렌더링, 검색·샘플 데이터 혼입 없음, 빈 결과·403/500 오류 및 request ID 노출, 쓰기 요청이 없는지 확인한다.
+- `/tool-factory/jobs/:jobId`: GET 단건 조회, 실제 분석 상태·후보 수·테스트 결과 수·오류 정보만 사용한다. 과거 Mock 프로젝트, 가상 빌드 로그 및 보안 검사 성공은 표시하지 않는다.
+- 프론트엔드 read-only API 연동으로 Backend schema/DB/Worker/Factory task는 변경하지 않는다. Source upload/Build/Review/Publish는 후속 별도 PR에서 검증된 권한·멱등성·상태전이·증빙 조건을 확인한 후 추가한다.
+
 ### Tool Factory 프론트엔드 시연 화면 구분 (2026-11-13)
 
 - `/tool-factory`는 고정 Mock 프로젝트임을 분명히 알리고 실제 MCP 서버 등록 경로와 구분한다.
