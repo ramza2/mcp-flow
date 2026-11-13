@@ -76,7 +76,7 @@ describe('Factory jobs — real, read-only API', () => {
       ...job,
       candidate_count: 2,
       test_result_count: 0,
-      analysis: { source_name: 'my-service.yaml' },
+      analysis: { servers: [] },
       analysis_artifact: null,
       test_results: [],
     }));
