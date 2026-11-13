@@ -431,7 +431,7 @@ describe('MCPToolDetail — API detail', () => {
     expect(await screen.findByText(/이 도구의 실행 정책이 아직 설정되지 않았습니다/i)).toBeInTheDocument();
     expect(screen.getByText('실행 정책이란?')).toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: /실행 정책 생성/i }));
-    expect(screen.getByRole('dialog', { name: '실행 정책 생성' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: '실행 정책 생성' })).toBeInTheDocument();
     expect(screen.getByRole('combobox', { name: '위험 분류' })).toBeInTheDocument();
     expect(screen.getByRole('checkbox', { name: '사용자 확인 필요' })).toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: /^저장$/i }));
