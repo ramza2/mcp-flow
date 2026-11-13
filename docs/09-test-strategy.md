@@ -1717,6 +1717,14 @@ Accuracy = Correct Top-1 / Valid Evaluation Cases × 100
 
 ## 28. Factory 시험
 
+### Factory Discovery 계약 정합성 및 MCP 서버 활성화 UX (2026-11-13)
+
+- Backend DiscoveryResponse.factory_diff의 `CLEAN/MISMATCHED/AMBIGUOUS` 계약을 사용해 Factory 전용 matched/expected missing/unexpected remote/contract changed 분류와 원격 도구명을 표시한다. 일반 MCP Discovery 응답에는 factory_diff가 없으므로 기존 UX를 보존한다.
+- Factory 미리보기 결과가 CLEAN + success true일 때만 별도 확인 후 `apply_changes=true` POST 허용. MISMATCHED/AMBIGUOUS는 응답 success가 잘못 true로 표시되더라도 UI에서 적용 차단; Backend는 동일 snapshot/lineage/contract를 다시 재검증한다.
+- 최신 연결 테스트 실행 시 오래된 미리보기 적용 버튼을 무효화한다. Preview만으로 실제 Apply 또는 도구 활성화가 수행되지 않으며 CLEAN Apply 후에도 Tool INACTIVE를 유지한다.
+- 서버 ACTIVE 전환은 별도 확인 창에서만 POST. 오류 시 Backend RESOURCE_CONFLICT 및 Request ID를 표시한다. Factory의 Connection Test·CLEAN Apply·endpoint fingerprint 검증은 Backend가 최종 판정한다.
+- Fixture 기반 Frontend 단위 테스트와 기존 일반 MCP 회귀, typecheck/build, Backend·PostgreSQL CI 검증. 운영 실제 외부 호출/ACTIVE 전환은 이 PR 범위에서 수행하지 않는다.
+
 ### Factory READY → MCP 서버 엔드포인트 등록 UI (2026-11-13)
 
 - READY Binding의 실제 MCP endpoint와 서버 ID를 이용해 GET `/mcp/servers/{server_id}`만 먼저 수행하고 자동 PATCH·연결 테스트·Discovery·Activate를 하지 않는다.
