@@ -6,6 +6,7 @@ import { EmptyState, ErrorState, InlineAlert, LoadingSkeleton } from '../../comp
 import { getFactoryPublishForReview, getFactoryReview, publishFactoryReview, type FactoryPublishDto, type FactoryReviewDto } from '../../api/factory';
 import { isAbortError, isApiError } from '../../api/client';
 import { formatTimestamp } from '../../domain';
+import FactoryRuntimeBindingPanel from './FactoryRuntimeBindingPanel';
 
 function freshPublishKey(): string {
   const bytes = new Uint8Array(16);
@@ -185,6 +186,12 @@ export default function FactoryReviewDetail() {
                 </div>
               )}
             </section>
+            {published && (
+              <FactoryRuntimeBindingPanel
+                publishId={published.id}
+                mcpServerId={published.mcp_server_id}
+              />
+            )}
           </>
         ) : (
           <EmptyState title="검토 기록을 찾을 수 없습니다" />

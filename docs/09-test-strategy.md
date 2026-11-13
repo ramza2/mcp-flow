@@ -1717,6 +1717,14 @@ Accuracy = Correct Top-1 / Valid Evaluation Cases × 100
 
 ## 28. Factory 시험
 
+### Factory Runtime Binding DRAFT 설정 및 READY 전환 UI (2026-11-13)
+
+- Publish Detail에서 실제 Runtime Binding GET; 404 시 빈 상태. 조회만으로 DB 변경 금지, 별도 확인 체크 뒤 사용자 명시 POST로 DRAFT 생성. 409 중복 생성 시 새 POST 자동 재시도 금지.
+- DRAFT에서 원본 REST API base_url 및 NONE/BEARER/BASIC/Secret UUID 참조를 PATCH로 전송. Secret 원문/토큰 입력 없음. lock_version 낙관 잠금, 오류 및 Request ID 표시. Host allowlist·SSRF·공급자 자격증명 검사는 Backend 최종 검증.
+- READY 변경은 저장된 base_url이 있고 설정이 미변경일 때만 별도 체크 후 POST. READY가 되어도 실제 MCP 연결 성공/도구 ACTIVE 표기 금지; 기존 MCP 서버 연결 테스트·Discovery 화면으로 별도 이동.
+- READY/DISABLED는 이번 UI에서 설정 편집 금지. 기존 Publish Mock GET은 연결 설정 조회가 추가된 상황에서도 POST를 호출하지 않아야 함.
+- 전체 검증은 Mock fetch/CSRF·읽기/쓰기 분리·기존 Regression과 Frontend build/Backend·PG CI. 실제 외부 연결 및 운영 쓰기 E2E는 수행하지 않음.
+
 ### Factory Review 승인/반려 및 Publish/Import UI (2026-11-13)
 
 - 실제 `SUCCEEDED/PASS` 및 증빙 해시가 있는 TestRun만 Review UI를 노출한다. 조회 GET은 안전하며 Review 미존재 404는 빈 상태로 처리한다. QUEUED/RUNNING/FAIL은 POST 버튼 자체가 없어야 한다.

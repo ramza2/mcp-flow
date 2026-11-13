@@ -358,3 +358,73 @@ export function publishFactoryReview(reviewId: string, idempotencyKey: string) {
     },
   );
 }
+
+/**
+ * Factory RuntimeBinding targets the original REST API upstream (base_url),
+ * not an MCP endpoint. Binding READY is not equivalent to MCP Tool activation.
+ */
+export type FactoryRuntimeBindingStatus = 'DRAFT' | 'READY' | 'DISABLED';
+export type FactoryRuntimeAuthType = 'NONE' | 'BEARER' | 'BASIC';
+
+export interface FactoryRuntimeBindingDto {
+  id: string;
+  publish_id: string;
+  mcp_server_id: string;
+  review_id: string;
+  generated_package_id: string;
+  package_content_sha256: string;
+  status: FactoryRuntimeBindingStatus;
+  base_url: string | null;
+  auth_type: FactoryRuntimeAuthType;
+  auth_secret_id: string | null;
+  connect_timeout_ms: number;
+  call_timeout_ms: number;
+  max_response_bytes: number;
+  mcp_endpoint_url: string | null;
+  last_error_code: string | null;
+  last_error_message: string | null;
+  created_by: string;
+  lock_version: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface FactoryRuntimeBindingUpdate {
+  base_url?: string;
+  auth_type?: FactoryRuntimeAuthType;
+  auth_secret_id?: string | null;
+  connect_timeout_ms?: number;
+  call_timeout_ms?: number;
+  max_response_bytes?: number;
+  lock_version: number;
+}
+
+export function getFactoryRuntimeBindingForPublish(publishId: string, signal?: AbortSignal) {
+  return apiRequest<FactoryRuntimeBindingDto>(
+    `/factory/publishes/${encodeURIComponent(publishId)}/runtime-binding`,
+    { signal },
+  );
+}
+
+/** Only a user action creates a binding. Server has one binding per publish. */
+export function createFactoryRuntimeBinding(publishId: string) {
+  return apiRequest<FactoryRuntimeBindingDto>(
+    `/factory/publishes/${encodeURIComponent(publishId)}/runtime-bindings`,
+    { method: 'POST' },
+  );
+}
+
+export function updateFactoryRuntimeBinding(bindingId: string, body: FactoryRuntimeBindingUpdate) {
+  return apiRequest<FactoryRuntimeBindingDto>(
+    `/factory/runtime-bindings/${encodeURIComponent(bindingId)}`,
+    { method: 'PATCH', body },
+  );
+}
+
+/** READY validates the outbound host policy and immutable package lineage. */
+export function readyFactoryRuntimeBinding(bindingId: string, lockVersion: number) {
+  return apiRequest<FactoryRuntimeBindingDto>(
+    `/factory/runtime-bindings/${encodeURIComponent(bindingId)}/ready`,
+    { method: 'POST', body: { lock_version: lockVersion } },
+  );
+}
