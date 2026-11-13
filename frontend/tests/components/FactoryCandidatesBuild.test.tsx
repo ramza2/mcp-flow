@@ -208,7 +208,7 @@ describe('Factory candidate review and Build snapshot', () => {
     });
     expect(await screen.findByText('동물 목록')).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: 'Factory Build 정의 상세' })).toBeInTheDocument();
-    expect(screen.getByText(/패키지 생성, 보안·계약 테스트/)).toBeInTheDocument();
+    expect(screen.getByText(/패키지와 구분됩니다.*보안·계약 테스트/)).toBeInTheDocument();
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
     expect(fetchMock.mock.calls[0][0]).toContain(`/api/v1/factory/builds/${BUILD_ID}`);
     expect(fetchMock.mock.calls[0][1].method).toBe('GET');
