@@ -48,7 +48,7 @@ describe('Factory OpenAPI upload — real API / safe retry', () => {
   afterEach(() => vi.unstubAllGlobals());
 
   it('rejects missing, invalid, empty and oversized files before making a request', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ applyAccept: false });
     const fetchMock = vi.fn();
     vi.stubGlobal('fetch', fetchMock);
     renderForm();
@@ -56,7 +56,7 @@ describe('Factory OpenAPI upload — real API / safe retry', () => {
     expect(screen.getByRole('button', { name: '분석 작업 생성' })).toBeDisabled();
     const input = screen.getByLabelText('OpenAPI 문서') as HTMLInputElement;
 
-    await user.upload(input, new File(['x'], 'script.py'), { applyAccept: false });
+    await user.upload(input, new File(['x'], 'script.py'));
     expect(screen.getByText(/\.json, \.yaml 또는 \.yml 파일만/)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '분석 작업 생성' })).toBeDisabled();
 
@@ -119,7 +119,7 @@ describe('Factory OpenAPI upload — real API / safe retry', () => {
   });
 
   it('does not submit another request after a file change with invalid extension', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ applyAccept: false });
     const fetchMock = vi.fn().mockResolvedValue(jsonResponse({
       error: { code: 'AUTH_FORBIDDEN', message: '관리 권한 없음' },
     }, 403));
@@ -131,7 +131,7 @@ describe('Factory OpenAPI upload — real API / safe retry', () => {
     await user.click(screen.getByRole('button', { name: '분석 작업 생성' }));
     expect(await screen.findByText('관리 권한 없음')).toBeInTheDocument();
 
-    await user.upload(input, new File(['invalid'], 'not-source.txt'), { applyAccept: false });
+    await user.upload(input, new File(['invalid'], 'not-source.txt'));
     expect(screen.getByRole('button', { name: '분석 작업 생성' })).toBeDisabled();
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
   });
