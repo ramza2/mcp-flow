@@ -1717,6 +1717,13 @@ Accuracy = Correct Top-1 / Valid Evaluation Cases × 100
 
 ## 28. Factory 시험
 
+### Tool Factory 프론트엔드 시연 화면 구분 (2026-11-13)
+
+- `/tool-factory`는 고정 Mock 프로젝트임을 분명히 알리고 실제 MCP 서버 등록 경로와 구분한다.
+- `/tool-factory/new`에서 가짜 업로드, 빌드 지연 후 성공, 보안 검사 통과, 게시 완료를 생성하지 않는다. 단계 설명은 읽기 전용이며 실제 API 호출 또는 가상 성공 상태를 만들지 않는다.
+- `/tool-factory/:buildId`는 예시 데이터임을 표시하고 존재하지 않는 예시 ID에 무관한 프로젝트나 로그를 출력하지 않는다.
+- 현재 Backend Factory 관련 API/시험·산출물 검증 로직은 손대지 않는다. 실제 UI 연동이 완료되면 Mock 표기를 제거하기 전에 응답 기반 통합 및 권한·오류 시나리오를 별도로 검증한다.
+
 필수:
 
 - valid/invalid OpenAPI
