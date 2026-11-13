@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router';
 import { ArrowLeft, RefreshCw } from 'lucide-react';
 import StatusBadge from '../../components/ui/StatusBadge';
+import FactoryDiscoverySummary from './FactoryDiscoverySummary';
 import { TabBar } from '../../components/ui/Tabs';
 import Button from '../../components/ui/Button';
 import DataTable, { Column } from '../../components/ui/DataTable';
@@ -71,6 +72,7 @@ export default function MCPServerDetail() {
 
   const [mutationError, setMutationError] = useState<FeedbackError | null>(null);
   const [statusMutating, setStatusMutating] = useState(false);
+  const [activateOpen, setActivateOpen] = useState(false);
   const [testing, setTesting] = useState(false);
   const [lastTest, setLastTest] = useState<ConnectionTestDto | null>(null);
   const [previewResult, setPreviewResult] = useState<DiscoveryDto | null>(null);
@@ -203,8 +205,10 @@ export default function MCPServerDetail() {
       const updated = await activateMCPServer(serverId);
       if (!mountedRef.current) return;
       setServer(updated);
+      setActivateOpen(false);
     } catch (err) {
       if (!mountedRef.current) return;
+      setActivateOpen(false);
       setMutationError(toFeedbackError(err, '서버 활성화에 실패했습니다.'));
     } finally {
       if (mountedRef.current) setStatusMutating(false);
@@ -229,6 +233,8 @@ export default function MCPServerDetail() {
 
   const runConnectionTest = async () => {
     if (!serverId) return;
+    setPreviewResult(null);
+    setApplyOpen(false);
     setTesting(true);
     setMutationError(null);
     try {
@@ -267,6 +273,7 @@ export default function MCPServerDetail() {
 
   const runDiscoveryPreview = async () => {
     if (!serverId) return;
+    setApplyOpen(false);
     setDiscovering(true);
     setPreviewResult(null);
     setMutationError(null);
@@ -302,7 +309,8 @@ export default function MCPServerDetail() {
   };
 
   const runDiscoveryApply = async () => {
-    if (!serverId) return;
+    if (!serverId || !previewResult?.success ||
+        (previewResult.factory_diff && previewResult.factory_diff.status !== 'CLEAN')) return;
     setApplying(true);
     setApplyError(null);
     try {
@@ -373,6 +381,9 @@ export default function MCPServerDetail() {
 
   const canActivate = server.status === 'DRAFT' || server.status === 'INACTIVE';
   const canDeactivate = server.status === 'ACTIVE';
+  const canApplyPreview = Boolean(
+    previewResult?.success && (!previewResult.factory_diff || previewResult.factory_diff.status === 'CLEAN')
+  );
 
   const toolCols: Column<MCPToolDto>[] = [
     {
@@ -438,13 +449,13 @@ export default function MCPServerDetail() {
             <Button
               variant="secondary"
               size="sm"
-              disabled={!previewResult?.success}
+              disabled={!canApplyPreview || discovering || applying}
               onClick={() => setApplyOpen(true)}
             >
               탐색 결과 적용
             </Button>
             {canActivate && (
-              <Button variant="primary" size="sm" loading={statusMutating} onClick={handleActivate}>
+              <Button variant="primary" size="sm" loading={statusMutating} onClick={() => setActivateOpen(true)}>
                 활성화
               </Button>
             )}
@@ -492,6 +503,7 @@ export default function MCPServerDetail() {
             )}
           </div>
         )}
+        {previewResult?.factory_diff && <FactoryDiscoverySummary diff={previewResult.factory_diff} />}
         {applyError && <InlineAlert type="error" message={applyError} />}
       </div>
 
@@ -605,6 +617,15 @@ export default function MCPServerDetail() {
                         추가 {d.diff.added} · 변경 {d.diff.changed} · 누락 {d.diff.missing}
                         {d.apply_changes ? ' · 적용됨' : ' · 미리보기'}
                       </p>
+                      {d.factory_diff && (
+                        <p className="text-xs font-semibold text-slate-600">
+                          Factory 정합성: {d.factory_diff.status}
+                          {' · '}일치 {d.factory_diff.matched}
+                          {' · '}누락 {d.factory_diff.missing_expected}
+                          {' · '}예상 외 {d.factory_diff.unexpected_remote}
+                          {' · '}계약 변경 {d.factory_diff.contract_changed}
+                        </p>
+                      )}
                     </div>
                     <StatusBadge status={d.success ? 'SUCCEEDED' : 'FAILED'} size="sm" />
                   </div>
@@ -661,6 +682,15 @@ export default function MCPServerDetail() {
         description="미리 확인한 탐색 결과를 서버의 도구 목록에 반영합니다. 추가·변경·누락 항목에 영향을 줄 수 있습니다. 계속하시겠습니까?"
         confirmLabel="적용"
         loading={applying}
+      />
+      <ConfirmDialog
+        open={activateOpen}
+        onClose={() => setActivateOpen(false)}
+        onConfirm={handleActivate}
+        title="MCP 서버 활성화"
+        description="실제 MCP 서버를 업무에서 사용할 수 있도록 상태를 변경합니다. Factory 서버는 최신 SUCCEEDED 연결 테스트와 CLEAN Discovery 적용 증빙을 Backend가 다시 확인하며, 도구 자체의 활성화는 별도입니다. 계속하시겠습니까?"
+        confirmLabel="활성화 확인"
+        loading={statusMutating}
       />
     </div>
   );
