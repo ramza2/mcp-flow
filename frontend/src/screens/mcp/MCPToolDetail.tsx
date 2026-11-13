@@ -89,7 +89,7 @@ export default function MCPToolDetail() {
         return;
       }
       setSelectedVersion(null);
-      setVersionError(toFeedbackError(err, 'ToolVersion 상세를 불러오지 못했습니다.'));
+      setVersionError(toFeedbackError(err, '도구 버전 상세 정보를 불러오지 못했습니다.'));
     } finally {
       if (versionRequestRef.current === controller && mountedRef.current) {
         setVersionLoading(false);
@@ -120,7 +120,7 @@ export default function MCPToolDetail() {
         } catch (err) {
           if (isAbortError(err) || cancelled) return;
           setVersions([]);
-          setVersionError(toFeedbackError(err, 'ToolVersion 목록을 불러오지 못했습니다.'));
+          setVersionError(toFeedbackError(err, '도구 버전 목록을 불러오지 못했습니다.'));
           return;
         }
         const currentId = t.current_version_id ?? versItems[0]?.id ?? null;
@@ -137,7 +137,7 @@ export default function MCPToolDetail() {
           setNotFound(true);
           return;
         }
-        setError(toFeedbackError(err, 'Tool 정보를 불러오지 못했습니다.'));
+        setError(toFeedbackError(err, '도구 정보를 불러오지 못했습니다.'));
       })
       .finally(() => {
         if (!cancelled) setLoading(false);
@@ -162,7 +162,7 @@ export default function MCPToolDetail() {
       if (mountedRef.current) setTool(latest);
     } catch (err) {
       if (mountedRef.current) {
-        setMutationError(toFeedbackError(err, '최신 Tool 상태를 불러오지 못했습니다.'));
+        setMutationError(toFeedbackError(err, '최신 도구 상태를 불러오지 못했습니다.'));
       }
     }
   };
@@ -182,14 +182,14 @@ export default function MCPToolDetail() {
       if (isVersionConflict(err)) {
         setMutationError({
           message:
-            '다른 작업으로 Tool 상태가 변경되었습니다. 최신 상태를 다시 불러옵니다. ' +
+            '다른 작업으로 도구 상태가 변경되었습니다. 최신 상태를 다시 불러옵니다. ' +
             (isApiError(err) ? err.message : ''),
           requestId: isApiError(err) ? err.requestId ?? undefined : undefined,
           code: isApiError(err) ? err.code : undefined,
         });
         await refetchToolOnly();
       } else {
-        setMutationError(toFeedbackError(err, `${action}에 실패했습니다.`));
+        setMutationError(toFeedbackError(err, `도구 ${action === 'activate' ? '활성화' : '비활성화'}에 실패했습니다.`));
       }
     } finally {
       if (mountedRef.current) setStatusMutating(false);
@@ -233,7 +233,7 @@ export default function MCPToolDetail() {
       if (isVersionConflict(err)) {
         setMutationError({
           message:
-            '다른 작업으로 Tool이 변경되었습니다. 최신 상태를 다시 불러옵니다. ' +
+            '다른 작업으로 도구 정보가 변경되었습니다. 최신 상태를 다시 불러옵니다. ' +
             (isApiError(err) ? err.message : ''),
           requestId: isApiError(err) ? err.requestId ?? undefined : undefined,
           code: isApiError(err) ? err.code : undefined,
@@ -241,7 +241,7 @@ export default function MCPToolDetail() {
         setEditOpen(false);
         await refetchToolOnly();
       } else {
-        setEditError(toFeedbackError(err, 'Metadata 저장에 실패했습니다.').message);
+        setEditError(toFeedbackError(err, '표시 정보 저장에 실패했습니다.').message);
       }
     } finally {
       if (mountedRef.current) setEditSaving(false);
@@ -263,7 +263,7 @@ export default function MCPToolDetail() {
   if (notFound) {
     return (
       <div className="p-6">
-        <ErrorState message="Tool을 찾을 수 없습니다." onRetry={() => navigate('/mcp/tools')} />
+        <ErrorState message="도구를 찾을 수 없습니다." onRetry={() => navigate('/mcp/tools')} />
       </div>
     );
   }
@@ -289,7 +289,7 @@ export default function MCPToolDetail() {
           onClick={() => navigate('/mcp/tools')}
           className="flex items-center gap-1.5 text-sm text-slate-500 hover:text-slate-700 mb-3"
         >
-          <ArrowLeft size={14} /> MCP Tools
+          <ArrowLeft size={14} /> MCP 도구 목록
         </button>
         <div className="flex items-start justify-between gap-4">
           <div>
@@ -309,7 +309,7 @@ export default function MCPToolDetail() {
                 loading={statusMutating}
                 onClick={() => void handleLifecycle('activate')}
               >
-                Activate
+                활성화
               </Button>
             )}
             {lifecycle === 'deactivate' && (
@@ -319,7 +319,7 @@ export default function MCPToolDetail() {
                 loading={statusMutating}
                 onClick={() => void handleLifecycle('deactivate')}
               >
-                Deactivate
+                비활성화
               </Button>
             )}
             {lifecycleDisabled && (
@@ -329,7 +329,7 @@ export default function MCPToolDetail() {
                 disabled
                 title="현재 상태에서는 활성화/비활성화할 수 없습니다."
               >
-                Unavailable
+                상태 변경 불가
               </Button>
             )}
           </div>
@@ -354,18 +354,24 @@ export default function MCPToolDetail() {
         )}
       </div>
 
+      <section aria-label="도구 관리 안내" className="border-b border-slate-200 bg-slate-50 px-6 py-3 text-sm text-slate-600">
+        <p className="font-medium text-slate-800">도구를 사용하기 전에 확인하세요</p>
+        <p className="mt-1">① 기본 정보·입력값 확인 → ② 실행 정책 확인 → ③ 필요한 경우 실행 테스트와 버전별 검증 결과 확인 → ④ 도구 활성화</p>
+        <p className="mt-1 text-xs text-slate-500">활성화는 검증 완료를 의미하지 않습니다. 실제 실행 가능 여부는 서버 권한과 정책에 따라 결정됩니다.</p>
+      </section>
+
       <div className="bg-white border-b border-slate-200 px-6">
         <TabBar
           tabs={[
-            { id: 'overview', label: 'Overview' },
-            { id: 'schema', label: 'Input Schema' },
-            { id: 'output', label: 'Output Schema' },
-            { id: 'policy', label: 'Policy' },
-            { id: 'verification', label: 'Verification' },
-            { id: 'test', label: 'Test Call' },
-            { id: 'usedby', label: 'Used By' },
-            { id: 'versions', label: 'Versions' },
-            { id: 'audit', label: 'Audit' },
+            { id: 'overview', label: '기본 정보' },
+            { id: 'schema', label: '입력 스키마' },
+            { id: 'output', label: '출력 스키마' },
+            { id: 'policy', label: '실행 정책' },
+            { id: 'verification', label: '검증 이력' },
+            { id: 'test', label: '실행 테스트' },
+            { id: 'usedby', label: '사용처' },
+            { id: 'versions', label: '버전 이력' },
+            { id: 'audit', label: '감사 이력' },
           ]}
           activeTab={tab}
           onChange={setTab}
@@ -381,35 +387,35 @@ export default function MCPToolDetail() {
           <div className="space-y-4">
             <div className="flex justify-end">
               <Button variant="outline" size="sm" onClick={openEdit}>
-                Edit metadata
+                표시 정보 수정
               </Button>
             </div>
             <div className="grid grid-cols-2 gap-4">
-              <InfoCard title="Tool 정보">
-                <Row label="Source Name" mono>
+              <InfoCard title="도구 정보">
+                <Row label="원본 도구 이름" mono>
                   {tool.remote_name}
                 </Row>
-                <Row label="Display Name">{tool.display_name ?? '—'}</Row>
-                <Row label="Description">{tool.description_override ?? '—'}</Row>
-                <Row label="Tags">{tags.length ? tags.join(', ') : '—'}</Row>
-                <Row label="Server ID" mono>
+                <Row label="표시 이름">{tool.display_name ?? '—'}</Row>
+                <Row label="설명">{tool.description_override ?? '—'}</Row>
+                <Row label="태그">{tags.length ? tags.join(', ') : '—'}</Row>
+                <Row label="서버 ID" mono>
                   {shortenId(tool.mcp_server_id)}
                 </Row>
-                <Row label="Tool Status">
+                <Row label="도구 상태">
                   <StatusBadge status={tool.status} size="sm" />
                 </Row>
-                <Row label="Current Version">
+                <Row label="현재 버전">
                   {selectedVersion ? `v${selectedVersion.version_no}` : '—'}
                 </Row>
-                <Row label="Version Validation">
+                <Row label="버전 유효성">
                   {validationStatus ? <ValidationBadge status={validationStatus} /> : '—'}
                 </Row>
                 <Row label="lock_version">{tool.lock_version}</Row>
-                <Row label="First Seen">{formatTimestamp(tool.first_seen_at)}</Row>
-                <Row label="Last Seen">{formatTimestamp(tool.last_seen_at)}</Row>
+                <Row label="최초 발견">{formatTimestamp(tool.first_seen_at)}</Row>
+                <Row label="최근 발견">{formatTimestamp(tool.last_seen_at)}</Row>
               </InfoCard>
               {selectedVersion?.validation_errors && selectedVersion.validation_errors.length > 0 && (
-                <InfoCard title="Validation Errors">
+                <InfoCard title="유효성 검사 오류">
                   <JsonViewer value={selectedVersion.validation_errors} />
                 </InfoCard>
               )}
@@ -419,17 +425,17 @@ export default function MCPToolDetail() {
 
         {tab === 'schema' && !versionLoading && (
           <div className="bg-white rounded-xl border border-slate-200 p-4">
-            <h3 className="text-sm font-semibold text-slate-800 mb-3">Input Schema</h3>
-            <JsonViewer value={selectedVersion?.input_schema ?? null} emptyLabel="Input schema가 없습니다." />
+            <h3 className="text-sm font-semibold text-slate-800 mb-3">입력 스키마</h3>
+            <JsonViewer value={selectedVersion?.input_schema ?? null} emptyLabel="입력 스키마가 없습니다." />
           </div>
         )}
 
         {tab === 'output' && !versionLoading && (
           <div className="bg-white rounded-xl border border-slate-200 p-4">
-            <h3 className="text-sm font-semibold text-slate-800 mb-3">Output Schema</h3>
+            <h3 className="text-sm font-semibold text-slate-800 mb-3">출력 스키마</h3>
             <JsonViewer
               value={selectedVersion?.output_schema ?? null}
-              emptyLabel="Output schema가 없습니다."
+              emptyLabel="출력 스키마가 없습니다."
             />
           </div>
         )}
@@ -456,8 +462,8 @@ export default function MCPToolDetail() {
 
         {tab === 'usedby' && (
           <EmptyState
-            title="Used By deferred"
-            description="Agent/Workflow 사용 이력 API는 아직 제공되지 않습니다."
+            title="사용처 조회 미지원"
+            description="이 도구를 사용하는 에이전트·워크플로 조회 기능은 아직 지원하지 않습니다."
           />
         )}
 
@@ -481,7 +487,7 @@ export default function MCPToolDetail() {
                   </div>
                   <div className="flex items-center gap-2">
                     {tool.current_version_id === v.id && (
-                      <span className="text-xs text-indigo-600 font-medium">current</span>
+                      <span className="text-xs text-indigo-600 font-medium">현재 버전</span>
                     )}
                     <ValidationBadge status={v.validation_status} />
                   </div>
@@ -492,22 +498,22 @@ export default function MCPToolDetail() {
         )}
 
         {tab === 'audit' && (
-          <EmptyState title="Audit deferred" description="Tool Audit 이력 API는 아직 제공되지 않습니다." />
+          <EmptyState title="감사 이력 조회 미지원" description="도구 감사 이력 조회 기능은 아직 지원하지 않습니다." />
         )}
       </div>
 
       <Dialog
         open={editOpen}
         onClose={() => !editSaving && setEditOpen(false)}
-        title="Edit metadata"
-        description="display_name, description_override, tags만 수정합니다."
+        title="도구 표시 정보 수정"
+        description="도구 이름·설명·태그만 변경합니다. 원본 도구 정의와 실행 정책은 변경하지 않습니다."
         footer={
           <>
             <Button variant="outline" onClick={() => setEditOpen(false)} disabled={editSaving}>
               취소
             </Button>
             <Button variant="primary" loading={editSaving} onClick={() => void saveMetadata()}>
-              Save
+              저장
             </Button>
           </>
         }
@@ -515,7 +521,7 @@ export default function MCPToolDetail() {
         <div className="space-y-3 text-sm">
           {editError && <InlineAlert type="error" message={editError} />}
           <label className="block space-y-1">
-            <span className="text-xs text-slate-500">Display Name</span>
+            <span className="text-xs text-slate-500">표시 이름</span>
             <input
               className="w-full border border-slate-300 rounded-md px-2 py-1.5"
               value={displayName}
@@ -523,7 +529,7 @@ export default function MCPToolDetail() {
             />
           </label>
           <label className="block space-y-1">
-            <span className="text-xs text-slate-500">Description Override</span>
+            <span className="text-xs text-slate-500">설명</span>
             <textarea
               className="w-full border border-slate-300 rounded-md px-2 py-1.5 min-h-[80px]"
               value={descriptionOverride}
@@ -531,7 +537,7 @@ export default function MCPToolDetail() {
             />
           </label>
           <label className="block space-y-1">
-            <span className="text-xs text-slate-500">Tags (comma-separated, max 32 × 64 chars)</span>
+            <span className="text-xs text-slate-500">태그 (쉼표로 구분, 최대 32개·각 64자)</span>
             <input
               className="w-full border border-slate-300 rounded-md px-2 py-1.5"
               value={tagsInput}
