@@ -1717,6 +1717,13 @@ Accuracy = Correct Top-1 / Valid Evaluation Cases × 100
 
 ## 28. Factory 시험
 
+### Factory 패키지 생성·샌드박스 TestRun UI (2026-11-13)
+
+- Build 상세 초기 화면은 GET Build/Artifacts만 수행하며 패키지 생성·검증 POST는 하지 않는다. 실제 선언형 패키지 생성 버튼에서만 POST `/factory/builds/{buildId}/generate`, `Idempotency-Key`, same-origin CSRF를 사용한다. 불확실한 네트워크 실패 후 동일 키 재시도 확인.
+- 패키지 상세는 GET Artifact/Tests만 수행. 명시적 버튼에서만 POST `/factory/artifacts/{packageId}/tests`로 샌드박스 TestRun 등록(QUEUED), 실제 TestRun ID로 상세 화면 전환.
+- TestRun 상세는 GET `/factory/test-runs/{id}`만 호출. 실제 `status`, `result` (`PASS/FAIL/null`), `security_result`, `contract_result`, 오류, `evidence_hash`만 표시한다. 검사 결과 미확정 시 PASS 표시 금지, 성공/실패 분리, Review/Publish/Activate 완료 표기 금지.
+- 테스트는 Mock fetch 기반 Frontend 단위 테스트만 실행하며 실제 운영 DB/Worker에 쓰지 않는다. Backend/DB/Worker 변경 없음.
+
 ### Factory Candidate 선택 및 Build 정의 생성 UI (2026-11-13)
 
 - 분석 상세에서 후보 화면으로 이동; 진입 시 GET Job/후보 페이지만 호출. 조회 동작은 서버 DB를 변경하지 않는다.
