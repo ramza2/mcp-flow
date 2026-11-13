@@ -200,15 +200,17 @@ describe('Factory immutable Review and safe Publish/Import', () => {
     expect(mock.mock.calls.every(([, opts]) => opts.method === 'GET')).toBe(true);
   });
 
-  it('existing Publish is shown from actual GET without new POST', async () => {
+  it('existing Publish is shown and Runtime Binding absence is GET-only', async () => {
     const mock = vi.fn((url: string, _opts: RequestInit) =>
-      Promise.resolve(respond(url.endsWith('/publish') ? published : review)),
+      Promise.resolve(url.endsWith('/runtime-binding')
+        ? respond(notFound, 404)
+        : respond(url.endsWith('/publish') ? published : review)),
     );
     vi.stubGlobal('fetch', mock);
     reviewView();
     expect(await screen.findByText(PUBLISH_ID)).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'DRAFT 서버·도구 게시 실행' })).not.toBeInTheDocument();
-    await waitFor(() => expect(mock.mock.calls).toHaveLength(2));
+    await waitFor(() => expect(mock.mock.calls).toHaveLength(3));
     expect(mock.mock.calls.every(([, opts]) => opts.method === 'GET')).toBe(true);
   });
 
