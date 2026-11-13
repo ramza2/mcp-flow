@@ -911,6 +911,7 @@ DRAFT → PUBLISHED → DEPRECATED
 - 시각 편집/고급 JSON Plan 화면: DRAFT만 저장, 저장되지 않은 내용은 validate 금지, malformed JSON은 클라이언트에서 차단, 서버 content_hash preflight로 이미 변경된 버전의 덮어쓰기 거절(원자적 If-Match 미지원 한계 명시), 저장 후 INVALID 초기화 및 별도 `/validate` 결과 표시, 임의 Plan Step Type/Status 변환 금지.
 - MCP 목록 한국어 UX 회귀: 서버/도구 목록 제목·표 열·상태 필터 한국어 노출과 canonical option value 보존, 연결 테스트 결과 한국어 표시, 도구 활성화/비활성화 버튼 한국어 표시·기존 API/If-Match/409 충돌 흐름 불변, 최초 빈 목록/필터 결과 없음 안내, 초보자 순서 안내를 검증한다.
 - MCP 서버 등록·상세 UX 회귀: 3단계 등록 화면의 필수 입력/다음 버튼 조건, 제한된 전송·인증 선택 안내, 현재 MCP 버전·사후 연결 테스트 안내, 생성 POST와 상세 이동, 422 오류 유지, 상세 연결 테스트·탐색 미리보기·적용 확인과 기존 상태 변경 API 호출을 검증한다. 화면 라벨만 한국어로 변경하며 canonical enum과 API 계약은 그대로 유지한다.
+- MCP 도구 상세 한국어 UX 회귀: 기본 정보/스키마/정책/검증/테스트/버전 탭 이동, 초보자 작업 순서 안내, 메타데이터 표시 정보 수정·저장, 활성화/비활성화, 404 및 409 충돌 피드백을 기존 API와 동일하게 검증한다. 서버 권한·실제 Tool 실행·검증 증빙 판정은 그대로 유지한다.
 - 공통 배지/실행 출처 한국어 회귀: `StatusBadge` 정상/실행/대기/승인/오류/부분성공/결과불명/게시·폐기 값은 한국어 레이블 표시, live RUNNING만 애니메이션, 명시적 label override 우선·미지 상태 안전 fallback·hover 원본 코드 보존, `RiskBadge`/`VerificationBadge`의 원본 risk/status 불변, 실행 출처와 p95 안내, 대시보드 실데이터·권한 403 fallback 불변을 검증한다.
 - 운영 대시보드 한국어 회귀: 전역 운영 지표 조회 성공 시 실행 성공률·종료 건수·입력 및 승인 대기 합산·MCP 서버/도구·예약 실행의 표시는 한국어, 수치 및 API 호출/경로 불변을 확인한다. 403 시 `/executions` 본인 이력 fallback과 권한 안내를 유지하며 전역 데이터는 추가로 요청하거나 가짜 값을 만들지 않는다.
 - 워크플로 서버 검증 보고서 UI 회귀: 저장된 버전의 `validation_status=VALID` + `validation_report.valid=true` + `content_hash` 정확한 일치에서만 통과, 보고서 불일치/미지 구조/저장하지 않은 편집에 통과 표시 금지, 실패 원인·미지 checks·오류 목록 요약, 원본 JSON 기본 접힘 및 무손실 표시, DRAFT/게시 버전의 서버 검증 및 편집 권한 동작 불변을 확인한다.
