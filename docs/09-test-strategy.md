@@ -1717,6 +1717,13 @@ Accuracy = Correct Top-1 / Valid Evaluation Cases × 100
 
 ## 28. Factory 시험
 
+### Factory 실제 OpenAPI 업로드 및 분석 Job 생성 UI (2026-11-13)
+
+- 공통 `apiRequest`의 FormData 사용 시 JSON.stringify 금지, 수동 Content-Type 미설정, same-origin Cookie/CSRF·에러/세션 처리 유지; 일반 JSON 요청 회귀 유지.
+- `/tool-factory/jobs/new`: OpenAPI JSON/YAML 선택, 확장자/빈 파일/2MiB 초과 사전 차단, 명시적 생성 버튼에서만 POST. `source` multipart와 `Idempotency-Key` 전송 후 실제 응답 `id` 상세 페이지 이동.
+- 서버 실패·403 시 오류 표시, 결과 불확실한 동일 파일 재시도는 최초 키 재사용하여 중복 Job 생성을 방지. 파일 변경 시 새 키 사용.
+- Factory Backend의 서버 측 업로드 길이 제한, 원본 저장/Outbox/작업 생성 권한 및 멱등성 보호는 기존 구현에 위임. 테스트에서 실제 업로드·분석 실행 및 운영 데이터 변이는 금지.
+
 ### Factory 실제 분석 작업 읽기 전용 API 화면 (2026-11-13)
 
 - `/tool-factory/jobs`: GET `/factory/jobs?page=1&page_size=20&sort=-created_at` 실제 응답 렌더링, 검색·샘플 데이터 혼입 없음, 빈 결과·403/500 오류 및 request ID 노출, 쓰기 요청이 없는지 확인한다.
