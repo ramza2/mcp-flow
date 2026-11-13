@@ -268,10 +268,12 @@ describe('MCPToolDetail — API detail', () => {
     expect(await screen.findByRole('button', { name: /^테스트 실행$/ })).toBeInTheDocument();
     expect(screen.queryByText(/Test Call deferred/i)).not.toBeInTheDocument();
     expect(screen.getByText(/VERIFIED/i)).toBeInTheDocument();
-    expect(screen.getByText(/자동 생성되지 않습니다/i)).toBeInTheDocument();
+    expect(screen.getByText(/자동 생성되지는 않습니다/i)).toBeInTheDocument();
+    expect(screen.getByText(/외부 MCP 도구를 호출할 수 있으므로/)).toBeInTheDocument();
+    expect(screen.getByText(/JSON 인수를 실제 값으로 수정하세요/)).toBeInTheDocument();
 
     await user.click(screen.getByRole('button', { name: /^테스트 실행$/ }));
-    expect(await screen.findByText(/Execution 생성됨/i)).toBeInTheDocument();
+    expect(await screen.findByText(/실행 작업 생성됨/i)).toBeInTheDocument();
     expect(
       fetchMock.mock.calls.some(
         ([input, init]) =>
@@ -481,6 +483,12 @@ describe('MCPToolDetail — API detail', () => {
     await screen.findByRole('heading', { name: 'Search Docs' });
     await user.click(screen.getByRole('button', { name: /^검증 이력$/i }));
     await waitFor(() => expect(v1Signal).toBeDefined());
+    expect(screen.getByText(/검증 기록은 선택한 도구 버전에만 적용됩니다/)).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: '검증 기록 생성' }));
+    expect(screen.getByRole('heading', { name: '검증 기록 생성' })).toBeInTheDocument();
+    const verifiedOption = screen.getByRole('option', { name: '검증 완료 (VERIFIED)' }) as HTMLOptionElement;
+    expect(verifiedOption.value).toBe('VERIFIED');
+    await user.click(screen.getByRole('button', { name: '취소' }));
 
     await user.click(screen.getByRole('button', { name: /^버전 이력$/i }));
     await user.click(screen.getByText('v3'));
@@ -510,7 +518,7 @@ describe('MCPToolDetail — API detail', () => {
       }),
     );
 
-    expect(await screen.findByText(/v3 · Historical/i)).toBeInTheDocument();
+    expect(await screen.findByText(/v3 · 이전 버전/i)).toBeInTheDocument();
     expect(screen.queryByText('stale')).not.toBeInTheDocument();
   });
 

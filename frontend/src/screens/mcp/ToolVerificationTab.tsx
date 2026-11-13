@@ -120,7 +120,7 @@ export default function ToolVerificationTab({
         setItems([]);
         setTotal(0);
         setHasNext(false);
-        setError(toFeedbackError(err, 'Verification 목록을 불러오지 못했습니다.'));
+        setError(toFeedbackError(err, '도구 검증 이력을 불러오지 못했습니다.'));
       })
       .finally(() => {
         if (listRequestRef.current === controller && mountedRef.current) {
@@ -159,7 +159,7 @@ export default function ToolVerificationTab({
             return;
           }
           setDetail(null);
-          setDetailError(toFeedbackError(err, 'Verification 상세를 불러오지 못했습니다.'));
+          setDetailError(toFeedbackError(err, '도구 검증 상세를 불러오지 못했습니다.'));
         })
         .finally(() => {
           if (detailRequestRef.current === controller && mountedRef.current) {
@@ -185,7 +185,7 @@ export default function ToolVerificationTab({
     setCreateError(null);
     const criteria = criteriaVersion.trim();
     if (!criteria) {
-      setCreateError('criteria_version is required.');
+      setCreateError('검증 기준 버전을 입력하세요.');
       return;
     }
 
@@ -198,11 +198,11 @@ export default function ToolVerificationTab({
       const normalId = testExecutionId.trim();
       const errorId = errorTestExecutionId.trim();
       if (!normalId) {
-        setCreateError('Normal Manual Test Execution ID is required.');
+        setCreateError('정상 실행 테스트의 Execution ID가 필요합니다.');
         return;
       }
       if (!errorId) {
-        setCreateError('Error/Timeout Manual Test Execution ID is required.');
+        setCreateError('실패 또는 시간 초과 실행 테스트의 Execution ID가 필요합니다.');
         return;
       }
       body.test_execution_id = normalId;
@@ -214,18 +214,18 @@ export default function ToolVerificationTab({
     } else if (createStatus === 'FAILED') {
       const trimmed = resultSummaryText.trim();
       if (!trimmed) {
-        setCreateError('FAILED requires result_summary JSON object.');
+        setCreateError('실패 기록에는 결과 요약 JSON 객체가 필요합니다.');
         return;
       }
       try {
         const parsed: unknown = JSON.parse(trimmed);
         if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-          setCreateError('result_summary must be a JSON object.');
+          setCreateError('결과 요약은 JSON 객체여야 합니다.');
           return;
         }
         body.result_summary = parsed as Record<string, JsonValue>;
       } catch {
-        setCreateError('result_summary is not valid JSON.');
+        setCreateError('결과 요약의 JSON 형식이 올바르지 않습니다.');
         return;
       }
     }
@@ -241,7 +241,7 @@ export default function ToolVerificationTab({
       loadDetail(created.id);
     } catch (err) {
       if (!mountedRef.current) return;
-      setCreateError(toFeedbackError(err, 'Verification 생성에 실패했습니다.').message);
+      setCreateError(toFeedbackError(err, '도구 검증 기록 생성에 실패했습니다.').message);
     } finally {
       if (mountedRef.current) setCreating(false);
     }
@@ -250,7 +250,7 @@ export default function ToolVerificationTab({
   if (!active) return null;
 
   if (!selectedVersion || !versionId) {
-    return <EmptyState title="선택된 ToolVersion이 없습니다" />;
+    return <EmptyState title="선택된 도구 버전이 없습니다" />;
   }
 
   const isCurrent = currentVersionId === versionId;
@@ -271,11 +271,11 @@ export default function ToolVerificationTab({
       <div className="flex items-center justify-between gap-3">
         <div>
           <p className="text-sm font-semibold text-slate-800">
-            v{selectedVersion.version_no} · {isCurrent ? 'Current' : 'Historical'}
+            v{selectedVersion.version_no} · {isCurrent ? '현재 버전' : '이전 버전'}
           </p>
           <p className="text-xs text-slate-400">
-            Verification은 선택한 ToolVersion에만 귀속됩니다. VERIFIED는 Manual Tool Test
-            durable evidence와 Object Storage report로 서버가 판정합니다.
+            검증 기록은 선택한 도구 버전에만 적용됩니다. VERIFIED 판정은 서버가 수동 실행 테스트의
+            저장된 증빙과 객체 저장소 보고서를 확인해 결정합니다.
           </p>
         </div>
         <Button
@@ -286,14 +286,14 @@ export default function ToolVerificationTab({
             setCreateOpen(true);
           }}
         >
-          Generate Verification
+          검증 기록 생성
         </Button>
       </div>
 
       <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600">
-        VERIFIED 생성에는 동일 ToolVersion의 정상 SUCCEEDED Manual Test Execution과 별도
-        FAILED/TIMED_OUT error evidence Execution이 필요합니다. result_summary와 evidence
-        blob은 서버가 파생합니다.
+        VERIFIED 검증을 생성하려면 동일 도구 버전에서 성공한 수동 실행 테스트(SUCCEEDED)와
+        별도의 실패 또는 시간 초과 테스트(FAILED/TIMED_OUT)가 필요합니다.
+        결과 요약과 증빙 파일은 서버에서 생성하며, 화면에서 임의로 입력하지 않습니다.
       </div>
 
       {error && (
@@ -312,8 +312,8 @@ export default function ToolVerificationTab({
         <LoadingSkeleton rows={4} />
       ) : !error && items.length === 0 ? (
         <EmptyState
-          title="Verification 이력이 없습니다"
-          description="PENDING / FAILED 기록 또는 durable evidence 기반 VERIFIED 생성이 가능합니다."
+          title="검증 이력이 없습니다"
+          description="대기·실패 기록을 남기거나, 필요한 실행 테스트 증빙을 확보한 후 검증 완료 기록을 생성할 수 있습니다."
         />
       ) : (
         <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
@@ -333,13 +333,13 @@ export default function ToolVerificationTab({
                     <span className="text-xs font-mono text-slate-500">{item.criteria_version}</span>
                   </div>
                   <p className="text-xs text-slate-400">
-                    Verified at {formatTimestamp(item.verified_at)} · By{' '}
-                    {item.verified_by ? shortenId(item.verified_by) : 'Not recorded'}
+                    검증 일시 {formatTimestamp(item.verified_at)} · 검증자{' '}
+                    {item.verified_by ? shortenId(item.verified_by) : '기록 없음'}
                   </p>
                 </div>
                 <div className="text-right text-xs text-slate-400 space-y-0.5">
-                  <p>Expires {item.expires_at ? formatTimestamp(item.expires_at) : '—'}</p>
-                  <p>Exec {item.test_execution_id ? shortenId(item.test_execution_id) : '—'}</p>
+                  <p>만료 시각 {item.expires_at ? formatTimestamp(item.expires_at) : '—'}</p>
+                  <p>실행 ID {item.test_execution_id ? shortenId(item.test_execution_id) : '—'}</p>
                 </div>
               </div>
             </button>
@@ -357,7 +357,7 @@ export default function ToolVerificationTab({
 
       {(detailLoading || detail || detailError) && (
         <div className="bg-white rounded-xl border border-slate-200 p-4 space-y-3">
-          <h3 className="text-sm font-semibold text-slate-800">Verification Detail</h3>
+          <h3 className="text-sm font-semibold text-slate-800">검증 상세</h3>
           {detailLoading && <LoadingSkeleton rows={3} />}
           {detailError && (
             <div className="space-y-1">
@@ -371,22 +371,22 @@ export default function ToolVerificationTab({
           )}
           {detail && !detailLoading && (
             <div className="space-y-2 text-sm">
-              <Row label="Status">
+              <Row label="상태">
                 <VerificationBadge status={detail.status} />
                 {expiredByTimestamp && (
-                  <span className="text-xs text-amber-700 ml-2">Expired by timestamp</span>
+                  <span className="text-xs text-amber-700 ml-2">유효 기간 만료</span>
                 )}
               </Row>
-              <Row label="Criteria">{detail.criteria_version}</Row>
-              <Row label="Verified at">{formatTimestamp(detail.verified_at)}</Row>
-              <Row label="Verified by">
+              <Row label="검증 기준">{detail.criteria_version}</Row>
+              <Row label="검증 일시">{formatTimestamp(detail.verified_at)}</Row>
+              <Row label="검증자">
                 {detail.verified_by ? (
                   <span className="font-mono text-xs">{detail.verified_by}</span>
                 ) : (
-                  'Not recorded'
+                  '기록 없음'
                 )}
               </Row>
-              <Row label="Normal test">
+              <Row label="정상 실행 테스트">
                 {detail.test_execution_id ? (
                   <button
                     type="button"
@@ -399,7 +399,7 @@ export default function ToolVerificationTab({
                   '—'
                 )}
               </Row>
-              <Row label="Error test">
+              <Row label="오류 실행 테스트">
                 {errorExecId ? (
                   <button
                     type="button"
@@ -412,19 +412,19 @@ export default function ToolVerificationTab({
                   '—'
                 )}
               </Row>
-              <Row label="Evidence blob">
+              <Row label="증빙 파일 ID">
                 {detail.evidence_blob_id ? (
                   <span className="font-mono text-xs">{detail.evidence_blob_id}</span>
                 ) : (
                   '—'
                 )}
               </Row>
-              <Row label="Expires at">
+              <Row label="만료 시각">
                 {detail.expires_at ? formatTimestamp(detail.expires_at) : '—'}
               </Row>
               {detail.status === 'VERIFIED' && (
                 <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-700 space-y-1">
-                  <p className="font-semibold text-slate-800">Derived checklist</p>
+                  <p className="font-semibold text-slate-800">서버 판정 체크리스트</p>
                   <p>schema_valid: {schemaValid == null ? '—' : String(schemaValid)}</p>
                   <p>normal_call_passed: {normalPassed == null ? '—' : String(normalPassed)}</p>
                   <p>
@@ -435,7 +435,7 @@ export default function ToolVerificationTab({
               )}
               {detail.result_summary && (
                 <div>
-                  <p className="text-xs text-slate-400 mb-1">result_summary</p>
+                  <p className="text-xs text-slate-400 mb-1">결과 요약 (result_summary)</p>
                   <JsonViewer value={detail.result_summary} />
                 </div>
               )}
@@ -447,15 +447,15 @@ export default function ToolVerificationTab({
       <Dialog
         open={createOpen}
         onClose={() => !creating && setCreateOpen(false)}
-        title="Generate Verification"
-        description="VERIFIED는 Manual Tool Test evidence를 서버가 검증합니다. result_summary / evidence blob은 직접 입력하지 않습니다."
+        title="검증 기록 생성"
+        description="검증 완료(VERIFIED)는 서버가 수동 실행 테스트 증빙을 검토해 판정합니다. 결과 요약과 증빙 파일은 직접 입력하지 않습니다."
         footer={
           <>
             <Button variant="outline" onClick={() => setCreateOpen(false)} disabled={creating}>
               취소
             </Button>
             <Button variant="primary" loading={creating} onClick={() => void handleCreate()}>
-              {createStatus === 'VERIFIED' ? 'Generate Verification' : 'Create'}
+              {createStatus === 'VERIFIED' ? '검증 완료 기록 생성' : '기록 생성'}
             </Button>
           </>
         }
@@ -463,19 +463,19 @@ export default function ToolVerificationTab({
         <div className="space-y-3 text-sm">
           {createError && <InlineAlert type="error" message={createError} />}
           <label className="block space-y-1">
-            <span className="text-xs text-slate-500">status</span>
+            <span className="text-xs text-slate-500">기록 상태</span>
             <select
               className="w-full border border-slate-300 rounded-md px-2 py-1.5"
               value={createStatus}
               onChange={e => setCreateStatus(e.target.value as CreateStatus)}
             >
-              <option value="PENDING">PENDING</option>
-              <option value="FAILED">FAILED</option>
-              <option value="VERIFIED">VERIFIED</option>
+              <option value="PENDING">대기 (PENDING)</option>
+              <option value="FAILED">실패 (FAILED)</option>
+              <option value="VERIFIED">검증 완료 (VERIFIED)</option>
             </select>
           </label>
           <label className="block space-y-1">
-            <span className="text-xs text-slate-500">criteria_version</span>
+            <span className="text-xs text-slate-500">검증 기준 버전</span>
             <input
               className="w-full border border-slate-300 rounded-md px-2 py-1.5"
               value={criteriaVersion}
@@ -486,7 +486,7 @@ export default function ToolVerificationTab({
             <>
               <label className="block space-y-1">
                 <span className="text-xs text-slate-500">
-                  Normal Manual Test Execution ID (SUCCEEDED)
+                  정상 실행 테스트 ID (SUCCEEDED)
                 </span>
                 <input
                   className="w-full border border-slate-300 rounded-md px-2 py-1.5 font-mono text-xs"
@@ -497,7 +497,7 @@ export default function ToolVerificationTab({
               </label>
               <label className="block space-y-1">
                 <span className="text-xs text-slate-500">
-                  Error/Timeout Manual Test Execution ID
+                  실패·시간 초과 테스트 ID
                 </span>
                 <input
                   className="w-full border border-slate-300 rounded-md px-2 py-1.5 font-mono text-xs"
@@ -507,7 +507,7 @@ export default function ToolVerificationTab({
                 />
               </label>
               <label className="block space-y-1">
-                <span className="text-xs text-slate-500">expires_at (optional)</span>
+                <span className="text-xs text-slate-500">만료 시각 (선택)</span>
                 <input
                   type="datetime-local"
                   className="w-full border border-slate-300 rounded-md px-2 py-1.5"
@@ -519,7 +519,7 @@ export default function ToolVerificationTab({
           )}
           {createStatus === 'FAILED' && (
             <label className="block space-y-1">
-              <span className="text-xs text-slate-500">result_summary (JSON object)</span>
+              <span className="text-xs text-slate-500">실패 사유 요약 (JSON 객체)</span>
               <textarea
                 className="w-full border border-slate-300 rounded-md px-2 py-1.5 font-mono text-xs min-h-[96px]"
                 value={resultSummaryText}
