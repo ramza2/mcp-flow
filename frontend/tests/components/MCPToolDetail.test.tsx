@@ -428,10 +428,14 @@ describe('MCPToolDetail — API detail', () => {
 
     await screen.findByRole('heading', { name: 'Search Docs' });
     await user.click(screen.getByRole('button', { name: /^실행 정책$/i }));
-    expect(await screen.findByText(/아직 Tool Policy가 설정되지 않았습니다/i)).toBeInTheDocument();
-    await user.click(screen.getByRole('button', { name: /Create Policy/i }));
-    await user.click(screen.getByRole('button', { name: /^Save$/i }));
-    expect(await screen.findByText(/Edit Policy/i)).toBeInTheDocument();
+    expect(await screen.findByText(/이 도구의 실행 정책이 아직 설정되지 않았습니다/i)).toBeInTheDocument();
+    expect(screen.getByText('실행 정책이란?')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: /실행 정책 생성/i }));
+    expect(screen.getByRole('dialog', { name: '실행 정책 생성' })).toBeInTheDocument();
+    expect(screen.getByRole('combobox', { name: '위험 분류' })).toBeInTheDocument();
+    expect(screen.getByRole('checkbox', { name: '사용자 확인 필요' })).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: /^저장$/i }));
+    expect(await screen.findByText(/실행 정책 수정/i)).toBeInTheDocument();
   });
 
   it('Verification is version-scoped and ignores stale list for prior version', async () => {
@@ -591,11 +595,11 @@ describe('MCPToolDetail — API detail', () => {
 
     await screen.findByRole('heading', { name: 'Search Docs' });
     await user.click(screen.getByRole('button', { name: /^실행 정책$/i }));
-    expect(await screen.findByText(/아직 Tool Policy가 설정되지 않았습니다/i)).toBeInTheDocument();
-    await user.click(screen.getByRole('button', { name: /Create Policy/i }));
-    await user.click(screen.getByRole('button', { name: /^Save$/i }));
+    expect(await screen.findByText(/이 도구의 실행 정책이 아직 설정되지 않았습니다/i)).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: /실행 정책 생성/i }));
+    await user.click(screen.getByRole('button', { name: /^저장$/i }));
 
-    expect(await screen.findByText(/다른 작업에서 Policy가 생성되었습니다/i)).toBeInTheDocument();
+    expect(await screen.findByText(/다른 작업에서 실행 정책이 생성되었습니다/i)).toBeInTheDocument();
     expect(screen.getByText(/Request ID: req-pol-create/i)).toBeInTheDocument();
     expect(await screen.findByText(/from-other-create/i)).toBeInTheDocument();
     expect(screen.getByText(/멱등 쓰기/i)).toBeInTheDocument();
@@ -651,11 +655,11 @@ describe('MCPToolDetail — API detail', () => {
 
     await screen.findByRole('heading', { name: 'Search Docs' });
     await user.click(screen.getByRole('button', { name: /^실행 정책$/i }));
-    expect(await screen.findByText(/Edit Policy/i)).toBeInTheDocument();
-    await user.click(screen.getByRole('button', { name: /Edit Policy/i }));
-    await user.click(screen.getByRole('button', { name: /^Save$/i }));
+    expect(await screen.findByText(/실행 정책 수정/i)).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: /실행 정책 수정/i }));
+    await user.click(screen.getByRole('button', { name: /^저장$/i }));
 
-    expect(await screen.findByText(/다른 작업으로 Policy가 변경되었습니다/i)).toBeInTheDocument();
+    expect(await screen.findByText(/다른 작업으로 실행 정책이 변경되었습니다/i)).toBeInTheDocument();
     expect(screen.getByText(/Request ID: req-pol-stale/i)).toBeInTheDocument();
     expect(await screen.findByText(/refetched-latest/i)).toBeInTheDocument();
     expect(screen.getByText('45000')).toBeInTheDocument();
