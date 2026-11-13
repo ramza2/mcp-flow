@@ -1717,6 +1717,15 @@ Accuracy = Correct Top-1 / Valid Evaluation Cases × 100
 
 ## 28. Factory 시험
 
+### Factory Review 승인/반려 및 Publish/Import UI (2026-11-13)
+
+- 실제 `SUCCEEDED/PASS` 및 증빙 해시가 있는 TestRun만 Review UI를 노출한다. 조회 GET은 안전하며 Review 미존재 404는 빈 상태로 처리한다. QUEUED/RUNNING/FAIL은 POST 버튼 자체가 없어야 한다.
+- Review 결정 초기 미선택, `APPROVE`/`REJECT`와 500자 이하 의견, 불변 운영 DB 기록 확인 체크 후 명시적인 POST만 수행한다. CSRF·Idempotency-Key·오류 Request ID 확인, 동일 결정/의견 재시도시 동일 키.
+- Review 이력 존재 시 같은 TestRun에 새로운 Review POST를 노출하지 않는다. 승인 후에도 자동 Publish는 하지 않는다.
+- `/tool-factory/reviews/:reviewId`는 실제 Review와 Publish/Import GET만 호출; 미게시 404는 정상 빈 상태. `REJECT`에서는 게시 버튼을 표시하지 않고, `APPROVE`도 별도 위험 확인 체크 없이는 비활성이다.
+- Publish POST는 실제 DRAFT MCP Server와 INACTIVE Tools를 생성하므로 테스트의 Mock fetch로만 검증한다. 멱등성 키·CSRF, 이미 게시된 경우 GET-only, 결과 서버/도구 연결 정보 및 `ACTIVE` 오인 표시 방지.
+- Backend/DB/Worker/infra 코드는 변경하지 않는다. 실제 운영 저장 변경은 각 사용자 명시적 클릭 후에만 발생한다.
+
 ### Factory 패키지 생성·샌드박스 TestRun UI (2026-11-13)
 
 - Build 상세 초기 화면은 GET Build/Artifacts만 수행하며 패키지 생성·검증 POST는 하지 않는다. 실제 선언형 패키지 생성 버튼에서만 POST `/factory/builds/{buildId}/generate`, `Idempotency-Key`, same-origin CSRF를 사용한다. 불확실한 네트워크 실패 후 동일 키 재시도 확인.
