@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react';
-import { useNavigate } from 'react-router';
 import Button from '../../components/ui/Button';
 import { EmptyState, ErrorState, InlineAlert, LoadingSkeleton } from '../../components/ui/EmptyState';
 import { isAbortError, isApiError } from '../../api/client';
+import FactoryMCPServerEndpointLink from './FactoryMCPServerEndpointLink';
 import {
   createFactoryRuntimeBinding,
   getFactoryRuntimeBindingForPublish,
@@ -28,7 +28,6 @@ export default function FactoryRuntimeBindingPanel({
   publishId: string;
   mcpServerId: string;
 }) {
-  const navigate = useNavigate();
   const [binding, setBinding] = useState<FactoryRuntimeBindingDto | null>(null);
   const [loading, setLoading] = useState(true);
   const [refresh, setRefresh] = useState(0);
@@ -258,9 +257,12 @@ export default function FactoryRuntimeBindingPanel({
                   MCP 엔드포인트: <span className="font-mono break-all">{binding.mcp_endpoint_url}</span>
                 </p>
               )}
-              <Button variant="outline" onClick={() => navigate(`/mcp/servers/${mcpServerId}`)}>
-                MCP 서버 연결 테스트·탐색 화면으로
-              </Button>
+              {binding.mcp_server_id === mcpServerId ? (
+                <FactoryMCPServerEndpointLink binding={binding} />
+              ) : (
+                <InlineAlert type="error"
+                  message="게시 결과와 Runtime Binding의 MCP 서버 ID가 다릅니다. 연결 설정 등록을 중단합니다." />
+              )}
             </div>
           ) : (
             <InlineAlert type="warning" message="이 Runtime Binding은 DISABLED입니다. 기존 연결 설정을 활성화할 수 없습니다." />
