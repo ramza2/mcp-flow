@@ -277,3 +277,84 @@ export function getFactoryTestRun(testRunId: string, signal?: AbortSignal) {
     signal,
   });
 }
+
+/** Factory Review is a single immutable APPROVE/REJECT decision for a PASS TestRun. */
+export type FactoryReviewDecision = 'APPROVE' | 'REJECT';
+
+export interface FactoryReviewDto {
+  id: string;
+  test_run_id: string;
+  generated_package_id: string;
+  build_id: string;
+  job_id: string;
+  decision: FactoryReviewDecision;
+  comment: string | null;
+  test_evidence_hash: string;
+  review_evidence_hash: string;
+  reviewed_by: string;
+  reviewed_at: string;
+  created_at: string;
+}
+
+export interface FactoryPublishDto {
+  id: string;
+  review_id: string;
+  test_run_id: string;
+  generated_package_id: string;
+  build_id: string;
+  job_id: string;
+  mcp_server_id: string;
+  mcp_tool_ids: string[];
+  tool_count: number;
+  publish_evidence_hash: string;
+  requested_by: string;
+  created_at: string;
+}
+
+export function getFactoryReviewForTestRun(testRunId: string, signal?: AbortSignal) {
+  return apiRequest<FactoryReviewDto>(
+    `/factory/test-runs/${encodeURIComponent(testRunId)}/review`,
+    { signal },
+  );
+}
+
+export function createFactoryReview(
+  testRunId: string,
+  decision: FactoryReviewDecision,
+  comment: string | null,
+  idempotencyKey: string,
+) {
+  return apiRequest<FactoryReviewDto>(
+    `/factory/test-runs/${encodeURIComponent(testRunId)}/review`,
+    {
+      method: 'POST',
+      body: { decision, comment },
+      headers: { 'Idempotency-Key': idempotencyKey },
+    },
+  );
+}
+
+export function getFactoryReview(reviewId: string, signal?: AbortSignal) {
+  return apiRequest<FactoryReviewDto>(
+    `/factory/reviews/${encodeURIComponent(reviewId)}`,
+    { signal },
+  );
+}
+
+export function getFactoryPublishForReview(reviewId: string, signal?: AbortSignal) {
+  return apiRequest<FactoryPublishDto>(
+    `/factory/reviews/${encodeURIComponent(reviewId)}/publish`,
+    { signal },
+  );
+}
+
+/** Imports a reviewed package as DRAFT MCP server and INACTIVE tools, never active. */
+export function publishFactoryReview(reviewId: string, idempotencyKey: string) {
+  return apiRequest<FactoryPublishDto>(
+    `/factory/reviews/${encodeURIComponent(reviewId)}/publish`,
+    {
+      method: 'POST',
+      headers: { 'Idempotency-Key': idempotencyKey },
+    },
+  );
+}
