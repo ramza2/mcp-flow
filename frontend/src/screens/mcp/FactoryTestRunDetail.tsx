@@ -8,6 +8,7 @@ import { EmptyState, ErrorState, InlineAlert, LoadingSkeleton } from '../../comp
 import { getFactoryTestRun, type FactoryTestRunDto } from '../../api/factory';
 import { isAbortError, isApiError } from '../../api/client';
 import { formatTimestamp } from '../../domain';
+import FactoryReviewPanel from './FactoryReviewPanel';
 
 export default function FactoryTestRunDetail() {
   const { testRunId } = useParams();
@@ -101,8 +102,14 @@ export default function FactoryTestRunDetail() {
             </section>
             {passed && (
               <p role="status" className="text-sm font-medium text-green-700">
-                테스트가 실제 PASS로 완료됐습니다. 검토·게시·활성화 기능은 후속 단계에서 별도로 진행합니다.
+                테스트가 실제 PASS로 완료됐습니다. 아래에서 검토 결정을 별도로 저장할 수 있으며 게시·활성화는 자동 실행되지 않습니다.
               </p>
+            )}
+            {passed && record.evidence_hash && record.evidence_hash.length === 64 && (
+              <FactoryReviewPanel testRunId={record.id} evidenceHash={record.evidence_hash} />
+            )}
+            {passed && (!record.evidence_hash || record.evidence_hash.length !== 64) && (
+              <InlineAlert type="warning" message="검증 증빙 해시가 없어 검토할 수 없습니다. 실제 Backend 결과를 확인하세요." />
             )}
           </>
         ) : (
