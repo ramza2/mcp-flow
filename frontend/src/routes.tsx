@@ -40,6 +40,7 @@ import FactoryJobCandidates from './screens/mcp/FactoryJobCandidates';
 import FactoryBuildRecord from './screens/mcp/FactoryBuildRecord';
 import FactoryPackageDetail from './screens/mcp/FactoryPackageDetail';
 import FactoryTestRunDetail from './screens/mcp/FactoryTestRunDetail';
+import FactoryReviewDetail from './screens/mcp/FactoryReviewDetail';
 import ToolFactoryNew from './screens/mcp/ToolFactoryNew';
 import FactoryBuildDetail from './screens/mcp/FactoryBuildDetail';
 
@@ -105,6 +106,7 @@ export const router = createBrowserRouter([
           { path: 'tool-factory/builds/:buildId', Component: FactoryBuildRecord },
           { path: 'tool-factory/artifacts/:packageId', Component: FactoryPackageDetail },
           { path: 'tool-factory/test-runs/:testRunId', Component: FactoryTestRunDetail },
+          { path: 'tool-factory/reviews/:reviewId', Component: FactoryReviewDetail },
           { path: 'tool-factory/new', Component: ToolFactoryNew },
           { path: 'tool-factory/:buildId', Component: FactoryBuildDetail },
 
