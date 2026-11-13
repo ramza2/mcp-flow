@@ -161,7 +161,10 @@ describe('Factory real package and sandbox test UX', () => {
   });
 
   it('shows genuine PASS only after successful test status and evidence', async () => {
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(respond({
+    vi.stubGlobal('fetch', vi.fn((url: string) => Promise.resolve(
+      url.endsWith('/review')
+        ? respond({ error: { code: 'NOT_FOUND', message: 'No Review yet' } }, 404)
+        : respond({
       ...testRun,
       status: 'SUCCEEDED',
       result: 'PASS',
@@ -169,13 +172,13 @@ describe('Factory real package and sandbox test UX', () => {
       contract_result: { result: 'PASS' },
       evidence_hash: 'e'.repeat(64),
       finished_at: '2026-11-13T00:05:00Z',
-    })));
+    }))));
     renderWithRouter(<FactoryTestRunDetail />, {
       path: '/tool-factory/test-runs/:testRunId',
       route: `/tool-factory/test-runs/${TEST_ID}`,
     });
     expect(await screen.findByText(/테스트가 실제 PASS로 완료됐습니다/)).toBeInTheDocument();
     expect(screen.getByText('증빙 해시')).toBeInTheDocument();
-    expect(screen.getByText(/검토·게시·활성화 기능은 후속 단계/)).toBeInTheDocument();
+    expect(screen.getByText(/게시·활성화는 자동 실행되지 않습니다/)).toBeInTheDocument();
   });
 });
