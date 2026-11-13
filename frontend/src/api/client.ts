@@ -4,6 +4,7 @@
  *
  * Cookie Session: credentials: 'same-origin'
  * CSRF: auto-attach X-CSRF-Token on unsafe methods (except csrf: 'omit')
+ * Multipart/FormData payloads are sent unchanged; browser sets the boundary/Content-Type.
  */
 
 import type { ApiErrorBody } from './types';
@@ -112,7 +113,7 @@ async function executeFetch(
       signal,
       credentials: 'same-origin',
       headers,
-      body: body === undefined ? undefined : JSON.stringify(body),
+      body: body === undefined ? undefined : body instanceof FormData ? body : JSON.stringify(body),
     });
   } catch (error) {
     if (isAbortError(error)) throw error;
@@ -145,7 +146,7 @@ export async function apiRequest<T>(path: string, options: RequestOptions = {}):
 
   const headers: Record<string, string> = {
     Accept: 'application/json',
-    ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
+    ...(body !== undefined && !(body instanceof FormData) ? { 'Content-Type': 'application/json' } : {}),
     ...extraHeaders,
   };
 

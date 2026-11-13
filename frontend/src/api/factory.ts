@@ -65,3 +65,17 @@ export function getFactoryJob(jobId: string, signal?: AbortSignal) {
     signal,
   });
 }
+
+/** The backend accepts only OpenAPI .json/.yaml/.yml files up to 2 MiB. */
+export const FACTORY_MAX_SOURCE_BYTES = 2 * 1024 * 1024;
+
+export function createFactoryAnalyzeJob(source: File, idempotencyKey: string, signal?: AbortSignal) {
+  const form = new FormData();
+  form.append('source', source, source.name);
+  return apiRequest<FactoryJobDto>('/factory/jobs', {
+    method: 'POST',
+    body: form,
+    headers: { 'Idempotency-Key': idempotencyKey },
+    signal,
+  });
+}

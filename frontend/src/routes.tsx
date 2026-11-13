@@ -34,6 +34,7 @@ import MCPToolDetail from './screens/mcp/MCPToolDetail';
 import ExternalDiscovery from './screens/mcp/ExternalDiscovery';
 import ToolFactory from './screens/mcp/ToolFactory';
 import FactoryJobs from './screens/mcp/FactoryJobs';
+import FactoryJobNew from './screens/mcp/FactoryJobNew';
 import FactoryJobDetail from './screens/mcp/FactoryJobDetail';
 import ToolFactoryNew from './screens/mcp/ToolFactoryNew';
 import FactoryBuildDetail from './screens/mcp/FactoryBuildDetail';
@@ -94,6 +95,7 @@ export const router = createBrowserRouter([
           { path: 'mcp/discovery', Component: ExternalDiscovery },
           { path: 'tool-factory', Component: ToolFactory },
           { path: 'tool-factory/jobs', Component: FactoryJobs },
+          { path: 'tool-factory/jobs/new', Component: FactoryJobNew },
           { path: 'tool-factory/jobs/:jobId', Component: FactoryJobDetail },
           { path: 'tool-factory/new', Component: ToolFactoryNew },
           { path: 'tool-factory/:buildId', Component: FactoryBuildDetail },

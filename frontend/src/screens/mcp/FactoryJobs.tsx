@@ -80,15 +80,20 @@ export default function FactoryJobs() {
         title="Factory 실제 분석 작업"
         description="서버에 저장된 OpenAPI 분석 작업을 조회합니다. 시연용 프로젝트와 다른 실제 이력입니다."
         actions={
-          <Button variant="outline" onClick={() => navigate('/tool-factory')}>
-            시연 화면 보기
-          </Button>
+          <>
+            <Button variant="outline" onClick={() => navigate('/tool-factory')}>
+              시연 화면 보기
+            </Button>
+            <Button onClick={() => navigate('/tool-factory/jobs/new')}>
+              OpenAPI 분석 시작
+            </Button>
+          </>
         }
       />
       <div className="p-6 space-y-4">
         <section aria-label="Factory 실제 작업 안내" className="rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600">
           <p className="font-semibold text-slate-800">실제 서버 작업 기록</p>
-          <p className="mt-1">아래 목록은 Factory API에서 가져온 분석 이력입니다. 이 화면은 조회 전용이며 소스 업로드·후보 생성·빌드·게시를 실행하지 않습니다.</p>
+          <p className="mt-1">아래 목록은 Factory API에서 가져온 분석 이력입니다. 목록 조회 자체는 읽기 전용이며, 신규 분석은 별도 업로드 화면에서 명시적으로 시작합니다. 후보 생성·빌드·게시는 여기서 실행되지 않습니다.</p>
           <p className="mt-1 text-xs">작업 완료는 MCP 도구 생성이나 활성화 완료를 의미하지 않습니다. 작업을 선택해 실제 분석 상세와 후보 수를 확인하세요.</p>
         </section>
         <div className="flex justify-end">
@@ -104,7 +109,7 @@ export default function FactoryJobs() {
           ) : items.length === 0 ? (
             <EmptyState
               title="등록된 Factory 분석 작업이 없습니다"
-              description="실제 서버에 저장된 분석 작업이 없거나 현재 조회할 작업이 없습니다. 예시 데이터는 이 목록에 표시하지 않습니다."
+              description="실제 분석 작업이 없습니다. OpenAPI 분석 시작 버튼으로 새 작업을 등록할 수 있으며, 예시 데이터는 이 목록에 표시되지 않습니다."
             />
           ) : (
             <>
