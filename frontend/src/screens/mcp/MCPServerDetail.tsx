@@ -689,7 +689,7 @@ export default function MCPServerDetail() {
         onConfirm={handleActivate}
         title="MCP 서버 활성화"
         description="실제 MCP 서버를 업무에서 사용할 수 있도록 상태를 변경합니다. Factory 서버는 최신 SUCCEEDED 연결 테스트와 CLEAN Discovery 적용 증빙을 Backend가 다시 확인하며, 도구 자체의 활성화는 별도입니다. 계속하시겠습니까?"
-        confirmLabel="활성화"
+        confirmLabel="활성화 확인"
         loading={statusMutating}
       />
     </div>
