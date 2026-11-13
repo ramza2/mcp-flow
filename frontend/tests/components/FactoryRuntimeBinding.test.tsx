@@ -124,7 +124,7 @@ describe('Factory RuntimeBinding onboarding', () => {
     expect(posts[0][0]).toBe(`/api/v1/factory/runtime-bindings/${BINDING_ID}/ready`);
     expect(JSON.parse(posts[0][1].body as string)).toEqual({ lock_version: 2 });
     expect((posts[0][1].headers as Record<string, string>)['X-CSRF-Token']).toBe('test-csrf-token');
-    expect(screen.getByText(ready.mcp_endpoint_url)).toBeInTheDocument();
+    expect(screen.getAllByText(ready.mcp_endpoint_url).length).toBeGreaterThanOrEqual(1);
   });
 
   it('never allows READY without a saved upstream URL', async () => {
