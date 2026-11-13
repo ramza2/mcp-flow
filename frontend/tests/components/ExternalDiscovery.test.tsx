@@ -44,6 +44,9 @@ async function renderReady() {
     route: '/mcp/discovery',
   });
   expect(await screen.findByDisplayValue('Official MCP Registry')).toBeInTheDocument();
+  expect(screen.getByRole('heading', { name: '외부 MCP 탐색' })).toBeInTheDocument();
+  expect(screen.getByText('외부 MCP 서버 등록 순서')).toBeInTheDocument();
+  expect(screen.getByText(/외부 등록 정보만으로 서버나 도구의 안전성/)).toBeInTheDocument();
 }
 
 describe('ExternalDiscovery — real API wiring', () => {
@@ -105,9 +108,9 @@ describe('ExternalDiscovery — real API wiring', () => {
     await user.click(screen.getByRole('button', { name: '검색' }));
 
     expect(await screen.findByText('Slack MCP')).toBeInTheDocument();
-    expect(screen.getByText(/1개 Candidate 검색됨/)).toBeInTheDocument();
+    expect(screen.getByText(/1개 서버 후보 검색됨/)).toBeInTheDocument();
     expect(screen.getByText(/Slack integration over Streamable HTTP/)).toBeInTheDocument();
-    expect(screen.getByText(/Source: Official MCP Registry/)).toBeInTheDocument();
+    expect(screen.getByText(/출처: Official MCP Registry/)).toBeInTheDocument();
     // Mock trust states / registry labels must not appear.
     expect(screen.queryByText('UNDER_REVIEW')).not.toBeInTheDocument();
     expect(screen.queryByText('mcp.run')).not.toBeInTheDocument();
@@ -255,15 +258,15 @@ describe('ExternalDiscovery — real API wiring', () => {
     await screen.findByText('Slack MCP');
 
     const card = screen.getByTestId(`candidate-${remoteCandidate.id}`);
-    expect(within(card).getByRole('button', { name: 'Import' })).toBeDisabled();
+    expect(within(card).getByRole('button', { name: 'DRAFT 서버 가져오기' })).toBeDisabled();
     expect(
-      within(card).getByText(/Import하려면 최신 검토 결과가 APPROVE여야 합니다/),
+      within(card).getByText(/가져오려면 이 후보를 먼저 승인해야 합니다/),
     ).toBeInTheDocument();
 
     await user.click(within(card).getByRole('button', { name: '승인' }));
     await user.click(await screen.findByRole('button', { name: '승인 제출' }));
     await waitFor(() => {
-      expect(within(card).getByRole('button', { name: 'Import' })).toBeEnabled();
+      expect(within(card).getByRole('button', { name: 'DRAFT 서버 가져오기' })).toBeEnabled();
     });
   });
 
@@ -284,12 +287,12 @@ describe('ExternalDiscovery — real API wiring', () => {
     await user.click(screen.getByRole('button', { name: '검색' }));
 
     expect(await screen.findByText('Local Package MCP')).toBeInTheDocument();
-    expect(screen.getByText(/Remote endpoint 없음/)).toBeInTheDocument();
+    expect(screen.getByText(/원격 연결 주소 없음/)).toBeInTheDocument();
     expect(
-      screen.getByText('원격 MCP endpoint가 없어 현재 Import할 수 없습니다.'),
+      screen.getByText('원격 MCP 연결 주소가 없거나 지원하지 않는 전송 방식이므로 가져올 수 없습니다.'),
     ).toBeInTheDocument();
     expect(screen.queryByText(/mcp\.example\.com/)).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Import' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'DRAFT 서버 가져오기' })).toBeDisabled();
   });
 
   it('K. import success created=true shows DRAFT and Draft Server link', async () => {
@@ -311,9 +314,9 @@ describe('ExternalDiscovery — real API wiring', () => {
     await user.click(screen.getByRole('button', { name: '검색' }));
     await screen.findByText('Slack MCP');
 
-    await user.click(screen.getByRole('button', { name: 'Import' }));
+    await user.click(screen.getByRole('button', { name: 'DRAFT 서버 가져오기' }));
     expect(await screen.findByText('DRAFT 생성 완료')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Draft Server 보기' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'MCP 서버 상세 보기' })).toBeInTheDocument();
     expect(screen.getByRole('link', { name: /srv-draft-imported-001/ })).toHaveAttribute(
       'href',
       '/mcp/servers/srv-draft-imported-001',
@@ -344,7 +347,7 @@ describe('ExternalDiscovery — real API wiring', () => {
     await renderReady();
     await user.type(screen.getByPlaceholderText(/Slack/i), 'slack');
     await user.click(screen.getByRole('button', { name: '검색' }));
-    await user.click(await screen.findByRole('button', { name: 'Import' }));
+    await user.click(await screen.findByRole('button', { name: 'DRAFT 서버 가져오기' }));
 
     expect(await screen.findByText('DRAFT 생성 완료')).toBeInTheDocument();
     expect(screen.getByRole('link', { name: /srv-existing-draft/ })).toBeInTheDocument();
@@ -369,11 +372,11 @@ describe('ExternalDiscovery — real API wiring', () => {
     await renderReady();
     await user.type(screen.getByPlaceholderText(/Slack/i), 'slack');
     await user.click(screen.getByRole('button', { name: '검색' }));
-    await user.click(await screen.findByRole('button', { name: 'Import' }));
+    await user.click(await screen.findByRole('button', { name: 'DRAFT 서버 가져오기' }));
 
     expect(await screen.findByText('import blocked')).toBeInTheDocument();
     expect(screen.queryByText('DRAFT 생성 완료')).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Import' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'DRAFT 서버 가져오기' })).toBeInTheDocument();
   });
 
   it('N. unsafe repository/homepage schemes are not clickable links', async () => {
@@ -393,10 +396,10 @@ describe('ExternalDiscovery — real API wiring', () => {
     await user.click(screen.getByRole('button', { name: '검색' }));
     await screen.findByText('Local Package MCP');
 
-    expect(screen.queryByRole('link', { name: /Repository/i })).not.toBeInTheDocument();
-    expect(screen.queryByRole('link', { name: /Homepage/i })).not.toBeInTheDocument();
-    expect(screen.getByText(/Repository: \(unsafe URL\)/)).toBeInTheDocument();
-    expect(screen.getByText(/Homepage: \(unsafe URL\)/)).toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: /저장소/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: /홈페이지/i })).not.toBeInTheDocument();
+    expect(screen.getByText(/저장소: 안전하지 않은 주소/)).toBeInTheDocument();
+    expect(screen.getByText(/홈페이지: 안전하지 않은 주소/)).toBeInTheDocument();
   });
 
   it('O. stale search response cannot overwrite newer results', async () => {
