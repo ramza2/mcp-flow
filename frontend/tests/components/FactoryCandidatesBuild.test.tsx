@@ -196,7 +196,11 @@ describe('Factory candidate review and Build snapshot', () => {
   });
 
   it('reads actual Build snapshots without pretending package, tests or publishing succeeded', async () => {
-    const fetchMock = vi.fn((_url: string, _opts: RequestInit) => Promise.resolve(jsonResponse(build)));
+    const fetchMock = vi.fn((url: string, _opts: RequestInit) => Promise.resolve(
+      jsonResponse(url.includes('/artifacts')
+        ? { items: [], build_id: BUILD_ID, page: 1, page_size: 20, total: 0, has_next: false }
+        : build),
+    ));
     vi.stubGlobal('fetch', fetchMock);
     renderWithRouter(<FactoryBuildRecord />, {
       route: `/tool-factory/builds/${BUILD_ID}`,
@@ -204,8 +208,8 @@ describe('Factory candidate review and Build snapshot', () => {
     });
     expect(await screen.findByText('동물 목록')).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: 'Factory Build 정의 상세' })).toBeInTheDocument();
-    expect(screen.getByText(/패키지 생성, 보안·계약 테스트/)).toBeInTheDocument();
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    expect(screen.getByText(/패키지와 구분됩니다.*보안·계약 테스트/)).toBeInTheDocument();
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
     expect(fetchMock.mock.calls[0][0]).toContain(`/api/v1/factory/builds/${BUILD_ID}`);
     expect(fetchMock.mock.calls[0][1].method).toBe('GET');
   });
