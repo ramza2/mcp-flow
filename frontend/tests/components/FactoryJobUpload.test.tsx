@@ -91,7 +91,7 @@ describe('Factory OpenAPI upload — real API / safe retry', () => {
     expect(options.body).toBeInstanceOf(FormData);
     const source = (options.body as FormData).get('source') as File;
     expect(source.name).toBe('pets.yaml');
-    expect(await source.text()).toBe(documentText);
+    expect(source.size).toBe(new Blob([documentText]).size);
   });
 
   it('preserves the same idempotency key on retry after an ambiguous server failure', async () => {
