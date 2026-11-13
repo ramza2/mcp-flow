@@ -28,13 +28,13 @@ import { labelExternalMCPReviewState } from '../../domain';
 const IMPORTABLE_TRANSPORTS = new Set(['STREAMABLE_HTTP', 'LEGACY_HTTP_SSE']);
 
 const FLOW_HINT = [
-  'Review',
-  '→ Import',
-  '→ Draft Server',
-  '→ Connection Test',
-  '→ Tool Discovery',
-  '→ Tool Verification',
-  '→ Activation',
+  '후보 검토',
+  '→ DRAFT 가져오기',
+  '→ 서버 상세',
+  '→ 연결 테스트',
+  '→ 도구 탐색',
+  '→ 도구 검증',
+  '→ 활성화',
 ] as const;
 
 function safeHttpUrl(raw: string | null | undefined): string | null {
@@ -76,10 +76,10 @@ function importDisabledReason(candidate: ExternalMCPCandidateDto): string | null
     !!candidate.endpoint_url
     && IMPORTABLE_TRANSPORTS.has(candidate.transport_type ?? '');
   if (!hasRemote) {
-    return '원격 MCP endpoint가 없어 현재 Import할 수 없습니다.';
+    return '원격 MCP 연결 주소가 없거나 지원하지 않는 전송 방식이므로 가져올 수 없습니다.';
   }
   if (candidate.review_state !== 'APPROVED') {
-    return 'Import하려면 최신 검토 결과가 APPROVE여야 합니다.';
+    return '가져오려면 이 후보를 먼저 승인해야 합니다.';
   }
   return null;
 }
@@ -163,7 +163,7 @@ export default function ExternalDiscovery() {
         }
         const apiErr = isApiError(err) ? err : null;
         setSourcesError({
-          message: apiErr?.message ?? 'Discovery Source 목록을 불러오지 못했습니다.',
+          message: apiErr?.message ?? '외부 MCP 검색 출처 목록을 불러오지 못했습니다.',
           requestId: apiErr?.requestId ?? undefined,
         });
       })
@@ -311,7 +311,7 @@ export default function ExternalDiscovery() {
       const apiErr = isApiError(err) ? err : null;
       setCandidateActionError((prev) => ({
         ...prev,
-        [candidate.id]: apiErr?.message ?? 'Import에 실패했습니다.',
+        [candidate.id]: apiErr?.message ?? 'DRAFT 서버 가져오기에 실패했습니다.',
       }));
     } finally {
       if (mountedRef.current) setImportingId(null);
@@ -322,8 +322,8 @@ export default function ExternalDiscovery() {
     return (
       <div>
         <PageHeader
-          title="External MCP Discovery"
-          description="외부 레지스트리에서 MCP Server Candidate를 탐색합니다."
+          title="외부 MCP 탐색"
+          description="외부 레지스트리에서 MCP 서버 후보를 찾고 검토하여 등록합니다."
         />
         <LoadingSkeleton rows={6} />
       </div>
@@ -334,8 +334,8 @@ export default function ExternalDiscovery() {
     return (
       <div>
         <PageHeader
-          title="External MCP Discovery"
-          description="외부 레지스트리에서 MCP Server Candidate를 탐색합니다."
+          title="외부 MCP 탐색"
+          description="외부 레지스트리에서 MCP 서버 후보를 찾고 검토하여 등록합니다."
         />
         <PermissionDenied />
       </div>
@@ -346,8 +346,8 @@ export default function ExternalDiscovery() {
     return (
       <div>
         <PageHeader
-          title="External MCP Discovery"
-          description="외부 레지스트리에서 MCP Server Candidate를 탐색합니다."
+          title="외부 MCP 탐색"
+          description="외부 레지스트리에서 MCP 서버 후보를 찾고 검토하여 등록합니다."
         />
         <ErrorState
           message={sourcesError.message}
@@ -363,25 +363,30 @@ export default function ExternalDiscovery() {
   return (
     <div>
       <PageHeader
-        title="External MCP Discovery"
-        description="외부 레지스트리에서 MCP Server Candidate를 탐색합니다."
+        title="외부 MCP 탐색"
+        description="외부 레지스트리에서 MCP 서버 후보를 찾고 검토하여 등록합니다."
       />
       <div className="p-6 space-y-4 max-w-3xl">
+        <div className="rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600">
+          <p className="font-semibold text-slate-800">외부 MCP 서버 등록 순서</p>
+          <p className="mt-1">① 검색 출처 선택 및 검색 → ② 후보 검토·승인 → ③ DRAFT 서버 가져오기 → ④ 서버 상세에서 연결 테스트·도구 탐색·검증 및 활성화</p>
+          <p className="mt-1 text-xs">외부 등록 정보만으로 서버나 도구의 안전성·연결 상태를 신뢰할 수 없습니다.</p>
+        </div>
         <InlineAlert
           type="warning"
-          message="외부 MCP는 검토 후보입니다. Review/Import는 Connection Test·Tool Discovery·활성화를 수행하지 않습니다. Import 후 Draft Server에서 Connection Test → Tool Discovery → Tool Verification → Activation을 진행하세요."
+          message="검색 결과는 검토가 필요한 외부 MCP 서버 후보입니다. 후보를 승인하고 가져와도 연결 테스트·도구 탐색·활성화가 자동 실행되지 않습니다. DRAFT 서버를 생성한 뒤 상세 화면에서 연결 테스트 → 도구 탐색 → 도구 검증 → 활성화를 진행하세요."
         />
 
         {!hasEnabledSource ? (
           <EmptyState
-            title="사용 가능한 Discovery Source가 없습니다"
-            description="활성화된 External MCP Source가 없습니다. 관리자에게 Source 설정을 요청하세요."
+            title="사용 가능한 검색 출처가 없습니다"
+            description="활성화된 외부 MCP 검색 출처가 없습니다. 관리자에게 출처 설정을 요청하세요."
           />
         ) : (
           <>
             <div className="space-y-2">
               <label htmlFor="discovery-source" className="block text-xs font-medium text-slate-600">
-                Source
+                검색 출처
               </label>
               <select
                 id="discovery-source"
@@ -396,7 +401,7 @@ export default function ExternalDiscovery() {
                     disabled={!source.enabled}
                   >
                     {source.name}
-                    {!source.enabled ? ' (disabled)' : ''}
+                    {!source.enabled ? ' (사용 안 함)' : ''}
                   </option>
                 ))}
               </select>
@@ -462,7 +467,7 @@ export default function ExternalDiscovery() {
         {hasSearched && !searchNetworkError && !searchFailed && (
           <div className="space-y-3">
             <p className="text-xs text-slate-500">
-              {candidateCount ?? candidates.length}개 Candidate 검색됨
+              {candidateCount ?? candidates.length}개 서버 후보 검색됨
             </p>
 
             {candidates.length === 0 ? (
@@ -499,7 +504,7 @@ export default function ExternalDiscovery() {
                           </span>
                           {imported && (
                             <span className="text-xs px-2 py-0.5 rounded-full font-medium bg-indigo-50 text-indigo-700">
-                              Imported
+                              가져온 서버
                             </span>
                           )}
                         </div>
@@ -508,17 +513,17 @@ export default function ExternalDiscovery() {
                         )}
                         <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-400">
                           <span>
-                            Source: {sourceNameById(c.source_id) ?? '—'}
+                            출처: {sourceNameById(c.source_id) ?? '—'}
                           </span>
                           <span>
-                            Transport:{' '}
-                            {c.transport_type ?? 'Remote endpoint 없음'}
+                            전송 방식:{' '}
+                            {c.transport_type ?? '원격 연결 주소 없음'}
                           </span>
-                          {c.version && <span>Version: {c.version}</span>}
-                          {c.license && <span>License: {c.license}</span>}
+                          {c.version && <span>버전: {c.version}</span>}
+                          {c.license && <span>라이선스: {c.license}</span>}
                           {c.endpoint_url && (
                             <span className="break-all">
-                              Endpoint: {c.endpoint_url}
+                              연결 주소: {c.endpoint_url}
                             </span>
                           )}
                           {repoHref ? (
@@ -528,10 +533,10 @@ export default function ExternalDiscovery() {
                               rel="noopener noreferrer"
                               className="inline-flex items-center gap-0.5 text-indigo-600 hover:underline"
                             >
-                              Repository <ExternalLink size={10} />
+                              저장소 <ExternalLink size={10} />
                             </a>
                           ) : c.repository_url ? (
-                            <span>Repository: (unsafe URL)</span>
+                            <span>저장소: 안전하지 않은 주소</span>
                           ) : null}
                           {homeHref ? (
                             <a
@@ -540,10 +545,10 @@ export default function ExternalDiscovery() {
                               rel="noopener noreferrer"
                               className="inline-flex items-center gap-0.5 text-indigo-600 hover:underline"
                             >
-                              Homepage <ExternalLink size={10} />
+                              홈페이지 <ExternalLink size={10} />
                             </a>
                           ) : c.homepage_url ? (
-                            <span>Homepage: (unsafe URL)</span>
+                            <span>홈페이지: 안전하지 않은 주소</span>
                           ) : null}
                         </div>
 
@@ -595,7 +600,7 @@ export default function ExternalDiscovery() {
                               navigate(`/mcp/servers/${c.imported_mcp_server_id}`)
                             }
                           >
-                            Draft Server 보기
+                            MCP 서버 상세 보기
                           </Button>
                         ) : (
                           <Button
@@ -606,7 +611,7 @@ export default function ExternalDiscovery() {
                             icon={<ArrowRight size={12} />}
                             onClick={() => void handleImport(c)}
                           >
-                            Import
+                            DRAFT 서버 가져오기
                           </Button>
                         )}
                       </div>
@@ -622,7 +627,7 @@ export default function ExternalDiscovery() {
 
                     {imported && c.imported_mcp_server_id && (
                       <p className="mt-2 text-xs text-slate-500">
-                        Draft:{' '}
+                        등록된 서버:{' '}
                         <Link
                           to={`/mcp/servers/${c.imported_mcp_server_id}`}
                           className="text-indigo-600 hover:underline"
@@ -643,7 +648,7 @@ export default function ExternalDiscovery() {
             <Search size={32} className="text-slate-300 mb-3" />
             <p className="text-sm text-slate-500">외부 MCP 레지스트리를 검색하세요.</p>
             <p className="text-xs text-slate-400 mt-1">
-              검색 결과는 Candidate로 표시되며, Review 후 DRAFT Import만 가능합니다.
+              검색 결과는 검토가 필요한 후보입니다. 검토·승인 후 DRAFT 서버로 가져올 수 있으며, 자동으로 연결되거나 활성화되지 않습니다.
             </p>
           </div>
         )}
@@ -658,7 +663,7 @@ export default function ExternalDiscovery() {
         title={reviewTarget?.decision === 'APPROVE' ? '후보 승인' : '후보 거절'}
         description={
           reviewTarget
-            ? `${reviewTarget.candidate.name} — ${reviewTarget.decision}`
+            ? `${reviewTarget.candidate.name} — ${reviewTarget.decision === 'APPROVE' ? '승인' : '거절'}`
             : undefined
         }
         footer={
@@ -685,7 +690,7 @@ export default function ExternalDiscovery() {
           <div className="space-y-3">
             <InlineAlert
               type="warning"
-              message="검토는 MCP Server에 연결하거나 설치·활성화하지 않습니다. Import 후에도 Connection Test와 Tool Discovery는 별도로 진행해야 합니다."
+              message="후보를 승인하거나 거절해도 서버가 설치·연결·활성화되지는 않습니다. 가져오기 이후 연결 테스트와 도구 탐색을 별도로 실행해야 합니다."
             />
             <div>
               <label
