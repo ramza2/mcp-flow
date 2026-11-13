@@ -125,6 +125,26 @@ export interface DiscoveryCreateRequest {
   apply_changes?: boolean;
 }
 
+/** Factory Publish contract reconciliation evidence (Backend DiscoveryResponse.factory_diff). */
+export type FactoryDiscoveryReconcileStatus = 'CLEAN' | 'MISMATCHED' | 'AMBIGUOUS';
+
+export interface FactoryDiscoveryClassificationDto {
+  remote_name: string;
+  classification: 'MATCHED' | 'MISSING_EXPECTED' | 'UNEXPECTED_REMOTE' | 'CONTRACT_CHANGED';
+  expected_contract_hash: string | null;
+  remote_contract_hash: string | null;
+}
+
+export interface FactoryDiscoveryDiffDto {
+  status: FactoryDiscoveryReconcileStatus;
+  matched: number;
+  missing_expected: number;
+  unexpected_remote: number;
+  contract_changed: number;
+  classifications: FactoryDiscoveryClassificationDto[];
+  error_message: string | null;
+}
+
 export interface DiscoveryDto {
   id: string;
   mcp_server_id: string;
@@ -136,6 +156,8 @@ export interface DiscoveryDto {
   error_message: string | null;
   apply_changes: boolean;
   diff: DiscoveryDiffSummaryDto;
+  /** Null for ordinary MCP servers. Do not conflate with generic add/change counts. */
+  factory_diff?: FactoryDiscoveryDiffDto | null;
   started_at: string;
   finished_at: string | null;
   capabilities: Record<string, JsonValue> | null;
