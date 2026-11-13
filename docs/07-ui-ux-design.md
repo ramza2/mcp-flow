@@ -842,6 +842,8 @@ UI states / actions:
 | Import success | `created` true/false both success; “DRAFT 생성 완료” + Draft Server 보기 → `/mcp/servers/{id}` |
 
 Factory 흐름:
+Tool Factory 화면 구분(2026-11-13): 현재 `/tool-factory`, `/tool-factory/new`, `/tool-factory/:buildId` 프론트엔드 경로는 실제 Factory API와 연결되지 않은 화면 예시다. 목록/상세에 사용한 `mockToolFactoryProjects`, 단계별 상태 및 성공 표시는 운영 증빙이 아니다. 운영 화면은 이 사실을 명확히 표시하고, `/tool-factory/new`의 가상 파일 업로드·시간 지연 기반 빌드·보안 테스트 통과·Publish 완료 시연을 실제 기능처럼 진행하지 않는다. 알 수 없는 예시 ID에 다른 샘플을 대체 표시하지 않는다. 실제 MCP 서버 등록은 `/mcp/servers/new`를 안내하며 Backend Factory 기능·API 자체와 구분한다.
+
 
 ```text
 Source
