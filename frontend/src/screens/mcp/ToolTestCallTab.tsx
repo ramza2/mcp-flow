@@ -71,13 +71,13 @@ export default function ToolTestCallTab({
     try {
       const value = JSON.parse(argumentsText) as unknown;
       if (value === null || typeof value !== 'object' || Array.isArray(value)) {
-        setParseError('arguments는 JSON object여야 합니다.');
+        setParseError('실행 인수는 JSON 객체 형태여야 합니다.');
         return;
       }
       parsed = value as Record<string, unknown>;
       setParseError(null);
     } catch {
-      setParseError('JSON 파싱에 실패했습니다.');
+      setParseError('실행 인수의 JSON 형식이 올바르지 않습니다.');
       return;
     }
 
@@ -144,8 +144,8 @@ export default function ToolTestCallTab({
           <div>
             <h3 className="text-sm font-semibold text-slate-800">도구 실행 테스트</h3>
             <p className="text-xs text-slate-500 mt-1">
-              source_type=MANUAL_TOOL_TEST Execution을 생성합니다. Verification VERIFIED는
-              자동 생성되지 않습니다.
+              선택한 도구 버전으로 실제 수동 실행 작업(MANUAL_TOOL_TEST)을 생성합니다.
+              실행 테스트만으로 검증 완료(VERIFIED) 기록이 자동 생성되지는 않습니다.
             </p>
           </div>
           <Button
@@ -159,33 +159,38 @@ export default function ToolTestCallTab({
 
         <dl className="grid grid-cols-2 gap-2 text-xs text-slate-600">
           <div>
-            <dt className="text-slate-400">ToolVersion</dt>
+            <dt className="text-slate-400">도구 버전</dt>
             <dd className="font-mono">v{selectedVersion.version_no}</dd>
           </div>
           <div>
-            <dt className="text-slate-400">Validation</dt>
+            <dt className="text-slate-400">유효성 검사</dt>
             <dd>{selectedVersion.validation_status}</dd>
           </div>
           <div className="col-span-2">
-            <dt className="text-slate-400">Version ID</dt>
+            <dt className="text-slate-400">버전 ID</dt>
             <dd className="font-mono">{shortenId(selectedVersion.id)}</dd>
           </div>
         </dl>
+
+        <p className="text-xs text-slate-500">
+          실행 전 입력 스키마의 필수값을 확인하고, JSON 인수를 실제 값으로 수정하세요.
+          실행 테스트는 외부 MCP 도구를 호출할 수 있으므로 데이터 변경 가능성과 실행 정책을 먼저 확인하세요.
+        </p>
 
         {!canRun && (
           <InlineAlert
             type="warning"
             message={
               selectedVersion.validation_status !== 'VALID'
-                ? 'VALID ToolVersion만 Test Call을 실행할 수 있습니다.'
-                : '현재 Tool의 current_version만 Test Call을 실행할 수 있습니다.'
+                ? '유효성 검사를 통과한(VALID) 도구 버전만 실행 테스트를 수행할 수 있습니다.'
+                : '현재 도구의 최신 활성 버전(current_version)만 실행 테스트를 수행할 수 있습니다.'
             }
           />
         )}
 
         <div>
           <label className="block text-xs font-medium text-slate-600 mb-1">
-            Arguments (JSON)
+            실행 인수 (JSON 객체)
           </label>
           <textarea
             className="w-full min-h-[180px] font-mono text-xs border border-slate-200 rounded-lg p-3 focus:outline-none focus:ring-2 focus:ring-slate-300"
@@ -209,10 +214,10 @@ export default function ToolTestCallTab({
         {result && (
           <div className="rounded-lg border border-emerald-200 bg-emerald-50 p-3 space-y-2">
             <p className="text-sm text-emerald-900">
-              Execution 생성됨: <span className="font-mono">{result.id}</span>
+              실행 작업 생성됨: <span className="font-mono">{result.id}</span>
             </p>
             <p className="text-xs text-emerald-800">
-              status={result.status} · source={result.source_type} · trigger=
+              상태={result.status} · 출처={result.source_type} · 실행 유형=
               {result.trigger_type}
             </p>
             <div className="flex flex-wrap gap-2">
@@ -228,7 +233,7 @@ export default function ToolTestCallTab({
                 variant="outline"
                 onClick={() => navigate(`/executions/${result.id}`)}
               >
-                Execution 상세로 이동
+                실행 상세로 이동
               </Button>
             </div>
             {responseError && <InlineAlert type="error" message={responseError} />}
@@ -249,7 +254,7 @@ export default function ToolTestCallTab({
                 </p>
                 {responsePreview.available ? (
                   <div className="space-y-2">
-                    <p className="text-xs font-medium text-slate-700">Tool 응답 텍스트</p>
+                    <p className="text-xs font-medium text-slate-700">도구 응답 텍스트</p>
                     {responsePreview.text_items.map((item, index) => (
                       <pre
                         key={index}
@@ -280,10 +285,10 @@ export default function ToolTestCallTab({
       </div>
 
       <div className="bg-white rounded-xl border border-slate-200 p-4">
-        <h3 className="text-sm font-semibold text-slate-800 mb-3">Input Schema</h3>
+        <h3 className="text-sm font-semibold text-slate-800 mb-3">입력 스키마</h3>
         <JsonViewer
           value={selectedVersion.input_schema ?? null}
-          emptyLabel="Input schema가 없습니다."
+          emptyLabel="입력 스키마가 없습니다."
         />
       </div>
     </div>
