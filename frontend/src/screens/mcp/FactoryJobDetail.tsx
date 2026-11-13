@@ -80,7 +80,10 @@ export default function FactoryJobDetail() {
           />
         ) : detail ? (
           <>
-            <div className="flex justify-end">
+            <div className="flex flex-wrap justify-end gap-2">
+              <Button onClick={() => navigate(`/tool-factory/jobs/${detail.id}/candidates`)}>
+                도구 후보 검토·Build 정의
+              </Button>
               <Button variant="outline" onClick={() => setRefreshKey(key => key + 1)}>새로고침</Button>
             </div>
             <section className="bg-white border border-slate-200 rounded-xl p-4">
@@ -116,7 +119,7 @@ export default function FactoryJobDetail() {
               )}
             </section>
             <p className="text-xs text-slate-500">
-              이 화면에서 후보 생성·빌드·검토·게시를 실행하지 않습니다. 분석 작업 성공만으로 MCP 서버나 도구가 활성화되지 않습니다.
+              후보를 저장하거나 Build 정의를 생성하려면 별도의 후보 검토 화면에서 명시적으로 실행하세요. 분석 작업 성공만으로 MCP 서버나 도구가 활성화되지 않습니다.
             </p>
           </>
         ) : (

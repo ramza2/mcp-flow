@@ -1717,6 +1717,14 @@ Accuracy = Correct Top-1 / Valid Evaluation Cases × 100
 
 ## 28. Factory 시험
 
+### Factory Candidate 선택 및 Build 정의 생성 UI (2026-11-13)
+
+- 분석 상세에서 후보 화면으로 이동; 진입 시 GET Job/후보 페이지만 호출. 조회 동작은 서버 DB를 변경하지 않는다.
+- SUCCEEDED Job 및 operation_count > 0일 때만 명시적 클릭으로 후보 materialize POST, 생성 수 및 실제 후보 목록 새로고침. 미완료 분석의 저장/Build 버튼 차단.
+- 각 후보 다중 선택, 페이지 간 선택 보존, 선택 0개 시 Build 생성 차단. 후보 ID 배열 정렬 후 전송. 재시도 시 동일한 후보 조합에 대해 Idempotency-Key 재사용. CSRF/세션 오류 처리 포함.
+- 생성된 Build 상세는 불변 candidate snapshot 조회만 수행. 패키지 생성·보안 검사·검토·게시 및 Tool 활성화를 성공으로 표기하지 않는다.
+- Backend Factory Job/Build/Package API 및 DB, Worker는 변경하지 않는다. 화면의 POST 테스트는 Mock fetch로 수행하며 실제 운영 DB에 쓰지 않는다.
+
 ### Factory 실제 OpenAPI 업로드 및 분석 Job 생성 UI (2026-11-13)
 
 - 공통 `apiRequest`의 FormData 사용 시 JSON.stringify 금지, 수동 Content-Type 미설정, same-origin Cookie/CSRF·에러/세션 처리 유지; 일반 JSON 요청 회귀 유지.
