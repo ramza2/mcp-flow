@@ -843,6 +843,8 @@ UI states / actions:
 
 Factory 흐름:
 Tool Factory 화면 구분(2026-11-13): 현재 `/tool-factory`, `/tool-factory/new`, `/tool-factory/:buildId` 프론트엔드 경로는 실제 Factory API와 연결되지 않은 화면 예시다. 목록/상세에 사용한 `mockToolFactoryProjects`, 단계별 상태 및 성공 표시는 운영 증빙이 아니다. 운영 화면은 이 사실을 명확히 표시하고, `/tool-factory/new`의 가상 파일 업로드·시간 지연 기반 빌드·보안 테스트 통과·Publish 완료 시연을 실제 기능처럼 진행하지 않는다. 알 수 없는 예시 ID에 다른 샘플을 대체 표시하지 않는다. 실제 MCP 서버 등록은 `/mcp/servers/new`를 안내하며 Backend Factory 기능·API 자체와 구분한다.
+Tool Factory 실제 작업 조회(2026-11-13): `/tool-factory/jobs`와 `/tool-factory/jobs/:jobId`는 기존 Backend `GET /api/v1/factory/jobs`, `GET /api/v1/factory/jobs/{job_id}`의 실제 분석 작업 이력과 상세를 조회한다. 기본 20건 페이지네이션, `-created_at` 정렬, 로딩/빈 결과/권한 오류 및 재시도, 버전·파일명·상태·분석 수·후보 수·오류를 표시한다. 실시간 새 작업·후보 생성·빌드·검토·게시 호출은 포함하지 않으며, PR #212의 `/tool-factory*` 시연 화면과 분리한다. 백엔드 실제 검증 증빙이 없는 결과를 완료로 표기하거나, 성공한 분석을 활성 도구로 표현하지 않는다.
+
 
 
 ```text
