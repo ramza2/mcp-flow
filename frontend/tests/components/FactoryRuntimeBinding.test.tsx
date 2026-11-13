@@ -124,7 +124,7 @@ describe('Factory RuntimeBinding onboarding', () => {
     expect(posts[0][0]).toBe(`/api/v1/factory/runtime-bindings/${BINDING_ID}/ready`);
     expect(JSON.parse(posts[0][1].body as string)).toEqual({ lock_version: 2 });
     expect((posts[0][1].headers as Record<string, string>)['X-CSRF-Token']).toBe('test-csrf-token');
-    expect(screen.getByText(ready.mcp_endpoint_url)).toBeInTheDocument();
+    expect(screen.getAllByText(ready.mcp_endpoint_url).length).toBeGreaterThanOrEqual(1);
   });
 
   it('never allows READY without a saved upstream URL', async () => {
@@ -158,12 +158,19 @@ describe('Factory RuntimeBinding onboarding', () => {
     expect(JSON.stringify(body)).not.toContain('password');
   });
 
-  it('READY state is read-only and routes to existing MCP server connection/discovery UX', async () => {
-    const mock = vi.fn((_url: string, _opts: RequestInit) => Promise.resolve(json(ready)));
+  it('READY remains read-only and checks the actual MCP server endpoint with GET', async () => {
+    const linkedServer = {
+      id: SERVER_ID, status: 'DRAFT', endpoint_url: ready.mcp_endpoint_url,
+      lock_version: 4,
+    };
+    const mock = vi.fn((url: string, _opts: RequestInit) =>
+      Promise.resolve(json(url.includes('/mcp/servers/') ? linkedServer : ready)),
+    );
     vi.stubGlobal('fetch', mock);
     view();
     expect(await screen.findByText(/Runtime Binding이 READY입니다/)).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'MCP 서버 연결 테스트·탐색 화면으로' })).toBeInTheDocument();
+    expect(await screen.findByText(/생성된 MCP 엔드포인트가 서버에 등록되었습니다/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '연결 테스트·도구 탐색 화면으로' })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: '연결 설정 저장' })).not.toBeInTheDocument();
     expect(mock.mock.calls.every(([, opts]) => opts.method === 'GET')).toBe(true);
   });

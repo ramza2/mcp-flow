@@ -1717,6 +1717,13 @@ Accuracy = Correct Top-1 / Valid Evaluation Cases × 100
 
 ## 28. Factory 시험
 
+### Factory READY → MCP 서버 엔드포인트 등록 UI (2026-11-13)
+
+- READY Binding의 실제 MCP endpoint와 서버 ID를 이용해 GET `/mcp/servers/{server_id}`만 먼저 수행하고 자동 PATCH·연결 테스트·Discovery·Activate를 하지 않는다.
+- 실제 서버 ID 불일치, 서버 상태 DRAFT/INACTIVE 이외, 기존 다른 endpoint, 비정상 URL이면 등록 불가로 처리한다. 이미 같은 endpoint가 있으면 GET-only 등록 완료로 처리한다.
+- 미등록 DRAFT/INACTIVE 서버에서 별도 확인 체크 후 PATCH로 생성된 exact MCP endpoint만 등록한다. `If-Match`와 세션 CSRF 확인, Backend가 URL/동시성/정책 검증. 409 충돌 후에는 GET으로 재조회하여 중복 적용 여부 확인; 자동 재시도·덮어쓰기는 하지 않는다.
+- 등록 완료 이후에만 기존 MCP 서버 연결 테스트/Discovery 화면으로 이동하며 단계 자동 연계·MCP 활성화 금지. Frontend Mock fetch 및 기존 API/Backend CI 재검증.
+
 ### Factory Runtime Binding DRAFT 설정 및 READY 전환 UI (2026-11-13)
 
 - Publish Detail에서 실제 Runtime Binding GET; 404 시 빈 상태. 조회만으로 DB 변경 금지, 별도 확인 체크 뒤 사용자 명시 POST로 DRAFT 생성. 409 중복 생성 시 새 POST 자동 재시도 금지.

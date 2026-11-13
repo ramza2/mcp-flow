@@ -60,6 +60,22 @@ export function createMCPServer(body: MCPServerCreateRequest, signal?: AbortSign
   });
 }
 
+/**
+ * Explicitly registers a READY Factory RuntimeBinding MCP endpoint on its
+ * DRAFT/INACTIVE MCP Server. No Connection Test, Discovery or Activate here.
+ */
+export function setFactoryMCPServerEndpoint(
+  serverId: string,
+  endpointUrl: string,
+  lockVersion: number,
+) {
+  return apiRequest<MCPServerDto>(`/mcp/servers/${encodeURIComponent(serverId)}`, {
+    method: 'PATCH',
+    body: { endpoint_url: endpointUrl },
+    headers: ifMatchHeaders(lockVersion),
+  });
+}
+
 export function activateMCPServer(serverId: string, signal?: AbortSignal) {
   return apiRequest<MCPServerDto>(`/mcp/servers/${serverId}/activate`, {
     method: 'POST',
