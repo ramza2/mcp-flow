@@ -73,7 +73,7 @@ describe('Factory immutable Review and safe Publish/Import', () => {
     runView();
 
     expect(await screen.findByRole('heading', { name: 'Factory 검토·승인/반려' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: '검토 결정 선택 필요' })).toBeDisabled();
+    expect(await screen.findByRole('button', { name: '검토 결정 선택 필요' })).toBeDisabled();
     expect(screen.getByRole('radio', { name: /승인 —/ })).not.toBeChecked();
     expect(screen.getByRole('radio', { name: /반려 —/ })).not.toBeChecked();
     expect(mock.mock.calls.every(([, opts]) => opts.method === 'GET')).toBe(true);
@@ -90,7 +90,7 @@ describe('Factory immutable Review and safe Publish/Import', () => {
     runView();
 
     await screen.findByRole('heading', { name: 'Factory 검토·승인/반려' });
-    await user.click(screen.getByRole('radio', { name: /승인 —/ }));
+    await user.click(await screen.findByRole('radio', { name: /승인 —/ }));
     expect(screen.getByRole('button', { name: '승인 결정 저장' })).toBeDisabled();
     await user.type(screen.getByLabelText(/검토 의견/), '검토 완료');
     await user.click(screen.getByRole('checkbox', { name: /변경 불가능한 기록/ }));
@@ -120,7 +120,7 @@ describe('Factory immutable Review and safe Publish/Import', () => {
     const user = userEvent.setup();
     runView();
     await screen.findByRole('heading', { name: 'Factory 검토·승인/반려' });
-    await user.click(screen.getByRole('radio', { name: /반려 —/ }));
+    await user.click(await screen.findByRole('radio', { name: /반려 —/ }));
     await user.click(screen.getByRole('checkbox', { name: /변경 불가능한 기록/ }));
     await user.click(screen.getByRole('button', { name: '반려 결정 저장' }));
     expect(await screen.findByText('일시적 오류')).toBeInTheDocument();
