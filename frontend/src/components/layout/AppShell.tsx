@@ -49,7 +49,8 @@ const navConfig: NavItem[] = [
       { label: 'MCP 서버', path: '/mcp/servers', icon: <Server size={14} />, permission: 'mcp.view' },
       { label: 'MCP 도구', path: '/mcp/tools', icon: <Wrench size={14} />, permission: 'mcp.view' },
       { label: '외부 MCP 탐색', path: '/mcp/discovery', icon: <Globe size={14} />, permission: 'mcp.view' },
-      { label: '도구 생성 (시연)', path: '/tool-factory', icon: <Factory size={14} />, permission: 'mcp.view' },
+      { label: 'Factory 실제 작업', path: '/tool-factory/jobs', icon: <Factory size={14} />, permission: 'mcp.view' },
+      { label: '도구 생성 (시연)', path: '/tool-factory', icon: <Factory size={14} />, permission: 'mcp.view' }
     ],
   },
   {
