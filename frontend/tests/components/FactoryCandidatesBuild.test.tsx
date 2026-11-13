@@ -93,7 +93,7 @@ describe('Factory candidate review and Build snapshot', () => {
   afterEach(() => vi.unstubAllGlobals());
 
   it('GET-only loading never materializes, builds, packages or publishes', async () => {
-    const fetchMock = vi.fn((url: string) => Promise.resolve(
+    const fetchMock = vi.fn((url: string, _opts: RequestInit) => Promise.resolve(
       jsonResponse(url.includes('/candidates') ? candidatePage([candidate]) : job),
     ));
     vi.stubGlobal('fetch', fetchMock);
@@ -130,7 +130,7 @@ describe('Factory candidate review and Build snapshot', () => {
     const writes = fetchMock.mock.calls.filter(([, opts]) => opts?.method === 'POST');
     expect(writes).toHaveLength(1);
     expect(writes[0][0]).toContain(`/api/v1/factory/jobs/${JOB_ID}/candidates/materialize`);
-    expect(writes[0][1].headers['X-CSRF-Token']).toBe('test-csrf-token');
+    expect((writes[0][1].headers as Record<string, string>)['X-CSRF-Token']).toBe('test-csrf-token');
   });
 
   it('selects a real persisted candidate and creates only an immutable Build definition', async () => {
@@ -150,9 +150,9 @@ describe('Factory candidate review and Build snapshot', () => {
     const writes = fetchMock.mock.calls.filter(([, opts]) => opts?.method === 'POST');
     expect(writes).toHaveLength(1);
     expect(writes[0][0]).toContain(`/api/v1/factory/jobs/${JOB_ID}/builds`);
-    expect(JSON.parse(writes[0][1].body)).toEqual({ candidate_ids: [CANDIDATE_ID] });
-    expect(writes[0][1].headers['Idempotency-Key']).toMatch(/^factory-build-[0-9a-f]{32}$/);
-    expect(writes[0][1].headers['X-CSRF-Token']).toBe('test-csrf-token');
+    expect(JSON.parse(writes[0][1].body as string)).toEqual({ candidate_ids: [CANDIDATE_ID] });
+    expect((writes[0][1].headers as Record<string, string>)['Idempotency-Key']).toMatch(/^factory-build-[0-9a-f]{32}$/);
+    expect((writes[0][1].headers as Record<string, string>)['X-CSRF-Token']).toBe('test-csrf-token');
   });
 
   it('reuses the same idempotency key when retrying an ambiguous Build failure', async () => {
@@ -180,11 +180,11 @@ describe('Factory candidate review and Build snapshot', () => {
     expect(await screen.findByText('실제 Build 기록으로 이동')).toBeInTheDocument();
     const posts = fetchMock.mock.calls.filter(([, opts]) => opts?.method === 'POST');
     expect(posts).toHaveLength(2);
-    expect(posts[0][1].headers['Idempotency-Key']).toBe(posts[1][1].headers['Idempotency-Key']);
+    expect((posts[0][1].headers as Record<string, string>)['Idempotency-Key']).toBe((posts[1][1].headers as Record<string, string>)['Idempotency-Key']);
   });
 
   it('disables both write actions for incomplete analysis and shows real status', async () => {
-    vi.stubGlobal('fetch', vi.fn((url: string) =>
+    vi.stubGlobal('fetch', vi.fn((url: string, _opts: RequestInit) =>
       Promise.resolve(jsonResponse(url.includes('/candidates')
         ? candidatePage([])
         : { ...job, status: 'RUNNING' })),
@@ -196,7 +196,7 @@ describe('Factory candidate review and Build snapshot', () => {
   });
 
   it('reads actual Build snapshots without pretending package, tests or publishing succeeded', async () => {
-    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(build));
+    const fetchMock = vi.fn((_url: string, _opts: RequestInit) => Promise.resolve(jsonResponse(build)));
     vi.stubGlobal('fetch', fetchMock);
     renderWithRouter(<FactoryBuildRecord />, {
       route: `/tool-factory/builds/${BUILD_ID}`,
