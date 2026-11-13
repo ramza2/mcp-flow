@@ -135,6 +135,11 @@ describe('MCPServerDetail — API detail', () => {
 
     await screen.findByText('Docs MCP');
     await user.click(screen.getByRole('button', { name: /^활성화$/i }));
+    expect(fetchMock.mock.calls.some(([url, init]) =>
+      String(url).includes('/activate') && init?.method === 'POST',
+    )).toBe(false);
+    expect(screen.getByText('MCP 서버 활성화')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: '활성화 확인' }));
 
     await waitFor(() => {
       expect(fetchMock).toHaveBeenCalledWith(
@@ -178,6 +183,11 @@ describe('MCPServerDetail — API detail', () => {
 
     await screen.findByText('Docs MCP');
     await user.click(screen.getByRole('button', { name: /^활성화$/i }));
+    expect(fetchMock.mock.calls.some(([url, init]) =>
+      String(url).includes('/activate') && init?.method === 'POST',
+    )).toBe(false);
+    expect(screen.getByText('MCP 서버 활성화')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: '활성화 확인' }));
 
     expect(await screen.findByText(/Server cannot be activated from current status/i)).toBeInTheDocument();
     expect(screen.getByText(/Request ID: req-conflict-1/i)).toBeInTheDocument();
