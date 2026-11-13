@@ -139,6 +139,7 @@ export default function FactoryReviewDetail() {
                     message="Publish/Import 기록이 있습니다. DRAFT 서버 및 INACTIVE 도구가 등록되었으며, MCP 도구가 ACTIVE 상태인 것은 아닙니다." />
                   <dl className="text-sm space-y-2">
                     <div className="flex flex-wrap gap-2"><dt className="text-slate-500">Publish ID</dt><dd className="font-mono break-all">{published.id}</dd></div>
+                    <div className="flex flex-wrap gap-2"><dt className="text-slate-500">DRAFT MCP 서버 ID</dt><dd className="font-mono break-all">{published.mcp_server_id}</dd></div>
                     <div className="flex flex-wrap gap-2"><dt className="text-slate-500">등록 도구 수</dt><dd>{published.tool_count}개</dd></div>
                     <div className="flex flex-wrap gap-2"><dt className="text-slate-500">게시 증빙 해시</dt><dd className="font-mono text-xs break-all">{published.publish_evidence_hash}</dd></div>
                     <div className="flex flex-wrap gap-2"><dt className="text-slate-500">등록 시각</dt><dd>{formatTimestamp(published.created_at)}</dd></div>
