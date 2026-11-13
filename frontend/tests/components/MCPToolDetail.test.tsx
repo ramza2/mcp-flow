@@ -45,6 +45,8 @@ describe('MCPToolDetail — API detail', () => {
     });
 
     expect(await screen.findByRole('heading', { name: 'Search Docs' })).toBeInTheDocument();
+    expect(screen.getByText('도구를 사용하기 전에 확인하세요')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '실행 정책' })).toBeInTheDocument();
     expect(screen.getAllByText('VALID').length).toBeGreaterThan(0);
     expect(screen.getAllByText('발견됨').length).toBeGreaterThan(0);
   });
@@ -62,7 +64,7 @@ describe('MCPToolDetail — API detail', () => {
       route: '/mcp/tools/missing',
     });
 
-    expect(await screen.findByText(/Tool을 찾을 수 없습니다/i)).toBeInTheDocument();
+    expect(await screen.findByText(/도구를 찾을 수 없습니다/i)).toBeInTheDocument();
   });
 
   it('renders input schema via JsonViewer', async () => {
@@ -75,7 +77,7 @@ describe('MCPToolDetail — API detail', () => {
     });
 
     await screen.findByRole('heading', { name: 'Search Docs' });
-    await user.click(screen.getByRole('button', { name: /^Input Schema$/i }));
+    await user.click(screen.getByRole('button', { name: /^입력 스키마$/i }));
 
     expect(await screen.findByText(/"query"/)).toBeInTheDocument();
   });
@@ -106,7 +108,7 @@ describe('MCPToolDetail — API detail', () => {
     });
 
     await screen.findByRole('heading', { name: 'Search Docs' });
-    await user.click(screen.getByRole('button', { name: /^Versions$/i }));
+    await user.click(screen.getByRole('button', { name: /^버전 이력$/i }));
     await user.click(screen.getByText('v3'));
 
     await waitFor(() => {
@@ -151,7 +153,7 @@ describe('MCPToolDetail — API detail', () => {
     });
 
     await screen.findByRole('heading', { name: 'Search Docs' });
-    await user.click(screen.getByRole('button', { name: /^Versions$/i }));
+    await user.click(screen.getByRole('button', { name: /^버전 이력$/i }));
 
     // Version A (v3) — keep pending
     await user.click(screen.getByText('v3'));
@@ -168,7 +170,7 @@ describe('MCPToolDetail — API detail', () => {
     // Late A response must not overwrite B
     resolveA(jsonResponse(warningVersion));
 
-    await user.click(screen.getByRole('button', { name: /^Overview$/i }));
+    await user.click(screen.getByRole('button', { name: /^기본 정보$/i }));
     expect(await screen.findByText('v1')).toBeInTheDocument();
     expect(screen.getAllByText('VALID').length).toBeGreaterThan(0);
     expect(screen.queryByText('v3')).not.toBeInTheDocument();
@@ -211,7 +213,7 @@ describe('MCPToolDetail — API detail', () => {
     });
 
     expect(await screen.findByRole('heading', { name: 'Search Docs' })).toBeInTheDocument();
-    await user.click(screen.getByRole('button', { name: /^Versions$/i }));
+    await user.click(screen.getByRole('button', { name: /^버전 이력$/i }));
     await user.click(screen.getByText('v3'));
 
     expect(await screen.findByText(/version detail failed/i)).toBeInTheDocument();
@@ -262,7 +264,7 @@ describe('MCPToolDetail — API detail', () => {
     });
 
     await screen.findByRole('heading', { name: 'Search Docs' });
-    await user.click(screen.getByRole('button', { name: /^Test Call$/i }));
+    await user.click(screen.getByRole('button', { name: /^실행 테스트$/i }));
     expect(await screen.findByRole('button', { name: /^테스트 실행$/ })).toBeInTheDocument();
     expect(screen.queryByText(/Test Call deferred/i)).not.toBeInTheDocument();
     expect(screen.getByText(/VERIFIED/i)).toBeInTheDocument();
@@ -289,8 +291,8 @@ describe('MCPToolDetail — API detail', () => {
     });
 
     await screen.findByRole('heading', { name: 'Search Docs' });
-    await user.click(screen.getByRole('button', { name: /^Used By$/i }));
-    expect(await screen.findByText(/Used By deferred/i)).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: /^사용처$/i }));
+    expect(await screen.findByText(/사용처 조회 미지원/i)).toBeInTheDocument();
   });
 
   it('header Activate uses If-Match and updates status + lock_version', async () => {
@@ -321,8 +323,8 @@ describe('MCPToolDetail — API detail', () => {
     });
 
     await screen.findByRole('heading', { name: 'Search Docs' });
-    await user.click(screen.getByRole('button', { name: 'Activate' }));
-    expect(await screen.findByRole('button', { name: 'Deactivate' })).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: '활성화' }));
+    expect(await screen.findByRole('button', { name: '비활성화' })).toBeInTheDocument();
     expect(screen.getAllByText('활성').length).toBeGreaterThan(0);
   });
 
@@ -364,13 +366,13 @@ describe('MCPToolDetail — API detail', () => {
     });
 
     await screen.findByRole('heading', { name: 'Search Docs' });
-    await user.click(screen.getByRole('button', { name: /Edit metadata/i }));
+    await user.click(screen.getByRole('button', { name: /표시 정보 수정/i }));
     await user.clear(screen.getByDisplayValue('Search Docs'));
-    await user.type(screen.getByRole('textbox', { name: /Display Name/i }), 'Docs Search');
+    await user.type(screen.getByRole('textbox', { name: /표시 이름/i }), 'Docs Search');
     const tags = screen.getByPlaceholderText(/ops, search/i);
     await user.clear(tags);
     await user.type(tags, 'docs');
-    await user.click(screen.getByRole('button', { name: /^Save$/i }));
+    await user.click(screen.getByRole('button', { name: /^저장$/i }));
 
     expect(await screen.findByRole('heading', { name: 'Docs Search' })).toBeInTheDocument();
   });
@@ -425,7 +427,7 @@ describe('MCPToolDetail — API detail', () => {
     });
 
     await screen.findByRole('heading', { name: 'Search Docs' });
-    await user.click(screen.getByRole('button', { name: /^Policy$/i }));
+    await user.click(screen.getByRole('button', { name: /^실행 정책$/i }));
     expect(await screen.findByText(/아직 Tool Policy가 설정되지 않았습니다/i)).toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: /Create Policy/i }));
     await user.click(screen.getByRole('button', { name: /^Save$/i }));
@@ -473,12 +475,12 @@ describe('MCPToolDetail — API detail', () => {
     });
 
     await screen.findByRole('heading', { name: 'Search Docs' });
-    await user.click(screen.getByRole('button', { name: /^Verification$/i }));
+    await user.click(screen.getByRole('button', { name: /^검증 이력$/i }));
     await waitFor(() => expect(v1Signal).toBeDefined());
 
-    await user.click(screen.getByRole('button', { name: /^Versions$/i }));
+    await user.click(screen.getByRole('button', { name: /^버전 이력$/i }));
     await user.click(screen.getByText('v3'));
-    await user.click(screen.getByRole('button', { name: /^Verification$/i }));
+    await user.click(screen.getByRole('button', { name: /^검증 이력$/i }));
 
     await waitFor(() => expect(v1Signal?.aborted).toBe(true));
     resolveV1(
@@ -588,7 +590,7 @@ describe('MCPToolDetail — API detail', () => {
     });
 
     await screen.findByRole('heading', { name: 'Search Docs' });
-    await user.click(screen.getByRole('button', { name: /^Policy$/i }));
+    await user.click(screen.getByRole('button', { name: /^실행 정책$/i }));
     expect(await screen.findByText(/아직 Tool Policy가 설정되지 않았습니다/i)).toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: /Create Policy/i }));
     await user.click(screen.getByRole('button', { name: /^Save$/i }));
@@ -648,7 +650,7 @@ describe('MCPToolDetail — API detail', () => {
     });
 
     await screen.findByRole('heading', { name: 'Search Docs' });
-    await user.click(screen.getByRole('button', { name: /^Policy$/i }));
+    await user.click(screen.getByRole('button', { name: /^실행 정책$/i }));
     expect(await screen.findByText(/Edit Policy/i)).toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: /Edit Policy/i }));
     await user.click(screen.getByRole('button', { name: /^Save$/i }));
@@ -704,10 +706,10 @@ describe('MCPToolDetail — API detail', () => {
     });
 
     await screen.findByRole('heading', { name: 'Search Docs' });
-    await user.click(screen.getByRole('button', { name: /Edit metadata/i }));
-    await user.click(screen.getByRole('button', { name: /^Save$/i }));
+    await user.click(screen.getByRole('button', { name: /표시 정보 수정/i }));
+    await user.click(screen.getByRole('button', { name: /^저장$/i }));
 
-    expect(await screen.findByText(/다른 작업으로 Tool이 변경되었습니다/i)).toBeInTheDocument();
+    expect(await screen.findByText(/다른 작업으로 도구 정보가 변경되었습니다/i)).toBeInTheDocument();
     expect(screen.getByText(/Request ID: req-meta-stale/i)).toBeInTheDocument();
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
     expect(await screen.findByRole('heading', { name: 'Latest From Peer' })).toBeInTheDocument();
@@ -740,10 +742,10 @@ describe('MCPToolDetail — API detail', () => {
     });
 
     await screen.findByRole('heading', { name: 'Search Docs' });
-    await user.click(screen.getByRole('button', { name: /Edit metadata/i }));
+    await user.click(screen.getByRole('button', { name: /표시 정보 수정/i }));
     const tags = screen.getByPlaceholderText(/ops, search/i);
     fireEvent.change(tags, { target: { value: 'x'.repeat(65) } });
-    await user.click(screen.getByRole('button', { name: /^Save$/i }));
+    await user.click(screen.getByRole('button', { name: /^저장$/i }));
 
     expect(await screen.findByText(/각 태그는 최대 64자까지 입력할 수 있습니다/i)).toBeInTheDocument();
     expect(fetchMock.mock.calls.some(([, init]) => init?.method === 'PATCH')).toBe(false);
@@ -776,12 +778,12 @@ describe('MCPToolDetail — API detail', () => {
     });
 
     await screen.findByRole('heading', { name: 'Search Docs' });
-    await user.click(screen.getByRole('button', { name: /Edit metadata/i }));
+    await user.click(screen.getByRole('button', { name: /표시 정보 수정/i }));
     const tags = screen.getByPlaceholderText(/ops, search/i);
     fireEvent.change(tags, {
       target: { value: Array.from({ length: 33 }, (_, i) => `t${i}`).join(',') },
     });
-    await user.click(screen.getByRole('button', { name: /^Save$/i }));
+    await user.click(screen.getByRole('button', { name: /^저장$/i }));
 
     expect(await screen.findByText(/태그는 최대 32개까지 입력할 수 있습니다/i)).toBeInTheDocument();
     expect(fetchMock.mock.calls.some(([, init]) => init?.method === 'PATCH')).toBe(false);
@@ -816,10 +818,10 @@ describe('MCPToolDetail — API detail', () => {
     });
 
     await screen.findByRole('heading', { name: 'Search Docs' });
-    await user.click(screen.getByRole('button', { name: /Edit metadata/i }));
+    await user.click(screen.getByRole('button', { name: /표시 정보 수정/i }));
     const tags = screen.getByPlaceholderText(/ops, search/i);
     fireEvent.change(tags, { target: { value: ' alpha , , beta, alpha, beta ' } });
-    await user.click(screen.getByRole('button', { name: /^Save$/i }));
+    await user.click(screen.getByRole('button', { name: /^저장$/i }));
 
     await waitFor(() => {
       expect(patchedBody).toEqual({
