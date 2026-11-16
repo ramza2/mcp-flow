@@ -8,12 +8,25 @@ from typing import Any
 from sqlalchemy import Select, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.domain.enums import ApprovalStatus
+from app.domain.enums import (
+    ApprovalStatus,
+    AuthorableStepType,
+    WorkflowVersionStatus,
+)
 from app.models.approval import ApprovalPolicy, ApprovalRequest
 from app.models.mcp import MCPToolPolicy
+from app.models.workflow import WorkflowVersion
 from app.schemas.common_page import parse_sort
 
-ALLOWED_APPROVAL_POLICY_SORT = frozenset({"name", "updated_at", "created_at", "status", "code"})
+ALLOWED_APPROVAL_POLICY_SORT = frozenset(
+    {"name", "updated_at", "created_at", "status", "code"}
+)
+_LIVE_WORKFLOW_VERSION_STATUSES = frozenset(
+    {
+        WorkflowVersionStatus.DRAFT.value,
+        WorkflowVersionStatus.PUBLISHED.value,
+    }
+)
 
 
 class ApprovalPolicyRepository:
@@ -174,3 +187,45 @@ class ApprovalPolicyRepository:
             ApprovalRequest.status == ApprovalStatus.PENDING.value,
         )
         return int((await self._session.execute(stmt)).scalar_one())
+
+    async def count_live_workflow_approval_references(
+        self, policy_id: uuid.UUID
+    ) -> int:
+        """Count DRAFT/PUBLISHED WorkflowVersions with APPROVAL Step refs.
+
+        DEPRECATED versions are historical and intentionally ignored so past
+        history does not block deactivate.
+        """
+        stmt = select(
+            WorkflowVersion.id,
+            WorkflowVersion.plan_definition,
+        ).where(WorkflowVersion.status.in_(sorted(_LIVE_WORKFLOW_VERSION_STATUSES)))
+        rows = list((await self._session.execute(stmt)).all())
+        target = str(policy_id)
+        matched = 0
+        for _version_id, plan in rows:
+            if self._plan_references_approval_policy(plan, target):
+                matched += 1
+        return matched
+
+    @staticmethod
+    def _plan_references_approval_policy(plan: Any, policy_id: str) -> bool:
+        if not isinstance(plan, dict):
+            return False
+        steps = plan.get("steps")
+        if not isinstance(steps, list):
+            return False
+        for step in steps:
+            if not isinstance(step, dict):
+                continue
+            if step.get("type") != AuthorableStepType.APPROVAL.value:
+                continue
+            config = step.get("config")
+            if not isinstance(config, dict):
+                continue
+            raw = config.get("approval_policy_id")
+            if raw is None:
+                continue
+            if str(raw) == policy_id:
+                return True
+        return False

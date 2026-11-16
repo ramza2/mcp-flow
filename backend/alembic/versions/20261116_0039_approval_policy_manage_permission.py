@@ -1,8 +1,15 @@
-"""Add approval.policy.manage permission for ApprovalPolicy admin API.
+"""Add approval.policy.manage permission; grant to ADMIN Role only if present.
 
 Revision ID: 20261116_0039
 Revises: 20261028_0038
 Create Date: 2026-11-16
+
+Does NOT:
+
+* create the ADMIN Role
+* grant the permission to all Roles
+* grant the permission to all Users / via user_roles blanket insert
+* touch ApprovalPolicy / ApprovalRequest / ToolPolicy / Workflow rows
 """
 
 from __future__ import annotations
@@ -37,6 +44,21 @@ def upgrade() -> None:
             ON CONFLICT (code) DO NOTHING
             """
         ).bindparams(id=_PERMISSION_ID)
+    )
+    # Grant ONLY to live Role code='ADMIN' when that Role already exists.
+    # Never INSERT into user_roles. Never grant to every Role.
+    op.execute(
+        sa.text(
+            """
+            INSERT INTO role_permissions (role_id, permission_id)
+            SELECT r.id, p.id
+            FROM roles r
+            JOIN permissions p ON p.code = 'approval.policy.manage'
+            WHERE r.code = 'ADMIN'
+              AND r.deleted_at IS NULL
+            ON CONFLICT DO NOTHING
+            """
+        )
     )
 
 

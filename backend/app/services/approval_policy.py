@@ -345,6 +345,19 @@ class ApprovalPolicyService:
                 status_code=status.HTTP_409_CONFLICT,
                 details=[{"pending_approval_request_references": pending_refs}],
             )
+        workflow_refs = await self._policies.count_live_workflow_approval_references(
+            policy_id
+        )
+        if workflow_refs > 0:
+            raise AppError(
+                code="RESOURCE_CONFLICT",
+                message=(
+                    "Cannot deactivate ApprovalPolicy while DRAFT/PUBLISHED "
+                    "WorkflowVersion APPROVAL steps reference it."
+                ),
+                status_code=status.HTTP_409_CONFLICT,
+                details=[{"live_workflow_approval_references": workflow_refs}],
+            )
 
         updated = await self._policies.set_status_atomic(
             policy_id,

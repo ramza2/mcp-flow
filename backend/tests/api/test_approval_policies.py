@@ -270,6 +270,117 @@ async def test_deactivate_blocked_by_tool_policy_reference(
     assert "ToolPolicy" in blocked.json()["error"]["message"]
 
 
+async def _seed_workflow_approval_version(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    *,
+    policy_id: uuid.UUID,
+    status: str,
+) -> uuid.UUID:
+    from app.domain.enums import AuthorableStepType
+    from app.repositories.workflow import WorkflowRepository
+    from app.repositories.workflow_version import WorkflowVersionRepository
+    from app.schemas.execution_plan import EXECUTION_PLAN_SCHEMA_VERSION
+
+    async with db_session_factory() as session:
+        workflow = await WorkflowRepository(session).create(
+            code=f"wf-{uuid.uuid4().hex[:8]}",
+            name="Approval Ref WF",
+        )
+        plan = {
+            "schema_version": EXECUTION_PLAN_SCHEMA_VERSION,
+            "goal": "deactivate guard",
+            "source": {"type": "WORKFLOW", "workflow_id": str(workflow.id)},
+            "inputs": {},
+            "limits": {"max_steps": 10, "max_parallelism": 1, "max_duration_seconds": 60},
+            "steps": [
+                {
+                    "id": "apr1",
+                    "name": "apr1",
+                    "type": AuthorableStepType.APPROVAL.value,
+                    "required": True,
+                    "depends_on": [],
+                    "when": None,
+                    "timeout_seconds": 30,
+                    "on_error": "FAIL_EXECUTION",
+                    "config": {"approval_policy_id": str(policy_id)},
+                }
+            ],
+            "completion": {
+                "success_policy": "ALL_REQUIRED",
+                "response_step_ids": ["apr1"],
+            },
+        }
+        version = await WorkflowVersionRepository(session).create(
+            workflow_id=workflow.id,
+            version_no=1,
+            plan_schema_version=EXECUTION_PLAN_SCHEMA_VERSION,
+            plan_definition=plan,
+            input_schema={},
+            output_schema={},
+            policy_defaults={},
+            content_hash=uuid.uuid4().hex,
+            change_summary="ref",
+        )
+        version.status = status
+        await session.commit()
+        return version.id
+
+
+@pytest.mark.asyncio
+async def test_deactivate_blocked_by_live_workflow_approval_reference(
+    policy_client: AsyncClient,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    created = await policy_client.post(API, json=_create_body())
+    assert created.status_code == 201
+    policy_id = uuid.UUID(created.json()["id"])
+
+    await _seed_workflow_approval_version(
+        db_session_factory, policy_id=policy_id, status="PUBLISHED"
+    )
+
+    blocked = await policy_client.post(f"{API}/{policy_id}/deactivate")
+    assert blocked.status_code == 409, blocked.text
+    assert blocked.json()["error"]["code"] == "RESOURCE_CONFLICT"
+    assert "WorkflowVersion" in blocked.json()["error"]["message"]
+
+
+@pytest.mark.asyncio
+async def test_deactivate_allows_deprecated_workflow_approval_history(
+    policy_client: AsyncClient,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    created = await policy_client.post(API, json=_create_body())
+    assert created.status_code == 201
+    policy_id = uuid.UUID(created.json()["id"])
+
+    await _seed_workflow_approval_version(
+        db_session_factory, policy_id=policy_id, status="DEPRECATED"
+    )
+
+    ok = await policy_client.post(f"{API}/{policy_id}/deactivate")
+    assert ok.status_code == 200, ok.text
+    assert ok.json()["status"] == "INACTIVE"
+
+
+@pytest.mark.asyncio
+async def test_deactivate_blocked_by_draft_workflow_approval_reference(
+    policy_client: AsyncClient,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    created = await policy_client.post(API, json=_create_body())
+    assert created.status_code == 201
+    policy_id = uuid.UUID(created.json()["id"])
+
+    await _seed_workflow_approval_version(
+        db_session_factory, policy_id=policy_id, status="DRAFT"
+    )
+
+    blocked = await policy_client.post(f"{API}/{policy_id}/deactivate")
+    assert blocked.status_code == 409, blocked.text
+    assert "WorkflowVersion" in blocked.json()["error"]["message"]
+
+
 @pytest.mark.asyncio
 async def test_permission_regression_decide_not_sufficient_or_required(
     unauthenticated_db_client: AsyncClient,
