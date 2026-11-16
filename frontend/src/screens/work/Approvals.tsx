@@ -1,50 +1,284 @@
+import { useCallback, useEffect, useState } from 'react';
 import { useNavigate } from 'react-router';
+import { RefreshCw } from 'lucide-react';
 import PageHeader from '../../components/ui/PageHeader';
-import DataTable, { Column } from '../../components/ui/DataTable';
-import StatusBadge, { RiskBadge } from '../../components/ui/StatusBadge';
+import DataTable, { type Column } from '../../components/ui/DataTable';
+import StatusBadge from '../../components/ui/StatusBadge';
 import FilterBar from '../../components/ui/FilterBar';
-import { mockApprovals } from '../../data/mock';
-import { APPROVAL_STATUSES } from '../../domain';
+import Button from '../../components/ui/Button';
+import Pagination from '../../components/ui/Pagination';
+import {
+  EmptyState,
+  ErrorState,
+  LoadingSkeleton,
+  PermissionDenied,
+} from '../../components/ui/EmptyState';
+import {
+  listApprovals,
+  type ApprovalListItemDto,
+  type ApprovalSort,
+} from '../../api/approvals';
+import { isAbortError, isApiError } from '../../api/client';
+import {
+  APPROVAL_STATUSES,
+  formatTimestamp,
+  labelApprovalDecisionMode,
+  labelApprovalStatus,
+  shortenId,
+  type ApprovalStatus,
+} from '../../domain';
+
+const PAGE_SIZE = 20;
+const DEFAULT_STATUS: ApprovalStatus = 'PENDING';
 
 export default function Approvals() {
   const navigate = useNavigate();
+  const [page, setPage] = useState(1);
+  const [statusFilter, setStatusFilter] = useState<ApprovalStatus | ''>('');
+  const [sort, setSort] = useState<ApprovalSort>('expires_at');
+  const [reload, setReload] = useState(0);
+  const [items, setItems] = useState<ApprovalListItemDto[]>([]);
+  const [total, setTotal] = useState(0);
+  const [hasNext, setHasNext] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [forbidden, setForbidden] = useState(false);
+  const [error, setError] = useState<{ message: string; requestId?: string } | null>(null);
 
-  const columns: Column<typeof mockApprovals[0]>[] = [
-    { key: 'purpose', label: '목적', render: r => <span className="font-medium text-slate-800">{r.purpose}</span> },
-    { key: 'requester', label: '요청자', render: r => <span className="font-mono text-xs text-slate-600">{r.requester}</span> },
-    { key: 'agent', label: 'Agent', render: r => <span className="text-sm text-slate-600">{r.agent}</span> },
-    { key: 'tool', label: 'Tool', render: r => <span className="font-mono text-xs text-slate-600">{r.tool}</span> },
-    { key: 'riskClass', label: 'Risk', render: r => <RiskBadge risk={r.riskClass} /> },
-    { key: 'requestedAt', label: '요청 시각', render: r => <span className="text-xs text-slate-500">{r.requestedAt}</span> },
-    { key: 'expiresAt', label: '만료 시각', render: r => <span className="text-xs text-slate-500">{r.expiresAt}</span> },
-    { key: 'status', label: '상태', render: r => <StatusBadge status={r.status} size="sm" /> },
+  const effectiveStatus: ApprovalStatus = statusFilter || DEFAULT_STATUS;
+
+  const load = useCallback(() => {
+    const controller = new AbortController();
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+    setForbidden(false);
+
+    listApprovals({
+      page,
+      page_size: PAGE_SIZE,
+      status: effectiveStatus,
+      sort,
+      signal: controller.signal,
+    })
+      .then((data) => {
+        if (cancelled) return;
+        setItems(data.items);
+        setTotal(data.total);
+        setHasNext(data.has_next);
+      })
+      .catch((err: unknown) => {
+        if (isAbortError(err) || cancelled) return;
+        if (isApiError(err) && err.status === 403) {
+          setForbidden(true);
+          setItems([]);
+          setTotal(0);
+          setHasNext(false);
+          return;
+        }
+        const apiErr = isApiError(err) ? err : null;
+        setError({
+          message: apiErr?.message ?? '승인 목록을 불러오지 못했습니다.',
+          requestId: apiErr?.requestId ?? undefined,
+        });
+        setItems([]);
+        setTotal(0);
+        setHasNext(false);
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+      controller.abort();
+    };
+  }, [page, effectiveStatus, sort, reload]);
+
+  useEffect(() => load(), [load]);
+
+  const columns: Column<ApprovalListItemDto>[] = [
+    {
+      key: 'id',
+      label: '승인 ID',
+      render: (row) => (
+        <span className="font-mono text-xs text-slate-600" title={row.id}>
+          {shortenId(row.id, 12)}
+        </span>
+      ),
+    },
+    {
+      key: 'status',
+      label: '상태',
+      render: (row) => (
+        <span title={row.status}>
+          <StatusBadge status={row.status} label={labelApprovalStatus(row.status)} size="sm" />
+        </span>
+      ),
+    },
+    {
+      key: 'can_decide',
+      label: '결정 가능',
+      render: (row) => (
+        <span className={`text-xs font-medium ${row.can_decide ? 'text-emerald-700' : 'text-slate-400'}`}>
+          {row.can_decide ? '가능' : '불가'}
+        </span>
+      ),
+    },
+    {
+      key: 'execution_id',
+      label: 'Execution',
+      render: (row) => (
+        <button
+          type="button"
+          className="font-mono text-xs text-indigo-600 hover:underline"
+          title={row.execution_id}
+          onClick={(event) => {
+            event.stopPropagation();
+            navigate(`/executions/${row.execution_id}`);
+          }}
+        >
+          {shortenId(row.execution_id, 12)}
+        </button>
+      ),
+    },
+    {
+      key: 'decision_mode',
+      label: '결정 방식',
+      render: (row) => (
+        <span className="text-xs text-slate-600" title={row.decision_mode}>
+          {labelApprovalDecisionMode(row.decision_mode)}
+          <span className="text-slate-400"> · {row.required_approvals}명</span>
+        </span>
+      ),
+    },
+    {
+      key: 'votes',
+      label: '집계',
+      render: (row) => (
+        <span className="text-xs text-slate-500">
+          승인 {row.approve_count} / 거절 {row.reject_count}
+        </span>
+      ),
+    },
+    {
+      key: 'requested_by',
+      label: '요청자',
+      render: (row) => (
+        <span className="font-mono text-xs text-slate-500" title={row.requested_by}>
+          {shortenId(row.requested_by, 8)}
+        </span>
+      ),
+    },
+    {
+      key: 'requested_at',
+      label: '요청 시각',
+      render: (row) => <span className="text-xs text-slate-500">{formatTimestamp(row.requested_at)}</span>,
+    },
+    {
+      key: 'expires_at',
+      label: '만료 시각',
+      render: (row) => <span className="text-xs text-amber-700">{formatTimestamp(row.expires_at)}</span>,
+    },
   ];
 
   return (
     <div>
-      <PageHeader title="Approvals" description="승인 요청을 검토하고 처리합니다." />
+      <PageHeader
+        title="승인"
+        description="승인 권한이 있는 요청을 조회합니다. 기본 목록은 대기 중(PENDING)이며, 승인·거절 처리는 이후 단계에서 지원합니다."
+        actions={
+          <Button
+            variant="outline"
+            icon={<RefreshCw size={13} />}
+            onClick={() => setReload((n) => n + 1)}
+          >
+            새로고침
+          </Button>
+        }
+      />
       <div className="p-6 space-y-4">
         <FilterBar
-          search
-          searchPlaceholder="목적, 요청자 검색..."
           filters={[
-            { key: 'status', label: '상태', options: APPROVAL_STATUSES.map(v => ({
-              value: v,
-              label: v.replace(/_/g, ' '),
-            })) },
-            { key: 'risk', label: 'Risk Class', options: [
-              { value: 'NON_IDEMPOTENT_WRITE', label: 'Non-Idempotent Write' },
-              { value: 'DESTRUCTIVE', label: 'Destructive' },
-            ]},
+            {
+              key: 'status',
+              label: '상태',
+              options: APPROVAL_STATUSES.map((value) => ({
+                value,
+                label: labelApprovalStatus(value),
+              })),
+            },
+            {
+              key: 'sort',
+              label: '정렬',
+              options: [
+                { value: 'expires_at', label: '만료 빠른 순' },
+                { value: '-expires_at', label: '만료 늦은 순' },
+                { value: 'requested_at', label: '요청 오래된 순' },
+                { value: '-requested_at', label: '요청 최신 순' },
+              ],
+            },
           ]}
+          onFilter={(key, value) => {
+            setPage(1);
+            if (key === 'status') setStatusFilter((value || '') as ApprovalStatus | '');
+            if (key === 'sort') setSort((value || 'expires_at') as ApprovalSort);
+          }}
         />
+        <p className="text-xs text-slate-500" role="status">
+          {statusFilter
+            ? `필터: ${labelApprovalStatus(statusFilter)}`
+            : '상태 미선택 시 대기 중(PENDING) 승인함을 조회합니다.'}
+          {' · '}권한은 서버의 승인 결정(`approval.decide`)을 따릅니다.
+        </p>
+
         <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
-          <DataTable
-            columns={columns}
-            data={mockApprovals}
-            rowKey={r => r.id}
-            onRowClick={r => navigate(`/approvals/${r.id}`)}
-          />
+          {forbidden ? (
+            <div className="py-4">
+              <PermissionDenied />
+              <p className="text-center text-sm text-slate-400 -mt-8 mb-10 px-6">
+                승인 목록을 보려면 관리자에게 승인 결정 권한을 요청하세요.
+              </p>
+            </div>
+          ) : loading ? (
+            <LoadingSkeleton rows={6} />
+          ) : error ? (
+            <ErrorState
+              message={error.message}
+              requestId={error.requestId}
+              onRetry={() => setReload((n) => n + 1)}
+            />
+          ) : items.length === 0 ? (
+            <EmptyState
+              title={
+                effectiveStatus === 'PENDING'
+                  ? '대기 중인 승인 요청이 없습니다.'
+                  : '조건에 맞는 승인 요청이 없습니다.'
+              }
+              description={
+                effectiveStatus === 'PENDING'
+                  ? '처리할 승인 요청이 생기면 여기에 표시됩니다.'
+                  : '상태 필터를 바꾸거나 새로고침해 보세요.'
+              }
+            />
+          ) : (
+            <>
+              <DataTable
+                columns={columns}
+                data={items}
+                rowKey={(row) => row.id}
+                onRowClick={(row) => navigate(`/approvals/${row.id}`)}
+                emptyMessage="조건에 맞는 승인 요청이 없습니다."
+              />
+              <Pagination
+                page={page}
+                pageSize={PAGE_SIZE}
+                total={total}
+                hasNext={hasNext}
+                onPageChange={setPage}
+                disabled={loading}
+              />
+            </>
+          )}
         </div>
       </div>
     </div>

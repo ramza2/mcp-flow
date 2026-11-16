@@ -2,6 +2,7 @@ import type {
   AgentStatus,
   AgentVersionStatus,
   AgentVisibility,
+  ApprovalStatus,
   AuditActorType,
   AuditResult,
   ExecutionSourceType,
@@ -116,6 +117,38 @@ export const AUDIT_RESULT_LABELS: Record<AuditResult, string> = {
   DENIED: 'Denied',
   FAILURE: 'Failure',
 };
+
+/** Approval Entity status — never map PENDING → WAITING_APPROVAL. */
+export const APPROVAL_STATUS_LABELS: Record<ApprovalStatus, string> = {
+  PENDING: '대기',
+  APPROVED: '승인됨',
+  REJECTED: '거절됨',
+  EXPIRED: '만료됨',
+  CANCELLED: '취소됨',
+};
+
+export const APPROVAL_DECISION_MODE_LABELS: Record<string, string> = {
+  ANY: '아무나 1명',
+  ALL: '전원 승인',
+  QUORUM: '정족수',
+};
+
+export const APPROVAL_DECISION_VALUE_LABELS: Record<string, string> = {
+  APPROVE: '승인',
+  REJECT: '거절',
+};
+
+export function labelApprovalStatus(value: string): string {
+  return APPROVAL_STATUS_LABELS[value as ApprovalStatus] ?? value;
+}
+
+export function labelApprovalDecisionMode(value: string): string {
+  return APPROVAL_DECISION_MODE_LABELS[value] ?? value;
+}
+
+export function labelApprovalDecisionValue(value: string): string {
+  return APPROVAL_DECISION_VALUE_LABELS[value] ?? value;
+}
 
 export const SCHEDULE_TARGET_LABELS: Record<ScheduleTargetType, string> = {
   AGENT_VERSION: '에이전트 버전',
