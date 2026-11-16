@@ -1,7 +1,7 @@
 /**
- * Approval query / pending inbox — GET /api/v1/approvals (docs/06 §13).
+ * Approval query + decisions — docs/06 §13.
  * Permission: current DB `approval.decide` (no separate approval.read).
- * Phase 1: read-only list/detail. POST decisions are out of scope.
+ * Clients never submit context_hash; server derives it.
  */
 
 import type { ApprovalStatus } from '../domain/types';
@@ -83,4 +83,43 @@ export function listApprovals(params: ApprovalListParams = {}) {
 
 export function getApproval(approvalId: string, signal?: AbortSignal) {
   return apiRequest<ApprovalDetailDto>(`/approvals/${approvalId}`, { signal });
+}
+
+export interface ApprovalDecisionCreateRequest {
+  decision: ApprovalDecisionValue;
+  /** Optional; server may require it for REJECT per snapshotted policy. */
+  comment?: string | null;
+}
+
+/** Safe subset from POST /approvals/{id}/decisions (201 only when persisted). */
+export interface ApprovalDecisionResultDto {
+  decision_id: string;
+  approval_request_id: string;
+  approval_status: ApprovalStatus | string;
+  execution_id: string;
+  step_execution_id: string;
+  execution_status: string;
+  step_status: string;
+  decision: ApprovalDecisionValue | string;
+  decided_by: string;
+  decided_at: string;
+  /** True when APPROVED created durable EXECUTION_APPROVAL_RESUME Outbox. */
+  resume_enqueued: boolean;
+}
+
+export function createApprovalDecision(
+  approvalId: string,
+  body: ApprovalDecisionCreateRequest,
+  signal?: AbortSignal,
+) {
+  return apiRequest<ApprovalDecisionResultDto>(`/approvals/${approvalId}/decisions`, {
+    method: 'POST',
+    body: {
+      decision: body.decision,
+      ...(body.comment != null && body.comment !== ''
+        ? { comment: body.comment }
+        : {}),
+    },
+    signal,
+  });
 }

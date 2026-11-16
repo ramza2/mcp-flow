@@ -8,17 +8,19 @@ import { screen } from '@testing-library/react';
 import ApprovalDetail from '@/screens/work/ApprovalDetail';
 import { renderWithRouter } from '../test-utils';
 
-const mocks = vi.hoisted(() => ({ get: vi.fn() }));
+const mocks = vi.hoisted(() => ({ get: vi.fn(), decide: vi.fn() }));
 
 vi.mock('@/api/approvals', () => ({
   getApproval: mocks.get,
   listApprovals: vi.fn(),
+  createApprovalDecision: mocks.decide,
 }));
 
 const approvalId = '11111111-1111-4111-8111-111111111111';
 
 beforeEach(() => {
   mocks.get.mockReset();
+  mocks.decide.mockReset();
   mocks.get.mockResolvedValue({
     id: approvalId,
     status: 'PENDING',
@@ -52,7 +54,7 @@ describe('ApprovalDetail contract regression', () => {
     expect(pendingBadges.length).toBeGreaterThan(0);
     expect(pendingBadges.every((el) => el.getAttribute('title') === 'PENDING')).toBe(true);
     expect(screen.queryByText('WAITING_APPROVAL')).not.toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: '승인' })).not.toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: '거절' })).not.toBeInTheDocument();
+    expect(screen.getAllByRole('button', { name: '승인' }).length).toBeGreaterThan(0);
+    expect(screen.getAllByRole('button', { name: '거절' }).length).toBeGreaterThan(0);
   });
 });

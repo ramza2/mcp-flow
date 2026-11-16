@@ -10,17 +10,20 @@ import { renderWithRouter } from '../test-utils';
 const mocks = vi.hoisted(() => ({
   list: vi.fn(),
   get: vi.fn(),
+  decide: vi.fn(),
 }));
 
 vi.mock('@/api/approvals', () => ({
   listApprovals: mocks.list,
   getApproval: mocks.get,
+  createApprovalDecision: mocks.decide,
 }));
 
 const approvalId = '11111111-1111-4111-8111-111111111111';
 const executionId = '22222222-2222-4222-8222-222222222222';
 const stepId = '33333333-3333-4333-8333-333333333333';
 const requesterId = '44444444-4444-4444-8444-444444444444';
+const decisionId = '77777777-7777-4777-8777-777777777777';
 
 const listItem = {
   id: approvalId,
@@ -45,20 +48,33 @@ const detail = {
     risk_class: 'DESTRUCTIVE',
     arguments: { petId: { kind: 'SECRET_REF', masked: true } },
   },
-  decisions: [
-    {
-      decision_id: '55555555-5555-4555-8555-555555555555',
-      decided_by: '66666666-6666-4666-8666-666666666666',
-      decision: 'APPROVE',
-      comment: '확인 완료',
-      decided_at: '2026-11-16T00:30:00.000Z',
-    },
-  ],
+  decisions: [] as Array<{
+    decision_id: string;
+    decided_by: string;
+    decision: string;
+    comment: string | null;
+    decided_at: string;
+  }>,
+};
+
+const approveResult = {
+  decision_id: decisionId,
+  approval_request_id: approvalId,
+  approval_status: 'APPROVED',
+  execution_id: executionId,
+  step_execution_id: stepId,
+  execution_status: 'WAITING_APPROVAL',
+  step_status: 'WAITING_APPROVAL',
+  decision: 'APPROVE',
+  decided_by: requesterId,
+  decided_at: '2026-11-16T00:30:00.000Z',
+  resume_enqueued: true,
 };
 
 beforeEach(() => {
   mocks.list.mockReset();
   mocks.get.mockReset();
+  mocks.decide.mockReset();
   mocks.list.mockResolvedValue({
     items: [listItem],
     page: 1,
@@ -67,13 +83,14 @@ beforeEach(() => {
     has_next: false,
   });
   mocks.get.mockResolvedValue(detail);
+  mocks.decide.mockResolvedValue(approveResult);
 });
 
 afterEach(() => {
   vi.restoreAllMocks();
 });
 
-describe('Approvals live list (phase 1 read)', () => {
+describe('Approvals live list', () => {
   it('loads GET /approvals PENDING inbox and shows can_decide without mock purpose/tool fields', async () => {
     renderWithRouter(<Approvals />, { path: '/approvals', route: '/approvals' });
 
@@ -134,35 +151,144 @@ describe('Approvals live list (phase 1 read)', () => {
   });
 });
 
-describe('ApprovalDetail live read (phase 1)', () => {
-  it('shows status, can_decide, safe_context, decision history — no approve/reject POST UI', async () => {
+describe('ApprovalDetail decide (phase 2)', () => {
+  it('shows approve/reject only when PENDING && can_decide', async () => {
     renderWithRouter(<ApprovalDetail />, {
       path: '/approvals/:approvalId',
       route: `/approvals/${approvalId}`,
     });
 
     expect(await screen.findByText('현재 계정으로 결정 가능')).toBeInTheDocument();
-    const pendingBadges = screen.getAllByText('대기');
-    expect(pendingBadges[0]).toHaveAttribute('title', 'PENDING');
-    expect(screen.queryByText('WAITING_APPROVAL')).not.toBeInTheDocument();
+    expect(screen.getAllByRole('button', { name: '승인' }).length).toBeGreaterThan(0);
+    expect(screen.getAllByRole('button', { name: '거절' }).length).toBeGreaterThan(0);
+    expect(screen.queryByText(/조회만 지원/)).not.toBeInTheDocument();
+  });
 
-    expect(screen.getByText(/safe_context/)).toBeInTheDocument();
-    expect(screen.getByText(/deletePet/)).toBeInTheDocument();
-    expect(screen.getByText(/masked/)).toBeInTheDocument();
-    expect(screen.queryByText('context_snapshot')).not.toBeInTheDocument();
-
-    expect(screen.getByText('결정 이력')).toBeInTheDocument();
-    expect(screen.getByText('승인')).toBeInTheDocument();
-    expect(screen.getByText('확인 완료')).toBeInTheDocument();
-
+  it('hides decide buttons when can_decide is false', async () => {
+    mocks.get.mockResolvedValue({ ...detail, can_decide: false });
+    renderWithRouter(<ApprovalDetail />, {
+      path: '/approvals/:approvalId',
+      route: `/approvals/${approvalId}`,
+    });
+    expect(await screen.findByText('현재 계정으로는 결정할 수 없음')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: '승인' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: '거절' })).not.toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: '승인하기' })).not.toBeInTheDocument();
-    expect(screen.getByText(/조회만 지원/)).toBeInTheDocument();
+  });
+
+  it('approves via confirmation, shows server result, and refreshes detail GET', async () => {
+    const user = userEvent.setup();
+    mocks.get
+      .mockResolvedValueOnce(detail)
+      .mockResolvedValueOnce({
+        ...detail,
+        status: 'APPROVED',
+        can_decide: false,
+        approve_count: 1,
+        resolved_at: '2026-11-16T00:30:00.000Z',
+        decisions: [
+          {
+            decision_id: decisionId,
+            decided_by: requesterId,
+            decision: 'APPROVE',
+            comment: null,
+            decided_at: '2026-11-16T00:30:00.000Z',
+          },
+        ],
+      });
+
+    renderWithRouter(<ApprovalDetail />, {
+      path: '/approvals/:approvalId',
+      route: `/approvals/${approvalId}`,
+    });
+    expect(await screen.findByText('현재 계정으로 결정 가능')).toBeInTheDocument();
+
+    await user.click(screen.getAllByRole('button', { name: '승인' })[0]);
+    expect(screen.getByText('승인 확인')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: '승인 확정' }));
 
     await waitFor(() => {
-      expect(mocks.get).toHaveBeenCalledWith(approvalId, expect.any(AbortSignal));
+      expect(mocks.decide).toHaveBeenCalledWith(approvalId, {
+        decision: 'APPROVE',
+        comment: null,
+      });
     });
+    expect(await screen.findByText('승인 결정이 저장되었습니다')).toBeInTheDocument();
+    expect(screen.getAllByText('WAITING_APPROVAL').length).toBeGreaterThanOrEqual(1);
+    expect(screen.getByText(/EXECUTION_APPROVAL_RESUME/)).toBeInTheDocument();
+    await waitFor(() => expect(mocks.get.mock.calls.length).toBeGreaterThanOrEqual(2));
+  });
+
+  it('rejects with comment and does not claim success on 409 conflict', async () => {
+    const user = userEvent.setup();
+    mocks.decide.mockRejectedValue(
+      new ApiError({
+        status: 409,
+        code: 'RESOURCE_CONFLICT',
+        message: 'Already decided.',
+        requestId: 'req-conflict',
+      }),
+    );
+    renderWithRouter(<ApprovalDetail />, {
+      path: '/approvals/:approvalId',
+      route: `/approvals/${approvalId}`,
+    });
+    expect(await screen.findByText('현재 계정으로 결정 가능')).toBeInTheDocument();
+
+    await user.click(screen.getAllByRole('button', { name: '거절' })[0]);
+    await user.type(screen.getByPlaceholderText(/거절 사유/), '정책상 거절');
+    await user.click(screen.getByRole('button', { name: '거절 확정' }));
+
+    await waitFor(() => {
+      expect(mocks.decide).toHaveBeenCalledWith(approvalId, {
+        decision: 'REJECT',
+        comment: '정책상 거절',
+      });
+    });
+    expect(await screen.findByText(/Already decided/)).toBeInTheDocument();
+    expect(screen.queryByText(/결정이 저장되었습니다/)).not.toBeInTheDocument();
+  });
+
+  it('does not claim success on network uncertainty', async () => {
+    const user = userEvent.setup();
+    mocks.decide.mockRejectedValue(
+      new ApiError({
+        status: 0,
+        code: 'NETWORK_ERROR',
+        message: 'Network request failed',
+      }),
+    );
+    renderWithRouter(<ApprovalDetail />, {
+      path: '/approvals/:approvalId',
+      route: `/approvals/${approvalId}`,
+    });
+    expect(await screen.findByText('현재 계정으로 결정 가능')).toBeInTheDocument();
+    await user.click(screen.getAllByRole('button', { name: '승인' })[0]);
+    await user.click(screen.getByRole('button', { name: '승인 확정' }));
+    expect(await screen.findByText(/성공으로 표시하지 않습니다/)).toBeInTheDocument();
+    expect(screen.queryByText(/결정이 저장되었습니다/)).not.toBeInTheDocument();
+  });
+
+  it('prevents double submit while a decide request is in flight', async () => {
+    const user = userEvent.setup();
+    let resolveDecide: (value: unknown) => void = () => undefined;
+    mocks.decide.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveDecide = resolve;
+        }),
+    );
+    renderWithRouter(<ApprovalDetail />, {
+      path: '/approvals/:approvalId',
+      route: `/approvals/${approvalId}`,
+    });
+    expect(await screen.findByText('현재 계정으로 결정 가능')).toBeInTheDocument();
+    await user.click(screen.getAllByRole('button', { name: '승인' })[0]);
+    await user.click(screen.getByRole('button', { name: '승인 확정' }));
+    await waitFor(() => expect(mocks.decide).toHaveBeenCalledTimes(1));
+    await user.click(screen.getByRole('button', { name: '승인 확정' }));
+    expect(mocks.decide).toHaveBeenCalledTimes(1);
+    resolveDecide(approveResult);
+    expect(await screen.findByText('승인 결정이 저장되었습니다')).toBeInTheDocument();
   });
 
   it('shows 404 Korean empty state (not 403) when detail is not visible', async () => {
