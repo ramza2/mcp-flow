@@ -51,6 +51,24 @@ describe('MCPToolDetail — API detail', () => {
     expect(screen.getAllByText('발견됨').length).toBeGreaterThan(0);
   });
 
+  it('provides a direct return to the parent server Tools tab', async () => {
+    vi.stubGlobal('fetch', stubToolFetch());
+    const user = userEvent.setup();
+    const { router } = renderWithRouter(<MCPToolDetail />, {
+      path: '/mcp/tools/:toolId',
+      route: `/mcp/tools/${discoveredTool.id}`,
+      routes: [
+        { path: '/mcp/tools/:toolId', element: <MCPToolDetail /> },
+        { path: '/mcp/servers/:serverId', element: <p>서버 도구 목록 화면</p> },
+      ],
+    });
+
+    await screen.findByRole('heading', { name: 'Search Docs' });
+    await user.click(screen.getByRole('button', { name: '서버 도구 목록' }));
+    expect(router.state.location.pathname).toBe(`/mcp/servers/${discoveredTool.mcp_server_id}`);
+    expect(router.state.location.search).toBe('?tab=tools');
+  });
+
   it('shows 404 for missing tool', async () => {
     vi.stubGlobal(
       'fetch',
