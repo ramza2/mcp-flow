@@ -32,7 +32,7 @@ function mockApi(
         lock_version: row.lock_version + 1,
       }));
     }
-    if (url.includes('/mcp/servers/') && url.endsWith('/tools')) {
+    if (url.includes('/mcp/servers/') && url.includes('/tools')) {
       return Promise.resolve(json({ ...list, items: tools, total: tools.length }));
     }
     if (url.includes('/discoveries')) return Promise.resolve(json(discoveryList));
@@ -113,7 +113,7 @@ describe('MCP server tool list: inline lifecycle and tab preservation', () => {
     expect(await screen.findByText('Another update happened')).toBeInTheDocument();
     expect(screen.getByText('Request ID: req-inline-tool-conflict')).toBeInTheDocument();
     await waitFor(() => expect(fetchMock.mock.calls.filter(([url, init]) =>
-      String(url).endsWith('/tools') && init?.method === 'GET',
+      String(url).includes('/tools') && init?.method === 'GET',
     ).length).toBeGreaterThanOrEqual(2));
     expect(fetchMock.mock.calls.filter(([, init]) => init?.method === 'POST')).toHaveLength(1);
   });
@@ -140,7 +140,7 @@ describe('MCP server tool list: inline lifecycle and tab preservation', () => {
       ],
     });
     await screen.findByRole('heading', { name: 'Docs MCP' });
-    await user.click(screen.getByRole('button', { name: /^도구\s*\d+$/ }));
+    await user.click(await screen.findByRole('button', { name: /^도구\s*2$/ }));
     expect(router.state.location.search).toBe('?tab=tools');
     await user.click(screen.getByText('Pending Tool'));
     expect(await screen.findByText('도구 상세')).toBeInTheDocument();
