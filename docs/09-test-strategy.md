@@ -1749,6 +1749,13 @@ Accuracy = Correct Top-1 / Valid Evaluation Cases × 100
 - Publish POST는 실제 DRAFT MCP Server와 INACTIVE Tools를 생성하므로 테스트의 Mock fetch로만 검증한다. 멱등성 키·CSRF, 이미 게시된 경우 GET-only, 결과 서버/도구 연결 정보 및 `ACTIVE` 오인 표시 방지.
 - Backend/DB/Worker/infra 코드는 변경하지 않는다. 실제 운영 저장 변경은 각 사용자 명시적 클릭 후에만 발생한다.
 
+### MCP Tool 수동 실행 E2E UX 사후 보완 (2026-11-16)
+
+- 409 `EXECUTION_PRECONDITION_FAILED: MCPToolPolicy 없음.`: Policy 탭으로 안내, 자동 Policy PUT·Test 재시도 없음.
+- 403 실행 권한 차단: 역할 `mcp.tool.execute` 및 MCP_TOOL ResourceGrant 각각의 관리 화면으로 안내. 권한 자동 부여·권한 검사 우회 없음. Request ID 유지.
+- 실행 생성 자체와 실행 결과 조회는 별도. 저장된 결과 `FAILED/TIMED_OUT`은 더 이상 '실행 중'이라고 표기하지 않으며, 실행 상세의 오류 코드/단계 확인으로 안내한다. 기존 SUCCEEDED의 안전한 텍스트 미리보기 유지.
+- Frontend 회귀로 Policy/Permission/비관련 409/실패 종료/정상 결과 분기를 검사하고 Backend/PG CI는 그대로 유지.
+
 ### Factory 패키지 생성·샌드박스 TestRun UI (2026-11-13)
 
 - Build 상세 초기 화면은 GET Build/Artifacts만 수행하며 패키지 생성·검증 POST는 하지 않는다. 실제 선언형 패키지 생성 버튼에서만 POST `/factory/builds/{buildId}/generate`, `Idempotency-Key`, same-origin CSRF를 사용한다. 불확실한 네트워크 실패 후 동일 키 재시도 확인.
