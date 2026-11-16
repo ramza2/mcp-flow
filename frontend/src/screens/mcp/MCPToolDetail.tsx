@@ -469,6 +469,7 @@ export default function MCPToolDetail() {
             selectedVersion={selectedVersion}
             currentVersionId={tool?.current_version_id ?? null}
             active={tab === 'test'}
+            onShowPolicy={() => setTab('policy')}
           />
         )}
 
