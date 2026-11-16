@@ -135,7 +135,7 @@ export default function ApprovalPolicySelect({
           'w-full border border-slate-300 rounded-md px-2 py-1.5 bg-white text-sm'
         }
         value={selectedId ?? ''}
-        disabled={disabled || loading}
+        disabled={disabled || loading || forbidden}
         onChange={(event) => {
           const next = event.target.value;
           onChange(next ? next : null);

@@ -93,7 +93,7 @@ describe('ApprovalPolicySelect', () => {
     expect(screen.getByRole('combobox')).toHaveValue(inactivePolicy.id);
   });
 
-  it('shows 403 guidance and keeps orphan current value', async () => {
+  it('shows 403 guidance, disables select, and keeps orphan current value', async () => {
     const fetchMock = vi.fn().mockResolvedValue(
       ok(
         {
@@ -114,7 +114,9 @@ describe('ApprovalPolicySelect', () => {
     expect(
       await screen.findByText(/승인 정책 목록을 볼 권한이 없습니다/),
     ).toBeInTheDocument();
-    expect(screen.getByRole('combobox')).toHaveValue(inactivePolicy.id);
+    const select = screen.getByRole('combobox', { name: '승인 정책' });
+    expect(select).toBeDisabled();
+    expect(select).toHaveValue(inactivePolicy.id);
     expect(
       screen.getByRole('option', { name: /삭제되었거나 조회할 수 없음/ }),
     ).toBeInTheDocument();
