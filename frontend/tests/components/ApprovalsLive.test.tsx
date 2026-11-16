@@ -215,7 +215,82 @@ describe('ApprovalDetail decide (phase 2)', () => {
     expect(await screen.findByText('승인 결정이 저장되었습니다')).toBeInTheDocument();
     expect(screen.getAllByText('WAITING_APPROVAL').length).toBeGreaterThanOrEqual(1);
     expect(screen.getByText(/EXECUTION_APPROVAL_RESUME/)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '승인' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '거절' })).not.toBeInTheDocument();
     await waitFor(() => expect(mocks.get.mock.calls.length).toBeGreaterThanOrEqual(2));
+  });
+
+  it('hides decide buttons while quiet GET refresh is still pending after success', async () => {
+    const user = userEvent.setup();
+    let resolveRefresh: (value: unknown) => void = () => undefined;
+    mocks.get
+      .mockResolvedValueOnce(detail)
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolveRefresh = resolve;
+          }),
+      );
+
+    renderWithRouter(<ApprovalDetail />, {
+      path: '/approvals/:approvalId',
+      route: `/approvals/${approvalId}`,
+    });
+    expect(await screen.findByText('현재 계정으로 결정 가능')).toBeInTheDocument();
+    await user.click(screen.getAllByRole('button', { name: '승인' })[0]);
+    await user.click(screen.getByRole('button', { name: '승인 확정' }));
+
+    expect(await screen.findByText('승인 결정이 저장되었습니다')).toBeInTheDocument();
+    // Stale detail is still PENDING/can_decide, but decide UI must stay hidden.
+    expect(screen.queryByRole('button', { name: '승인' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '거절' })).not.toBeInTheDocument();
+    expect(screen.queryByText(/승인 \/ 거절/)).not.toBeInTheDocument();
+
+    resolveRefresh({
+      ...detail,
+      status: 'APPROVED',
+      can_decide: false,
+      approve_count: 1,
+      decisions: [
+        {
+          decision_id: decisionId,
+          decided_by: requesterId,
+          decision: 'APPROVE',
+          comment: null,
+          decided_at: '2026-11-16T00:30:00.000Z',
+        },
+      ],
+    });
+    await waitFor(() => expect(mocks.get.mock.calls.length).toBeGreaterThanOrEqual(2));
+    expect(screen.queryByRole('button', { name: '승인' })).not.toBeInTheDocument();
+  });
+
+  it('keeps decide buttons hidden when quiet GET refresh fails after success', async () => {
+    const user = userEvent.setup();
+    mocks.get
+      .mockResolvedValueOnce(detail)
+      .mockRejectedValueOnce(
+        new ApiError({
+          status: 500,
+          code: 'INTERNAL',
+          message: 'refresh failed',
+        }),
+      );
+
+    renderWithRouter(<ApprovalDetail />, {
+      path: '/approvals/:approvalId',
+      route: `/approvals/${approvalId}`,
+    });
+    expect(await screen.findByText('현재 계정으로 결정 가능')).toBeInTheDocument();
+    await user.click(screen.getAllByRole('button', { name: '승인' })[0]);
+    await user.click(screen.getByRole('button', { name: '승인 확정' }));
+
+    expect(await screen.findByText('승인 결정이 저장되었습니다')).toBeInTheDocument();
+    expect(
+      await screen.findByText(/상세를 다시 불러오지 못했습니다/),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '승인' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '거절' })).not.toBeInTheDocument();
   });
 
   it('rejects with comment and does not claim success on 409 conflict', async () => {

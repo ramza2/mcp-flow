@@ -166,8 +166,14 @@ export default function ApprovalDetail() {
     return load({ quiet: false });
   }, [load, reload]);
 
+  // After a confirmed POST success (decision_id), hide decide controls even if
+  // the quiet GET refresh is still in flight or failed — never re-offer decide
+  // from stale PENDING/can_decide.
   const canAct =
-    detail?.status === 'PENDING' && detail.can_decide === true && !submitting;
+    detail?.status === 'PENDING' &&
+    detail.can_decide === true &&
+    !submitting &&
+    lastResult == null;
 
   const submitDecision = async (decision: 'APPROVE' | 'REJECT') => {
     if (!approvalId || !detail || submitLock.current) return;
