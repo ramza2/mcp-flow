@@ -554,6 +554,7 @@ BOOTSTRAP_PERMISSION_CODES: tuple[str, ...] = (
     "execution.read",
     "execution.cancel",
     "approval.decide",
+    "approval.policy.manage",
     "audit.read",
     "audit.export",
     "schedule.manage",

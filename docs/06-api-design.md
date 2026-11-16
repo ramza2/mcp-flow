@@ -288,6 +288,7 @@ workflow.execute
 execution.read
 execution.cancel
 approval.decide
+approval.policy.manage
 audit.read
 audit.export
 schedule.manage
@@ -296,6 +297,15 @@ schedule.manage
 `audit.read` — Audit query (list/detail). Privileged global reader; no ResourceGrant / own-events filter.
 
 `audit.export` — reserved for asynchronous Audit export (Job/Object Storage). `POST /audit/exports` is **not** implemented in the Audit ledger foundation slice.
+
+`approval.policy.manage` — ApprovalPolicy admin CRUD / activate / deactivate. Distinct from `approval.decide` (ApprovalRequest inbox / decisions).
+
+ADMIN Role grant procedure (never grant to all users):
+
+1. Apply Alembic `20261116_0039` (inserts permission; grants only if live Role `code=ADMIN` already exists).
+2. If ADMIN Role is created later, call `grant_approval_policy_manage_to_admin_role(session)` (idempotent; ADMIN-only).
+3. Verify with `verify_admin_approval_policy_manage_grant(session)` → `permission_present` and (when ADMIN exists) `granted=true`.
+4. Do **not** bulk-insert into `user_roles` / grant every Role. Explicit non-ADMIN grants remain operator-driven via Role permission replace API.
 ---
 
 ## 7. Secret 및 Provider Profile API
@@ -970,10 +980,24 @@ POST  /approval-policies/{policy_id}/activate
 POST  /approval-policies/{policy_id}/deactivate
 ```
 
+Admin API (current implementation):
+
+- Session + CSRF (unsafe) + `CurrentPrincipalDep`
+- 권한은 `approval.policy.manage` (ACTIVE user). `approval.decide`로 게이트하지 않음
+- `POST` 생성: `code` 필수·고유, 기본 `status=ACTIVE`
+- `decision_mode` ∈ `ANY|ALL|QUORUM`; `ANY`는 `required_approvals=1` 고정
+- `approver_scope`: `null` / `{}` / `{"role_codes":[...]}` only; role_codes는 기존 Role에 존재해야 함
+- `PATCH`: If-Match 또는 body.`lock_version` 필수; `code`/`status`는 PATCH로 변경 불가
+- `deactivate`: ToolPolicy(`requires_approval`+동일 policy), PENDING ApprovalRequest, 또는 DRAFT/PUBLISHED WorkflowVersion APPROVAL Step 참조 시 409. DEPRECATED WorkflowVersion(과거 이력)은 차단하지 않음
+- activate/deactivate는 idempotent (이미 목표 status면 그대로 반환)
+- ApprovalRequest / Workflow / ToolPolicy mutation API는 본 슬라이스 범위 밖
+- `approval.policy.manage`는 ADMIN Role에만 자동 부여(Role이 이미 있을 때); 전체 사용자 자동 부여 금지
+
 Policy 예:
 
 ```json
 {
+  "code": "external-transfer",
   "name": "외부 전송 승인",
   "decision_mode": "ANY",
   "required_approvals": 1,
