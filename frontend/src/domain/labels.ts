@@ -2,6 +2,8 @@ import type {
   AgentStatus,
   AgentVersionStatus,
   AgentVisibility,
+  ApprovalDecisionMode,
+  ApprovalPolicyStatus,
   ApprovalStatus,
   AuditActorType,
   AuditResult,
@@ -127,7 +129,7 @@ export const APPROVAL_STATUS_LABELS: Record<ApprovalStatus, string> = {
   CANCELLED: '취소됨',
 };
 
-export const APPROVAL_DECISION_MODE_LABELS: Record<string, string> = {
+export const APPROVAL_DECISION_MODE_LABELS: Record<ApprovalDecisionMode, string> = {
   ANY: '아무나 1명',
   ALL: '전원 승인',
   QUORUM: '정족수',
@@ -138,12 +140,21 @@ export const APPROVAL_DECISION_VALUE_LABELS: Record<string, string> = {
   REJECT: '거절',
 };
 
+export const APPROVAL_POLICY_STATUS_LABELS: Record<ApprovalPolicyStatus, string> = {
+  ACTIVE: '활성',
+  INACTIVE: '비활성',
+};
+
 export function labelApprovalStatus(value: string): string {
   return APPROVAL_STATUS_LABELS[value as ApprovalStatus] ?? value;
 }
 
 export function labelApprovalDecisionMode(value: string): string {
-  return APPROVAL_DECISION_MODE_LABELS[value] ?? value;
+  return APPROVAL_DECISION_MODE_LABELS[value as ApprovalDecisionMode] ?? value;
+}
+
+export function labelApprovalPolicyStatus(value: string): string {
+  return APPROVAL_POLICY_STATUS_LABELS[value as ApprovalPolicyStatus] ?? value;
 }
 
 export function labelApprovalDecisionValue(value: string): string {
