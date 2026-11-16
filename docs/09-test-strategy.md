@@ -1068,6 +1068,14 @@ Approval `REJECTED/EXPIRED`를 Execution `REJECTED/EXPIRED` 상태로 직접 매
 
 ## 17. Schedule 시험
 
+### Frontend Approvals read inbox (phase 1)
+
+- `frontend/src/api/approvals.ts`: `GET /approvals`, `GET /approvals/{id}` only (POST decisions deferred).
+- Permission is server `approval.decide` (no invented `approval.read`). List default `status=PENDING`.
+- Detail shows canonical `status`, `can_decide`, masked `safe_context`, and `decisions` history only — never raw `context_snapshot` / `context_hash` / `secret_id`.
+- UI states: loading, empty PENDING inbox, 403 permission denied, detail 404 (not 403 for IDOR), generic API error + retry. Korean copy; Approval `PENDING` is never remapped to Execution `WAITING_APPROVAL`.
+- Tests: `frontend/src/api/__tests__/approvals-api.test.ts`, `frontend/tests/components/ApprovalsLive.test.tsx`, `frontend/tests/components/ApprovalDetail.test.tsx`.
+
 ### Frontend Live registry (2026-11-06)
 
 - `frontend/src/api/__tests__/schedules-api.test.ts`: 실제 API 경로·검색/페이징·Version ID pin·CSRF create·If-Match PATCH·lifecycle·occurrence 목록.
