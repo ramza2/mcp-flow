@@ -3,18 +3,19 @@ import { screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { useLocation, useNavigate } from 'react-router';
 import MCPServerDetail from '@/screens/mcp/MCPServerDetail';
+import type { MCPToolDto, MCPToolListDto } from '@/api/types';
 import { activeServer, activeTool, inactiveTool, missingTool, discoveryList } from '../fixtures/mcp-api';
 import { renderWithRouter } from '../test-utils';
 
 const pending = { ...inactiveTool, display_name: 'Pending Tool', remote_name: 'pending_tool' };
 const active = { ...activeTool, display_name: 'Active Tool', remote_name: 'active_tool' };
-const list = { items: [pending, active], total: 2, page: 1, page_size: 20, has_next: false };
+const list: MCPToolListDto = { items: [pending, active], total: 2, page: 1, page_size: 20, has_next: false };
 function json(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
 }
 function mockApi(
   options: {
-    tools?: typeof list.items;
+    tools?: MCPToolDto[];
     onWrite?: (url: string, init: RequestInit) => Response;
   } = {},
 ) {
