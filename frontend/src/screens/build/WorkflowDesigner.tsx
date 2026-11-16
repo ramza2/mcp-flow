@@ -8,7 +8,8 @@ import PageHeader from '../../components/ui/PageHeader';
 import Button from '../../components/ui/Button';
 import { RiskBadge } from '../../components/ui/StatusBadge';
 import { InlineAlert } from '../../components/ui/EmptyState';
-import { mockWorkflows, mockWorkflowFull, mockTools, mockApprovalPolicies } from '../../data/mock';
+import ApprovalPolicySelect from '../../components/approval/ApprovalPolicySelect';
+import { mockWorkflows, mockWorkflowFull, mockTools } from '../../data/mock';
 import type { AuthorableStepType } from '../../domain';
 
 /** Canonical authorable Step Types come from domain (Execution Plan v1). Visual PARALLEL/END stay presentation-only. */
@@ -149,7 +150,7 @@ function createStep(type: AuthorableStepType, index: number, dependsOn: string[]
     dependsOn,
   };
   if (type === 'JOIN') return { ...base, joinPolicy: 'ALL_SUCCESS' };
-  if (type === 'APPROVAL') return { ...base, approvalPolicyId: mockApprovalPolicies[0]?.id };
+  if (type === 'APPROVAL') return { ...base, approvalPolicyId: undefined };
   if (type === 'LOOP') {
     return {
       ...base,
@@ -596,17 +597,17 @@ export default function WorkflowDesigner() {
 
               {selectedStep.type === 'APPROVAL' && (
                 <Field label="승인 정책">
-                  <select
-                    value={selectedStep.approvalPolicyId ?? ''}
+                  <ApprovalPolicySelect
+                    value={selectedStep.approvalPolicyId ?? null}
                     disabled={readOnly}
-                    onChange={e => updateStep(selectedStep.id, { approvalPolicyId: e.target.value })}
+                    emptyLabel="승인 정책 선택..."
                     className={inputClass}
-                  >
-                    <option value="">승인 정책 선택...</option>
-                    {mockApprovalPolicies.map(p => (
-                      <option key={p.id} value={p.id}>{p.name} ({p.status})</option>
-                    ))}
-                  </select>
+                    onChange={(policyId) =>
+                      updateStep(selectedStep.id, {
+                        approvalPolicyId: policyId ?? undefined,
+                      })
+                    }
+                  />
                 </Field>
               )}
 

@@ -11,6 +11,7 @@ import Button from '../../components/ui/Button';
 import Dialog from '../../components/ui/Dialog';
 import { EmptyState, InlineAlert, LoadingSkeleton } from '../../components/ui/EmptyState';
 import JsonViewer from '../../components/ui/JsonViewer';
+import ApprovalPolicySelect from '../../components/approval/ApprovalPolicySelect';
 import {
   isResourceConflict,
   isVersionConflict,
@@ -155,10 +156,10 @@ export default function ToolPolicyTab({ toolId, active }: Props) {
     setEditorOpen(true);
   };
 
-  const approvalBlocked =
-    form.requires_approval &&
-    !form.approval_policy_id &&
-    !(policy?.requires_approval && policy.approval_policy_id);
+  const resolvedApprovalPolicyId = form.requires_approval
+    ? (form.approval_policy_id ?? policy?.approval_policy_id ?? null)
+    : null;
+  const approvalBlocked = form.requires_approval && !resolvedApprovalPolicyId;
 
   const handleSave = async () => {
     setFormError(null);
@@ -189,9 +190,7 @@ export default function ToolPolicyTab({ toolId, active }: Props) {
     }
 
     if (approvalBlocked) {
-      setFormError(
-        '현재 ApprovalPolicy 관리 API가 제공되지 않아 새 승인정책 연결은 아직 지원하지 않습니다.',
-      );
+      setFormError('승인이 필요하면 승인 정책을 선택하세요.');
       return;
     }
 
@@ -199,9 +198,7 @@ export default function ToolPolicyTab({ toolId, active }: Props) {
       risk_class: form.risk_class,
       requires_confirmation: form.requires_confirmation,
       requires_approval: form.requires_approval,
-      approval_policy_id: form.requires_approval
-        ? (form.approval_policy_id ?? policy?.approval_policy_id ?? null)
-        : null,
+      approval_policy_id: resolvedApprovalPolicyId,
       timeout_ms: form.timeout_ms,
       max_attempts: form.max_attempts,
       max_result_bytes: form.max_result_bytes,
@@ -265,7 +262,7 @@ export default function ToolPolicyTab({ toolId, active }: Props) {
       <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 text-sm text-slate-600">
         <p className="font-medium text-slate-800">실행 정책이란?</p>
         <p className="mt-1">도구 실행 시 위험 분류, 자동 선택 여부, 사용자 확인·승인, 실행 제한 시간 등을 제어하는 설정입니다.</p>
-        <p className="mt-1 text-xs">정책이 없으면 도구 탐색만으로 자동 생성되지 않습니다. 승인 정책 연결이 필요한 기능은 관리 API 지원 범위에 따라 제한됩니다.</p>
+        <p className="mt-1 text-xs">정책이 없으면 도구 탐색만으로 자동 생성되지 않습니다. 승인이 필요하면 ACTIVE 승인 정책을 연결하세요.</p>
       </div>
       {mutationError && (
         <div className="space-y-1">
@@ -441,22 +438,17 @@ export default function ToolPolicyTab({ toolId, active }: Props) {
           </div>
 
           {form.requires_approval && (
-            <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800 space-y-1">
-              {form.approval_policy_id || policy?.approval_policy_id ? (
-                <p>
-                  기존 승인 정책을 사용합니다. 승인 정책 참조:{' '}
-                  <span className="font-mono">
-                    {shortenId(form.approval_policy_id ?? policy?.approval_policy_id)}
-                  </span>
-                  . 다른 승인 정책으로 변경하는 기능은 아직 지원하지 않습니다.
-                </p>
-              ) : (
-                <p>
-                  현재 ApprovalPolicy 관리 API가 제공되지 않아 새 승인정책 연결은 아직 지원하지
-                  않습니다.
-                </p>
-              )}
-            </div>
+            <label className="block space-y-1">
+              <span className="text-xs text-slate-500">승인 정책</span>
+              <ApprovalPolicySelect
+                value={form.approval_policy_id ?? policy?.approval_policy_id ?? null}
+                disabled={saving}
+                emptyLabel="승인 정책 선택..."
+                onChange={(policyId) =>
+                  setForm((prev) => ({ ...prev, approval_policy_id: policyId }))
+                }
+              />
+            </label>
           )}
 
           <label className="block space-y-1">
