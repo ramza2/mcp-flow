@@ -6,7 +6,9 @@ import MCPServerDetail from '@/screens/mcp/MCPServerDetail';
 import { activeServer, activeTool, inactiveTool, missingTool, discoveryList } from '../fixtures/mcp-api';
 import { renderWithRouter } from '../test-utils';
 
-const list = { items: [inactiveTool, activeTool], total: 2, page: 1, page_size: 20, has_next: false };
+const pending = { ...inactiveTool, display_name: 'Pending Tool', remote_name: 'pending_tool' };
+const active = { ...activeTool, display_name: 'Active Tool', remote_name: 'active_tool' };
+const list = { items: [pending, active], total: 2, page: 1, page_size: 20, has_next: false };
 function json(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
 }
@@ -50,15 +52,15 @@ describe('MCP server tool list: inline lifecycle and tab preservation', () => {
     const fetchMock = mockApi();
     const user = userEvent.setup();
     const { router } = view(fetchMock);
-    expect(await screen.findByRole('button', { name: '도구 활성화: Search Docs' })).toBeInTheDocument();
-    await user.click(screen.getByRole('button', { name: '도구 활성화: Search Docs' }));
+    expect(await screen.findByRole('button', { name: '도구 활성화: Pending Tool' })).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: '도구 활성화: Pending Tool' }));
     expect(screen.getByText('MCP 도구 활성화')).toBeInTheDocument();
     expect(fetchMock.mock.calls.some(([url, init]) =>
       String(url).endsWith('/activate') && init?.method === 'POST',
     )).toBe(false);
 
     await user.click(screen.getByRole('button', { name: '도구 활성화 확인' }));
-    expect(await screen.findByRole('button', { name: '도구 비활성화: Search Docs' })).toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: '도구 비활성화: Pending Tool' })).toBeInTheDocument();
     expect(router.state.location.pathname).toBe(route);
     expect(router.state.location.search).toBe('?tab=tools');
     const writes = fetchMock.mock.calls.filter(([, init]) => init?.method === 'POST');
@@ -71,13 +73,13 @@ describe('MCP server tool list: inline lifecycle and tab preservation', () => {
     const fetchMock = mockApi();
     const user = userEvent.setup();
     view(fetchMock);
-    await screen.findByRole('button', { name: '도구 비활성화: Search Docs' });
-    await user.click(screen.getByRole('button', { name: '도구 비활성화: Search Docs' }));
+    await screen.findByRole('button', { name: '도구 비활성화: Active Tool' });
+    await user.click(screen.getByRole('button', { name: '도구 비활성화: Active Tool' }));
     await user.click(screen.getByRole('button', { name: '취소' }));
     expect(fetchMock.mock.calls.some(([, init]) => init?.method === 'POST')).toBe(false);
-    await user.click(screen.getByRole('button', { name: '도구 비활성화: Search Docs' }));
+    await user.click(screen.getByRole('button', { name: '도구 비활성화: Active Tool' }));
     await user.click(screen.getByRole('button', { name: '도구 비활성화 확인' }));
-    expect(await screen.findByRole('button', { name: '도구 활성화: Search Docs' })).toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: '도구 활성화: Active Tool' })).toBeInTheDocument();
     const writes = fetchMock.mock.calls.filter(([, init]) => init?.method === 'POST');
     expect(writes).toHaveLength(1);
     expect(writes[0][0]).toBe(`/api/v1/mcp/tools/${activeTool.id}/deactivate`);
@@ -104,8 +106,8 @@ describe('MCP server tool list: inline lifecycle and tab preservation', () => {
     });
     const user = userEvent.setup();
     view(fetchMock);
-    await screen.findByRole('button', { name: '도구 활성화: Search Docs' });
-    await user.click(screen.getByRole('button', { name: '도구 활성화: Search Docs' }));
+    await screen.findByRole('button', { name: '도구 활성화: Pending Tool' });
+    await user.click(screen.getByRole('button', { name: '도구 활성화: Pending Tool' }));
     await user.click(screen.getByRole('button', { name: '도구 활성화 확인' }));
     expect(await screen.findByText('Another update happened')).toBeInTheDocument();
     expect(screen.getByText('Request ID: req-inline-tool-conflict')).toBeInTheDocument();
@@ -139,11 +141,11 @@ describe('MCP server tool list: inline lifecycle and tab preservation', () => {
     await screen.findByRole('heading', { name: 'Docs MCP' });
     await user.click(screen.getByRole('button', { name: /^도구\s*\d+$/ }));
     expect(router.state.location.search).toBe('?tab=tools');
-    await user.click(screen.getByText('Search Docs'));
+    await user.click(screen.getByText('Pending Tool'));
     expect(await screen.findByText('도구 상세')).toBeInTheDocument();
     expect(screen.getByText('서버에서 이동')).toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: '뒤로' }));
-    expect(await screen.findByRole('button', { name: '도구 활성화: Search Docs' })).toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: '도구 활성화: Pending Tool' })).toBeInTheDocument();
     expect(router.state.location.search).toBe('?tab=tools');
   });
 });
