@@ -983,6 +983,8 @@ Tailwind
 
 The frontend is a standalone Vite application.
 
+MCP registry list UX: keep the selected server tab in the URL when navigating to a Tool detail and offer direct return to that server's Tools tab. Prefer explicit per-row Activate/Deactivate with a confirmation dialog, canonical status helpers, `If-Match: lock_version`, and no bulk/automatic state changes. Re-read on version conflict; never optimistically assume success. Preserve existing Tool detail actions and API behavior.
+
 Do not reintroduce Figma Make runtime dependencies.
 
 Do not add:
