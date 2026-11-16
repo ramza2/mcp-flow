@@ -30,6 +30,7 @@ interface Props {
   selectedVersion: MCPToolVersionDto | null;
   currentVersionId: string | null;
   active: boolean;
+  onShowPolicy: () => void;
 }
 
 export default function ToolTestCallTab({
@@ -37,12 +38,15 @@ export default function ToolTestCallTab({
   selectedVersion,
   currentVersionId,
   active,
+  onShowPolicy,
 }: Props) {
   const navigate = useNavigate();
   const [argumentsText, setArgumentsText] = useState('{\n}\n');
   const [parseError, setParseError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<FeedbackError | null>(null);
+  const [runIssue, setRunIssue] = useState<'policy' | 'permissions' | null>(null);
+  const [responsePermissionDenied, setResponsePermissionDenied] = useState(false);
   const [result, setResult] = useState<ManualToolTestCreateResult | null>(null);
   const [responsePreview, setResponsePreview] = useState<ManualToolTestResultDto | null>(null);
   const [checkingResponse, setCheckingResponse] = useState(false);
@@ -53,6 +57,8 @@ export default function ToolTestCallTab({
     setArgumentsText(defaultArgumentsJson(selectedVersion));
     setParseError(null);
     setError(null);
+    setRunIssue(null);
+    setResponsePermissionDenied(false);
     setResult(null);
     setResponsePreview(null);
     setResponseError(null);
@@ -83,6 +89,8 @@ export default function ToolTestCallTab({
 
     setSubmitting(true);
     setError(null);
+    setRunIssue(null);
+    setResponsePermissionDenied(false);
     setResult(null);
     setResponsePreview(null);
     setResponseError(null);
@@ -98,6 +106,11 @@ export default function ToolTestCallTab({
       setResult(created);
     } catch (err) {
       if (isAbortError(err)) return;
+      if (isApiError(err)) {
+        if (err.status === 403) setRunIssue('permissions');
+        else if (err.status === 409 && err.code === 'EXECUTION_PRECONDITION_FAILED' &&
+          err.message.includes('MCPToolPolicy 없음')) setRunIssue('policy');
+      }
       setError(
         isApiError(err) && err.status === 403
           ? {
@@ -116,11 +129,13 @@ export default function ToolTestCallTab({
     if (!result || checkingResponse) return;
     setCheckingResponse(true);
     setResponseError(null);
+    setResponsePermissionDenied(false);
     try {
       const preview = await getManualToolTestResult(toolId, result.id);
       setResponsePreview(preview);
     } catch (err) {
       if (isAbortError(err)) return;
+      if (isApiError(err) && err.status === 403) setResponsePermissionDenied(true);
       setResponseError(
         isApiError(err) && err.status === 403
           ? '응답 조회 권한이 없습니다. 현재 mcp.tool.execute 및 해당 도구의 ResourceGrant를 확인해 주세요.'
@@ -208,6 +223,21 @@ export default function ToolTestCallTab({
             {error.requestId && (
               <p className="font-mono text-xs text-slate-400">Request ID: {error.requestId}</p>
             )}
+            {runIssue === 'policy' && (
+              <Button size="sm" variant="outline" onClick={onShowPolicy}>
+                이 도구의 실행 정책 설정으로 이동
+              </Button>
+            )}
+            {runIssue === 'permissions' && (
+              <div className="flex flex-wrap gap-2">
+                <Button size="sm" variant="outline" onClick={() => navigate('/admin/roles')}>
+                  역할 기능 권한 확인
+                </Button>
+                <Button size="sm" variant="outline" onClick={() => navigate('/admin/users')}>
+                  사용자별 도구 접근 권한 확인
+                </Button>
+              </div>
+            )}
           </div>
         )}
 
@@ -236,7 +266,16 @@ export default function ToolTestCallTab({
                 실행 상세로 이동
               </Button>
             </div>
-            {responseError && <InlineAlert type="error" message={responseError} />}
+            {responseError && (
+              <div className="space-y-2">
+                <InlineAlert type="error" message={responseError} />
+                {responsePermissionDenied && (
+                  <Button size="sm" variant="outline" onClick={() => navigate('/admin/users')}>
+                    사용자별 도구 접근 권한 확인
+                  </Button>
+                )}
+              </div>
+            )}
             {responsePreview && (
               <div className="rounded-lg border border-slate-200 bg-white p-3 space-y-2">
                 <p className="text-xs text-slate-700">
@@ -269,10 +308,12 @@ export default function ToolTestCallTab({
                   </div>
                 ) : (
                   <p className="text-xs text-slate-600">
-                    {responsePreview.status !== 'SUCCEEDED'
-                      ? '아직 실행 중이거나 완료되지 않았습니다. 잠시 후 다시 응답 확인을 눌러 주세요.'
-                      : '표시 가능한 텍스트 결과가 없습니다. (' +
-                        (responsePreview.unavailable_reason ?? 'EMPTY') + ')'}
+                    {responsePreview.status === 'FAILED' || responsePreview.status === 'TIMED_OUT'
+                      ? '실행이 실패 또는 제한시간 초과로 종료됐습니다. 실행 상세에서 오류 코드와 단계를 확인하세요.'
+                      : responsePreview.status !== 'SUCCEEDED'
+                        ? '아직 실행 중이거나 결과가 완료되지 않았습니다. 새로고침하여 상태를 확인하세요.'
+                        : '표시 가능한 텍스트 결과가 없습니다. (' +
+                          (responsePreview.unavailable_reason ?? 'EMPTY') + ')'}
                   </p>
                 )}
                 <p className="text-xs text-slate-500">
