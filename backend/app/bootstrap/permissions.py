@@ -23,6 +23,10 @@ _BOOTSTRAP_META: dict[str, tuple[str, str]] = {
     "execution.read": ("Execution Read", "Read Execution state and events."),
     "execution.cancel": ("Execution Cancel", "Cancel running Executions."),
     "approval.decide": ("Approval Decide", "Approve or reject pending Approvals."),
+    "approval.policy.manage": (
+        "Approval Policy Manage",
+        "Create/read/update/activate/deactivate ApprovalPolicy definitions.",
+    ),
     "audit.read": ("Audit Read", "Read audit records."),
     "audit.export": (
         "Audit Export",

@@ -288,6 +288,7 @@ workflow.execute
 execution.read
 execution.cancel
 approval.decide
+approval.policy.manage
 audit.read
 audit.export
 schedule.manage
@@ -296,6 +297,8 @@ schedule.manage
 `audit.read` — Audit query (list/detail). Privileged global reader; no ResourceGrant / own-events filter.
 
 `audit.export` — reserved for asynchronous Audit export (Job/Object Storage). `POST /audit/exports` is **not** implemented in the Audit ledger foundation slice.
+
+`approval.policy.manage` — ApprovalPolicy admin CRUD / activate / deactivate. Distinct from `approval.decide` (ApprovalRequest inbox / decisions).
 ---
 
 ## 7. Secret 및 Provider Profile API
@@ -970,10 +973,23 @@ POST  /approval-policies/{policy_id}/activate
 POST  /approval-policies/{policy_id}/deactivate
 ```
 
+Admin API (current implementation):
+
+- Session + CSRF (unsafe) + `CurrentPrincipalDep`
+- 권한은 `approval.policy.manage` (ACTIVE user). `approval.decide`로 게이트하지 않음
+- `POST` 생성: `code` 필수·고유, 기본 `status=ACTIVE`
+- `decision_mode` ∈ `ANY|ALL|QUORUM`; `ANY`는 `required_approvals=1` 고정
+- `approver_scope`: `null` / `{}` / `{"role_codes":[...]}` only; role_codes는 기존 Role에 존재해야 함
+- `PATCH`: If-Match 또는 body.`lock_version` 필수; `code`/`status`는 PATCH로 변경 불가
+- `deactivate`: ToolPolicy(`requires_approval`+동일 policy) 또는 PENDING ApprovalRequest 참조 시 409
+- activate/deactivate는 idempotent (이미 목표 status면 그대로 반환)
+- ApprovalRequest / Workflow / ToolPolicy mutation API는 본 슬라이스 범위 밖
+
 Policy 예:
 
 ```json
 {
+  "code": "external-transfer",
   "name": "외부 전송 승인",
   "decision_mode": "ANY",
   "required_approvals": 1,
