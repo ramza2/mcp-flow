@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { useNavigate, useParams } from 'react-router';
+import { useLocation, useNavigate, useParams } from 'react-router';
 import { ArrowLeft } from 'lucide-react';
 import StatusBadge from '../../components/ui/StatusBadge';
 import { TabBar } from '../../components/ui/Tabs';
@@ -34,6 +34,8 @@ import {
 export default function MCPToolDetail() {
   const { toolId } = useParams();
   const navigate = useNavigate();
+  const location = useLocation();
+  const fromServer = (location.state as { fromServer?: boolean } | null)?.fromServer === true;
   const mountedRef = useRef(true);
   const versionRequestRef = useRef<AbortController | null>(null);
   const [tab, setTab] = useState('overview');
@@ -285,12 +287,22 @@ export default function MCPToolDetail() {
   return (
     <div>
       <div className="bg-white border-b border-slate-200 px-6 py-4">
-        <button
-          onClick={() => navigate('/mcp/tools')}
-          className="flex items-center gap-1.5 text-sm text-slate-500 hover:text-slate-700 mb-3"
-        >
-          <ArrowLeft size={14} /> MCP 도구 목록
-        </button>
+        <div className="flex items-center gap-4 mb-3">
+          <button
+            onClick={() => navigate(fromServer ? `/mcp/servers/${tool.mcp_server_id}?tab=tools` : '/mcp/tools')}
+            className="flex items-center gap-1.5 text-sm text-slate-500 hover:text-slate-700"
+          >
+            <ArrowLeft size={14} /> {fromServer ? '서버 도구 목록' : 'MCP 도구 목록'}
+          </button>
+          {!fromServer && (
+            <button
+              onClick={() => navigate(`/mcp/servers/${tool.mcp_server_id}?tab=tools`)}
+              className="text-sm text-slate-500 hover:text-slate-700"
+            >
+              서버 도구 목록
+            </button>
+          )}
+        </div>
         <div className="flex items-start justify-between gap-4">
           <div>
             <h1 className="text-lg font-semibold text-slate-900">{title}</h1>
