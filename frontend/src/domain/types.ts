@@ -88,6 +88,14 @@ export type StepStatus = (typeof STEP_STATUSES)[number];
 export const APPROVAL_STATUSES = ['PENDING', 'APPROVED', 'REJECTED', 'EXPIRED', 'CANCELLED'] as const;
 export type ApprovalStatus = (typeof APPROVAL_STATUSES)[number];
 
+/** docs/05 approval_policies.status */
+export const APPROVAL_POLICY_STATUSES = ['ACTIVE', 'INACTIVE'] as const;
+export type ApprovalPolicyStatus = (typeof APPROVAL_POLICY_STATUSES)[number];
+
+/** docs/05 approval_policies.decision_mode */
+export const APPROVAL_DECISION_MODES = ['ANY', 'ALL', 'QUORUM'] as const;
+export type ApprovalDecisionMode = (typeof APPROVAL_DECISION_MODES)[number];
+
 export const JOB_STATUSES = ['PENDING', 'QUEUED', 'RUNNING', 'SUCCEEDED', 'FAILED', 'CANCELLED', 'TIMED_OUT'] as const;
 export type JobStatus = (typeof JOB_STATUSES)[number];
 

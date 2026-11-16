@@ -9,6 +9,8 @@ import {
   AGENT_VERSION_STATUSES,
   AGENT_VERSION_VALIDATION_STATUSES,
   AGENT_VISIBILITIES,
+  APPROVAL_DECISION_MODES,
+  APPROVAL_POLICY_STATUSES,
   APPROVAL_STATUSES,
   AUDIT_ACTOR_TYPES,
   AUDIT_RESULTS,
@@ -154,6 +156,11 @@ describe('Canonical Domain Contract (docs/04/05)', () => {
 
   it('Approval', () => {
     expectExact(APPROVAL_STATUSES, ['PENDING', 'APPROVED', 'REJECTED', 'EXPIRED', 'CANCELLED']);
+  });
+
+  it('ApprovalPolicy', () => {
+    expectExact(APPROVAL_POLICY_STATUSES, ['ACTIVE', 'INACTIVE']);
+    expectExact(APPROVAL_DECISION_MODES, ['ANY', 'ALL', 'QUORUM']);
   });
 
   it('Job', () => {
