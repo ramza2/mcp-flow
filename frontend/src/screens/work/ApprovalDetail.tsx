@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router';
-import { ArrowLeft, Info } from 'lucide-react';
+import { ArrowLeft, CheckCircle2, Info, XCircle } from 'lucide-react';
 import StatusBadge from '../../components/ui/StatusBadge';
 import Button from '../../components/ui/Button';
+import Dialog, { ConfirmDialog } from '../../components/ui/Dialog';
 import {
   EmptyState,
   ErrorState,
@@ -10,7 +11,12 @@ import {
   LoadingSkeleton,
   PermissionDenied,
 } from '../../components/ui/EmptyState';
-import { getApproval, type ApprovalDetailDto } from '../../api/approvals';
+import {
+  createApprovalDecision,
+  getApproval,
+  type ApprovalDecisionResultDto,
+  type ApprovalDetailDto,
+} from '../../api/approvals';
 import { isAbortError, isApiError } from '../../api/client';
 import {
   formatTimestamp,
@@ -19,6 +25,48 @@ import {
   labelApprovalStatus,
   shortenId,
 } from '../../domain';
+
+function formatDecisionError(err: unknown): { message: string; requestId?: string } {
+  if (!isApiError(err)) {
+    return { message: '결정을 제출하지 못했습니다. 네트워크 상태를 확인한 뒤 다시 시도하세요.' };
+  }
+  if (err.status === 0 || err.code === 'NETWORK_ERROR') {
+    return {
+      message: '네트워크 오류로 결정을 확인하지 못했습니다. 성공으로 표시하지 않습니다. 목록을 새로고침해 상태를 확인하세요.',
+      requestId: err.requestId ?? undefined,
+    };
+  }
+  if (err.status === 403) {
+    return {
+      message: err.message || '결정 권한이 없거나 정책/범위에 맞지 않습니다.',
+      requestId: err.requestId ?? undefined,
+    };
+  }
+  if (err.status === 404) {
+    return {
+      message: err.message || '승인 요청을 찾을 수 없거나 더 이상 볼 수 없습니다.',
+      requestId: err.requestId ?? undefined,
+    };
+  }
+  if (err.status === 409) {
+    return {
+      message:
+        err.message ||
+        '이미 결정했거나 상태가 변경되어 처리할 수 없습니다. 상세를 다시 불러오세요.',
+      requestId: err.requestId ?? undefined,
+    };
+  }
+  if (err.status === 422) {
+    return {
+      message: err.message || '입력값이 올바르지 않습니다.',
+      requestId: err.requestId ?? undefined,
+    };
+  }
+  return {
+    message: err.message || '결정을 제출하지 못했습니다.',
+    requestId: err.requestId ?? undefined,
+  };
+}
 
 export default function ApprovalDetail() {
   const { approvalId } = useParams();
@@ -30,52 +78,140 @@ export default function ApprovalDetail() {
   const [error, setError] = useState<{ message: string; requestId?: string } | null>(null);
   const [reload, setReload] = useState(0);
 
-  const load = useCallback(() => {
-    if (!approvalId) {
-      setNotFound(true);
-      setLoading(false);
-      return () => undefined;
-    }
-    const controller = new AbortController();
-    let cancelled = false;
-    setLoading(true);
-    setError(null);
-    setForbidden(false);
-    setNotFound(false);
-    setDetail(null);
+  const [approveOpen, setApproveOpen] = useState(false);
+  const [rejectOpen, setRejectOpen] = useState(false);
+  const [rejectComment, setRejectComment] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+  const [actionError, setActionError] = useState<{ message: string; requestId?: string } | null>(
+    null,
+  );
+  const [lastResult, setLastResult] = useState<ApprovalDecisionResultDto | null>(null);
+  const [refreshWarning, setRefreshWarning] = useState<string | null>(null);
+  const submitLock = useRef(false);
 
-    getApproval(approvalId, controller.signal)
-      .then((data) => {
-        if (cancelled) return;
-        setDetail(data);
-      })
-      .catch((err: unknown) => {
-        if (isAbortError(err) || cancelled) return;
-        if (isApiError(err) && err.status === 403) {
-          setForbidden(true);
-          return;
-        }
-        if (isApiError(err) && err.status === 404) {
-          setNotFound(true);
-          return;
-        }
-        const apiErr = isApiError(err) ? err : null;
-        setError({
-          message: apiErr?.message ?? '승인 상세를 불러오지 못했습니다.',
-          requestId: apiErr?.requestId ?? undefined,
+  const load = useCallback(
+    (opts?: { quiet?: boolean }) => {
+      if (!approvalId) {
+        setNotFound(true);
+        setLoading(false);
+        return () => undefined;
+      }
+      const controller = new AbortController();
+      let cancelled = false;
+      const quiet = Boolean(opts?.quiet);
+      if (!quiet) {
+        setLoading(true);
+        setError(null);
+        setForbidden(false);
+        setNotFound(false);
+        setDetail(null);
+      }
+
+      getApproval(approvalId, controller.signal)
+        .then((data) => {
+          if (cancelled) return;
+          setDetail(data);
+          setForbidden(false);
+          setNotFound(false);
+          setError(null);
+        })
+        .catch((err: unknown) => {
+          if (isAbortError(err) || cancelled) return;
+          if (isApiError(err) && err.status === 403) {
+            if (!quiet) {
+              setForbidden(true);
+              setDetail(null);
+            }
+            return;
+          }
+          if (isApiError(err) && err.status === 404) {
+            if (!quiet) {
+              setNotFound(true);
+              setDetail(null);
+            } else {
+              setNotFound(true);
+              setDetail(null);
+            }
+            return;
+          }
+          if (!quiet) {
+            const apiErr = isApiError(err) ? err : null;
+            setError({
+              message: apiErr?.message ?? '승인 상세를 불러오지 못했습니다.',
+              requestId: apiErr?.requestId ?? undefined,
+            });
+            setDetail(null);
+          } else {
+            setRefreshWarning(
+              '결정은 저장됐을 수 있으나 상세를 다시 불러오지 못했습니다. 새로고침으로 확인해 주세요.',
+            );
+          }
+        })
+        .finally(() => {
+          if (!cancelled && !quiet) setLoading(false);
         });
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
+
+      return () => {
+        cancelled = true;
+        controller.abort();
+      };
+    },
+    [approvalId],
+  );
+
+  useEffect(() => {
+    setLastResult(null);
+    setActionError(null);
+    setRefreshWarning(null);
+    return load({ quiet: false });
+  }, [load, reload]);
+
+  // After a confirmed POST success (decision_id), hide decide controls even if
+  // the quiet GET refresh is still in flight or failed — never re-offer decide
+  // from stale PENDING/can_decide.
+  const canAct =
+    detail?.status === 'PENDING' &&
+    detail.can_decide === true &&
+    !submitting &&
+    lastResult == null;
+
+  const submitDecision = async (decision: 'APPROVE' | 'REJECT') => {
+    if (!approvalId || !detail || submitLock.current) return;
+    if (detail.status !== 'PENDING' || !detail.can_decide) return;
+
+    submitLock.current = true;
+    setSubmitting(true);
+    setActionError(null);
+    setRefreshWarning(null);
+    setLastResult(null);
+
+    try {
+      const comment =
+        decision === 'REJECT' ? rejectComment.trim() || null : null;
+      const result = await createApprovalDecision(approvalId, {
+        decision,
+        comment,
       });
-
-    return () => {
-      cancelled = true;
-      controller.abort();
-    };
-  }, [approvalId, reload]);
-
-  useEffect(() => load(), [load]);
+      if (!result?.decision_id) {
+        setActionError({
+          message:
+            '서버 응답이 불완전하여 성공으로 표시하지 않습니다. 목록을 새로고침해 상태를 확인하세요.',
+        });
+        return;
+      }
+      setLastResult(result);
+      setApproveOpen(false);
+      setRejectOpen(false);
+      setRejectComment('');
+      load({ quiet: true });
+    } catch (err: unknown) {
+      setActionError(formatDecisionError(err));
+      // Do not claim success on any failure / network uncertainty.
+    } finally {
+      submitLock.current = false;
+      setSubmitting(false);
+    }
+  };
 
   return (
     <div>
@@ -113,7 +249,35 @@ export default function ApprovalDetail() {
                 </span>
               </div>
             </div>
-            <CanDecideBadge canDecide={detail.can_decide} status={detail.status} />
+            <div className="flex flex-col items-end gap-2 shrink-0">
+              <CanDecideBadge canDecide={detail.can_decide} status={detail.status} />
+              {canAct && (
+                <div className="flex gap-2">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={submitting}
+                    onClick={() => {
+                      setActionError(null);
+                      setRejectOpen(true);
+                    }}
+                  >
+                    거절
+                  </Button>
+                  <Button
+                    size="sm"
+                    disabled={submitting}
+                    icon={<CheckCircle2 size={13} />}
+                    onClick={() => {
+                      setActionError(null);
+                      setApproveOpen(true);
+                    }}
+                  >
+                    승인
+                  </Button>
+                </div>
+              )}
+            </div>
           </div>
         )}
       </div>
@@ -144,10 +308,28 @@ export default function ApprovalDetail() {
           />
         ) : detail ? (
           <>
-            <InlineAlert
-              type="info"
-              message="이 화면은 조회만 지원합니다. 승인·거절 처리는 이후 단계에서 제공됩니다."
-            />
+            {actionError && (
+              <InlineAlert
+                type="error"
+                message={`${actionError.message}${
+                  actionError.requestId ? ` (Request ID: ${actionError.requestId})` : ''
+                }`}
+              />
+            )}
+            {refreshWarning && <InlineAlert type="warning" message={refreshWarning} />}
+            {lastResult && (
+              <DecisionResultBanner
+                result={lastResult}
+                onOpenExecution={() => navigate(`/executions/${lastResult.execution_id}`)}
+              />
+            )}
+
+            {detail.status === 'PENDING' && !detail.can_decide && (
+              <InlineAlert
+                type="info"
+                message="이 요청은 조회만 가능합니다. 이미 결정했거나 정책·만료·범위 때문에 지금은 결정할 수 없습니다."
+              />
+            )}
 
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
               <InfoCard title="상태 · 결정 가능 여부">
@@ -247,7 +429,10 @@ export default function ApprovalDetail() {
                             {formatTimestamp(decision.decided_at)}
                           </span>
                         </div>
-                        <p className="font-mono text-[11px] text-slate-500 mt-1" title={decision.decided_by}>
+                        <p
+                          className="font-mono text-[11px] text-slate-500 mt-1"
+                          title={decision.decided_by}
+                        >
                           결정자: {shortenId(decision.decided_by, 12)}
                         </p>
                         {decision.comment && (
@@ -262,16 +447,168 @@ export default function ApprovalDetail() {
               </InfoCard>
             </div>
 
+            {canAct && (
+              <div className="bg-white border border-slate-200 rounded-xl p-4">
+                <h3 className="text-sm font-semibold text-slate-800 mb-2">승인 / 거절</h3>
+                <p className="text-xs text-slate-500 mb-3">
+                  최종 권한·정책·만료·중복 결정은 서버가 판정합니다. 자동 승인하지 않습니다.
+                </p>
+                <div className="flex gap-3">
+                  <Button
+                    variant="outline"
+                    disabled={submitting}
+                    onClick={() => {
+                      setActionError(null);
+                      setRejectOpen(true);
+                    }}
+                  >
+                    거절
+                  </Button>
+                  <Button
+                    disabled={submitting}
+                    loading={submitting && approveOpen}
+                    icon={<CheckCircle2 size={13} />}
+                    onClick={() => {
+                      setActionError(null);
+                      setApproveOpen(true);
+                    }}
+                  >
+                    승인하기
+                  </Button>
+                </div>
+              </div>
+            )}
+
             <div className="flex gap-2">
               <Button variant="outline" onClick={() => navigate('/approvals')}>
                 목록으로
               </Button>
-              <Button variant="outline" onClick={() => setReload((n) => n + 1)}>
+              <Button
+                variant="outline"
+                disabled={submitting}
+                onClick={() => setReload((n) => n + 1)}
+              >
                 다시 불러오기
               </Button>
             </div>
           </>
         ) : null}
+      </div>
+
+      <ConfirmDialog
+        open={approveOpen}
+        onClose={() => {
+          if (!submitting) setApproveOpen(false);
+        }}
+        onConfirm={() => void submitDecision('APPROVE')}
+        title="승인 확인"
+        description="이 요청을 승인할까요? 서버가 권한·정책·만료를 다시 검증합니다. 승인 후에도 Execution은 즉시 RUNNING이 되지 않을 수 있습니다."
+        confirmLabel="승인 확정"
+        loading={submitting}
+      />
+
+      <Dialog
+        open={rejectOpen}
+        onClose={() => {
+          if (!submitting) setRejectOpen(false);
+        }}
+        title="승인 거절"
+        description="거절 사유를 입력하세요. 정책에 따라 필수일 수 있으며, 서버가 최종 검증합니다."
+        size="sm"
+        footer={
+          <>
+            <Button
+              variant="outline"
+              disabled={submitting}
+              onClick={() => setRejectOpen(false)}
+            >
+              취소
+            </Button>
+            <Button
+              variant="danger"
+              loading={submitting}
+              disabled={submitting}
+              onClick={() => void submitDecision('REJECT')}
+            >
+              거절 확정
+            </Button>
+          </>
+        }
+      >
+        <textarea
+          value={rejectComment}
+          onChange={(e) => setRejectComment(e.target.value)}
+          placeholder="거절 사유 (정책에 따라 필수일 수 있음)"
+          rows={3}
+          disabled={submitting}
+          className="w-full text-sm border border-slate-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-red-400 disabled:bg-slate-50"
+        />
+      </Dialog>
+    </div>
+  );
+}
+
+function DecisionResultBanner({
+  result,
+  onOpenExecution,
+}: {
+  result: ApprovalDecisionResultDto;
+  onOpenExecution: () => void;
+}) {
+  const approved = result.decision === 'APPROVE';
+  return (
+    <div
+      className={`rounded-xl border p-4 ${
+        approved ? 'bg-emerald-50 border-emerald-200' : 'bg-red-50 border-red-200'
+      }`}
+      role="status"
+    >
+      <div
+        className={`flex items-center gap-2 text-sm font-semibold ${
+          approved ? 'text-emerald-800' : 'text-red-800'
+        }`}
+      >
+        {approved ? <CheckCircle2 size={16} /> : <XCircle size={16} />}
+        {approved ? '승인 결정이 저장되었습니다' : '거절 결정이 저장되었습니다'}
+      </div>
+      <dl className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
+        <div>
+          <dt className="text-slate-500">Approval 상태</dt>
+          <dd className="font-medium text-slate-800" title={result.approval_status}>
+            {labelApprovalStatus(result.approval_status)}
+          </dd>
+        </div>
+        <div>
+          <dt className="text-slate-500">결정</dt>
+          <dd className="font-medium text-slate-800" title={result.decision}>
+            {labelApprovalDecisionValue(result.decision)}
+          </dd>
+        </div>
+        <div>
+          <dt className="text-slate-500">Execution 상태</dt>
+          <dd className="font-mono text-slate-800">{result.execution_status}</dd>
+        </div>
+        <div>
+          <dt className="text-slate-500">Step 상태</dt>
+          <dd className="font-mono text-slate-800">{result.step_status}</dd>
+        </div>
+        <div className="sm:col-span-2">
+          <dt className="text-slate-500">재개 Outbox</dt>
+          <dd className="text-slate-800">
+            {result.resume_enqueued
+              ? 'EXECUTION_APPROVAL_RESUME 등록됨 (API가 RUNNING으로 올리지 않음)'
+              : '등록되지 않음'}
+          </dd>
+        </div>
+      </dl>
+      <p className="text-xs text-slate-600 mt-3">
+        거절/만료 시 Execution은 REJECTED/EXPIRED가 아니라 계획 정책에 따라 FAILED 등으로
+        종료될 수 있습니다.
+      </p>
+      <div className="mt-3">
+        <Button size="sm" variant="outline" onClick={onOpenExecution}>
+          Execution 보기
+        </Button>
       </div>
     </div>
   );

@@ -185,7 +185,7 @@ export default function Approvals() {
     <div>
       <PageHeader
         title="승인"
-        description="승인 권한이 있는 요청을 조회합니다. 기본 목록은 대기 중(PENDING)이며, 승인·거절 처리는 이후 단계에서 지원합니다."
+        description="승인 권한이 있는 요청을 조회합니다. 기본 목록은 대기 중(PENDING)입니다. 상세에서 PENDING이고 결정 가능할 때만 승인·거절할 수 있습니다."
         actions={
           <Button
             variant="outline"

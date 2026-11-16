@@ -1068,11 +1068,13 @@ Approval `REJECTED/EXPIRED`를 Execution `REJECTED/EXPIRED` 상태로 직접 매
 
 ## 17. Schedule 시험
 
-### Frontend Approvals read inbox (phase 1)
+### Frontend Approvals inbox + decide (phase 1–2)
 
-- `frontend/src/api/approvals.ts`: `GET /approvals`, `GET /approvals/{id}` only (POST decisions deferred).
+- `frontend/src/api/approvals.ts`: `GET /approvals`, `GET /approvals/{id}`, `POST /approvals/{id}/decisions` (CSRF; never submit `context_hash`).
 - Permission is server `approval.decide` (no invented `approval.read`). List default `status=PENDING`.
-- Detail shows canonical `status`, `can_decide`, masked `safe_context`, and `decisions` history only — never raw `context_snapshot` / `context_hash` / `secret_id`.
+- Detail shows canonical `status`, `can_decide`, masked `safe_context`, and `decisions` history — never raw `context_snapshot` / `context_hash` / `secret_id`.
+- Decide UI only when `status===PENDING && can_decide` and no confirmed POST success yet; confirm dialog + reject comment; submit lock against double-click; success only after 201 with `decision_id`; then quiet GET refresh. After confirmed success, hide decide buttons even while GET is delayed or fails (do not re-offer from stale PENDING/`can_decide`). Show `approval_status` / `execution_status` / `step_status` / `resume_enqueued` from the POST response (APPROVED may keep Execution `WAITING_APPROVAL`).
+- Errors: 403/404/409/422/network — never claim success on uncertain outcomes. No auto-approve, no mock decide path.
 - UI states: loading, empty PENDING inbox, 403 permission denied, detail 404 (not 403 for IDOR), generic API error + retry. Korean copy; Approval `PENDING` is never remapped to Execution `WAITING_APPROVAL`.
 - Tests: `frontend/src/api/__tests__/approvals-api.test.ts`, `frontend/tests/components/ApprovalsLive.test.tsx`, `frontend/tests/components/ApprovalDetail.test.tsx`.
 
