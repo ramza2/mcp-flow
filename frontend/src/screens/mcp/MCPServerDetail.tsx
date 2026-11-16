@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { useNavigate, useParams } from 'react-router';
+import { useNavigate, useParams, useSearchParams } from 'react-router';
 import { ArrowLeft, RefreshCw } from 'lucide-react';
 import StatusBadge from '../../components/ui/StatusBadge';
 import FactoryDiscoverySummary from './FactoryDiscoverySummary';
@@ -11,14 +11,17 @@ import { ConfirmDialog } from '../../components/ui/Dialog';
 import { EmptyState, ErrorState, InlineAlert, LoadingSkeleton } from '../../components/ui/EmptyState';
 import {
   activateMCPServer,
+  activateMCPTool,
   connectionTestMCPServer,
   createDiscovery,
   deactivateMCPServer,
+  deactivateMCPTool,
   getMCPServer,
   listDiscoveries,
   listServerTools,
 } from '../../api/mcp';
 import { isAbortError, isApiError } from '../../api/client';
+import { isVersionConflict, mergeToolRow, toolLifecycleAction, type ToolLifecycleAction } from './toolLifecycle';
 import type { ConnectionTestDto, DiscoveryDto, MCPServerDto, MCPToolDto } from '../../api/types';
 import {
   labelAuthType,
@@ -50,7 +53,19 @@ export default function MCPServerDetail() {
   const navigate = useNavigate();
   const mountedRef = useRef(true);
 
-  const [tab, setTab] = useState('overview');
+  const [searchParams, setSearchParams] = useSearchParams();
+  const requestedTab = searchParams.get('tab');
+  const tab = ['overview', 'tools', 'discovery', 'health', 'audit'].includes(requestedTab ?? '')
+    ? requestedTab!
+    : 'overview';
+  const setTab = (next: string) => {
+    setSearchParams(previous => {
+      const nextParams = new URLSearchParams(previous);
+      if (next === 'overview') nextParams.delete('tab');
+      else nextParams.set('tab', next);
+      return nextParams;
+    }, { replace: true });
+  };
   const [server, setServer] = useState<MCPServerDto | null>(null);
   const [loading, setLoading] = useState(true);
   const [notFound, setNotFound] = useState(false);
@@ -62,6 +77,9 @@ export default function MCPServerDetail() {
   const [toolsHasNext, setToolsHasNext] = useState(false);
   const [toolsLoading, setToolsLoading] = useState(false);
   const [toolsError, setToolsError] = useState<FeedbackError | null>(null);
+  const [pendingToolAction, setPendingToolAction] = useState<{ tool: MCPToolDto; action: Exclude<ToolLifecycleAction, null> } | null>(null);
+  const [toolMutatingId, setToolMutatingId] = useState<string | null>(null);
+  const [toolMutationError, setToolMutationError] = useState<FeedbackError | null>(null);
 
   const [discoveries, setDiscoveries] = useState<DiscoveryDto[]>([]);
   const [discPage, setDiscPage] = useState(1);
@@ -123,6 +141,42 @@ export default function MCPServerDetail() {
     },
     [serverId, toolsPage],
   );
+
+  // Tool state changes are explicit single-row actions with optimistic locking.
+  // Never assume success or navigate away on a failed mutation.
+  const handleToolAction = async () => {
+    if (!pendingToolAction || toolMutatingId || !serverId) return;
+    const { tool, action } = pendingToolAction;
+    const current = tools.find(row => row.id === tool.id);
+    if (!current || current.mcp_server_id !== serverId ||
+        current.lock_version !== tool.lock_version ||
+        toolLifecycleAction(current.status) !== action) {
+      setPendingToolAction(null);
+      setToolMutationError({ message: '도구 상태가 변경되었습니다. 최신 목록을 확인하세요.' });
+      void reloadTools();
+      return;
+    }
+    setToolMutatingId(tool.id);
+    setToolMutationError(null);
+    try {
+      const updated = action === 'activate'
+        ? await activateMCPTool(tool.id, tool.lock_version)
+        : await deactivateMCPTool(tool.id, tool.lock_version);
+      if (!mountedRef.current) return;
+      setTools(previous => mergeToolRow(previous, updated));
+      setPendingToolAction(null);
+    } catch (err) {
+      if (!mountedRef.current) return;
+      setPendingToolAction(null);
+      setToolMutationError(toFeedbackError(
+        err,
+        action === 'activate' ? '도구 활성화에 실패했습니다.' : '도구 비활성화에 실패했습니다.',
+      ));
+      if (isVersionConflict(err)) void reloadTools();
+    } finally {
+      if (mountedRef.current) setToolMutatingId(null);
+    }
+  };
 
   const reloadDiscoveries = useCallback(
     async (signal?: AbortSignal) => {
@@ -400,6 +454,32 @@ export default function MCPServerDetail() {
     },
     { key: 'status', label: '상태', render: r => <StatusBadge status={r.status} size="sm" /> },
     {
+      key: 'actions',
+      label: '관리',
+      render: r => {
+        const action = toolLifecycleAction(r.status);
+        if (!action) return <span className="text-xs text-slate-400">상태 변경 불가</span>;
+        const activating = action === 'activate';
+        return (
+          <span onClick={event => event.stopPropagation()}>
+            <Button
+              size="sm"
+              variant={activating ? 'outline' : 'ghost'}
+              disabled={Boolean(toolMutatingId)}
+              loading={toolMutatingId === r.id}
+              aria-label={`도구 ${activating ? '활성화' : '비활성화'}: ${r.display_name ?? r.remote_name}`}
+              onClick={() => {
+                setToolMutationError(null);
+                setPendingToolAction({ tool: r, action });
+              }}
+            >
+              {activating ? '활성화' : '비활성화'}
+            </Button>
+          </span>
+        );
+      },
+    },
+    {
       key: 'updatedAt',
       label: '수정 시각',
       render: r => <span className="text-xs text-slate-400">{formatTimestamp(r.updated_at)}</span>,
@@ -556,6 +636,15 @@ export default function MCPServerDetail() {
 
         {tab === 'tools' && (
           <div className="max-w-4xl">
+            {toolMutationError && (
+              <div className="mb-3 space-y-1">
+                <InlineAlert type="error" message={toolMutationError.message} />
+                {toolMutationError.requestId && (
+                  <p className="text-xs font-mono text-slate-500">Request ID: {toolMutationError.requestId}</p>
+                )}
+                <Button variant="outline" size="sm" onClick={() => void reloadTools()}>목록 다시 조회</Button>
+              </div>
+            )}
             {toolsLoading && <LoadingSkeleton rows={4} />}
             {!toolsLoading && toolsError && (
               <ErrorState
@@ -575,7 +664,7 @@ export default function MCPServerDetail() {
                   columns={toolCols}
                   data={tools}
                   rowKey={r => r.id}
-                  onRowClick={r => navigate(`/mcp/tools/${r.id}`)}
+                  onRowClick={r => navigate(`/mcp/tools/${r.id}`, { state: { fromServer: true } })}
                 />
                 <Pagination
                   page={toolsPage}
@@ -674,6 +763,15 @@ export default function MCPServerDetail() {
         )}
       </div>
 
+      <ConfirmDialog
+        open={Boolean(pendingToolAction)}
+        onClose={() => { if (!toolMutatingId) setPendingToolAction(null); }}
+        onConfirm={() => void handleToolAction()}
+        title={`MCP 도구 ${pendingToolAction?.action === 'activate' ? '활성화' : '비활성화'}`}
+        description={`'${pendingToolAction?.tool.display_name ?? pendingToolAction?.tool.remote_name ?? ''}' 도구를 ${pendingToolAction?.action === 'activate' ? '활성화' : '비활성화'}합니다. 상태 변경은 실제 운영 DB에 반영되며 검증(VERIFIED) 기록은 별도입니다. 계속하시겠습니까?`}
+        confirmLabel={pendingToolAction?.action === 'activate' ? '도구 활성화 확인' : '도구 비활성화 확인'}
+        loading={Boolean(toolMutatingId)}
+      />
       <ConfirmDialog
         open={applyOpen}
         onClose={() => setApplyOpen(false)}
