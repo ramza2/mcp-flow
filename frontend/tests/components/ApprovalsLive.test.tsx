@@ -213,7 +213,10 @@ describe('ApprovalDetail decide (phase 2)', () => {
       });
     });
     expect(await screen.findByText('승인 결정이 저장되었습니다')).toBeInTheDocument();
-    expect(screen.getAllByText('WAITING_APPROVAL').length).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByTitle('WAITING_APPROVAL').length).toBeGreaterThanOrEqual(1);
+    expect(screen.getByTestId('approval-decision-execution-note')).toHaveTextContent(
+      /즉시 실행 완료/,
+    );
     expect(screen.getByText(/EXECUTION_APPROVAL_RESUME/)).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: '승인' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: '거절' })).not.toBeInTheDocument();

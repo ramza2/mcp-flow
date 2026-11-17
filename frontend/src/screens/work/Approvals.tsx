@@ -27,6 +27,13 @@ import {
   shortenId,
   type ApprovalStatus,
 } from '../../domain';
+import {
+  APPROVAL_REVIEW_FLOW_LABEL,
+  APPROVAL_REVIEW_STEPS,
+  approvalVsExecutionNote,
+  approvalsForbiddenGuidance,
+  approvalsListEmptyGuidance,
+} from './approvalUx';
 
 const PAGE_SIZE = 20;
 const DEFAULT_STATUS: ApprovalStatus = 'PENDING';
@@ -126,7 +133,7 @@ export default function Approvals() {
     },
     {
       key: 'execution_id',
-      label: 'Execution',
+      label: '실행',
       render: (row) => (
         <button
           type="button"
@@ -197,6 +204,27 @@ export default function Approvals() {
         }
       />
       <div className="p-6 space-y-4">
+        <section
+          aria-label="승인 처리 안내"
+          className="rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600"
+          data-testid="approval-setup-progress"
+        >
+          <p className="font-semibold text-slate-800">처리 순서: {APPROVAL_REVIEW_FLOW_LABEL}</p>
+          <ol className="mt-2 flex flex-wrap gap-2 text-xs">
+            {APPROVAL_REVIEW_STEPS.map((step, index) => (
+              <li
+                key={step.id}
+                className="rounded-md border border-slate-200 bg-white px-2 py-1 text-slate-700"
+                data-testid={`approval-setup-step-${step.id}`}
+              >
+                {index + 1}. {step.label}
+              </li>
+            ))}
+          </ol>
+          <p className="mt-2 text-xs text-slate-500" data-testid="approval-vs-execution-note">
+            {approvalVsExecutionNote()}
+          </p>
+        </section>
         <FilterBar
           filters={[
             {
@@ -235,8 +263,11 @@ export default function Approvals() {
           {forbidden ? (
             <div className="py-4">
               <PermissionDenied />
-              <p className="text-center text-sm text-slate-400 -mt-8 mb-10 px-6">
-                승인 목록을 보려면 관리자에게 승인 결정 권한을 요청하세요.
+              <p
+                className="text-center text-sm text-slate-400 -mt-8 mb-10 px-6"
+                data-testid="approvals-forbidden-guidance"
+              >
+                {approvalsForbiddenGuidance()}
               </p>
             </div>
           ) : loading ? (
@@ -249,16 +280,8 @@ export default function Approvals() {
             />
           ) : items.length === 0 ? (
             <EmptyState
-              title={
-                effectiveStatus === 'PENDING'
-                  ? '대기 중인 승인 요청이 없습니다.'
-                  : '조건에 맞는 승인 요청이 없습니다.'
-              }
-              description={
-                effectiveStatus === 'PENDING'
-                  ? '처리할 승인 요청이 생기면 여기에 표시됩니다.'
-                  : '상태 필터를 바꾸거나 새로고침해 보세요.'
-              }
+              title={approvalsListEmptyGuidance(effectiveStatus).title}
+              description={approvalsListEmptyGuidance(effectiveStatus).description}
             />
           ) : (
             <>
