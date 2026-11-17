@@ -1,20 +1,58 @@
 #!/usr/bin/env bash
 # Boot isolated E2E-001 stack + Vite, then run the Playwright scenario.
+# Requires explicit E2E001_ALLOW_DB_RESET=1 (no default approval).
 set -Eeuo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-STATE_DIR="${E2E001_STATE_DIR:-/tmp/mcpflow-e2e001}"
+RUN_ID="$(python3 -c 'import uuid; print(uuid.uuid4().hex[:12])')"
+STATE_DIR="${E2E001_STATE_DIR:-/tmp/mcpflow-e2e001-${RUN_ID}}"
 STATE_PATH="${STATE_DIR}/state.json"
 mkdir -p "${STATE_DIR}"
+
+secure_rm() {
+  local path="$1"
+  if [[ -f "${path}" ]]; then
+    E2E001_SCRUB_PATH="${path}" python3 - <<'PY'
+from pathlib import Path
+import os
+p = Path(os.environ["E2E001_SCRUB_PATH"])
+if p.is_file():
+    try:
+        size = max(p.stat().st_size, 1)
+        with open(p, "r+b") as f:
+            f.write(b"\0" * size)
+            f.flush()
+            os.fsync(f.fileno())
+    except OSError:
+        pass
+    p.unlink(missing_ok=True)
+PY
+  fi
+}
+
+scrub_state() {
+  secure_rm "${STATE_PATH}"
+  for f in "${STATE_DIR}"/cj*; do
+    [[ -e "$f" ]] || continue
+    secure_rm "$f"
+  done
+}
 
 if [[ -z "${TEST_DATABASE_URL:-}" && -z "${MCPFLOW_DATABASE_URL:-}" ]]; then
   echo "TEST_DATABASE_URL or MCPFLOW_DATABASE_URL required" >&2
   exit 1
 fi
+if [[ "${E2E001_ALLOW_DB_RESET:-}" != "1" ]]; then
+  echo "Refusing to run without explicit E2E001_ALLOW_DB_RESET=1" >&2
+  exit 1
+fi
 export TEST_DATABASE_URL="${TEST_DATABASE_URL:-$MCPFLOW_DATABASE_URL}"
 export MCPFLOW_DATABASE_URL="${MCPFLOW_DATABASE_URL:-$TEST_DATABASE_URL}"
-export E2E001_ALLOW_DB_RESET="${E2E001_ALLOW_DB_RESET:-1}"
+export E2E001_ALLOW_DB_RESET=1
 export E2E001_STATE_DIR="${STATE_DIR}"
 export PYTHONPATH="${ROOT}/backend${PYTHONPATH:+:$PYTHONPATH}"
+
+# Never reuse a previous run's credential/state file.
+scrub_state
 
 cleanup() {
   if [[ -n "${STACK_PID:-}" ]]; then
@@ -25,6 +63,7 @@ cleanup() {
     kill -TERM "${VITE_PID}" 2>/dev/null || true
     wait "${VITE_PID}" 2>/dev/null || true
   fi
+  scrub_state
 }
 trap cleanup EXIT
 

@@ -4,11 +4,14 @@
 Boots throwaway Redis + Mock ModelOps + Mock MCP + API + outbox + Celery worker,
 seeds one ACTIVE/PUBLISHED Agent + READ_ONLY Tool, writes state JSON.
 
-Never targets ops Redis/containers. Requires TEST_DATABASE_URL /
-MCPFLOW_DATABASE_URL pointing at the local test Postgres.
+Never targets ops Redis/containers. Requires an explicit
+``E2E001_ALLOW_DB_RESET=1`` and a local ``*_test`` / ``mcpflow_test``
+Postgres URL (ops DB names/hosts are refused).
 
 Usage:
-  E2E001_ALLOW_DB_RESET=1 python3 scripts/e2e001_isolated_stack.py
+  E2E001_ALLOW_DB_RESET=1 \\
+    TEST_DATABASE_URL=postgresql+asyncpg://...@127.0.0.1:5432/mcpflow_test \\
+    python3 scripts/e2e001_isolated_stack.py
 """
 
 from __future__ import annotations
@@ -27,6 +30,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from shutil import which
 from typing import Any
+from urllib.parse import urlparse
 
 # Ensure backend package imports resolve when run as a script.
 _BACKEND_ROOT = Path(__file__).resolve().parents[1]
@@ -40,7 +44,11 @@ NL_REQUEST = f"서울 날씨 {QUERY_TOKEN} 알려줘"
 USERNAME = "e2e001_user"
 PASSWORD = "e2e001-pass-word"
 AGENT_NAME = "E2E001 Weather Agent"
-MCP_RESULT_TEXT = "e2e001-mock-mcp-sunny"
+# Per-boot nonce so a stale UI/state cannot satisfy the scenario.
+RUN_NONCE = uuid.uuid4().hex[:12]
+MCP_RESULT_TEXT = f"e2e001-mock-mcp-sunny-{RUN_NONCE}"
+_LOCAL_PG_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+_FORBIDDEN_PG_DBS = frozenset({"mcpflow", "postgres", "production", "prod", "ops", "main"})
 
 _OUTPUT_SCHEMA = {
     "type": "object",
@@ -78,6 +86,90 @@ class _Shared:
     lock = threading.Lock()
 
 
+def _secure_unlink(path: Path) -> None:
+    """Overwrite then delete a file that may hold credentials."""
+    if not path.is_file():
+        return
+    try:
+        size = max(path.stat().st_size, 1)
+        with open(path, "r+b") as handle:
+            handle.write(b"\0" * size)
+            handle.flush()
+            os.fsync(handle.fileno())
+    except OSError:
+        pass
+    path.unlink(missing_ok=True)
+
+
+def _scrub_sensitive_state() -> None:
+    for name in ("state.json", "cj", "cj2", "cj3", "cj4"):
+        _secure_unlink(STATE_DIR / name)
+
+
+def _compose_answer_from_messages(messages: list[Any]) -> dict[str, str]:
+    """Ground answer text in schema evidence (not a fixed canned string alone)."""
+    for message in reversed(messages):
+        if not isinstance(message, dict) or message.get("role") != "user":
+            continue
+        raw = message.get("content")
+        if not isinstance(raw, str):
+            continue
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        evidence = payload.get("evidence")
+        if not isinstance(evidence, dict):
+            continue
+        condition = evidence.get("condition")
+        if not isinstance(condition, str) or not condition.strip():
+            continue
+        location = evidence.get("location")
+        loc = location if isinstance(location, str) and location.strip() else "조회 위치"
+        temperature = evidence.get("temperature_c")
+        if isinstance(temperature, (int, float)):
+            return {
+                "answer": (f"{loc} 날씨는 {condition}이며 기온은 {temperature}도입니다."),
+            }
+        return {"answer": f"{loc} 날씨는 {condition}입니다."}
+    return {"answer": "표시할 검증된 조회 결과가 없습니다."}
+
+
+def _assert_test_only_postgres(db_url: str) -> None:
+    """Refuse ops/remote DBs; require local ``*_test`` / ``mcpflow_test``."""
+    normalized = db_url.replace("postgresql+asyncpg://", "postgresql://", 1)
+    parsed = urlparse(normalized)
+    host = (parsed.hostname or "").lower()
+    if host not in _LOCAL_PG_HOSTS:
+        raise SystemExit(f"Refusing non-local Postgres host {host!r} (ops DB access forbidden).")
+    db_name = (parsed.path or "").lstrip("/")
+    if not db_name or db_name in _FORBIDDEN_PG_DBS:
+        raise SystemExit(f"Refusing Postgres database {db_name!r}; use a local *_test DB.")
+    if not (db_name.endswith("_test") or db_name == "mcpflow_test"):
+        raise SystemExit(
+            f"Refusing Postgres database {db_name!r}; "
+            "require name ending in _test (or mcpflow_test)."
+        )
+
+    import asyncio
+
+    from sqlalchemy import text
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    async def _ping() -> None:
+        engine = create_async_engine(db_url, pool_pre_ping=True)
+        try:
+            async with engine.connect() as conn:
+                await conn.execute(text("SELECT 1"))
+        finally:
+            await engine.dispose()
+
+    try:
+        asyncio.run(_ping())
+    except Exception as exc:  # noqa: BLE001 — abort harness immediately
+        raise SystemExit(f"Temporary test PostgreSQL verification failed; aborting: {exc}") from exc
+
+
 def _start_modelops(port: int) -> ThreadingHTTPServer:
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *_args: object) -> None:
@@ -109,17 +201,11 @@ def _start_modelops(port: int) -> ThreadingHTTPServer:
                     or '"evidence"' in blob
                     or "verified JSON evidence" in blob
                 ):
-                    # AgentRunAnswerComposer expects {"answer": "..."}.
-                    content = {
-                        "answer": (
-                            f"서울 날씨는 {MCP_RESULT_TEXT}이며 기온은 21도입니다."
-                        ),
-                    }
-                elif (
-                    "tool_version_id" in blob
-                    or "llm_fit_score" in blob
-                    or "candidates" in blob
-                ):
+                    # Echo schema evidence from chat-result (MCP-backed).
+                    content = _compose_answer_from_messages(
+                        messages if isinstance(messages, list) else []
+                    )
+                elif "tool_version_id" in blob or "llm_fit_score" in blob or "candidates" in blob:
                     content = {
                         "candidates": [
                             {
@@ -181,6 +267,25 @@ def _start_mock_mcp(port: int) -> ThreadingHTTPServer:
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *_args: object) -> None:
             return
+
+        def do_GET(self) -> None:  # noqa: N802
+            path = self.path.split("?", 1)[0]
+            if path != "/__e2e001/stats":
+                self.send_response(404)
+                self.end_headers()
+                return
+            with _Shared.lock:
+                payload = {
+                    "tools_call_count": _Shared.mcp_calls,
+                    "expected_result_fragment": MCP_RESULT_TEXT,
+                    "run_nonce": RUN_NONCE,
+                }
+            encoded = json.dumps(payload).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(encoded)))
+            self.end_headers()
+            self.wfile.write(encoded)
 
         def do_POST(self) -> None:  # noqa: N802
             length = int(self.headers.get("Content-Length", "0"))
@@ -332,9 +437,7 @@ async def _seed(
                     status=UserStatus.ACTIVE,
                 )
             )
-            await UserRepository(session).set_password_hash(
-                user.id, hash_password(PASSWORD)
-            )
+            await UserRepository(session).set_password_hash(user.id, hash_password(PASSWORD))
             await session.refresh(user)
             role = await RoleService(session).create(
                 RoleCreate(code=f"e2e001-r-{uuid.uuid4().hex[:8]}", name="E2E001")
@@ -488,14 +591,15 @@ async def _seed(
 def _reset_db() -> None:
     if os.environ.get("E2E001_ALLOW_DB_RESET", "").strip() != "1":
         raise SystemExit(
-            "Refusing to reset DB without E2E001_ALLOW_DB_RESET=1 "
-            "(isolates Playwright E2E-001 from ops DBs)."
+            "Refusing to reset DB without explicit E2E001_ALLOW_DB_RESET=1 "
+            "(no default approval; ops DBs must not be wiped)."
         )
     from tests.integration.conftest import recover_integration_database
 
     db_url = os.environ.get("TEST_DATABASE_URL") or os.environ.get("MCPFLOW_DATABASE_URL")
     if not db_url:
         raise SystemExit("TEST_DATABASE_URL or MCPFLOW_DATABASE_URL required")
+    _assert_test_only_postgres(db_url)
     os.environ["MCPFLOW_DATABASE_URL"] = db_url
     os.environ["TEST_DATABASE_URL"] = db_url
     recover_integration_database(db_url)
@@ -503,6 +607,8 @@ def _reset_db() -> None:
 
 def main() -> int:
     STATE_DIR.mkdir(parents=True, exist_ok=True)
+    # Drop credentials / prior run markers before bootstrapping a new stack.
+    _scrub_sensitive_state()
     _reset_db()
 
     modelops_port = _free_port()
@@ -512,6 +618,7 @@ def main() -> int:
     mcp = _start_mock_mcp(mcp_port)
     modelops_base = f"http://127.0.0.1:{modelops_port}/v1"
     mcp_endpoint = f"http://127.0.0.1:{mcp_port}/mcp"
+    mcp_stats_url = f"http://127.0.0.1:{mcp_port}/__e2e001/stats"
 
     redis_url, redis_pid = _start_dedicated_redis()
     os.environ["MCPFLOW_REDIS_URL"] = redis_url
@@ -525,9 +632,7 @@ def main() -> int:
 
     import asyncio
 
-    seeded = asyncio.run(
-        _seed(modelops_base=modelops_base, mcp_endpoint=mcp_endpoint)
-    )
+    seeded = asyncio.run(_seed(modelops_base=modelops_base, mcp_endpoint=mcp_endpoint))
 
     children: list[subprocess.Popen[Any]] = []
     env = os.environ.copy()
@@ -591,23 +696,31 @@ def main() -> int:
     _wait_tcp("127.0.0.1", api_port, timeout_s=30)
 
     state = {
+        "run_nonce": RUN_NONCE,
         "api_base_url": f"http://127.0.0.1:{api_port}",
         "api_proxy_target": f"http://127.0.0.1:{api_port}",
         "redis_url": redis_url,
         "modelops_base_url": modelops_base,
         "mcp_endpoint_url": mcp_endpoint,
+        "mcp_stats_url": mcp_stats_url,
         "username": USERNAME,
         "password": PASSWORD,
         "agent_name": AGENT_NAME,
         "agent_id": seeded["agent_id"],
         "nl_request": NL_REQUEST,
         "expected_result_fragment": MCP_RESULT_TEXT,
-        "frontend_hint": "Set MCPFLOW_API_PROXY_TARGET to api_proxy_target and run Vite.",
+        "frontend_hint": ("Set MCPFLOW_API_PROXY_TARGET to api_proxy_target and run Vite."),
         **seeded,
     }
     STATE_PATH.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
     print(f"E2E001_READY state={STATE_PATH}", flush=True)
-    print(json.dumps({"api_proxy_target": state["api_proxy_target"]}, ensure_ascii=False), flush=True)
+    print(
+        json.dumps(
+            {"api_proxy_target": state["api_proxy_target"]},
+            ensure_ascii=False,
+        ),
+        flush=True,
+    )
 
     stop = threading.Event()
 
@@ -635,6 +748,7 @@ def main() -> int:
         _stop_pidfile(redis_pid)
         modelops.shutdown()
         mcp.shutdown()
+        _scrub_sensitive_state()
     return 0
 
 
