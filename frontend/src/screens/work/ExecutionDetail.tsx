@@ -56,6 +56,11 @@ import {
   labelExecutionSource,
   type ExecutionStatus,
 } from '../../domain';
+import {
+  executionStatusGuidance,
+  labelSseConnectionState,
+  unknownOutcomeGuidance,
+} from './executionDetailUx';
 
 const ACTIVE_STATUSES = new Set<ExecutionStatus>([
   'CREATED',
@@ -74,21 +79,7 @@ export interface ExecutionTimelineItem extends ExecutionEventEnvelope {
 }
 
 function connectionLabel(state: SseConnectionState): string {
-  switch (state) {
-    case 'connecting':
-      return 'Connecting';
-    case 'live':
-      return 'Live';
-    case 'reconnecting':
-      return 'Reconnecting';
-    case 'polling':
-      return 'Polling fallback';
-    case 'unavailable':
-      return 'Unavailable';
-    case 'disconnected':
-    default:
-      return 'Disconnected';
-  }
+  return labelSseConnectionState(state);
 }
 
 function JsonBlock({ title, value, note }: { title: string; value: unknown; note?: string }) {
@@ -176,7 +167,7 @@ export default function ExecutionDetail() {
         if (!opts?.quiet) {
           const apiErr = isApiError(err) ? err : null;
           setError({
-            message: apiErr?.message ?? 'Execution을 불러오지 못했습니다.',
+            message: apiErr?.message ?? '실행 정보를 불러오지 못했습니다.',
             requestId: apiErr?.requestId ?? undefined,
           });
         }
@@ -438,7 +429,7 @@ export default function ExecutionDetail() {
   if (!executionId) {
     return (
       <div className="p-6">
-        <EmptyState title="Execution ID가 없습니다." />
+        <EmptyState title="실행 ID가 없습니다." />
       </div>
     );
   }
@@ -463,7 +454,7 @@ export default function ExecutionDetail() {
     return (
       <div className="p-6">
         <EmptyState
-          title="Execution을 찾을 수 없습니다."
+          title="실행을 찾을 수 없습니다."
           description="권한이 없거나 삭제된 실행일 수 있습니다."
           action={{ label: '목록으로', onClick: () => navigate('/executions') }}
         />
@@ -493,6 +484,8 @@ export default function ExecutionDetail() {
     status === 'QUEUED' ||
     status === 'CREATED';
   const hasUnknown = steps.some((s) => s.status === 'UNKNOWN_OUTCOME');
+  const statusGuide = executionStatusGuidance(status);
+  const unknownGuide = unknownOutcomeGuidance();
 
   return (
     <div>
@@ -501,7 +494,7 @@ export default function ExecutionDetail() {
           onClick={() => navigate('/executions')}
           className="flex items-center gap-1.5 text-sm text-slate-500 hover:text-slate-700 mb-3"
         >
-          <ArrowLeft size={14} /> Executions
+          <ArrowLeft size={14} /> 실행 목록
         </button>
         <div className="flex items-start justify-between">
           <div>
@@ -513,30 +506,30 @@ export default function ExecutionDetail() {
             </div>
             <div className="flex flex-wrap gap-x-6 gap-y-1 text-xs text-slate-500">
               <span>
-                Source:{' '}
+                출처:{' '}
                 <span className="text-slate-700">
                   {labelExecutionSource(execution.source_type)}
                   {execution.source?.name ? ` · ${execution.source.name}` : ''}
                 </span>
               </span>
               <span>
-                Requester:{' '}
+                요청자:{' '}
                 <span className="text-slate-700 font-mono">{execution.requester_id}</span>
               </span>
               <span>
-                Requested:{' '}
+                요청 시각:{' '}
                 <span className="text-slate-700">
                   {formatTimestamp(execution.requested_at)}
                 </span>
               </span>
               <span>
-                Started:{' '}
+                시작 시각:{' '}
                 <span className="text-slate-700">
                   {formatTimestamp(execution.started_at)}
                 </span>
               </span>
               <span>
-                Duration:{' '}
+                소요 시간:{' '}
                 <span className="text-slate-700 font-mono">
                   {formatDurationMs(execution.duration_ms)}
                 </span>
@@ -560,6 +553,18 @@ export default function ExecutionDetail() {
             )}
           </div>
         </div>
+        {statusGuide && (
+          <section
+            className="mt-3 rounded-lg border border-slate-200 bg-slate-50 px-4 py-3"
+            data-testid="execution-status-guidance"
+          >
+            <p className="text-xs font-semibold text-slate-700">상태 안내</p>
+            <p className="mt-1 text-xs text-slate-600">{statusGuide.meaning}</p>
+            <p className="mt-1 text-xs text-slate-600" data-testid="execution-status-next">
+              다음: {statusGuide.nextAction}
+            </p>
+          </section>
+        )}
         {cancelError && (
           <div className="mt-3">
             <InlineAlert type="error" message={cancelError} />
@@ -569,15 +574,15 @@ export default function ExecutionDetail() {
           <div className="mt-3">
             <InlineAlert
               type="warning"
-              message="Cancel requested — 진행 중 Step 정리 후 CANCELLED로 전환됩니다."
+              message="취소가 요청되었습니다. 진행 중 단계 정리 후 취소 완료로 전환됩니다. 지금 완료된 것으로 보지 마세요."
             />
           </div>
         )}
         {hasUnknown && (
-          <div className="mt-3">
+          <div className="mt-3" data-testid="execution-unknown-outcome-alert">
             <InlineAlert
               type="warning"
-              message="UNKNOWN_OUTCOME Step이 있습니다. 자동 Retry CTA는 제공하지 않습니다. 외부 시스템 결과를 운영 확인하세요."
+              message={`${unknownGuide.meaning} ${unknownGuide.nextAction}`}
             />
           </div>
         )}
@@ -585,7 +590,7 @@ export default function ExecutionDetail() {
           <div className="mt-3">
             <InlineAlert
               type="error"
-              message={`error_code: ${execution.error_code}${
+              message={`오류 코드: ${execution.error_code}${
                 execution.error_category ? ` (${execution.error_category})` : ''
               }`}
             />
@@ -596,11 +601,11 @@ export default function ExecutionDetail() {
       <div className="bg-white border-b border-slate-200 px-6">
         <TabBar
           tabs={[
-            { id: 'overview', label: 'Overview' },
-            { id: 'steps', label: 'Steps' },
-            { id: 'events', label: 'Events' },
-            { id: 'io', label: 'Inputs / Outputs' },
-            { id: 'audit', label: 'Audit' },
+            { id: 'overview', label: '기본 정보' },
+            { id: 'steps', label: '단계' },
+            { id: 'events', label: '이벤트' },
+            { id: 'io', label: '입력 / 출력' },
+            { id: 'audit', label: '감사 이력' },
           ]}
           activeTab={tab}
           onChange={setTab}
@@ -645,59 +650,61 @@ function OverviewTab({
   steps: ExecutionStepListItemDto[];
   onLiveMrtrResolved: () => void;
 }) {
+  const waitingApproval = executionStatusGuidance('WAITING_APPROVAL');
+
   return (
     <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 max-w-4xl">
       <div className="bg-white rounded-xl border border-slate-200 p-4">
-        <h3 className="text-sm font-semibold text-slate-800 mb-3">Source</h3>
+        <h3 className="text-sm font-semibold text-slate-800 mb-3">실행 출처</h3>
         <div className="space-y-1.5 text-sm text-slate-700">
           <p>
-            Type:{' '}
+            유형:{' '}
             <span className="font-medium">
               {labelExecutionSource(execution.source_type)}
             </span>
           </p>
-          <p>Name: {execution.source?.name ?? '—'}</p>
+          <p>이름: {execution.source?.name ?? '—'}</p>
           <p className="font-mono text-xs text-slate-500">
-            version: {execution.source?.version_id ?? '—'}
+            버전: {execution.source?.version_id ?? '—'}
           </p>
           <p className="font-mono text-xs text-slate-500">
-            logical: {execution.source?.logical_id ?? '—'}
+            논리 ID: {execution.source?.logical_id ?? '—'}
           </p>
         </div>
       </div>
       <div className="bg-white rounded-xl border border-slate-200 p-4">
-        <h3 className="text-sm font-semibold text-slate-800 mb-3">Plan limits</h3>
+        <h3 className="text-sm font-semibold text-slate-800 mb-3">계획 제한</h3>
         {execution.plan_limits ? (
           <div className="space-y-1 text-sm text-slate-700">
-            <p>max_steps: {execution.plan_limits.max_steps ?? '—'}</p>
+            <p>최대 단계: {execution.plan_limits.max_steps ?? '—'}</p>
             <p>
-              max_duration_seconds:{' '}
+              최대 실행 시간(초):{' '}
               {execution.plan_limits.max_duration_seconds ?? '—'}
             </p>
-            <p>max_parallelism: {execution.plan_limits.max_parallelism ?? '—'}</p>
+            <p>최대 병렬: {execution.plan_limits.max_parallelism ?? '—'}</p>
             <p>
-              max_loop_iterations:{' '}
+              최대 루프 횟수:{' '}
               {execution.plan_limits.max_loop_iterations ?? '—'}
             </p>
             <p className="text-xs text-slate-400 font-mono mt-2">
-              schema {execution.plan_schema_version} · hash{' '}
+              스키마 {execution.plan_schema_version} · 해시{' '}
               {execution.plan_hash.slice(0, 12)}…
             </p>
           </div>
         ) : (
-          <p className="text-sm text-slate-400">limits summary 없음</p>
+          <p className="text-sm text-slate-400">계획 제한 요약이 없습니다.</p>
         )}
         <p className="text-xs text-slate-400 mt-3">
-          Plan snapshot은 Operations API에서 노출되지 않습니다.
+          계획 스냅샷 원문은 Operations API에서 노출되지 않습니다.
         </p>
       </div>
 
       <div className="bg-white rounded-xl border border-slate-200 p-4">
-        <h3 className="text-sm font-semibold text-slate-800 mb-3">Steps summary</h3>
+        <h3 className="text-sm font-semibold text-slate-800 mb-3">단계 요약</h3>
         <p className="text-sm text-slate-700">
-          {execution.completed_step_count} completed / {execution.step_count} total
+          완료 {execution.completed_step_count} / 전체 {execution.step_count}
           {execution.failed_step_count > 0
-            ? ` · ${execution.failed_step_count} failed`
+            ? ` · 실패 ${execution.failed_step_count}`
             : ''}
         </p>
         <ul className="mt-2 space-y-1">
@@ -710,16 +717,13 @@ function OverviewTab({
         </ul>
       </div>
 
-      {execution.status === 'WAITING_APPROVAL' && (
+      {execution.status === 'WAITING_APPROVAL' && waitingApproval && (
         <div className="col-span-full bg-amber-50 border border-amber-200 rounded-xl p-4 flex items-start gap-3">
           <AlertTriangle size={16} className="text-amber-600 shrink-0 mt-0.5" />
           <div>
-            <p className="text-sm font-semibold text-amber-800">
-              Execution WAITING_APPROVAL
-            </p>
-            <p className="text-sm text-amber-700 mt-0.5">
-              승인 대기 중입니다. Approval Entity status는 PENDING과 별개입니다.
-            </p>
+            <p className="text-sm font-semibold text-amber-800">승인 대기</p>
+            <p className="text-sm text-amber-700 mt-0.5">{waitingApproval.meaning}</p>
+            <p className="text-sm text-amber-700 mt-1">다음: {waitingApproval.nextAction}</p>
           </div>
         </div>
       )}
@@ -750,12 +754,13 @@ function StepsTab({
   stepDetailLoading: boolean;
 }) {
   if (steps.length === 0) {
-    return <EmptyState title="Step이 없습니다." />;
+    return <EmptyState title="단계가 없습니다." />;
   }
+  const unknownGuide = unknownOutcomeGuidance();
   return (
     <div className="flex gap-4 max-w-5xl">
       <div className="flex-1 bg-white rounded-xl border border-slate-200 p-6">
-        <h3 className="text-sm font-semibold text-slate-700 mb-6">Steps</h3>
+        <h3 className="text-sm font-semibold text-slate-700 mb-6">단계</h3>
         <div className="flex flex-col items-center gap-0">
           {steps.map((step, i) => (
             <div key={step.id} className="flex flex-col items-center">
@@ -775,7 +780,7 @@ function StepsTab({
                   </p>
                   <p className="text-xs text-slate-400">
                     {step.step_type}
-                    {step.iteration_no != null ? ` · iter ${step.iteration_no}` : ''}
+                    {step.iteration_no != null ? ` · 반복 ${step.iteration_no}` : ''}
                   </p>
                 </div>
                 <StatusBadge status={step.status} size="sm" />
@@ -790,7 +795,7 @@ function StepsTab({
         <div className="w-96 bg-white rounded-xl border border-slate-200 p-4">
           <div className="flex items-center justify-between mb-3">
             <p className="text-sm font-semibold text-slate-800 font-mono">
-              {stepDetail?.step_key ?? 'Step'}
+              {stepDetail?.step_key ?? '단계'}
             </p>
             <button
               onClick={() => onSelectStep(selectedStepId)}
@@ -803,31 +808,33 @@ function StepsTab({
             <LoadingSkeleton rows={4} />
           ) : stepDetail ? (
             <div className="space-y-2 text-xs">
-              <Row label="Type" value={stepDetail.step_type} />
-              <Row label="Status">
+              <Row label="유형" value={stepDetail.step_type} />
+              <Row label="상태">
                 <StatusBadge status={stepDetail.status} size="sm" />
               </Row>
-              <Row label="Attempts" value={String(stepDetail.attempt_count)} />
-              <Row label="Duration" value={formatDurationMs(stepDetail.duration_ms)} />
-              <Row label="Started" value={formatTimestamp(stepDetail.started_at)} />
-              <Row label="Finished" value={formatTimestamp(stepDetail.finished_at)} />
+              <Row label="시도 횟수" value={String(stepDetail.attempt_count)} />
+              <Row label="소요 시간" value={formatDurationMs(stepDetail.duration_ms)} />
+              <Row label="시작" value={formatTimestamp(stepDetail.started_at)} />
+              <Row label="종료" value={formatTimestamp(stepDetail.finished_at)} />
               {stepDetail.error_code && (
-                <Row label="Error" value={stepDetail.error_code} mono />
+                <Row label="오류" value={stepDetail.error_code} mono />
               )}
               {stepDetail.status === 'UNKNOWN_OUTCOME' && (
-                <div className="mt-3 p-2.5 bg-orange-50 border border-orange-200 rounded-lg">
+                <div
+                  className="mt-3 p-2.5 bg-orange-50 border border-orange-200 rounded-lg"
+                  data-testid="step-unknown-outcome-guidance"
+                >
                   <p className="text-xs font-semibold text-orange-700 mb-1">
-                    Unknown Outcome
+                    결과 확인 필요
                   </p>
-                  <p className="text-xs text-orange-600">
-                    자동 Retry CTA 없음. 외부 시스템 결과를 운영 확인하세요.
-                  </p>
+                  <p className="text-xs text-orange-600">{unknownGuide.meaning}</p>
+                  <p className="text-xs text-orange-600 mt-1">다음: {unknownGuide.nextAction}</p>
                 </div>
               )}
               <div className="mt-4 space-y-3">
-                <p className="text-xs font-semibold text-slate-600">Attempts</p>
+                <p className="text-xs font-semibold text-slate-600">시도 이력</p>
                 {stepDetail.attempts.length === 0 ? (
-                  <p className="text-xs text-slate-400">Attempt 없음</p>
+                  <p className="text-xs text-slate-400">시도 이력이 없습니다.</p>
                 ) : (
                   stepDetail.attempts.map((a) => <AttemptCard key={a.id} attempt={a} />)
                 )}
@@ -893,20 +900,20 @@ function EventsTab({
     <div className="max-w-3xl space-y-3">
       <div className="flex items-center justify-between px-1">
         <p className="text-sm text-slate-600">
-          Connection:{' '}
+          연결:{' '}
           <span className="font-medium text-slate-800" data-testid="sse-connection-state">
             {connectionLabel(connectionState)}
           </span>
         </p>
         <p className="text-xs text-slate-400">
-          {rows.length} event{rows.length === 1 ? '' : 's'} (max {MAX_TIMELINE_EVENTS})
+          이벤트 {rows.length}건 (최대 {MAX_TIMELINE_EVENTS})
         </p>
       </div>
       {rows.length === 0 ? (
         <div className="bg-white rounded-xl border border-slate-200 p-6">
           <EmptyState
-            title="아직 수신된 Execution Event가 없습니다."
-            description="SSE로 durable events가 도착하면 여기에 표시됩니다."
+            title="아직 수신된 실행 이벤트가 없습니다."
+            description="실시간 연결로 이벤트가 도착하면 여기에 표시됩니다."
           />
         </div>
       ) : (
@@ -947,7 +954,7 @@ function EventsTab({
                       setExpandedId((prev) => (prev === row.sseId ? null : row.sseId))
                     }
                   >
-                    {expanded ? 'Hide payload' : 'Show payload'}
+                    {expanded ? '내용 숨기기' : '내용 보기'}
                   </button>
                 </div>
                 {expanded && (
@@ -972,13 +979,13 @@ function IOTab({
   return (
     <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 max-w-4xl">
       <JsonBlock
-        title="Execution 입력"
-        note="input_snapshot / plan_snapshot은 Operations API에서 의도적으로 미노출입니다."
+        title="실행 입력"
+        note="입력·계획 스냅샷은 Operations API에서 의도적으로 노출되지 않습니다."
         value={null}
       />
       <JsonBlock
-        title="result_summary (safe)"
-        note="Tool content / structured_content / metadata는 포함되지 않습니다."
+        title="결과 요약 (안전 투영)"
+        note="도구 원문 content / structured_content / metadata는 포함되지 않습니다."
         value={resultSummary}
       />
     </div>
@@ -1006,7 +1013,7 @@ function AuditTab({ executionId }: { executionId: string }) {
           setForbidden(true);
           return;
         }
-        setError(isApiError(err) ? err.message : 'Audit를 불러오지 못했습니다.');
+        setError(isApiError(err) ? err.message : '감사 이력을 불러오지 못했습니다.');
       })
       .finally(() => {
         if (!controller.signal.aborted) setLoading(false);
@@ -1030,7 +1037,7 @@ function AuditTab({ executionId }: { executionId: string }) {
   if (loading) return <LoadingSkeleton rows={4} />;
   if (error) return <ErrorState message={error} />;
   if (items.length === 0) {
-    return <EmptyState title="이 Execution에 연결된 Audit event가 없습니다." />;
+    return <EmptyState title="이 실행에 연결된 감사 이력이 없습니다." />;
   }
 
   return (
@@ -1054,9 +1061,9 @@ function AuditTab({ executionId }: { executionId: string }) {
           </button>
           {expanded === log.event_id && detail && (
             <div className="px-4 pb-3 grid grid-cols-1 md:grid-cols-3 gap-3 text-xs">
-              <JsonBlock title="Before" value={detail.before_data} />
-              <JsonBlock title="After" value={detail.after_data} />
-              <JsonBlock title="Change set" value={detail.change_set} />
+              <JsonBlock title="변경 전" value={detail.before_data} />
+              <JsonBlock title="변경 후" value={detail.after_data} />
+              <JsonBlock title="변경 집합" value={detail.change_set} />
             </div>
           )}
         </div>
