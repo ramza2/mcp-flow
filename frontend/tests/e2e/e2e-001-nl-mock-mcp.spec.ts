@@ -77,7 +77,7 @@ async function browserApiJson(
 test.describe('E2E-001 NL → Mock MCP (isolated stack)', () => {
   test.skip(
     !state,
-    `Missing fresh ${STATE_PATH}. Start backend/scripts/e2e001_isolated_stack.py with explicit E2E001_ALLOW_DB_RESET=1 first.`,
+    `Missing fresh ${STATE_PATH}. Start backend/scripts/e2e001_isolated_stack.py with explicit E2E001_ALLOW_DB_RESET=1 (owned disposable Postgres).`,
   );
 
   test('login → Agent Run → result on screen via real API/Celery/Mock MCP', async ({

@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
 """Isolated stack for Playwright E2E-001 (docs/09).
 
-Boots throwaway Redis + Mock ModelOps + Mock MCP + API + outbox + Celery worker,
-seeds one ACTIVE/PUBLISHED Agent + READ_ONLY Tool, writes state JSON.
+Boots throwaway Redis + owned disposable Postgres + Mock ModelOps/MCP + API +
+outbox + Celery worker, seeds one ACTIVE/PUBLISHED Agent + READ_ONLY Tool,
+writes state JSON.
 
-Never targets ops Redis/containers. Requires an explicit
-``E2E001_ALLOW_DB_RESET=1`` and a local ``*_test`` / ``mcpflow_test``
-Postgres URL (ops DB names/hosts are refused).
+Never targets ops Redis/containers. Never TRUNCATE / reset a shared or
+pre-existing Postgres (localhost+*_test alone is not enough). DB work runs
+only on a cluster the harness creates under STATE_DIR.
+
+Requires explicit ``E2E001_ALLOW_DB_RESET=1`` to create/destroy that owned
+throwaway Postgres.
 
 Usage:
-  E2E001_ALLOW_DB_RESET=1 \\
-    TEST_DATABASE_URL=postgresql+asyncpg://...@127.0.0.1:5432/mcpflow_test \\
-    python3 scripts/e2e001_isolated_stack.py
+  E2E001_ALLOW_DB_RESET=1 python3 scripts/e2e001_isolated_stack.py
 """
 
 from __future__ import annotations
@@ -19,6 +21,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import signal
 import socket
 import subprocess
@@ -30,7 +33,6 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from shutil import which
 from typing import Any
-from urllib.parse import urlparse
 
 # Ensure backend package imports resolve when run as a script.
 _BACKEND_ROOT = Path(__file__).resolve().parents[1]
@@ -47,8 +49,8 @@ AGENT_NAME = "E2E001 Weather Agent"
 # Per-boot nonce so a stale UI/state cannot satisfy the scenario.
 RUN_NONCE = uuid.uuid4().hex[:12]
 MCP_RESULT_TEXT = f"e2e001-mock-mcp-sunny-{RUN_NONCE}"
-_LOCAL_PG_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
-_FORBIDDEN_PG_DBS = frozenset({"mcpflow", "postgres", "production", "prod", "ops", "main"})
+_OWNED_PG_USER = "e2e001"
+_OWNED_PG_DB = "e2e001_owned_test"
 
 _OUTPUT_SCHEMA = {
     "type": "object",
@@ -86,6 +88,11 @@ class _Shared:
     lock = threading.Lock()
 
 
+def _ensure_state_dir() -> None:
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    os.chmod(STATE_DIR, 0o700)
+
+
 def _secure_unlink(path: Path) -> None:
     """Overwrite then delete a file that may hold credentials."""
     if not path.is_file():
@@ -104,6 +111,22 @@ def _secure_unlink(path: Path) -> None:
 def _scrub_sensitive_state() -> None:
     for name in ("state.json", "cj", "cj2", "cj3", "cj4"):
         _secure_unlink(STATE_DIR / name)
+
+
+def _write_state_file(payload: dict[str, Any]) -> None:
+    STATE_PATH.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    os.chmod(STATE_PATH, 0o600)
+
+
+def _pg_bin(name: str) -> str:
+    for version in ("16", "15", "14"):
+        candidate = Path(f"/usr/lib/postgresql/{version}/bin") / name
+        if candidate.is_file():
+            return str(candidate)
+    found = which(name)
+    if found:
+        return found
+    raise RuntimeError(f"{name} required for owned disposable Postgres")
 
 
 def _compose_answer_from_messages(messages: list[Any]) -> dict[str, str]:
@@ -135,39 +158,122 @@ def _compose_answer_from_messages(messages: list[Any]) -> dict[str, str]:
     return {"answer": "표시할 검증된 조회 결과가 없습니다."}
 
 
-def _assert_test_only_postgres(db_url: str) -> None:
-    """Refuse ops/remote DBs; require local ``*_test`` / ``mcpflow_test``."""
-    normalized = db_url.replace("postgresql+asyncpg://", "postgresql://", 1)
-    parsed = urlparse(normalized)
-    host = (parsed.hostname or "").lower()
-    if host not in _LOCAL_PG_HOSTS:
-        raise SystemExit(f"Refusing non-local Postgres host {host!r} (ops DB access forbidden).")
-    db_name = (parsed.path or "").lstrip("/")
-    if not db_name or db_name in _FORBIDDEN_PG_DBS:
-        raise SystemExit(f"Refusing Postgres database {db_name!r}; use a local *_test DB.")
-    if not (db_name.endswith("_test") or db_name == "mcpflow_test"):
-        raise SystemExit(
-            f"Refusing Postgres database {db_name!r}; "
-            "require name ending in _test (or mcpflow_test)."
-        )
+def _start_dedicated_postgres() -> tuple[str, Path]:
+    """Create a throwaway Postgres cluster owned by this harness under STATE_DIR."""
+    data_dir = STATE_DIR / f"pg-{uuid.uuid4().hex}"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    os.chmod(data_dir, 0o700)
+    initdb = _pg_bin("initdb")
+    pg_ctl = _pg_bin("pg_ctl")
+    createdb = _pg_bin("createdb")
+    init = subprocess.run(
+        [
+            initdb,
+            "-D",
+            str(data_dir),
+            "-U",
+            _OWNED_PG_USER,
+            "--auth-local=trust",
+            "--auth-host=trust",
+            "--no-instructions",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if init.returncode != 0:
+        raise RuntimeError(f"initdb failed: {init.stderr or init.stdout}")
+    with (data_dir / "postgresql.conf").open("a", encoding="utf-8") as conf:
+        conf.write("\nlisten_addresses = '127.0.0.1'\n")
+        conf.write(f"unix_socket_directories = '{data_dir}'\n")
+        conf.write("fsync = off\n")
+        conf.write("full_page_writes = off\n")
+        conf.write("synchronous_commit = off\n")
+    port = _free_port()
+    start = subprocess.run(
+        [
+            pg_ctl,
+            "-D",
+            str(data_dir),
+            "-o",
+            f"-p {port} -k {data_dir}",
+            "-l",
+            str(data_dir / "pg.log"),
+            "start",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if start.returncode != 0:
+        log_tail = ""
+        log_path = data_dir / "pg.log"
+        if log_path.is_file():
+            log_tail = log_path.read_text(encoding="utf-8")[-2000:]
+        raise RuntimeError(f"pg_ctl start failed: {start.stderr or start.stdout}\n{log_tail}")
+    _wait_tcp("127.0.0.1", port, timeout_s=15)
+    created = subprocess.run(
+        [
+            createdb,
+            "-h",
+            "127.0.0.1",
+            "-p",
+            str(port),
+            "-U",
+            _OWNED_PG_USER,
+            _OWNED_PG_DB,
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if created.returncode != 0:
+        raise RuntimeError(f"createdb failed: {created.stderr or created.stdout}")
+    url = f"postgresql+asyncpg://{_OWNED_PG_USER}@127.0.0.1:{port}/{_OWNED_PG_DB}"
+    return url, data_dir
 
-    import asyncio
 
-    from sqlalchemy import text
-    from sqlalchemy.ext.asyncio import create_async_engine
-
-    async def _ping() -> None:
-        engine = create_async_engine(db_url, pool_pre_ping=True)
-        try:
-            async with engine.connect() as conn:
-                await conn.execute(text("SELECT 1"))
-        finally:
-            await engine.dispose()
-
+def _stop_dedicated_postgres(data_dir: Path | None) -> None:
+    if data_dir is None or not data_dir.is_dir():
+        return
     try:
-        asyncio.run(_ping())
-    except Exception as exc:  # noqa: BLE001 — abort harness immediately
-        raise SystemExit(f"Temporary test PostgreSQL verification failed; aborting: {exc}") from exc
+        pg_ctl = _pg_bin("pg_ctl")
+    except RuntimeError:
+        shutil.rmtree(data_dir, ignore_errors=True)
+        return
+    subprocess.run(
+        [pg_ctl, "-D", str(data_dir), "-m", "fast", "stop"],
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    shutil.rmtree(data_dir, ignore_errors=True)
+
+
+def _migrate_owned_database(db_url: str) -> None:
+    """Alembic upgrade on the owned empty DB only — never TRUNCATE shared DBs."""
+    from tests.integration.conftest import alembic_upgrade_head_sync
+
+    alembic_upgrade_head_sync(db_url)
+
+
+def _prepare_owned_database() -> tuple[str, Path]:
+    if os.environ.get("E2E001_ALLOW_DB_RESET", "").strip() != "1":
+        raise SystemExit(
+            "Refusing to create disposable Postgres without explicit "
+            "E2E001_ALLOW_DB_RESET=1 (no default approval; shared DBs must "
+            "not be wiped)."
+        )
+    # External URLs are ignored for reset — localhost+*_test is not ownership.
+    db_url, data_dir = _start_dedicated_postgres()
+    os.environ["MCPFLOW_DATABASE_URL"] = db_url
+    os.environ["TEST_DATABASE_URL"] = db_url
+    try:
+        _migrate_owned_database(db_url)
+    except Exception:
+        _stop_dedicated_postgres(data_dir)
+        raise
+    return db_url, data_dir
 
 
 def _start_modelops(port: int) -> ThreadingHTTPServer:
@@ -588,148 +694,139 @@ async def _seed(
         await engine.dispose()
 
 
-def _reset_db() -> None:
-    if os.environ.get("E2E001_ALLOW_DB_RESET", "").strip() != "1":
-        raise SystemExit(
-            "Refusing to reset DB without explicit E2E001_ALLOW_DB_RESET=1 "
-            "(no default approval; ops DBs must not be wiped)."
-        )
-    from tests.integration.conftest import recover_integration_database
-
-    db_url = os.environ.get("TEST_DATABASE_URL") or os.environ.get("MCPFLOW_DATABASE_URL")
-    if not db_url:
-        raise SystemExit("TEST_DATABASE_URL or MCPFLOW_DATABASE_URL required")
-    _assert_test_only_postgres(db_url)
-    os.environ["MCPFLOW_DATABASE_URL"] = db_url
-    os.environ["TEST_DATABASE_URL"] = db_url
-    recover_integration_database(db_url)
-
-
 def main() -> int:
-    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    _ensure_state_dir()
     # Drop credentials / prior run markers before bootstrapping a new stack.
     _scrub_sensitive_state()
-    _reset_db()
 
-    modelops_port = _free_port()
-    mcp_port = _free_port()
-    api_port = _free_port()
-    modelops = _start_modelops(modelops_port)
-    mcp = _start_mock_mcp(mcp_port)
-    modelops_base = f"http://127.0.0.1:{modelops_port}/v1"
-    mcp_endpoint = f"http://127.0.0.1:{mcp_port}/mcp"
-    mcp_stats_url = f"http://127.0.0.1:{mcp_port}/__e2e001/stats"
-
-    redis_url, redis_pid = _start_dedicated_redis()
-    os.environ["MCPFLOW_REDIS_URL"] = redis_url
-    os.environ["MCPFLOW_DATABASE_URL"] = os.environ["TEST_DATABASE_URL"]
-    # Faster outbox poll for the browser wait budget.
-    os.environ["MCPFLOW_OUTBOX_POLL_INTERVAL_SECONDS"] = "0.5"
-
-    from app.core.config import get_settings
-
-    get_settings.cache_clear()
-
-    import asyncio
-
-    seeded = asyncio.run(_seed(modelops_base=modelops_base, mcp_endpoint=mcp_endpoint))
-
+    redis_pid: Path | None = None
+    pg_data: Path | None = None
+    modelops: ThreadingHTTPServer | None = None
+    mcp: ThreadingHTTPServer | None = None
     children: list[subprocess.Popen[Any]] = []
-    env = os.environ.copy()
-    env["MCPFLOW_DATABASE_URL"] = os.environ["MCPFLOW_DATABASE_URL"]
-    env["MCPFLOW_REDIS_URL"] = redis_url
-    env["MCPFLOW_OUTBOX_POLL_INTERVAL_SECONDS"] = "0.5"
-    env["PYTHONPATH"] = str(_BACKEND_ROOT)
+    exit_code = 1
 
-    api = subprocess.Popen(
-        [
-            sys.executable,
-            "-m",
-            "uvicorn",
-            "app.main:app",
-            "--host",
-            "127.0.0.1",
-            "--port",
-            str(api_port),
-            "--log-level",
-            "warning",
-        ],
-        cwd=str(_BACKEND_ROOT),
-        env=env,
-        stdout=subprocess.DEVNULL,
-        stderr=open(STATE_DIR / "api.log", "w", encoding="utf-8"),
-    )
-    children.append(api)
-
-    worker = subprocess.Popen(
-        [
-            sys.executable,
-            "-m",
-            "celery",
-            "-A",
-            "app.infrastructure.celery_app:celery_app",
-            "worker",
-            "-Q",
-            "execution",
-            "--pool=solo",
-            "--concurrency=1",
-            "--loglevel=WARNING",
-            "-n",
-            "e2e001@%h",
-        ],
-        cwd=str(_BACKEND_ROOT),
-        env=env,
-        stdout=subprocess.DEVNULL,
-        stderr=open(STATE_DIR / "worker.log", "w", encoding="utf-8"),
-    )
-    children.append(worker)
-
-    outbox = subprocess.Popen(
-        [sys.executable, "-m", "app.entrypoints.outbox"],
-        cwd=str(_BACKEND_ROOT),
-        env=env,
-        stdout=subprocess.DEVNULL,
-        stderr=open(STATE_DIR / "outbox.log", "w", encoding="utf-8"),
-    )
-    children.append(outbox)
-
-    _wait_tcp("127.0.0.1", api_port, timeout_s=30)
-
-    state = {
-        "run_nonce": RUN_NONCE,
-        "api_base_url": f"http://127.0.0.1:{api_port}",
-        "api_proxy_target": f"http://127.0.0.1:{api_port}",
-        "redis_url": redis_url,
-        "modelops_base_url": modelops_base,
-        "mcp_endpoint_url": mcp_endpoint,
-        "mcp_stats_url": mcp_stats_url,
-        "username": USERNAME,
-        "password": PASSWORD,
-        "agent_name": AGENT_NAME,
-        "agent_id": seeded["agent_id"],
-        "nl_request": NL_REQUEST,
-        "expected_result_fragment": MCP_RESULT_TEXT,
-        "frontend_hint": ("Set MCPFLOW_API_PROXY_TARGET to api_proxy_target and run Vite."),
-        **seeded,
-    }
-    STATE_PATH.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
-    print(f"E2E001_READY state={STATE_PATH}", flush=True)
-    print(
-        json.dumps(
-            {"api_proxy_target": state["api_proxy_target"]},
-            ensure_ascii=False,
-        ),
-        flush=True,
-    )
-
-    stop = threading.Event()
-
-    def _handle(_signum: int, _frame: object) -> None:
-        stop.set()
-
-    signal.signal(signal.SIGTERM, _handle)
-    signal.signal(signal.SIGINT, _handle)
     try:
+        _db_url, pg_data = _prepare_owned_database()
+
+        modelops_port = _free_port()
+        mcp_port = _free_port()
+        api_port = _free_port()
+        modelops = _start_modelops(modelops_port)
+        mcp = _start_mock_mcp(mcp_port)
+        modelops_base = f"http://127.0.0.1:{modelops_port}/v1"
+        mcp_endpoint = f"http://127.0.0.1:{mcp_port}/mcp"
+        mcp_stats_url = f"http://127.0.0.1:{mcp_port}/__e2e001/stats"
+
+        redis_url, redis_pid = _start_dedicated_redis()
+        os.environ["MCPFLOW_REDIS_URL"] = redis_url
+        # Faster outbox poll for the browser wait budget.
+        os.environ["MCPFLOW_OUTBOX_POLL_INTERVAL_SECONDS"] = "0.5"
+
+        from app.core.config import get_settings
+
+        get_settings.cache_clear()
+
+        import asyncio
+
+        seeded = asyncio.run(_seed(modelops_base=modelops_base, mcp_endpoint=mcp_endpoint))
+
+        env = os.environ.copy()
+        env["MCPFLOW_DATABASE_URL"] = os.environ["MCPFLOW_DATABASE_URL"]
+        env["MCPFLOW_REDIS_URL"] = redis_url
+        env["MCPFLOW_OUTBOX_POLL_INTERVAL_SECONDS"] = "0.5"
+        env["PYTHONPATH"] = str(_BACKEND_ROOT)
+
+        api = subprocess.Popen(
+            [
+                sys.executable,
+                "-m",
+                "uvicorn",
+                "app.main:app",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                str(api_port),
+                "--log-level",
+                "warning",
+            ],
+            cwd=str(_BACKEND_ROOT),
+            env=env,
+            stdout=subprocess.DEVNULL,
+            stderr=open(STATE_DIR / "api.log", "w", encoding="utf-8"),
+        )
+        children.append(api)
+
+        worker = subprocess.Popen(
+            [
+                sys.executable,
+                "-m",
+                "celery",
+                "-A",
+                "app.infrastructure.celery_app:celery_app",
+                "worker",
+                "-Q",
+                "execution",
+                "--pool=solo",
+                "--concurrency=1",
+                "--loglevel=WARNING",
+                "-n",
+                "e2e001@%h",
+            ],
+            cwd=str(_BACKEND_ROOT),
+            env=env,
+            stdout=subprocess.DEVNULL,
+            stderr=open(STATE_DIR / "worker.log", "w", encoding="utf-8"),
+        )
+        children.append(worker)
+
+        outbox = subprocess.Popen(
+            [sys.executable, "-m", "app.entrypoints.outbox"],
+            cwd=str(_BACKEND_ROOT),
+            env=env,
+            stdout=subprocess.DEVNULL,
+            stderr=open(STATE_DIR / "outbox.log", "w", encoding="utf-8"),
+        )
+        children.append(outbox)
+
+        _wait_tcp("127.0.0.1", api_port, timeout_s=30)
+
+        state = {
+            "run_nonce": RUN_NONCE,
+            "api_base_url": f"http://127.0.0.1:{api_port}",
+            "api_proxy_target": f"http://127.0.0.1:{api_port}",
+            "database_owned": True,
+            "database_name": _OWNED_PG_DB,
+            "redis_url": redis_url,
+            "modelops_base_url": modelops_base,
+            "mcp_endpoint_url": mcp_endpoint,
+            "mcp_stats_url": mcp_stats_url,
+            "username": USERNAME,
+            "password": PASSWORD,
+            "agent_name": AGENT_NAME,
+            "agent_id": seeded["agent_id"],
+            "nl_request": NL_REQUEST,
+            "expected_result_fragment": MCP_RESULT_TEXT,
+            "frontend_hint": ("Set MCPFLOW_API_PROXY_TARGET to api_proxy_target and run Vite."),
+            **seeded,
+        }
+        _write_state_file(state)
+        print(f"E2E001_READY state={STATE_PATH}", flush=True)
+        print(
+            json.dumps(
+                {"api_proxy_target": state["api_proxy_target"]},
+                ensure_ascii=False,
+            ),
+            flush=True,
+        )
+
+        stop = threading.Event()
+
+        def _handle(_signum: int, _frame: object) -> None:
+            stop.set()
+
+        signal.signal(signal.SIGTERM, _handle)
+        signal.signal(signal.SIGINT, _handle)
         while not stop.is_set():
             time.sleep(0.2)
             for child in children:
@@ -737,19 +834,27 @@ def main() -> int:
                     raise RuntimeError(
                         f"child exited early pid={child.pid} code={child.returncode}"
                     )
+        exit_code = 0
     finally:
         for child in children:
-            child.send_signal(signal.SIGTERM)
+            try:
+                child.send_signal(signal.SIGTERM)
+            except ProcessLookupError:
+                pass
         for child in children:
             try:
                 child.wait(timeout=10)
             except subprocess.TimeoutExpired:
                 child.kill()
-        _stop_pidfile(redis_pid)
-        modelops.shutdown()
-        mcp.shutdown()
+        if redis_pid is not None:
+            _stop_pidfile(redis_pid)
+        if modelops is not None:
+            modelops.shutdown()
+        if mcp is not None:
+            mcp.shutdown()
+        _stop_dedicated_postgres(pg_data)
         _scrub_sensitive_state()
-    return 0
+    return exit_code
 
 
 if __name__ == "__main__":
