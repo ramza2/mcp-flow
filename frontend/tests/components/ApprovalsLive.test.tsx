@@ -322,7 +322,10 @@ describe('ApprovalDetail decide (phase 2)', () => {
         comment: '정책상 거절',
       });
     });
-    expect(await screen.findByText(/Already decided/)).toBeInTheDocument();
+    const conflictAlert = await screen.findByText(/Already decided/);
+    expect(conflictAlert).toHaveTextContent(/Already decided/);
+    expect(conflictAlert).toHaveTextContent(/최신 승인 상태|다시 불러/);
+    expect(conflictAlert).toHaveTextContent(/Request ID: req-conflict/);
     expect(screen.queryByText(/결정이 저장되었습니다/)).not.toBeInTheDocument();
   });
 

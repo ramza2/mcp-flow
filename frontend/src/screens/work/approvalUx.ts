@@ -108,6 +108,51 @@ export function approvalsForbiddenGuidance(): string {
   );
 }
 
+/** Status-specific Korean next actions (shown even when the server message is English). */
+export const APPROVAL_DECISION_ERROR_NEXT: Record<403 | 404 | 409 | 422, string> = {
+  403: '결정 권한·정책·범위를 확인하세요. 권한이 없으면 관리자에게 승인 결정 권한을 요청하세요.',
+  404: '목록으로 돌아가거나 다시 불러와 확인하세요. 서버는 권한 부족을 404로 반환할 수 있습니다.',
+  409:
+    '이미 결정했거나 상태가 바뀌었을 수 있습니다. 최신 승인 상태를 다시 불러오세요. 자동으로 재결정하지 않습니다.',
+  422: '거절 사유 등 필수 입력을 확인한 뒤 다시 시도하세요.',
+};
+
+/**
+ * Combine preserved server message with Korean next-action guidance.
+ * Avoids appending the same guidance twice when the server text already includes it.
+ */
+export function composeApprovalDecisionErrorMessage(
+  serverMessage: string | undefined | null,
+  nextAction: string,
+): string {
+  const original = (serverMessage ?? '').trim();
+  const next = nextAction.trim();
+  if (!next) return original;
+  if (!original) return next;
+  if (decisionErrorGuidanceAlreadyPresent(original, next)) {
+    return original;
+  }
+  return `${original} 다음: ${next}`;
+}
+
+function decisionErrorGuidanceAlreadyPresent(original: string, next: string): boolean {
+  if (original.includes(next)) return true;
+  // Distinctive fragments — if already present, do not append a second copy.
+  const markers = [
+    '다음:',
+    '최신 승인 상태',
+    '다시 불러',
+    '승인 결정 권한',
+    '권한·정책·범위',
+    '필수 입력',
+    '자동으로 재결정',
+    '성공으로 표시하지',
+  ];
+  const nextMarkers = markers.filter((m) => next.includes(m));
+  if (nextMarkers.length === 0) return false;
+  return nextMarkers.every((m) => original.includes(m));
+}
+
 /** User-facing decide/submit errors — no success claim; no API contract change. */
 export function formatApprovalDecisionError(err: {
   status?: number;
@@ -128,36 +173,45 @@ export function formatApprovalDecisionError(err: {
   }
   if (err.status === 403) {
     return {
-      message:
-        err.message ||
-        '결정 권한이 없거나 정책·범위에 맞지 않습니다. 관리자에게 권한을 확인하세요.',
+      message: composeApprovalDecisionErrorMessage(
+        err.message,
+        APPROVAL_DECISION_ERROR_NEXT[403],
+      ),
       requestId,
     };
   }
   if (err.status === 404) {
     return {
-      message:
-        err.message ||
-        '승인 요청을 찾을 수 없거나 더 이상 볼 수 없습니다. (서버는 권한 부족을 404로 반환할 수 있습니다.)',
+      message: composeApprovalDecisionErrorMessage(
+        err.message,
+        APPROVAL_DECISION_ERROR_NEXT[404],
+      ),
       requestId,
     };
   }
   if (err.status === 409) {
     return {
-      message:
-        err.message ||
-        '이미 결정했거나 상태가 변경되어 처리할 수 없습니다(중복·충돌). 상세를 다시 불러오세요. 자동으로 재결정하지 않습니다.',
+      message: composeApprovalDecisionErrorMessage(
+        err.message,
+        APPROVAL_DECISION_ERROR_NEXT[409],
+      ),
       requestId,
     };
   }
   if (err.status === 422) {
     return {
-      message: err.message || '입력값이 올바르지 않습니다. 거절 사유 등 필수 항목을 확인하세요.',
+      message: composeApprovalDecisionErrorMessage(
+        err.message,
+        APPROVAL_DECISION_ERROR_NEXT[422],
+      ),
       requestId,
     };
   }
   return {
-    message: err.message || '결정을 제출하지 못했습니다. 성공으로 표시하지 않습니다.',
+    message: composeApprovalDecisionErrorMessage(
+      err.message,
+      '결정을 제출하지 못했습니다. 성공으로 표시하지 않습니다.',
+    ),
     requestId,
   };
 }

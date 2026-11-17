@@ -6,10 +6,12 @@ import ApprovalDetail from '@/screens/work/ApprovalDetail';
 import { ApiError } from '@/api/client';
 import { renderWithRouter } from '../test-utils';
 import {
+  APPROVAL_DECISION_ERROR_NEXT,
   APPROVAL_REVIEW_FLOW_LABEL,
   approvalStatusGuidance,
   approvalVsExecutionNote,
   approvalsListEmptyGuidance,
+  composeApprovalDecisionErrorMessage,
   formatApprovalDecisionError,
 } from '@/screens/work/approvalUx';
 
@@ -81,9 +83,68 @@ describe('Approval beginner UX helpers', () => {
     expect(approvalStatusGuidance('APPROVED')?.nextAction).toMatch(/즉시 실행 완료|RUNNING/);
     expect(approvalsListEmptyGuidance('PENDING').title).toMatch(/대기 중/);
     expect(formatApprovalDecisionError({ status: 409, message: '' }).message).toMatch(
-      /중복|충돌/,
+      /최신 승인 상태|다시 불러/,
     );
     expect(formatApprovalDecisionError({ status: 403 }).message).toMatch(/권한/);
+  });
+
+  it('keeps English server messages and appends Korean next actions for 403/404/409/422', () => {
+    const cases = [
+      {
+        status: 403 as const,
+        message: 'Missing approval.decide permission.',
+        requestId: 'req-403',
+        next: /권한|관리자/,
+      },
+      {
+        status: 404 as const,
+        message: 'Not found',
+        requestId: 'req-404',
+        next: /다시 불러|404/,
+      },
+      {
+        status: 409 as const,
+        message: 'Already decided.',
+        requestId: 'req-409',
+        next: /최신 승인 상태|다시 불러/,
+      },
+      {
+        status: 422 as const,
+        message: 'Reject comment required.',
+        requestId: 'req-422',
+        next: /필수 입력|거절 사유/,
+      },
+    ];
+    for (const c of cases) {
+      const formatted = formatApprovalDecisionError({
+        status: c.status,
+        message: c.message,
+        requestId: c.requestId,
+      });
+      expect(formatted.message).toContain(c.message);
+      expect(formatted.message).toMatch(c.next);
+      expect(formatted.message).toMatch(/다음:/);
+      expect(formatted.requestId).toBe(c.requestId);
+      // Guidance appears once — no duplicated next-action block.
+      expect(formatted.message.split('다음:').length - 1).toBe(1);
+    }
+
+    const alreadyKorean = composeApprovalDecisionErrorMessage(
+      APPROVAL_DECISION_ERROR_NEXT[409],
+      APPROVAL_DECISION_ERROR_NEXT[409],
+    );
+    expect(alreadyKorean).toBe(APPROVAL_DECISION_ERROR_NEXT[409]);
+    expect(alreadyKorean.split('다음:').length - 1).toBe(0);
+
+    const network = formatApprovalDecisionError({
+      status: 0,
+      code: 'NETWORK_ERROR',
+      message: 'Network request failed',
+      requestId: 'req-net',
+    });
+    expect(network.message).toMatch(/성공으로 표시하지 않습니다/);
+    expect(network.message).not.toMatch(/결정이 저장되었습니다/);
+    expect(network.requestId).toBe('req-net');
   });
 });
 
