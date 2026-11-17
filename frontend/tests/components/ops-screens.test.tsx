@@ -303,11 +303,16 @@ describe('Ops screens real API wiring', () => {
 
     expect(await screen.findByText(EXEC_ID)).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /New Execution \(Retry\)/i })).not.toBeInTheDocument();
-    expect(screen.getByText(/UNKNOWN_OUTCOME Step이 있습니다/i)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /재시도/i })).not.toBeInTheDocument();
+    expect(await screen.findByTestId('execution-unknown-outcome-alert')).toBeInTheDocument();
+    expect(screen.getByTestId('execution-unknown-outcome-alert')).toHaveTextContent(/외부 시스템/);
+    expect(screen.getByTestId('execution-unknown-outcome-alert')).toHaveTextContent(/자동 재시도/);
 
-    await user.click(screen.getByRole('button', { name: /^Steps$/i }));
+    await user.click(screen.getByRole('button', { name: /^단계$/i }));
     await user.click(screen.getByText('t1'));
-    expect(await screen.findByText(/자동 Retry CTA 없음/i)).toBeInTheDocument();
+    expect(await screen.findByTestId('step-unknown-outcome-guidance')).toBeInTheDocument();
+    expect(screen.getByTestId('step-unknown-outcome-guidance')).toHaveTextContent(/외부/);
+    expect(screen.getByTestId('step-unknown-outcome-guidance')).toHaveTextContent(/재시도 버튼은 제공하지 않습니다/);
 
     await user.click(screen.getByRole('button', { name: /실행 취소/i }));
     await waitFor(() => {
@@ -504,16 +509,16 @@ describe('ExecutionDetail Events/IO boundaries', () => {
     });
 
     await screen.findByText(EXEC_ID);
-    await user.click(screen.getByRole('button', { name: /^Events$/i }));
+    await user.click(screen.getByRole('button', { name: /^이벤트$/i }));
     expect(screen.queryByText(/Events API deferred/i)).not.toBeInTheDocument();
     expect(
-      await screen.findByText(/아직 수신된 Execution Event가 없습니다/i),
+      await screen.findByText(/아직 수신된 실행 이벤트가 없습니다/i),
     ).toBeInTheDocument();
     expect(screen.getByTestId('sse-connection-state')).toBeInTheDocument();
 
-    await user.click(screen.getByRole('button', { name: /^Inputs \/ Outputs$/i }));
+    await user.click(screen.getByRole('button', { name: /^입력 \/ 출력$/i }));
     expect(
-      await screen.findByText(/input_snapshot \/ plan_snapshot은 Operations API에서 의도적으로 미노출/i),
+      await screen.findByText(/입력·계획 스냅샷은 Operations API에서 의도적으로 노출되지 않습니다/i),
     ).toBeInTheDocument();
     expect(screen.getByText(/"step_keys"/i)).toBeInTheDocument();
     const preBlocks = screen.getAllByText((_, el) => el?.tagName === 'PRE');
