@@ -163,11 +163,18 @@ export default function ApprovalPolicySelect({
           정책은 유지할 수 있지만 다른 정책으로 바꿀 수 없습니다.
         </p>
       )}
+      {!loading && !forbidden && !error && activeItems.length === 0 && (
+        <p className="text-[11px] text-amber-700">
+          ACTIVE 승인 정책이 없습니다. 관리자 화면에서 정책을 만들거나 활성화한 뒤
+          선택하세요. 기존 정책은 자동으로 활성화되지 않습니다.
+        </p>
+      )}
       {error && <p className="text-[11px] text-red-600">{error}</p>}
       {currentExtra && currentExtra.status !== 'ACTIVE' && (
         <p className="text-[11px] text-amber-700">
           현재 연결된 승인 정책이 {labelApprovalPolicyStatus(currentExtra.status)}{' '}
-          상태입니다. 가능하면 ACTIVE 정책으로 바꾸세요.
+          상태입니다. 가능하면 ACTIVE 정책으로 바꾸세요. 이 화면에서 자동 활성화하지
+          않습니다.
         </p>
       )}
       {showOrphan && selectedId && !forbidden && (

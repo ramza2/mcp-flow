@@ -17,9 +17,32 @@ import {
   simpleBranchWhen,
 } from "@/screens/build/workflowGraphModel"
 import { listMCPTools } from "@/api/mcp"
+import { getApprovalPolicy, listApprovalPolicies } from "@/api/approvalPolicies"
 import type { JsonValue, MCPToolDto } from "@/api/types"
 
 vi.mock("@/api/mcp", () => ({ listMCPTools: vi.fn() }))
+vi.mock("@/api/approvalPolicies", () => ({
+  listApprovalPolicies: vi.fn(),
+  getApprovalPolicy: vi.fn(),
+}))
+
+const approvalPolicyId = "44444444-4444-4444-8444-444444444444"
+const activeApprovalPolicy = {
+  id: approvalPolicyId,
+  code: "external-transfer",
+  name: "외부 전송 승인",
+  description: null,
+  status: "ACTIVE" as const,
+  decision_mode: "ANY" as const,
+  required_approvals: 1,
+  approver_scope: null,
+  default_expiry_seconds: 3600,
+  allow_self_approval: false,
+  reject_comment_required: false,
+  created_at: "2026-11-16T00:00:00Z",
+  updated_at: "2026-11-16T00:00:00Z",
+  lock_version: 1,
+}
 
 // React Flow measures nodes in the browser; jsdom needs a no-op observer.
 vi.stubGlobal(
@@ -80,6 +103,14 @@ describe("Canonical visual workflow editor", () => {
       total: 1,
       has_next: false,
     })
+    vi.mocked(listApprovalPolicies).mockResolvedValue({
+      items: [activeApprovalPolicy],
+      page: 1,
+      page_size: 100,
+      total: 1,
+      has_next: false,
+    })
+    vi.mocked(getApprovalPolicy).mockResolvedValue(activeApprovalPolicy)
   })
 
   it("shows one step-creation section at a time and preserves unfinished selections", async () => {
@@ -127,22 +158,59 @@ describe("Canonical visual workflow editor", () => {
     expect(onChange).not.toHaveBeenCalled()
   })
 
-  it("adds canonical TOOL/JOIN without introducing persisted PARALLEL or END", () => {
+  it("adds canonical TOOL/JOIN/APPROVAL without introducing persisted PARALLEL or END", () => {
     const base = basePlan()
     const one = addStepToPlan(base, "TOOL", toolVersionId)
     const two = addStepToPlan(one, "JOIN")
-    expect(getVisualSteps(two)?.map((step) => step.type)).toEqual([
+    expect(addStepToPlan(two, "APPROVAL")).toBe(two)
+    const three = addStepToPlan(two, "APPROVAL", approvalPolicyId)
+    expect(getVisualSteps(three)?.map((step) => step.type)).toEqual([
       "TOOL",
       "JOIN",
+      "APPROVAL",
     ])
-    expect(getVisualSteps(two)?.[0].config).toEqual({
+    expect(getVisualSteps(three)?.[0].config).toEqual({
       tool_version_id: toolVersionId,
       bindings: {},
     })
-    expect(getVisualSteps(two)?.[1].config).toEqual({ policy: "ALL_SUCCESS" })
-    expect(two.source).toEqual(base.source)
-    expect(two.completion).toEqual(base.completion)
+    expect(getVisualSteps(three)?.[1].config).toEqual({ policy: "ALL_SUCCESS" })
+    expect(getVisualSteps(three)?.[2].config).toEqual({
+      approval_policy_id: approvalPolicyId,
+    })
+    expect(three.source).toEqual(base.source)
+    expect(three.completion).toEqual(base.completion)
     expect(base.steps).toEqual([])
+  })
+
+  it("adds APPROVAL from the visual editor using only approval_policy_id", async () => {
+    const user = userEvent.setup()
+    const onChange = vi.fn()
+    const plan = {
+      ...basePlan(),
+      marker: { keep: true },
+    } as Plan
+    render(<WorkflowVisualEditor plan={plan} readOnly={false} onChange={onChange} />)
+
+    await user.click(screen.getByRole("button", { name: "승인" }))
+    expect(screen.getByRole("button", { name: "승인 단계 추가" })).toBeDisabled()
+    const select = await screen.findByRole("combobox", { name: "승인 정책" })
+    await waitFor(() => expect(select).not.toBeDisabled())
+    await user.selectOptions(select, approvalPolicyId)
+    await user.click(screen.getByRole("button", { name: "승인 단계 추가" }))
+
+    const next = onChange.mock.lastCall?.[0] as Plan
+    expect(next.marker).toEqual({ keep: true })
+    expect(next.source).toEqual(plan.source)
+    expect(getVisualSteps(next)?.[0]).toMatchObject({
+      type: "APPROVAL",
+      config: { approval_policy_id: approvalPolicyId },
+    })
+    expect(vi.mocked(listApprovalPolicies)).toHaveBeenCalled()
+    expect(
+      vi.mocked(listApprovalPolicies).mock.calls.some((call) =>
+        call[0]?.status === "ACTIVE",
+      ),
+    ).toBe(true)
   })
 
   it("adds a CONDITION only from an explicit non-secret source and preserves the Plan", () => {

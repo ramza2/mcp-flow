@@ -1,5 +1,6 @@
 import { lazy, Suspense, useEffect, useMemo, useState } from "react"
 import {
+  CheckSquare,
   ChevronDown,
   GitBranch,
   Link2,
@@ -11,6 +12,7 @@ import {
 import { listMCPTools } from "../../api/mcp"
 import type { MCPToolDto, JsonValue } from "../../api/types"
 import { isAbortError } from "../../api/client"
+import ApprovalPolicySelect from "../../components/approval/ApprovalPolicySelect"
 import {
   branchConditionSources,
   connectionProblem,
@@ -106,18 +108,27 @@ export function causesDependencyCycle(
 
 export function addStepToPlan(
   plan: Plan,
-  type: "TOOL" | "JOIN",
-  toolVersionId?: string,
+  type: "TOOL" | "JOIN" | "APPROVAL",
+  refId?: string,
 ): Plan {
   const steps = getVisualSteps(plan)
-  if (!steps || (type === "TOOL" && !toolVersionId)) return plan
+  if (!steps) return plan
+  if (type === "TOOL" && !refId) return plan
+  // APPROVAL config exact field: approval_policy_id (docs/04 §9.4). Never invent/activate a policy.
+  if (type === "APPROVAL" && !refId) return plan
   const prefix = type.toLowerCase()
   let ordinal = steps.length + 1
   while (steps.some((step) => step.id === `${prefix}_${ordinal}`)) ordinal++
   const id = `${prefix}_${ordinal}`
+  const name =
+    type === "TOOL"
+      ? `도구 실행 ${ordinal}`
+      : type === "JOIN"
+        ? `합류 ${ordinal}`
+        : `승인 대기 ${ordinal}`
   const step: Step = {
     id,
-    name: type === "TOOL" ? `도구 실행 ${ordinal}` : `합류 ${ordinal}`,
+    name,
     type,
     required: true,
     depends_on: [],
@@ -126,8 +137,10 @@ export function addStepToPlan(
     on_error: "FAIL_EXECUTION",
     config:
       type === "TOOL"
-        ? { tool_version_id: toolVersionId!, bindings: {} }
-        : { policy: "ALL_SUCCESS" },
+        ? { tool_version_id: refId!, bindings: {} }
+        : type === "JOIN"
+          ? { policy: "ALL_SUCCESS" }
+          : { approval_policy_id: refId! },
   }
   return { ...plan, steps: [...steps, step] }
 }
@@ -425,8 +438,9 @@ export default function WorkflowVisualEditor({
   const [warning, setWarning] = useState("")
   const [newBindingName, setNewBindingName] = useState("")
   const [newConditionSource, setNewConditionSource] = useState("")
+  const [newApprovalPolicyId, setNewApprovalPolicyId] = useState<string | null>(null)
   const [view, setView] = useState<"graph" | "list">("graph")
-  const [addSection, setAddSection] = useState<"tool" | "condition" | "join">("tool")
+  const [addSection, setAddSection] = useState<"tool" | "condition" | "join" | "approval">("tool")
   const [responseExpanded, setResponseExpanded] = useState(false)
 
   useEffect(() => {
@@ -547,6 +561,16 @@ export default function WorkflowVisualEditor({
     setSelected(getVisualSteps(next)?.at(-1)?.id ?? null)
     setWarning("합류 단계에는 상위 단계를 한 개 이상 연결해야 합니다.")
   }
+  const addApproval = () => {
+    if (readOnly || !newApprovalPolicyId) return
+    const next = addStepToPlan(plan, "APPROVAL", newApprovalPolicyId)
+    if (next === plan) return
+    onChange(next)
+    setSelected(getVisualSteps(next)?.at(-1)?.id ?? null)
+    setWarning(
+      "승인 단계가 추가되었습니다. 필요하면 선행 연결을 설정한 뒤 초안 저장·서버 검증하세요.",
+    )
+  }
   const addCondition = () => {
     if (readOnly) return
     const next = addConditionStepToPlan(plan, newConditionSource)
@@ -661,11 +685,12 @@ export default function WorkflowVisualEditor({
       <aside className="min-w-0 p-3 xl:p-4 border-b xl:border-b-0 xl:border-r border-slate-200 bg-slate-50 space-y-3 xl:max-h-[min(80vh,920px)] xl:overflow-y-auto" aria-label="단계 추가 및 완료 응답">
         <h2 className="font-semibold text-sm text-slate-800">단계 추가</h2>
         <p className="text-xs text-slate-500">추가할 단계 종류를 선택하세요. 설정은 선택한 종류만 표시됩니다.</p>
-        <div role="group" aria-label="추가할 단계 종류" className="grid grid-cols-3 gap-1">
+        <div role="group" aria-label="추가할 단계 종류" className="grid grid-cols-2 gap-1">
           {([
             ["tool", "도구"],
             ["condition", "조건"],
             ["join", "합류"],
+            ["approval", "승인"],
           ] as const).map(([kind, label]) => (
             <button key={kind} type="button" aria-pressed={addSection === kind}
               onClick={() => setAddSection(kind)}
@@ -832,6 +857,35 @@ export default function WorkflowVisualEditor({
         >
           <GitBranch size={15} /> 합류 단계 추가
         </button>
+          </section>
+        )}
+        {addSection === "approval" && (
+          <section aria-label="승인 단계 추가 설정" className="space-y-3">
+            <p className="text-xs text-slate-600">
+              ACTIVE 승인 정책을 선택한 뒤 승인 대기 단계를 추가합니다. Plan 계약은
+              {" "}
+              <code className="font-mono text-[10px]">config.approval_policy_id</code>
+              {" "}만 사용하며, 비활성 정책을 자동 활성화하지 않습니다.
+            </p>
+            <label className="block text-xs font-medium text-slate-600">
+              승인 정책
+              <div className="mt-1">
+                <ApprovalPolicySelect
+                  value={newApprovalPolicyId}
+                  disabled={readOnly}
+                  emptyLabel="ACTIVE 승인 정책 선택..."
+                  onChange={setNewApprovalPolicyId}
+                />
+              </div>
+            </label>
+            <button
+              type="button"
+              disabled={readOnly || !newApprovalPolicyId}
+              onClick={addApproval}
+              className="flex items-center justify-center gap-2 rounded-lg p-2 text-sm border border-green-300 bg-green-50 text-green-900 w-full disabled:opacity-40"
+            >
+              <CheckSquare size={15} /> 승인 단계 추가
+            </button>
           </section>
         )}
         <div className="border-t border-slate-200 pt-3 space-y-2">
@@ -1208,6 +1262,36 @@ export default function WorkflowVisualEditor({
                   <option value="ANY_SUCCESS">하나 이상 성공</option>
                 </select>
               </>
+            )}
+            {active.type === "APPROVAL" && (
+              <div className="space-y-2 rounded-lg border border-green-200 bg-green-50/60 p-3">
+                <h3 className="text-sm font-semibold text-green-900">승인 정책</h3>
+                <p className="text-xs text-slate-600">
+                  Execution Plan v1 APPROVAL 단계는{" "}
+                  <code className="font-mono text-[10px]">approval_policy_id</code>
+                  {" "}만 저장합니다. 다른 Plan 필드는 유지됩니다.
+                </p>
+                <ApprovalPolicySelect
+                  value={
+                    typeof config?.approval_policy_id === "string"
+                      ? config.approval_policy_id
+                      : null
+                  }
+                  disabled={readOnly}
+                  allowEmpty={false}
+                  emptyLabel="ACTIVE 승인 정책 선택..."
+                  onChange={(policyId) => {
+                    if (!policyId) return
+                    updateConfig((current) => ({
+                      ...current,
+                      approval_policy_id: policyId,
+                    }))
+                    setWarning(
+                      "승인 정책을 변경했습니다. 초안 저장 후 서버 검증하세요.",
+                    )
+                  }}
+                />
+              </div>
             )}
             {active.type === "CONDITION" && (
               <div className="space-y-2 border border-amber-200 bg-amber-50/60 rounded-lg p-3">
