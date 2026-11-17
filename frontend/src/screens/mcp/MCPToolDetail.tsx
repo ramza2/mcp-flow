@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useLocation, useNavigate, useParams } from 'react-router';
-import { ArrowLeft } from 'lucide-react';
+import { ArrowLeft, CheckCircle2, Circle } from 'lucide-react';
 import StatusBadge from '../../components/ui/StatusBadge';
 import { TabBar } from '../../components/ui/Tabs';
 import JsonViewer from '../../components/ui/JsonViewer';
@@ -17,7 +17,7 @@ import {
 } from '../../api/mcp';
 import { isAbortError, isApiError } from '../../api/client';
 import type { MCPToolDto, MCPToolVersionDto } from '../../api/types';
-import { formatTimestamp, shortenId } from '../../domain';
+import { formatTimestamp, hasPermission, shortenId } from '../../domain';
 import ToolPolicyTab from './ToolPolicyTab';
 import ToolTestCallTab from './ToolTestCallTab';
 import ToolVerificationTab from './ToolVerificationTab';
@@ -30,6 +30,15 @@ import {
   toolLifecycleAction,
   type FeedbackError,
 } from './toolLifecycle';
+import {
+  MCP_TOOL_SETUP_FLOW_LABEL,
+  buildMcpToolSetupSteps,
+  deriveMcpToolSetupFlags,
+  lifecycleMutationNextAction,
+  nextMcpToolSetupAction,
+  toolLifecycleDisabledReason,
+  toolStatusMeaningNote,
+} from './mcpToolSetup';
 
 export default function MCPToolDetail() {
   const { toolId } = useParams();
@@ -182,16 +191,27 @@ export default function MCPToolDetail() {
     } catch (err) {
       if (!mountedRef.current) return;
       if (isVersionConflict(err)) {
+        const base =
+          '다른 작업으로 도구 상태가 변경되었습니다. 최신 상태를 다시 불러옵니다. ' +
+          (isApiError(err) ? err.message : '');
         setMutationError({
-          message:
-            '다른 작업으로 도구 상태가 변경되었습니다. 최신 상태를 다시 불러옵니다. ' +
-            (isApiError(err) ? err.message : ''),
+          message: `${base} ${lifecycleMutationNextAction(action, { code: 'RESOURCE_VERSION_CONFLICT' })}`,
           requestId: isApiError(err) ? err.requestId ?? undefined : undefined,
           code: isApiError(err) ? err.code : undefined,
         });
         await refetchToolOnly();
       } else {
-        setMutationError(toFeedbackError(err, `도구 ${action === 'activate' ? '활성화' : '비활성화'}에 실패했습니다.`));
+        const feedback = toFeedbackError(
+          err,
+          `도구 ${action === 'activate' ? '활성화' : '비활성화'}에 실패했습니다.`,
+        );
+        if (isApiError(err) && err.status === 403) {
+          feedback.code = feedback.code ?? 'FORBIDDEN';
+        }
+        setMutationError({
+          ...feedback,
+          message: `${feedback.message} ${lifecycleMutationNextAction(action, feedback)}`,
+        });
       }
     } finally {
       if (mountedRef.current) setStatusMutating(false);
@@ -281,8 +301,13 @@ export default function MCPToolDetail() {
   const title = tool.display_name ?? tool.remote_name;
   const validationStatus = selectedVersion?.validation_status;
   const lifecycle = toolLifecycleAction(tool.status);
-  const lifecycleDisabled = isLifecycleActionDisabled(tool.status);
+  const lifecycleDisabledReason = toolLifecycleDisabledReason(tool, {
+    canEdit: hasPermission('mcp.edit'),
+  });
+  const lifecycleBlocked = Boolean(lifecycleDisabledReason) || isLifecycleActionDisabled(tool.status);
   const tags = stringTags(tool.tags);
+  const setupSteps = buildMcpToolSetupSteps(deriveMcpToolSetupFlags(tool));
+  const nextSetup = nextMcpToolSetupAction(setupSteps, tool);
 
   return (
     <div>
@@ -313,36 +338,40 @@ export default function MCPToolDetail() {
               <span className="text-xs text-slate-400 font-mono">{shortenId(tool.mcp_server_id)}</span>
             </div>
           </div>
-          <div className="flex items-center gap-2">
-            {lifecycle === 'activate' && (
-              <Button
-                variant="primary"
-                size="sm"
-                loading={statusMutating}
-                onClick={() => void handleLifecycle('activate')}
-              >
-                활성화
-              </Button>
-            )}
-            {lifecycle === 'deactivate' && (
-              <Button
-                variant="outline"
-                size="sm"
-                loading={statusMutating}
-                onClick={() => void handleLifecycle('deactivate')}
-              >
-                비활성화
-              </Button>
-            )}
-            {lifecycleDisabled && (
-              <Button
-                variant="ghost"
-                size="sm"
-                disabled
-                title="현재 상태에서는 활성화/비활성화할 수 없습니다."
-              >
-                상태 변경 불가
-              </Button>
+          <div className="flex flex-col items-end gap-2">
+            <div className="flex items-center gap-2">
+              {lifecycle === 'activate' && (
+                <Button
+                  variant="primary"
+                  size="sm"
+                  loading={statusMutating}
+                  disabled={lifecycleBlocked}
+                  onClick={() => void handleLifecycle('activate')}
+                >
+                  활성화
+                </Button>
+              )}
+              {lifecycle === 'deactivate' && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  loading={statusMutating}
+                  disabled={lifecycleBlocked}
+                  onClick={() => void handleLifecycle('deactivate')}
+                >
+                  비활성화
+                </Button>
+              )}
+              {!lifecycle && (
+                <Button variant="ghost" size="sm" disabled>
+                  상태 변경 불가
+                </Button>
+              )}
+            </div>
+            {lifecycleDisabledReason && (
+              <p className="max-w-md text-right text-xs text-slate-500" data-testid="mcp-tool-activate-disabled-reason">
+                {lifecycle === 'deactivate' ? '변경 불가' : '활성화 불가'}: {lifecycleDisabledReason}
+              </p>
             )}
           </div>
         </div>
@@ -352,6 +381,7 @@ export default function MCPToolDetail() {
             {versionError.requestId && (
               <p className="font-mono text-xs text-slate-400">Request ID: {versionError.requestId}</p>
             )}
+            <p className="text-xs text-slate-500">다음: 버전 목록을 다시 불러오거나 서버에서 도구 탐색을 다시 적용하세요.</p>
           </div>
         )}
         {mutationError && (
@@ -366,10 +396,41 @@ export default function MCPToolDetail() {
         )}
       </div>
 
-      <section aria-label="도구 관리 안내" className="border-b border-slate-200 bg-slate-50 px-6 py-3 text-sm text-slate-600">
-        <p className="font-medium text-slate-800">도구를 사용하기 전에 확인하세요</p>
-        <p className="mt-1">① 기본 정보·입력값 확인 → ② 실행 정책 확인 → ③ 필요한 경우 실행 테스트와 버전별 검증 결과 확인 → ④ 도구 활성화</p>
-        <p className="mt-1 text-xs text-slate-500">활성화는 검증 완료를 의미하지 않습니다. 실제 실행 가능 여부는 서버 권한과 정책에 따라 결정됩니다.</p>
+      <section
+        aria-label="도구 관리 안내"
+        className="border-b border-slate-200 bg-slate-50 px-6 py-3"
+        data-testid="mcp-tool-setup-progress"
+      >
+        <p className="text-xs font-semibold text-slate-700 mb-2">
+          이용 준비: {MCP_TOOL_SETUP_FLOW_LABEL}
+        </p>
+        <ol className="flex flex-wrap gap-3 mb-2">
+          {setupSteps.map(step => (
+            <li
+              key={step.id}
+              className={`inline-flex items-center gap-1.5 text-xs ${
+                step.done ? 'text-emerald-700' : 'text-slate-500'
+              }`}
+              data-testid={`mcp-tool-setup-step-${step.id}`}
+              data-done={step.done ? 'true' : 'false'}
+            >
+              {step.done
+                ? <CheckCircle2 size={14} className="shrink-0" aria-hidden />
+                : <Circle size={14} className="shrink-0" aria-hidden />}
+              <span>{step.label}</span>
+            </li>
+          ))}
+        </ol>
+        {nextSetup ? (
+          <p className="text-xs text-slate-600" data-testid="mcp-tool-setup-next">
+            다음: {nextSetup.message}
+          </p>
+        ) : (
+          <p className="text-xs text-emerald-700" data-testid="mcp-tool-setup-next">
+            도구가 활성입니다. 검증 완료(VERIFIED)와 실제 실행 가능 여부는 검증 이력·실행 정책·권한에서 별도로 확인하세요.
+          </p>
+        )}
+        <p className="mt-1 text-xs text-slate-500">{toolStatusMeaningNote()}</p>
       </section>
 
       <div className="bg-white border-b border-slate-200 px-6">
@@ -415,6 +476,11 @@ export default function MCPToolDetail() {
                 </Row>
                 <Row label="도구 상태">
                   <StatusBadge status={tool.status} size="sm" />
+                </Row>
+                <Row label="상태 의미">
+                  <span className="text-xs text-slate-600">
+                    활성=사용 후보 · 검증 완료(VERIFIED)=버전 증빙(별도) · 서버 초안(DRAFT)≠도구 상태
+                  </span>
                 </Row>
                 <Row label="현재 버전">
                   {selectedVersion ? `v${selectedVersion.version_no}` : '—'}
@@ -476,14 +542,17 @@ export default function MCPToolDetail() {
         {tab === 'usedby' && (
           <EmptyState
             title="사용처 조회 미지원"
-            description="이 도구를 사용하는 에이전트·워크플로 조회 기능은 아직 지원하지 않습니다."
+            description="이 도구를 사용하는 에이전트·워크플로 조회 기능은 아직 지원하지 않습니다. 활성화와 실행 가능 여부는 실행 정책·권한 탭/관리 화면에서 확인하세요."
           />
         )}
 
         {tab === 'versions' && (
           <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
             {versions.length === 0 ? (
-              <EmptyState title="버전 이력이 없습니다" />
+              <EmptyState
+                title="버전 이력이 없습니다"
+                description="서버에서 도구 탐색 결과를 적용하면 버전이 생성됩니다. 버전이 없으면 활성화할 수 없습니다."
+              />
             ) : (
               versions.map(v => (
                 <button
@@ -511,7 +580,10 @@ export default function MCPToolDetail() {
         )}
 
         {tab === 'audit' && (
-          <EmptyState title="감사 이력 조회 미지원" description="도구 감사 이력 조회 기능은 아직 지원하지 않습니다." />
+          <EmptyState
+            title="감사 이력 조회 미지원"
+            description="도구 감사 이력 조회 기능은 아직 지원하지 않습니다. 활성화·검증·실행 정책은 각 탭에서 확인하세요."
+          />
         )}
       </div>
 
