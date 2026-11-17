@@ -17,6 +17,7 @@ scenarios:
       - tests/unit/test_execution_creation.py
       - tests/unit/test_tool_runner.py
     integration:
+      - tests/integration/test_agent_request_nl_to_mcp_golden.py
       - tests/integration/test_request_analyzer.py
       - tests/integration/test_tool_retrieval.py
       - tests/integration/test_tool_selector.py
@@ -78,6 +79,7 @@ scenarios:
     integration:
       - tests/integration/test_approval_wait.py
       - tests/integration/test_approval_decision_resume.py
+      - tests/integration/test_tool_policy_approval_resume_e2e.py
 
   - id: authorization_deny
     title: Authorization deny / missing grant fail-closed
