@@ -44,12 +44,12 @@ describe('Agent beginner UX helpers', () => {
       { status: 'DRAFT', current_version_id: null },
       [{ status: 'DRAFT', validation_status: 'INVALID' }],
     );
-    expect(steps.map(s => [s.id, s.done])).toEqual([
-      ['create', true],
-      ['validate', false],
-      ['publish', false],
-      ['activate', false],
-      ['run', false],
+    expect(steps.map(s => [s.id, s.label, s.done])).toEqual([
+      ['create', '생성', true],
+      ['validate', '검증', false],
+      ['publish', '게시', false],
+      ['activate', '활성화', false],
+      ['run', '실행 가능', false],
     ]);
     expect(nextAgentSetupAction(steps)?.stepId).toBe('validate');
   });
@@ -60,6 +60,7 @@ describe('Agent beginner UX helpers', () => {
       [{ status: 'PUBLISHED', validation_status: 'VALID' }],
     );
     expect(steps.every(s => s.done)).toBe(true);
+    expect(steps.find(s => s.id === 'run')?.label).toBe('실행 가능');
     expect(nextAgentSetupAction(steps)).toBeNull();
   });
 
@@ -190,6 +191,7 @@ describe('AgentDetail beginner progress and CTAs', () => {
     fireEvent.click(screen.getByRole('button', { name: '에이전트 실행으로 이동' }));
     await waitFor(() => {
       expect(router.state.location.pathname).toBe('/run');
+      expect(router.state.location.search).toBe('?agentId=agent-1');
     });
   });
 });

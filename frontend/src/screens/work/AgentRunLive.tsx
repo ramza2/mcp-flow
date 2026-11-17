@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { useNavigate, useParams } from 'react-router';
+import { useNavigate, useParams, useSearchParams } from 'react-router';
 import { Bot, ChevronDown, ChevronUp, Loader2, RefreshCw, Send } from 'lucide-react';
 import Button from '../../components/ui/Button';
 import StatusBadge from '../../components/ui/StatusBadge';
+import { InlineAlert } from '../../components/ui/EmptyState';
 import { isAbortError, isApiError } from '../../api/client';
 import {
   analyzeAgentRun,
@@ -205,13 +206,39 @@ function nextMessageId(): string {
   return `msg-${messageSeq}`;
 }
 
+export type AgentIdQueryResolution =
+  | { kind: 'none' }
+  | { kind: 'ok'; agentId: string }
+  | { kind: 'unavailable'; requestedId: string; message: string };
+
+/** Resolve /run?agentId= against the runnable list — never invent a substitute. */
+export function resolveAgentIdQuery(
+  requestedId: string | null | undefined,
+  runnableAgentIds: Iterable<string>,
+): AgentIdQueryResolution {
+  const id = (requestedId ?? '').trim();
+  if (!id) return { kind: 'none' };
+  for (const runnableId of runnableAgentIds) {
+    if (runnableId === id) return { kind: 'ok', agentId: id };
+  }
+  return {
+    kind: 'unavailable',
+    requestedId: id,
+    message:
+      '연결한 에이전트를 실행할 수 없습니다. 활성·게시된 실행 가능 목록에 없거나 권한이 없습니다. 다른 에이전트를 직접 선택한 뒤 실행하세요.',
+  };
+}
+
 export default function AgentRunLive() {
   const { conversationId } = useParams();
+  const [searchParams] = useSearchParams();
   const navigate = useNavigate();
+  const requestedAgentId = searchParams.get('agentId');
   const [agents, setAgents] = useState<RunnableAgentDto[]>([]);
   const [agentId, setAgentId] = useState('');
   const [defaultAgentId, setDefaultAgentId] = useState('');
   const [chooseAgent, setChooseAgent] = useState(false);
+  const [agentLinkError, setAgentLinkError] = useState<string | null>(null);
   const [prompt, setPrompt] = useState('');
   const [request, setRequest] = useState<AgentRunRequestDto | null>(null);
   const [selection, setSelection] = useState<AgentRunSelectionDto | null>(null);
@@ -278,6 +305,25 @@ export default function AgentRunLive() {
       if (controller.signal.aborted) return;
       setAgents(response.items);
       setDefaultAgentId(response.default_agent_id ?? '');
+      const linked = resolveAgentIdQuery(
+        requestedAgentId,
+        response.items.map((item) => item.id),
+      );
+      if (linked.kind === 'ok') {
+        setAgentId(linked.agentId);
+        setChooseAgent(true);
+        setAgentLinkError(null);
+        return;
+      }
+      if (linked.kind === 'unavailable') {
+        // Do not substitute another Agent; keep direct-select mode and block
+        // submit until the user explicitly picks a runnable Agent.
+        setAgentId('');
+        setChooseAgent(true);
+        setAgentLinkError(linked.message);
+        return;
+      }
+      setAgentLinkError(null);
       setAgentId((old) => old || response.default_agent_id || response.items[0]?.id || '');
       setChooseAgent(!response.default_agent_id);
     }).catch((err: unknown) => {
@@ -286,16 +332,18 @@ export default function AgentRunLive() {
       if (!controller.signal.aborted) setLoadingAgents(false);
     });
     return () => controller.abort();
-  }, []);
+  }, [requestedAgentId]);
 
   // The saved request pins the AgentVersion used for this conversation. A
   // previous explicit selection must not silently become today's default on F5.
+  // Conversation restore wins over ?agentId= once the saved request is loaded.
   useEffect(() => {
     if (!request || loadingAgents || locallySubmittedRequestId.current === request.id) return;
     const savedAgent = agents.find((agent) => agent.agent_version_id === request.agent_version_id);
     if (!savedAgent) return;
     setAgentId(savedAgent.id);
     setChooseAgent(!defaultAgentId || savedAgent.id !== defaultAgentId);
+    setAgentLinkError(null);
   }, [request?.id, request?.agent_version_id, agents, defaultAgentId, loadingAgents]);
 
   const loadChatResult = useCallback(async (requestId: string, signal?: AbortSignal) => {
@@ -910,9 +958,12 @@ export default function AgentRunLive() {
             </Button>
           )}
         </div>
+        {agentLinkError && (
+          <InlineAlert type="warning" message={agentLinkError} />
+        )}
         {chooseAgent && (
           <>
-            {!defaultAgentId && !loadingAgents && (
+            {!defaultAgentId && !loadingAgents && !agentLinkError && (
               <p className="text-xs text-amber-700">
                 기본 Agent가 설정되지 않았습니다. Agent를 직접 선택해 실행할 수 있습니다.
               </p>
@@ -925,9 +976,16 @@ export default function AgentRunLive() {
               className="w-full rounded-md border border-slate-300 p-2 text-sm"
               value={agentId}
               disabled={working || loadingAgents}
-              onChange={(event) => setAgentId(event.target.value)}
+              onChange={(event) => {
+                setAgentId(event.target.value);
+                if (event.target.value) setAgentLinkError(null);
+              }}
             >
-              {agents.length === 0 && <option value="">사용 가능한 Agent 없음</option>}
+              {(agents.length === 0 || !agentId) && (
+                <option value="">
+                  {agents.length === 0 ? '사용 가능한 Agent 없음' : '에이전트를 선택하세요'}
+                </option>
+              )}
               {agents.map((agent) => (
                 <option key={agent.id} value={agent.id}>
                   {agent.name} (v{agent.version_no})
