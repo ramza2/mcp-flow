@@ -42,8 +42,10 @@ export function deriveMcpServerSetupFlags(input: {
   discoveryPreviewed: boolean;
   applied: boolean;
 } {
-  const connectionOk =
-    Boolean(input.lastHealthyAt) || input.lastTest?.status === 'SUCCEEDED';
+  // Prefer the latest on-screen connection test; fall back to lastHealthyAt only when absent.
+  const connectionOk = input.lastTest
+    ? input.lastTest.status === 'SUCCEEDED'
+    : Boolean(input.lastHealthyAt);
   const discoveryPreviewed =
     Boolean(input.previewResult?.success)
     || input.discoveries.some(d => d.success)

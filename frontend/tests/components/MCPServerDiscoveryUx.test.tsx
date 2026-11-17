@@ -46,6 +46,47 @@ describe('MCP server discovery UX helpers', () => {
     expect(nextMcpServerSetupAction(steps)?.stepId).toBe('connect');
   });
 
+  it('treats recent connection failure as not connected even with past healthy history', () => {
+    const failedRecent = deriveMcpServerSetupFlags({
+      lastHealthyAt: '2026-09-01T10:00:00Z',
+      lastTest: { status: 'FAILED' },
+      previewResult: null,
+      discoveries: [],
+      toolsTotal: 0,
+    });
+    expect(failedRecent.connectionOk).toBe(false);
+    expect(nextMcpServerSetupAction(
+      buildMcpServerSetupSteps({ registered: true, ...failedRecent }),
+    )?.stepId).toBe('connect');
+
+    const timedOutRecent = deriveMcpServerSetupFlags({
+      lastHealthyAt: '2026-09-01T10:00:00Z',
+      lastTest: { status: 'TIMED_OUT' },
+      previewResult: null,
+      discoveries: [],
+      toolsTotal: 0,
+    });
+    expect(timedOutRecent.connectionOk).toBe(false);
+
+    const healthyFallback = deriveMcpServerSetupFlags({
+      lastHealthyAt: '2026-09-01T10:00:00Z',
+      lastTest: null,
+      previewResult: null,
+      discoveries: [],
+      toolsTotal: 0,
+    });
+    expect(healthyFallback.connectionOk).toBe(true);
+
+    const recentSuccess = deriveMcpServerSetupFlags({
+      lastHealthyAt: null,
+      lastTest: { status: 'SUCCEEDED' },
+      previewResult: null,
+      discoveries: [],
+      toolsTotal: 0,
+    });
+    expect(recentSuccess.connectionOk).toBe(true);
+  });
+
   it('marks apply done when tools exist and explains disabled apply in Korean', () => {
     const flags = deriveMcpServerSetupFlags({
       lastHealthyAt: '2026-09-02T14:20:00Z',
