@@ -39,7 +39,7 @@ describe('MCPTools — API list + lifecycle', () => {
     expect(await screen.findByText('Search Docs')).toBeInTheDocument();
     expect(screen.getAllByText('Docs MCP').length).toBeGreaterThan(0);
     expect(screen.getByRole('heading', { name: 'MCP 도구 관리' })).toBeInTheDocument();
-    expect(screen.getByText('도구 사용 전 확인하세요')).toBeInTheDocument();
+    expect(screen.getByTestId('mcp-tool-setup-progress')).toHaveTextContent(/도구 찾기/);
     expect(screen.getByRole('combobox', { name: '도구 상태' }).querySelector('option[value="ACTIVE"]')).toHaveTextContent('활성');
   });
 

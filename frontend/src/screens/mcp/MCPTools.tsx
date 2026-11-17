@@ -10,7 +10,7 @@ import { EmptyState, ErrorState, InlineAlert, LoadingSkeleton } from '../../comp
 import { activateMCPTool, deactivateMCPTool, getMCPTool, listMCPServers, listMCPTools } from '../../api/mcp';
 import { isAbortError, isApiError } from '../../api/client';
 import type { MCPServerDto, MCPToolDto } from '../../api/types';
-import { formatTimestamp, MCP_TOOL_STATUSES, labelMCPToolStatus } from '../../domain';
+import { formatTimestamp, hasPermission, MCP_TOOL_STATUSES, labelMCPToolStatus } from '../../domain';
 import {
   isLifecycleActionDisabled,
   isVersionConflict,
@@ -19,6 +19,14 @@ import {
   toolLifecycleAction,
   type FeedbackError,
 } from './toolLifecycle';
+import {
+  MCP_TOOL_SETUP_FLOW_LABEL,
+  lifecycleMutationNextAction,
+  listEmptyGuidance,
+  listLoadFailureGuidance,
+  toolLifecycleDisabledReason,
+  toolStatusMeaningNote,
+} from './mcpToolSetup';
 
 const PAGE_SIZE = 20;
 
@@ -80,7 +88,11 @@ export default function MCPTools() {
       })
       .catch(err => {
         if (isAbortError(err) || cancelled) return;
-        setError(toFeedbackError(err, '도구 목록을 불러오지 못했습니다.'));
+        const feedback = toFeedbackError(err, '도구 목록을 불러오지 못했습니다.');
+        if (isApiError(err) && err.status === 403) {
+          feedback.code = feedback.code ?? 'FORBIDDEN';
+        }
+        setError(feedback);
         setTools([]);
         setTotal(0);
         setHasNext(false);
@@ -114,10 +126,11 @@ export default function MCPTools() {
       setTools(prev => mergeToolRow(prev, updated));
     } catch (err) {
       if (isVersionConflict(err)) {
+        const base =
+          '다른 작업으로 도구 상태가 변경되었습니다. 최신 상태를 다시 불러옵니다. ' +
+          (isApiError(err) ? err.message : '');
         setActionError({
-          message:
-            '다른 작업으로 도구 상태가 변경되었습니다. 최신 상태를 다시 불러옵니다. ' +
-            (isApiError(err) ? err.message : ''),
+          message: `${base} ${lifecycleMutationNextAction(action, { code: 'RESOURCE_VERSION_CONFLICT' })}`,
           requestId: isApiError(err) ? err.requestId ?? undefined : undefined,
           code: isApiError(err) ? err.code : undefined,
         });
@@ -128,7 +141,14 @@ export default function MCPTools() {
           loadTools();
         }
       } else {
-        setActionError(toFeedbackError(err, `${action === 'activate' ? '활성화' : '비활성화'}에 실패했습니다.`));
+        const feedback = toFeedbackError(
+          err,
+          `${action === 'activate' ? '활성화' : '비활성화'}에 실패했습니다.`,
+        );
+        setActionError({
+          ...feedback,
+          message: `${feedback.message} ${lifecycleMutationNextAction(action, feedback)}`,
+        });
       }
     } finally {
       mutatingIdsRef.current.delete(tool.id);
@@ -163,22 +183,22 @@ export default function MCPTools() {
     {
       key: 'actions',
       label: '작업',
-      width: 'w-28',
+      width: 'w-44',
       render: r => {
         const action = toolLifecycleAction(r.status);
-        const disabled = isLifecycleActionDisabled(r.status);
+        const reason = toolLifecycleDisabledReason(r, { canEdit: hasPermission('mcp.edit') });
+        const statusBlocked = isLifecycleActionDisabled(r.status) || !action;
         const busy = mutatingIds.has(r.id);
-        if (disabled || !action) {
+        if (reason || statusBlocked || !action) {
           return (
-            <Button
-              variant="ghost"
-              size="sm"
-              disabled
-              title="현재 상태에서는 활성화/비활성화할 수 없습니다."
-              onClick={e => e.stopPropagation()}
-            >
-              —
-            </Button>
+            <span className="block max-w-[11rem]" onClick={e => e.stopPropagation()}>
+              <Button variant="ghost" size="sm" disabled>
+                —
+              </Button>
+              <p className="mt-1 text-[11px] leading-snug text-slate-500" data-testid="mcp-tool-list-disabled-reason">
+                {reason ?? '현재 상태에서는 활성화/비활성화할 수 없습니다.'}
+              </p>
+            </span>
           );
         }
         return (
@@ -208,10 +228,15 @@ export default function MCPTools() {
     <div>
       <PageHeader title="MCP 도구 관리" description="서버에서 탐색한 도구의 상태와 사용 정책을 확인합니다." />
       <div className="p-6 space-y-4">
-        <section aria-label="MCP 도구 이용 안내" className="rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600">
-          <p className="font-semibold text-slate-800">도구 사용 전 확인하세요</p>
-          <p className="mt-1">서버에서 도구를 탐색한 뒤 필요한 도구만 활성화하세요. 도구 상세에서 설명·위험도·실행 정책과 검증 결과를 먼저 확인하는 것이 좋습니다.</p>
-          <p className="mt-1 text-xs text-slate-500">활성화 버튼은 도구 상태를 변경하며, 실제 실행 가능 여부는 서버의 권한 및 정책 검사에 따라 결정됩니다.</p>
+        <section
+          aria-label="MCP 도구 이용 안내"
+          className="rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600"
+          data-testid="mcp-tool-setup-progress"
+        >
+          <p className="font-semibold text-slate-800">이용 준비: {MCP_TOOL_SETUP_FLOW_LABEL}</p>
+          <p className="mt-1">검색으로 도구를 찾은 뒤 상태를 확인하고, 상세에서 실행 정책·권한을 검토한 다음 필요한 도구만 활성화하세요.</p>
+          <p className="mt-1 text-xs text-slate-500">{toolStatusMeaningNote()}</p>
+          <p className="mt-1 text-xs text-slate-500">활성화는 자동으로 수행되지 않으며, 실행 가능 여부는 서버의 권한·정책 검사가 최종 결정합니다.</p>
         </section>
         <FilterBar
           search
@@ -243,11 +268,17 @@ export default function MCPTools() {
           {loading ? (
             <LoadingSkeleton rows={6} />
           ) : error ? (
-            <ErrorState message={error.message} requestId={error.requestId} onRetry={loadTools} />
+            <div className="space-y-2 p-4">
+              <ErrorState message={error.message} requestId={error.requestId} onRetry={loadTools} />
+              <p className="text-xs text-slate-500" data-testid="mcp-tool-list-error-next">
+                {listLoadFailureGuidance(error.code)}
+              </p>
+            </div>
           ) : tools.length === 0 ? (
             <EmptyState
-              title={debouncedQ || statusFilter || serverFilter ? '조건에 맞는 MCP 도구가 없습니다' : '등록된 MCP 도구가 없습니다'}
-              description={debouncedQ || statusFilter || serverFilter ? '검색어 또는 필터를 변경해 보세요.' : 'MCP 서버에서 도구 탐색 결과를 미리 확인하고 적용해 주세요.'}
+              {...listEmptyGuidance({
+                hasFilters: Boolean(debouncedQ || statusFilter || serverFilter),
+              })}
             />
           ) : (
             <>
