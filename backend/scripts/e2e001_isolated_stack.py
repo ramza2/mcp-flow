@@ -2,8 +2,9 @@
 """Isolated stack for Playwright E2E-001 (docs/09).
 
 Boots throwaway Redis + owned disposable Postgres + Mock ModelOps/MCP + API +
-outbox + Celery worker, seeds one ACTIVE/PUBLISHED Agent + READ_ONLY Tool,
-writes state JSON.
+outbox + Celery worker (execution+maintenance), seeds one ACTIVE/PUBLISHED
+Agent + READ_ONLY Tool via Activate → TOOL_EMBEDDING_ENSURE → Mock Embedding
+→ READY (no manual READY seed), then writes state JSON.
 
 Never targets ops Redis/containers. Never TRUNCATE / reset a shared or
 pre-existing Postgres (localhost+*_test alone is not enough). DB work runs
@@ -541,7 +542,6 @@ async def _seed(
     from app.repositories.mcp_tool import MCPToolRepository
     from app.repositories.mcp_tool_policy import MCPToolPolicyRepository
     from app.repositories.role import PermissionRepository
-    from app.repositories.tool_embedding import ToolEmbeddingRepository
     from app.repositories.user import UserRepository
     from app.schemas.auth import (
         ResourceGrantCreate,
@@ -552,6 +552,7 @@ async def _seed(
     )
     from app.services.authorization import ResourceGrantService
     from app.services.embedding_profile import EmbeddingProfileService
+    from app.services.mcp_tool import MCPToolService
     from app.services.role import RoleService
     from app.services.user import UserService
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -631,7 +632,7 @@ async def _seed(
                 remote_name="e2e001_weather",
                 display_name="E2E001 Weather",
                 tags=["weather"],
-                status=MCPToolStatus.ACTIVE.value,
+                status=MCPToolStatus.DISCOVERED.value,
             )
             version = await tools.create_version(
                 mcp_tool_id=tool.id,
@@ -648,6 +649,7 @@ async def _seed(
                 output_schema=_OUTPUT_SCHEMA,
             )
             tool.current_version_id = version.id
+            await session.flush()
             await MCPToolPolicyRepository(session).create(
                 mcp_tool_id=tool.id,
                 risk_class=RiskClass.READ_ONLY.value,
@@ -703,13 +705,12 @@ async def _seed(
                     }
                 ],
             )
-            await ToolEmbeddingRepository(session).upsert_ready_if_current(
-                tool_version_id=version.id,
-                embedding_profile_id=emb.id,
-                search_text=NL_REQUEST,
-                content_hash=hashlib.sha256(NL_REQUEST.encode()).hexdigest(),
-                embedding=[1.0, 0.0, 0.0, 0.0],
+            # Activate enqueues TOOL_EMBEDDING_ENSURE (no manual READY upsert).
+            activated = await MCPToolService(session).activate(
+                tool.id, expected_lock_version=int(tool.lock_version)
             )
+            if activated.status != MCPToolStatus.ACTIVE:
+                raise RuntimeError(f"tool activate expected ACTIVE, got {activated.status}")
             await session.commit()
             _Shared.tool_version_id = str(version.id)
             return {
@@ -718,7 +719,50 @@ async def _seed(
                 "agent_version_id": str(agent_version.id),
                 "tool_id": str(tool.id),
                 "tool_version_id": str(version.id),
+                "embedding_profile_id": str(emb.id),
             }
+    finally:
+        await engine.dispose()
+
+
+async def _wait_tool_embedding_ready(
+    *,
+    tool_version_id: str,
+    embedding_profile_id: str,
+    timeout_s: float = 60.0,
+) -> None:
+    """Poll until Outbox→Celery maintenance→Mock Embedding persists READY."""
+    import asyncio
+
+    from app.domain.enums import ToolEmbeddingStatus
+    from app.repositories.tool_embedding import ToolEmbeddingRepository
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+
+    db_url = os.environ["MCPFLOW_DATABASE_URL"]
+    engine = create_async_engine(db_url, pool_pre_ping=True)
+    factory = async_sessionmaker(
+        bind=engine, class_=AsyncSession, expire_on_commit=False, autoflush=False
+    )
+    version_uuid = uuid.UUID(tool_version_id)
+    profile_uuid = uuid.UUID(embedding_profile_id)
+    deadline = time.time() + timeout_s
+    last_status: str | None = None
+    try:
+        while time.time() < deadline:
+            async with factory() as session:
+                row = await ToolEmbeddingRepository(session).get(
+                    tool_version_id=version_uuid,
+                    embedding_profile_id=profile_uuid,
+                )
+                if row is not None:
+                    last_status = row.status
+                    if row.status == ToolEmbeddingStatus.READY and row.embedding is not None:
+                        return
+            await asyncio.sleep(0.1)
+        raise RuntimeError(
+            "ToolEmbedding did not reach READY via outbox/maintenance worker; "
+            f"last_status={last_status}"
+        )
     finally:
         await engine.dispose()
 
@@ -795,7 +839,7 @@ def main() -> int:
                 "app.infrastructure.celery_app:celery_app",
                 "worker",
                 "-Q",
-                "execution",
+                "execution,maintenance",
                 "--pool=solo",
                 "--concurrency=1",
                 "--loglevel=WARNING",
@@ -817,6 +861,15 @@ def main() -> int:
             stderr=open(STATE_DIR / "outbox.log", "w", encoding="utf-8"),
         )
         children.append(outbox)
+
+        # Real Activate→Outbox→maintenance→Mock Embedding must reach READY
+        # before Playwright starts (no manual upsert_ready).
+        asyncio.run(
+            _wait_tool_embedding_ready(
+                tool_version_id=seeded["tool_version_id"],
+                embedding_profile_id=seeded["embedding_profile_id"],
+            )
+        )
 
         _wait_tcp("127.0.0.1", api_port, timeout_s=30)
 
