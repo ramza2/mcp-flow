@@ -19,6 +19,7 @@ scenarios:
     integration:
       - tests/integration/test_agent_request_nl_to_mcp_golden.py
       - tests/integration/test_outbox_celery_worker_mcp_e2e.py
+      - tests/integration/test_tool_embedding_auto_index_celery_e2e.py
       - tests/integration/test_request_analyzer.py
       - tests/integration/test_tool_retrieval.py
       - tests/integration/test_tool_selector.py
