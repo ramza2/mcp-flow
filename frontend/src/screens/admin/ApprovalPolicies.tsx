@@ -359,9 +359,11 @@ export default function ApprovalPolicies() {
                 className={`w-full text-left px-4 py-3 border-b border-slate-100 hover:bg-slate-50 transition-colors
                   ${selectedId === policy.id ? 'bg-indigo-50' : ''}`}
               >
-                <div className="flex items-center justify-between gap-2">
-                  <span className="text-sm font-medium text-slate-800 truncate">{policy.name}</span>
-                  <span title={policy.status}>
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span className="text-sm font-medium text-slate-800 min-w-0 flex-1 break-words">
+                    {policy.name}
+                  </span>
+                  <span title={policy.status} className="shrink-0">
                     <StatusBadge
                       status={policy.status}
                       label={labelApprovalPolicyStatus(policy.status)}
@@ -383,9 +385,11 @@ export default function ApprovalPolicies() {
           )}
           {selected && (
             <div className="max-w-lg space-y-4">
-              <div className="flex items-center justify-between gap-3">
-                <h2 className="text-base font-semibold text-slate-900">{selected.name}</h2>
-                <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <h2 className="text-base font-semibold text-slate-900 min-w-0 flex-1 break-words">
+                  {selected.name}
+                </h2>
+                <div className="flex flex-wrap items-center gap-2 shrink-0 max-w-full">
                   <Button size="sm" variant="outline" onClick={() => openEdit(selected)} disabled={busy}>
                     편집
                   </Button>

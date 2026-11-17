@@ -93,6 +93,23 @@ describe('ApprovalPolicySelect', () => {
     expect(screen.getByRole('combobox')).toHaveValue(inactivePolicy.id);
   });
 
+  it('shows guidance when ACTIVE list is empty without auto-activating', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      ok({ items: [], page: 1, page_size: 100, total: 0, has_next: false }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    render(<ApprovalPolicySelect value={null} onChange={vi.fn()} />);
+
+    expect(
+      await screen.findByText(/ACTIVE 승인 정책이 없습니다/),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/자동으로 활성화되지 않습니다/)).toBeInTheDocument();
+    expect(fetchMock.mock.calls.some((call) => String(call[0]).includes('/activate'))).toBe(
+      false,
+    );
+  });
+
   it('shows 403 guidance, disables select, and keeps orphan current value', async () => {
     const fetchMock = vi.fn().mockResolvedValue(
       ok(
