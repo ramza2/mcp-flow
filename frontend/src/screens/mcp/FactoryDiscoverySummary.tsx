@@ -1,6 +1,7 @@
 /** Factory-imported MCP Discovery: immutable contract reconciliation result, not generic add/change counts. */
 
 import type { FactoryDiscoveryDiffDto } from '../../api/types';
+import { labelFactoryReconcileStatus } from './mcpServerSetup';
 
 const LABELS = {
   MATCHED: '계약 일치',
@@ -12,11 +13,7 @@ const LABELS = {
 export default function FactoryDiscoverySummary({ diff }: { diff: FactoryDiscoveryDiffDto }) {
   const clean = diff.status === 'CLEAN';
   const mismatches = diff.classifications.filter(item => item.classification !== 'MATCHED');
-  const statusText = clean
-    ? 'Factory 계약 정합성 일치 (CLEAN)'
-    : diff.status === 'AMBIGUOUS'
-      ? 'Factory 계약 판정 불명확 (AMBIGUOUS)'
-      : 'Factory 계약 불일치 (MISMATCHED)';
+  const statusText = `Factory 계약 정합성: ${labelFactoryReconcileStatus(diff.status)}`;
   return (
     <div
       role="region"
@@ -35,7 +32,7 @@ export default function FactoryDiscoverySummary({ diff }: { diff: FactoryDiscove
       {clean ? (
         <p className="mt-2 text-xs text-green-800">
           이 결과는 미리보기 기준입니다. 정합성 검증은 적용 시 Backend에서 다시 수행합니다.
-          CLEAN 미리보기만으로 서버 또는 도구가 활성화되지는 않습니다.
+          계약 일치 미리보기만으로 서버 또는 도구가 활성화되지는 않습니다.
         </p>
       ) : (
         <p className="mt-2 text-xs text-red-800">

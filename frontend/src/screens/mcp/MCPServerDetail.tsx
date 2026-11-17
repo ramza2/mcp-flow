@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate, useParams, useSearchParams } from 'react-router';
-import { ArrowLeft, RefreshCw } from 'lucide-react';
+import { ArrowLeft, CheckCircle2, Circle, RefreshCw } from 'lucide-react';
 import StatusBadge from '../../components/ui/StatusBadge';
 import FactoryDiscoverySummary from './FactoryDiscoverySummary';
 import { TabBar } from '../../components/ui/Tabs';
@@ -32,6 +32,14 @@ import {
   formatTimestamp,
   shortenId,
 } from '../../domain';
+import {
+  MCP_SERVER_SETUP_FLOW_LABEL,
+  applyDiscoveryDisabledReason,
+  buildMcpServerSetupSteps,
+  deriveMcpServerSetupFlags,
+  labelFactoryReconcileStatus,
+  nextMcpServerSetupAction,
+} from './mcpServerSetup';
 
 const DISCOVERY_PAGE_SIZE = 20;
 const TOOLS_PAGE_SIZE = 20;
@@ -435,9 +443,24 @@ export default function MCPServerDetail() {
 
   const canActivate = server.status === 'DRAFT' || server.status === 'INACTIVE';
   const canDeactivate = server.status === 'ACTIVE';
-  const canApplyPreview = Boolean(
-    previewResult?.success && (!previewResult.factory_diff || previewResult.factory_diff.status === 'CLEAN')
-  );
+  const applyDisabledReason = applyDiscoveryDisabledReason({
+    previewResult,
+    discovering,
+    applying,
+  });
+  const canApplyPreview = applyDisabledReason == null;
+  const setupFlags = deriveMcpServerSetupFlags({
+    lastHealthyAt: server.last_healthy_at,
+    lastTest,
+    previewResult,
+    discoveries,
+    toolsTotal,
+  });
+  const setupSteps = buildMcpServerSetupSteps({
+    registered: true,
+    ...setupFlags,
+  });
+  const nextSetup = nextMcpServerSetupAction(setupSteps);
 
   const toolCols: Column<MCPToolDto>[] = [
     {
@@ -529,7 +552,7 @@ export default function MCPServerDetail() {
             <Button
               variant="secondary"
               size="sm"
-              disabled={!canApplyPreview || discovering || applying}
+              disabled={!canApplyPreview}
               onClick={() => setApplyOpen(true)}
             >
               탐색 결과 적용
@@ -546,12 +569,20 @@ export default function MCPServerDetail() {
             )}
           </div>
         </div>
+        {applyDisabledReason && (
+          <p className="mt-2 text-xs text-slate-500 text-right" data-testid="mcp-apply-disabled-reason">
+            적용 불가: {applyDisabledReason}
+          </p>
+        )}
         {mutationError && (
           <div className="mt-3 space-y-1">
             <InlineAlert type="error" message={mutationError.message} />
             {mutationError.requestId && (
               <p className="font-mono text-xs text-slate-400">Request ID: {mutationError.requestId}</p>
             )}
+            <p className="text-xs text-slate-500">
+              연결 테스트와 도구 탐색을 다시 확인한 뒤 재시도하세요. 자동으로 적용되거나 활성화되지 않습니다.
+            </p>
           </div>
         )}
         {lastTest && (
@@ -566,6 +597,15 @@ export default function MCPServerDetail() {
             {lastTest.error_message && (
               <p className="text-red-600 text-xs mt-1">{lastTest.error_message}</p>
             )}
+            {lastTest.status === 'SUCCEEDED' ? (
+              <p className="text-xs text-slate-500 mt-1">
+                다음: 도구 탐색 미리보기로 변경 사항을 확인하세요.
+              </p>
+            ) : (
+              <p className="text-xs text-slate-500 mt-1">
+                다음: 서버 주소·네트워크·인증 설정을 확인한 뒤 연결 테스트를 다시 실행하세요.
+              </p>
+            )}
           </div>
         )}
         {previewResult && (
@@ -574,23 +614,73 @@ export default function MCPServerDetail() {
               도구 탐색 미리보기 — {previewResult.success ? '성공' : '실패'}
             </p>
             {previewResult.success ? (
-              <p className="text-xs text-slate-600 mt-1">
-                추가 {previewResult.diff.added} · 변경 {previewResult.diff.changed} · 누락{' '}
-                {previewResult.diff.missing} · 변경 없음 {previewResult.diff.unchanged}
-              </p>
+              <>
+                <p className="text-xs text-slate-600 mt-1">
+                  추가 {previewResult.diff.added} · 변경 {previewResult.diff.changed} · 누락{' '}
+                  {previewResult.diff.missing} · 변경 없음 {previewResult.diff.unchanged}
+                </p>
+                <p className="text-xs text-slate-500 mt-1">
+                  다음: 변경 내용을 확인한 뒤 탐색 결과 적용을 실행하세요. 적용 전 도구는 등록되지 않습니다.
+                </p>
+              </>
             ) : (
-              <p className="text-xs text-red-600 mt-1">{previewResult.error_message}</p>
+              <>
+                <p className="text-xs text-red-600 mt-1">{previewResult.error_message}</p>
+                <p className="text-xs text-slate-500 mt-1">
+                  다음: 연결 테스트가 성공했는지 확인한 뒤 도구 탐색 미리보기를 다시 실행하세요.
+                </p>
+              </>
             )}
           </div>
         )}
         {previewResult?.factory_diff && <FactoryDiscoverySummary diff={previewResult.factory_diff} />}
-        {applyError && <InlineAlert type="error" message={applyError} />}
+        {applyError && (
+          <div className="mt-2 space-y-1">
+            <InlineAlert type="error" message={applyError} />
+            <p className="text-xs text-slate-500">
+              다음: 미리보기를 다시 실행해 정합성을 확인한 뒤 적용을 재시도하세요. 자동 적용·자동 활성화는 하지 않습니다.
+            </p>
+          </div>
+        )}
       </div>
 
-      <section aria-label="서버 등록 후 작업 안내" className="border-b border-slate-200 bg-slate-50 px-6 py-3 text-sm text-slate-600">
-        <p className="font-medium text-slate-800">서버 등록 후 이용 순서</p>
-        <p className="mt-1">① 연결 테스트로 접속 확인 → ② 도구 탐색 미리보기로 변경 사항 확인 → ③ 탐색 결과 적용 → ④ 도구 상세에서 필요한 도구 활성화</p>
-        <p className="mt-1 text-xs text-slate-500">도구 탐색 미리보기만으로 도구가 등록되지는 않습니다. 결과 적용 전 변경 내용을 확인하세요.</p>
+      <section
+        aria-label="서버 등록 후 작업 안내"
+        className="border-b border-slate-200 bg-slate-50 px-6 py-3"
+        data-testid="mcp-server-setup-progress"
+      >
+        <p className="text-xs font-semibold text-slate-700 mb-2">
+          이용 준비: {MCP_SERVER_SETUP_FLOW_LABEL}
+        </p>
+        <ol className="flex flex-wrap gap-3 mb-2">
+          {setupSteps.map(step => (
+            <li
+              key={step.id}
+              className={`inline-flex items-center gap-1.5 text-xs ${
+                step.done ? 'text-emerald-700' : 'text-slate-500'
+              }`}
+              data-testid={`mcp-server-setup-step-${step.id}`}
+              data-done={step.done ? 'true' : 'false'}
+            >
+              {step.done
+                ? <CheckCircle2 size={14} className="shrink-0" aria-hidden />
+                : <Circle size={14} className="shrink-0" aria-hidden />}
+              <span>{step.label}</span>
+            </li>
+          ))}
+        </ol>
+        {nextSetup ? (
+          <p className="text-xs text-slate-600" data-testid="mcp-server-setup-next">
+            다음: {nextSetup.message}
+          </p>
+        ) : (
+          <p className="text-xs text-emerald-700" data-testid="mcp-server-setup-next">
+            도구 목록이 반영되었습니다. 필요한 도구는 도구 탭에서 별도로 활성화하세요.
+          </p>
+        )}
+        <p className="mt-1 text-xs text-slate-500">
+          도구 탐색 미리보기만으로 도구가 등록되지는 않습니다. 서버·도구 활성화는 자동으로 수행되지 않습니다.
+        </p>
       </section>
 
       <div className="bg-white border-b border-slate-200 px-6">
@@ -655,7 +745,10 @@ export default function MCPServerDetail() {
             )}
             {!toolsLoading && !toolsError && tools.length === 0 && (
               <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
-                <EmptyState title="이 서버에 등록된 도구가 없습니다" description="도구 탐색 미리보기를 확인한 후 결과를 적용하세요." />
+                <EmptyState
+                  title="이 서버에 등록된 도구가 없습니다"
+                  description="상단에서 연결 테스트 → 도구 탐색 미리보기 → 탐색 결과 적용 순서로 진행하세요. 적용 후에도 필요한 도구는 별도로 활성화해야 합니다."
+                />
               </div>
             )}
             {!toolsLoading && !toolsError && tools.length > 0 && (
@@ -689,7 +782,10 @@ export default function MCPServerDetail() {
               />
             )}
             {!discoveriesLoading && !discoveriesError && discoveries.length === 0 && (
-              <EmptyState title="도구 탐색 이력이 없습니다" />
+              <EmptyState
+                title="도구 탐색 이력이 없습니다"
+                description="상단의 '도구 탐색 미리보기'를 실행하면 이력이 쌓입니다. 미리보기 성공 후 '탐색 결과 적용'으로 도구 목록에 반영하세요."
+              />
             )}
             {!discoveriesLoading && !discoveriesError && discoveries.length > 0 && (
               <div className="space-y-2">
@@ -705,10 +801,12 @@ export default function MCPServerDetail() {
                       <p className="text-xs text-slate-400">
                         추가 {d.diff.added} · 변경 {d.diff.changed} · 누락 {d.diff.missing}
                         {d.apply_changes ? ' · 적용됨' : ' · 미리보기'}
+                        {' · '}
+                        {d.success ? '성공' : '실패'}
                       </p>
                       {d.factory_diff && (
                         <p className="text-xs font-semibold text-slate-600">
-                          Factory 정합성: {d.factory_diff.status}
+                          Factory 정합성: {labelFactoryReconcileStatus(d.factory_diff.status)}
                           {' · '}일치 {d.factory_diff.matched}
                           {' · '}누락 {d.factory_diff.missing_expected}
                           {' · '}예상 외 {d.factory_diff.unexpected_remote}
@@ -738,27 +836,42 @@ export default function MCPServerDetail() {
               <Row label="최근 연결 오류">{formatTimestamp(server.last_error_at)}</Row>
             </InfoCard>
             {lastTest ? (
-              <div className="bg-white border border-slate-200 rounded-lg px-4 py-3 flex items-center justify-between">
-                <span className="text-xs font-mono text-slate-500">
-                  {formatTimestamp(lastTest.checked_at)} (현재 화면)
-                </span>
-                <span className="text-sm font-mono text-slate-600">
-                  {lastTest.latency_ms != null ? `${lastTest.latency_ms}ms` : '—'}
-                </span>
-                <StatusBadge status={lastTest.status} size="sm" />
+              <div className="bg-white border border-slate-200 rounded-lg px-4 py-3 space-y-2">
+                <div className="flex items-center justify-between gap-3">
+                  <span className="text-xs font-mono text-slate-500">
+                    {formatTimestamp(lastTest.checked_at)} (현재 화면)
+                  </span>
+                  <span className="text-sm font-mono text-slate-600">
+                    {lastTest.latency_ms != null ? `${lastTest.latency_ms}ms` : '—'}
+                  </span>
+                  <StatusBadge status={lastTest.status} size="sm" />
+                </div>
+                <p className="text-xs text-slate-600">{labelCheckStatus(lastTest.status)}</p>
+                {lastTest.status !== 'SUCCEEDED' && (
+                  <p className="text-xs text-slate-500">
+                    다음: 서버 주소와 네트워크를 확인한 뒤 상단의 연결 테스트를 다시 실행하세요.
+                  </p>
+                )}
               </div>
+            ) : (
+              <EmptyState
+                title="아직 이 화면에서 실행한 연결 테스트가 없습니다"
+                description="상단의 '연결 테스트'를 실행해 접속을 확인하세요. 과거 이력 조회는 아직 지원하지 않습니다."
+              />
+            )}
+            {lastTest ? (
+              <EmptyState
+                title="연결 테스트 이력 조회 미지원"
+                description="과거 연결 테스트 이력 조회는 아직 지원하지 않습니다. 이 화면에서 실행한 연결 테스트 결과만 볼 수 있습니다."
+              />
             ) : null}
-            <EmptyState
-              title="연결 테스트 이력 조회 미지원"
-              description="과거 연결 테스트 이력 조회는 아직 지원하지 않습니다. 이 화면에서 실행한 연결 테스트 결과만 볼 수 있습니다."
-            />
           </div>
         )}
 
         {tab === 'audit' && (
           <EmptyState
             title="감사 이력 조회 미지원"
-            description="서버 감사 이력 조회 기능은 아직 지원하지 않습니다."
+            description="서버 감사 이력 조회 기능은 아직 지원하지 않습니다. 연결 확인·도구 탐색은 상단 버튼으로 진행하세요."
           />
         )}
       </div>
@@ -786,7 +899,7 @@ export default function MCPServerDetail() {
         onClose={() => setActivateOpen(false)}
         onConfirm={handleActivate}
         title="MCP 서버 활성화"
-        description="실제 MCP 서버를 업무에서 사용할 수 있도록 상태를 변경합니다. Factory 서버는 최신 SUCCEEDED 연결 테스트와 CLEAN Discovery 적용 증빙을 Backend가 다시 확인하며, 도구 자체의 활성화는 별도입니다. 계속하시겠습니까?"
+        description="실제 MCP 서버를 업무에서 사용할 수 있도록 상태를 변경합니다. Factory 서버는 최신 연결 성공 결과와 계약 일치 탐색 적용 증빙을 Backend가 다시 확인하며, 도구 자체의 활성화는 별도입니다. 계속하시겠습니까?"
         confirmLabel="활성화 확인"
         loading={statusMutating}
       />

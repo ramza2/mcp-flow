@@ -1,11 +1,18 @@
 import { useState } from 'react';
 import { useNavigate } from 'react-router';
-import { ArrowLeft, Check, ChevronRight } from 'lucide-react';
+import { ArrowLeft, Check, CheckCircle2, ChevronRight, Circle } from 'lucide-react';
 import Button from '../../components/ui/Button';
 import { InlineAlert } from '../../components/ui/EmptyState';
 import { createMCPServer } from '../../api/mcp';
 import { isApiError } from '../../api/client';
 import { CURRENT_MCP_PROTOCOL_VERSION } from '../../domain';
+import {
+  MCP_SERVER_SETUP_FLOW_LABEL,
+  buildMcpServerSetupSteps,
+  nextMcpServerSetupAction,
+  registerSubmitDisabledReason,
+  registerWizardNextDisabledReason,
+} from './mcpServerSetup';
 
 const STEPS = ['기본 정보', '연결 설정', '확인 및 등록'];
 
@@ -17,6 +24,16 @@ export default function MCPServerNew() {
   const [endpointUrl, setEndpointUrl] = useState('');
   const [registering, setRegistering] = useState(false);
   const [registerError, setRegisterError] = useState<string | null>(null);
+
+  const setupSteps = buildMcpServerSetupSteps({
+    registered: false,
+    connectionOk: false,
+    discoveryPreviewed: false,
+    applied: false,
+  });
+  const nextSetup = nextMcpServerSetupAction(setupSteps);
+  const nextDisabledReason = registerWizardNextDisabledReason(step, name, endpointUrl);
+  const submitDisabledReason = registerSubmitDisabledReason(name, endpointUrl);
 
   const handleRegister = async () => {
     setRegistering(true);
@@ -54,6 +71,36 @@ export default function MCPServerNew() {
         </button>
         <h1 className="text-lg font-semibold text-slate-900">MCP 서버 등록</h1>
         <p className="text-sm text-slate-500 mt-1">기본 정보를 입력해 서버를 등록한 다음 상세 화면에서 연결 확인과 도구 탐색을 진행합니다.</p>
+        <div
+          className="mt-4 rounded-lg border border-slate-200 bg-slate-50 px-4 py-3"
+          data-testid="mcp-server-setup-progress"
+        >
+          <p className="text-xs font-semibold text-slate-700 mb-2">
+            이용 준비: {MCP_SERVER_SETUP_FLOW_LABEL}
+          </p>
+          <ol className="flex flex-wrap gap-3 mb-2">
+            {setupSteps.map(s => (
+              <li
+                key={s.id}
+                className={`inline-flex items-center gap-1.5 text-xs ${
+                  s.done ? 'text-emerald-700' : 'text-slate-500'
+                }`}
+                data-testid={`mcp-server-setup-step-${s.id}`}
+                data-done={s.done ? 'true' : 'false'}
+              >
+                {s.done
+                  ? <CheckCircle2 size={14} className="shrink-0" aria-hidden />
+                  : <Circle size={14} className="shrink-0" aria-hidden />}
+                <span>{s.label}</span>
+              </li>
+            ))}
+          </ol>
+          {nextSetup && (
+            <p className="text-xs text-slate-600" data-testid="mcp-server-setup-next">
+              다음: {nextSetup.message}
+            </p>
+          )}
+        </div>
       </div>
 
       <div className="bg-white border-b border-slate-200 px-6 py-4">
@@ -145,15 +192,27 @@ export default function MCPServerNew() {
               type="info"
               message="등록 후 서버 상세 화면으로 이동합니다. 그곳에서 ① 연결 테스트 ② 도구 탐색 미리보기 ③ 탐색 결과 적용 ④ 필요한 도구 활성화를 진행하세요. 등록만으로 도구가 활성화되지는 않습니다."
             />
-            {registerError && <InlineAlert type="error" message={registerError} />}
+            {registerError && (
+              <div className="space-y-1">
+                <InlineAlert type="error" message={registerError} />
+                <p className="text-xs text-slate-500">
+                  입력값을 확인한 뒤 다시 등록하세요. 등록에 실패해도 서버는 생성되지 않습니다.
+                </p>
+              </div>
+            )}
             <Button
               loading={registering}
               onClick={handleRegister}
               className="mt-2"
-              disabled={!name.trim() || !endpointUrl.trim()}
+              disabled={Boolean(submitDisabledReason)}
             >
               서버 등록
             </Button>
+            {submitDisabledReason && (
+              <p className="text-xs text-slate-500" data-testid="mcp-register-submit-disabled-reason">
+                등록 불가: {submitDisabledReason}
+              </p>
+            )}
           </Section>
         )}
 
@@ -162,12 +221,19 @@ export default function MCPServerNew() {
             이전
           </Button>
           {step < STEPS.length - 1 ? (
-            <Button
-              onClick={() => setStep(step + 1)}
-              disabled={step === 0 ? !name.trim() : !endpointUrl.trim()}
-            >
-              다음
-            </Button>
+            <div className="flex flex-col items-end gap-1">
+              <Button
+                onClick={() => setStep(step + 1)}
+                disabled={Boolean(nextDisabledReason)}
+              >
+                다음
+              </Button>
+              {nextDisabledReason && (
+                <p className="text-xs text-slate-500" data-testid="mcp-register-next-disabled-reason">
+                  {nextDisabledReason}
+                </p>
+              )}
+            </div>
           ) : null}
         </div>
       </div>
