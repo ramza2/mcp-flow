@@ -197,17 +197,20 @@ describe('ExecutionDetail MRTR / UNKNOWN_OUTCOME (API-backed)', () => {
       route: `/executions/${EXEC_ID}`,
     });
 
-    expect(await screen.findByText(/UNKNOWN_OUTCOME/i)).toBeInTheDocument();
-    expect(screen.getByText(/자동 Retry CTA는 제공하지 않습니다/i)).toBeInTheDocument();
+    expect(await screen.findByTestId('execution-unknown-outcome-alert')).toBeInTheDocument();
+    expect(screen.getByTestId('execution-unknown-outcome-alert')).toHaveTextContent(/외부 시스템/);
+    expect(screen.getByTestId('execution-unknown-outcome-alert')).toHaveTextContent(/자동 재시도/);
     expect(
       screen.queryByRole('button', { name: /New Execution \(Retry\)/i }),
     ).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /재시도/i })).not.toBeInTheDocument();
 
-    await user.click(screen.getByRole('button', { name: /^Steps$/i }));
+    await user.click(screen.getByRole('button', { name: /^단계$/i }));
     await user.click(screen.getByText('send'));
     await waitFor(() => {
-      expect(screen.getByText(/자동 Retry CTA 없음/i)).toBeInTheDocument();
+      expect(screen.getByTestId('step-unknown-outcome-guidance')).toBeInTheDocument();
     });
+    expect(screen.getByTestId('step-unknown-outcome-guidance')).toHaveTextContent(/외부/);
   });
 });
 
@@ -275,8 +278,8 @@ describe('ExecutionDetail SSE + polling fallback', () => {
     const source = await waitForSse();
     expect(source.url).toBe(`/api/v1/executions/${EXEC_ID}/events`);
     act(() => source.emitOpen());
-    await user.click(screen.getByRole('button', { name: /^Events$/i }));
-    expect(await screen.findByTestId('sse-connection-state')).toHaveTextContent('Live');
+    await user.click(screen.getByRole('button', { name: /^이벤트$/i }));
+    expect(await screen.findByTestId('sse-connection-state')).toHaveTextContent('실시간');
   });
 
   it('named SSE event triggers quiet snapshot refresh without status regression', async () => {
@@ -326,7 +329,7 @@ describe('ExecutionDetail SSE + polling fallback', () => {
     act(() => {
       source.emitMessage(envelope('execution.started', 'RUNNING'), '5');
     });
-    await user.click(screen.getByRole('button', { name: /^Events$/i }));
+    await user.click(screen.getByRole('button', { name: /^이벤트$/i }));
     expect(screen.queryByTestId('execution-event-row')).not.toBeInTheDocument();
   });
 
@@ -348,7 +351,7 @@ describe('ExecutionDetail SSE + polling fallback', () => {
       source.emitNamed('execution.started', envelope('execution.started', 'RUNNING'), '21');
     });
 
-    await user.click(screen.getByRole('button', { name: /^Events$/i }));
+    await user.click(screen.getByRole('button', { name: /^이벤트$/i }));
     const rows = await screen.findAllByTestId('execution-event-row');
     expect(rows).toHaveLength(2);
     expect(within(rows[0]).getByText(/execution\.queued/)).toBeInTheDocument();
@@ -371,7 +374,7 @@ describe('ExecutionDetail SSE + polling fallback', () => {
       source.emitNamed('execution.failed', envelope('execution.failed', 'FAILED'), '56');
     });
 
-    await user.click(screen.getByRole('button', { name: /^Events$/i }));
+    await user.click(screen.getByRole('button', { name: /^이벤트$/i }));
     const rows = await screen.findAllByTestId('execution-event-row');
     expect(rows).toHaveLength(2);
     expect(within(rows[0]).getByText('실행 중')).toBeInTheDocument();
@@ -393,7 +396,7 @@ describe('ExecutionDetail SSE + polling fallback', () => {
       source.emitNamed('execution.started', envelope('execution.started'), '');
       source.emitNamed('execution.started', envelope('execution.started'), 'abc');
     });
-    await user.click(screen.getByRole('button', { name: /^Events$/i }));
+    await user.click(screen.getByRole('button', { name: /^이벤트$/i }));
     expect(screen.queryByTestId('execution-event-row')).not.toBeInTheDocument();
   });
 
@@ -407,7 +410,7 @@ describe('ExecutionDetail SSE + polling fallback', () => {
     await screen.findByText(EXEC_ID);
     const source = await waitForSse();
     act(() => source.emitOpen());
-    await user.click(screen.getByRole('button', { name: /^Events$/i }));
+    await user.click(screen.getByRole('button', { name: /^이벤트$/i }));
 
     act(() => {
       source.emitError();
@@ -415,11 +418,11 @@ describe('ExecutionDetail SSE + polling fallback', () => {
     });
     expect(source.isClosed).toBe(false);
     expect(await screen.findByTestId('sse-connection-state')).toHaveTextContent(
-      'Reconnecting',
+      '재연결 중',
     );
 
     act(() => source.emitOpen());
-    expect(await screen.findByTestId('sse-connection-state')).toHaveTextContent('Live');
+    expect(await screen.findByTestId('sse-connection-state')).toHaveTextContent('실시간');
 
     act(() => {
       source.emitError();
@@ -430,7 +433,7 @@ describe('ExecutionDetail SSE + polling fallback', () => {
       expect(source.isClosed).toBe(true);
     });
     expect(await screen.findByTestId('sse-connection-state')).toHaveTextContent(
-      'Polling fallback',
+      '폴링 대체',
     );
 
     const callsBefore = fetchMock.mock.calls.length;
@@ -452,8 +455,8 @@ describe('ExecutionDetail SSE + polling fallback', () => {
     await screen.findByText(EXEC_ID);
     const source = await waitForSse();
     act(() => source.emitOpen());
-    await user.click(screen.getByRole('button', { name: /^Events$/i }));
-    expect(await screen.findByTestId('sse-connection-state')).toHaveTextContent('Live');
+    await user.click(screen.getByRole('button', { name: /^이벤트$/i }));
+    expect(await screen.findByTestId('sse-connection-state')).toHaveTextContent('실시간');
 
     act(() => {
       window.dispatchEvent(new Event('offline'));
@@ -469,8 +472,8 @@ describe('ExecutionDetail SSE + polling fallback', () => {
     });
 
     expect(source.isClosed).toBe(false);
-    expect(screen.getByTestId('sse-connection-state')).toHaveTextContent('Live');
-    expect(screen.queryByText('Polling fallback')).not.toBeInTheDocument();
+    expect(screen.getByTestId('sse-connection-state')).toHaveTextContent('실시간');
+    expect(screen.queryByText('폴링 대체')).not.toBeInTheDocument();
   });
 
   it('sustained offline beyond grace on active execution switches to polling', async () => {
@@ -483,8 +486,8 @@ describe('ExecutionDetail SSE + polling fallback', () => {
     await screen.findByText(EXEC_ID);
     const source = await waitForSse();
     act(() => source.emitOpen());
-    await user.click(screen.getByRole('button', { name: /^Events$/i }));
-    expect(await screen.findByTestId('sse-connection-state')).toHaveTextContent('Live');
+    await user.click(screen.getByRole('button', { name: /^이벤트$/i }));
+    expect(await screen.findByTestId('sse-connection-state')).toHaveTextContent('실시간');
 
     act(() => {
       window.dispatchEvent(new Event('offline'));
@@ -497,7 +500,7 @@ describe('ExecutionDetail SSE + polling fallback', () => {
       expect(source.isClosed).toBe(true);
     });
     expect(await screen.findByTestId('sse-connection-state')).toHaveTextContent(
-      'Polling fallback',
+      '폴링 대체',
     );
 
     // After fallback, online must not auto-return to SSE; 4s REST polling continues.
@@ -512,7 +515,7 @@ describe('ExecutionDetail SSE + polling fallback', () => {
       expect(fetchMock.mock.calls.length).toBeGreaterThan(callsBefore);
     });
     expect(screen.getByTestId('sse-connection-state')).toHaveTextContent(
-      'Polling fallback',
+      '폴링 대체',
     );
     // No new EventSource after fallback + online.
     expect(FakeEventSource.instances.filter((s) => !s.isClosed)).toHaveLength(0);
@@ -528,8 +531,8 @@ describe('ExecutionDetail SSE + polling fallback', () => {
     await screen.findByText(EXEC_ID);
     const source = await waitForSse();
     act(() => source.emitOpen());
-    await user.click(screen.getByRole('button', { name: /^Events$/i }));
-    expect(await screen.findByTestId('sse-connection-state')).toHaveTextContent('Live');
+    await user.click(screen.getByRole('button', { name: /^이벤트$/i }));
+    expect(await screen.findByTestId('sse-connection-state')).toHaveTextContent('실시간');
 
     act(() => {
       window.dispatchEvent(new Event('offline'));
@@ -539,8 +542,8 @@ describe('ExecutionDetail SSE + polling fallback', () => {
     });
 
     expect(source.isClosed).toBe(false);
-    expect(screen.getByTestId('sse-connection-state')).toHaveTextContent('Live');
-    expect(screen.queryByText('Polling fallback')).not.toBeInTheDocument();
+    expect(screen.getByTestId('sse-connection-state')).toHaveTextContent('실시간');
+    expect(screen.queryByText('폴링 대체')).not.toBeInTheDocument();
   });
 
   it('unmount clears offline watchdog timer and listeners', async () => {
@@ -627,10 +630,10 @@ describe('ExecutionDetail SSE + polling fallback', () => {
     const source = await waitForSse();
     act(() => source.emitOpen());
 
-    await user.click(screen.getByRole('button', { name: /^Steps$/i }));
+    await user.click(screen.getByRole('button', { name: /^단계$/i }));
     await user.click(screen.getByText('send'));
     await waitFor(() => {
-      expect(screen.getAllByText(/Attempts/i).length).toBeGreaterThan(0);
+      expect(screen.getAllByText(/시도/i).length).toBeGreaterThan(0);
     });
     const stepDetailCallsBefore = fetchMock.mock.calls.filter((c) =>
       String(c[0]).includes(`/steps/${STEP_ID}`),
@@ -747,7 +750,7 @@ describe('ExecutionDetail SSE + polling fallback', () => {
       await vi.advanceTimersByTimeAsync(SNAPSHOT_REFRESH_DEBOUNCE_MS + 10);
     });
     expect(
-      await screen.findByText(/Cancel requested — 진행 중 Step 정리/i),
+      await screen.findByText(/취소가 요청되었습니다/i),
     ).toBeInTheDocument();
   });
 
@@ -772,9 +775,9 @@ describe('ExecutionDetail SSE + polling fallback', () => {
       }
     });
 
-    await user.click(screen.getByRole('button', { name: /^Events$/i }));
+    await user.click(screen.getByRole('button', { name: /^이벤트$/i }));
     const rows = await screen.findAllByTestId('execution-event-row');
     expect(rows.length).toBe(200);
-    expect(screen.getByText(/200 events/)).toBeInTheDocument();
+    expect(screen.getByText(/이벤트 200건/)).toBeInTheDocument();
   });
 });
