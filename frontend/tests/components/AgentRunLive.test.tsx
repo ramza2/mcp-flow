@@ -695,6 +695,53 @@ describe('AgentRunLive — chat phase 1', () => {
     expect(screen.queryByText(/연결한 에이전트를 실행할 수 없습니다/)).toBeNull();
   });
 
+  it('submits natural language with the ?agentId= Agent (not the default)', async () => {
+    const otherAgentId = '11111111-1111-4111-8111-111111111111';
+    mocks.list.mockResolvedValue({
+      items: [
+        {
+          id: otherAgentId,
+          agent_version_id: '22222222-2222-4222-8222-222222222222',
+          name: '기본 Agent',
+          description: null,
+          version_no: 1,
+        },
+        {
+          id: agentId,
+          agent_version_id: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
+          name: '상세에서 연 Agent',
+          description: null,
+          version_no: 2,
+        },
+      ],
+      default_agent_id: otherAgentId,
+    });
+    mocks.submit.mockResolvedValue(row('RECEIVED'));
+    mocks.analyze.mockResolvedValue(row('RETRIEVING'));
+    mocks.getSelection.mockResolvedValue({ request: row('RETRIEVING'), selection: null });
+    mocks.progress.mockResolvedValue(stage('RETRIEVING'));
+    mocks.select.mockResolvedValue({
+      request: row('WAITING_INPUT'),
+      selection: selection('NO_MATCH'),
+    });
+
+    renderLive(`/run?agentId=${agentId}`);
+    await waitFor(() => {
+      expect(screen.getByRole('combobox', { name: 'Agent 선택' })).toHaveValue(agentId);
+    });
+
+    fireEvent.change(screen.getByPlaceholderText(/무엇을 도와드릴까요/), {
+      target: { value: '상세에서 연 에이전트로 조회해 줘' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: '실행' }));
+
+    await waitFor(() => {
+      expect(mocks.submit).toHaveBeenCalledWith(agentId, '상세에서 연 에이전트로 조회해 줘');
+    });
+    expect(mocks.submit).not.toHaveBeenCalledWith(otherAgentId, expect.anything());
+    expect(mocks.submit).toHaveBeenCalledTimes(1);
+  });
+
   it('shows guidance and blocks submit when ?agentId= is not runnable (no substitute)', async () => {
     const otherAgentId = '11111111-1111-4111-8111-111111111111';
     mocks.list.mockResolvedValue({
