@@ -163,6 +163,10 @@ def _start_dedicated_postgres() -> tuple[str, Path]:
     data_dir = STATE_DIR / f"pg-{uuid.uuid4().hex}"
     data_dir.mkdir(parents=True, exist_ok=True)
     os.chmod(data_dir, 0o700)
+    # Unix socket path max is ~107 bytes; keep socket dir short under /tmp.
+    sock_dir = Path("/tmp") / f"e2pg{uuid.uuid4().hex[:10]}"
+    sock_dir.mkdir(parents=True, exist_ok=True)
+    os.chmod(sock_dir, 0o700)
     initdb = _pg_bin("initdb")
     pg_ctl = _pg_bin("pg_ctl")
     createdb = _pg_bin("createdb")
@@ -182,10 +186,14 @@ def _start_dedicated_postgres() -> tuple[str, Path]:
         text=True,
     )
     if init.returncode != 0:
+        shutil.rmtree(sock_dir, ignore_errors=True)
+        shutil.rmtree(data_dir, ignore_errors=True)
         raise RuntimeError(f"initdb failed: {init.stderr or init.stdout}")
+    # Marker after initdb — data dir must be empty before initdb.
+    (data_dir / ".e2e001_sock_dir").write_text(str(sock_dir) + "\n", encoding="utf-8")
     with (data_dir / "postgresql.conf").open("a", encoding="utf-8") as conf:
         conf.write("\nlisten_addresses = '127.0.0.1'\n")
-        conf.write(f"unix_socket_directories = '{data_dir}'\n")
+        conf.write(f"unix_socket_directories = '{sock_dir}'\n")
         conf.write("fsync = off\n")
         conf.write("full_page_writes = off\n")
         conf.write("synchronous_commit = off\n")
@@ -196,7 +204,7 @@ def _start_dedicated_postgres() -> tuple[str, Path]:
             "-D",
             str(data_dir),
             "-o",
-            f"-p {port} -k {data_dir}",
+            f"-p {port} -k {sock_dir}",
             "-l",
             str(data_dir / "pg.log"),
             "start",
@@ -210,25 +218,33 @@ def _start_dedicated_postgres() -> tuple[str, Path]:
         log_path = data_dir / "pg.log"
         if log_path.is_file():
             log_tail = log_path.read_text(encoding="utf-8")[-2000:]
+        # Cluster did not start — still remove data/socket leftovers.
+        shutil.rmtree(sock_dir, ignore_errors=True)
+        shutil.rmtree(data_dir, ignore_errors=True)
         raise RuntimeError(f"pg_ctl start failed: {start.stderr or start.stdout}\n{log_tail}")
-    _wait_tcp("127.0.0.1", port, timeout_s=15)
-    created = subprocess.run(
-        [
-            createdb,
-            "-h",
-            "127.0.0.1",
-            "-p",
-            str(port),
-            "-U",
-            _OWNED_PG_USER,
-            _OWNED_PG_DB,
-        ],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    if created.returncode != 0:
-        raise RuntimeError(f"createdb failed: {created.stderr or created.stdout}")
+    # From here the postmaster is up: any ready/createdb failure must stop it.
+    try:
+        _wait_tcp("127.0.0.1", port, timeout_s=15)
+        created = subprocess.run(
+            [
+                createdb,
+                "-h",
+                "127.0.0.1",
+                "-p",
+                str(port),
+                "-U",
+                _OWNED_PG_USER,
+                _OWNED_PG_DB,
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if created.returncode != 0:
+            raise RuntimeError(f"createdb failed: {created.stderr or created.stdout}")
+    except Exception:
+        _stop_dedicated_postgres(data_dir)
+        raise
     url = f"postgresql+asyncpg://{_OWNED_PG_USER}@127.0.0.1:{port}/{_OWNED_PG_DB}"
     return url, data_dir
 
@@ -236,10 +252,21 @@ def _start_dedicated_postgres() -> tuple[str, Path]:
 def _stop_dedicated_postgres(data_dir: Path | None) -> None:
     if data_dir is None or not data_dir.is_dir():
         return
+    sock_dir: Path | None = None
+    marker = data_dir / ".e2e001_sock_dir"
+    if marker.is_file():
+        try:
+            raw = marker.read_text(encoding="utf-8").strip()
+            if raw:
+                sock_dir = Path(raw)
+        except OSError:
+            sock_dir = None
     try:
         pg_ctl = _pg_bin("pg_ctl")
     except RuntimeError:
         shutil.rmtree(data_dir, ignore_errors=True)
+        if sock_dir is not None:
+            shutil.rmtree(sock_dir, ignore_errors=True)
         return
     subprocess.run(
         [pg_ctl, "-D", str(data_dir), "-m", "fast", "stop"],
@@ -248,6 +275,8 @@ def _stop_dedicated_postgres(data_dir: Path | None) -> None:
         stderr=subprocess.DEVNULL,
     )
     shutil.rmtree(data_dir, ignore_errors=True)
+    if sock_dir is not None:
+        shutil.rmtree(sock_dir, ignore_errors=True)
 
 
 def _migrate_owned_database(db_url: str) -> None:
