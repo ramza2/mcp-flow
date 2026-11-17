@@ -9,6 +9,7 @@ import FilterBar from '../../components/ui/FilterBar';
 import Button from '../../components/ui/Button';
 import Pagination from '../../components/ui/Pagination';
 import { EmptyState, ErrorState, LoadingSkeleton } from '../../components/ui/EmptyState';
+import PermissionGate from '../../components/PermissionGate';
 import { listAgents } from '../../api/agents';
 import { isAbortError, isApiError } from '../../api/client';
 import type { AgentDto } from '../../api/types';
@@ -129,9 +130,11 @@ export default function Agents() {
         title="에이전트 관리"
         description="업무 지시문을 이해하고 허용된 MCP 도구를 사용하는 에이전트를 생성·관리합니다."
         actions={
-          <Button icon={<Plus size={14} />} onClick={handleNewAgent}>
-            새 에이전트
-          </Button>
+          <PermissionGate permission="agent.edit">
+            <Button icon={<Plus size={14} />} onClick={handleNewAgent}>
+              새 에이전트
+            </Button>
+          </PermissionGate>
         }
       />
       <div className="p-6 space-y-4">
@@ -153,10 +156,25 @@ export default function Agents() {
           ) : error ? (
             <ErrorState message={error.message} requestId={error.requestId} onRetry={() => { loadAgents(); }} />
           ) : agents.length === 0 ? (
-            <EmptyState
-              title="등록된 에이전트가 없습니다"
-              description="새 에이전트를 만들고 업무 지시문과 모델을 설정한 뒤 게시·활성화하세요."
-            />
+            <PermissionGate
+              permission="agent.edit"
+              fallback={(
+                <EmptyState
+                  title="등록된 에이전트가 없습니다"
+                  description="에이전트를 만들 권한이 없습니다. 관리자에게 권한을 요청하세요."
+                />
+              )}
+            >
+              <EmptyState
+                title="등록된 에이전트가 없습니다"
+                description="새 에이전트를 만들고 업무 지시문과 모델을 설정한 뒤 게시·활성화하세요."
+                action={{
+                  label: '새 에이전트',
+                  onClick: handleNewAgent,
+                  icon: <Plus size={14} />,
+                }}
+              />
+            </PermissionGate>
           ) : (
             <>
               <DataTable

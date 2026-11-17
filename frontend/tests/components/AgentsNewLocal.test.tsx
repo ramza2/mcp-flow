@@ -29,10 +29,10 @@ describe('Agents New Agent local draft', () => {
     });
 
     await waitFor(() => {
-      expect(screen.getByRole('button', { name: '새 에이전트' })).toBeInTheDocument();
+      expect(screen.getAllByRole('button', { name: '새 에이전트' }).length).toBeGreaterThanOrEqual(1);
     });
 
-    fireEvent.click(screen.getByRole('button', { name: '새 에이전트' }));
+    fireEvent.click(screen.getAllByRole('button', { name: '새 에이전트' })[0]!);
 
     expect(createAgent).not.toHaveBeenCalled();
     expect(router.state.location.pathname).toBe(NEW_AGENT_PATH);

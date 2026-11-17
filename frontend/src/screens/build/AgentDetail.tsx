@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useNavigate, useParams } from 'react-router';
-import { ArrowLeft, Pencil, Plus, Rocket, Power, Trash2 } from 'lucide-react';
+import { ArrowLeft, CheckCircle2, Circle, Pencil, Play, Plus, Rocket, Power, Trash2 } from 'lucide-react';
 import StatusBadge, { VersionBadge } from '../../components/ui/StatusBadge';
 import { TabBar } from '../../components/ui/Tabs';
 import Button from '../../components/ui/Button';
@@ -21,6 +21,82 @@ import type { AgentDto, AgentToolGrantDto, AgentVersionDto } from '../../api/typ
 import { formatTimestamp, labelAgentStatus, labelAgentVersionStatus, labelAgentVisibility } from '../../domain';
 
 type VersionStatus = 'DRAFT' | 'PUBLISHED' | 'DEPRECATED';
+
+export type AgentSetupStepId = 'create' | 'validate' | 'publish' | 'activate' | 'run';
+
+export type AgentSetupStep = {
+  id: AgentSetupStepId;
+  label: string;
+  done: boolean;
+};
+
+/** Beginner checklist from existing Agent / Version fields only (no new Domain states). */
+export function buildAgentSetupSteps(
+  agent: Pick<AgentDto, 'status' | 'current_version_id'>,
+  versions: Pick<AgentVersionDto, 'status' | 'validation_status'>[],
+): AgentSetupStep[] {
+  const hasVersion = versions.length > 0;
+  const validated = versions.some(
+    v => v.validation_status === 'VALID'
+      || v.status === 'PUBLISHED'
+      || v.status === 'DEPRECATED',
+  );
+  const published = Boolean(agent.current_version_id);
+  const activated = agent.status === 'ACTIVE';
+  const readyToRun = activated && published;
+  return [
+    { id: 'create', label: '생성', done: hasVersion },
+    { id: 'validate', label: '검증', done: validated },
+    { id: 'publish', label: '게시', done: published },
+    { id: 'activate', label: '활성화', done: activated },
+    { id: 'run', label: '실행', done: readyToRun },
+  ];
+}
+
+export function nextAgentSetupAction(
+  steps: AgentSetupStep[],
+): { stepId: AgentSetupStepId; message: string } | null {
+  const pending = steps.find(s => !s.done);
+  if (!pending) return null;
+  switch (pending.id) {
+    case 'create':
+      return { stepId: 'create', message: '초안 버전을 만들어 업무 지시문·모델·도구를 설정하세요.' };
+    case 'validate':
+      return { stepId: 'validate', message: '초안을 저장한 뒤 검증을 통과하세요. 게시 시 서버 검증이 함께 실행됩니다.' };
+    case 'publish':
+      return { stepId: 'publish', message: '검증된 초안을 게시하세요. 게시만으로는 실행되지 않습니다.' };
+    case 'activate':
+      return { stepId: 'activate', message: '게시된 버전으로 에이전트를 활성화하세요.' };
+    case 'run':
+      return { stepId: 'run', message: '에이전트 실행 화면에서 자연어로 업무를 지시하세요.' };
+    default:
+      return null;
+  }
+}
+
+export function publishDisabledReason(
+  latestStatus: VersionStatus | null,
+): string | null {
+  if (latestStatus == null) {
+    return '게시하려면 초안 버전이 필요합니다. 새 초안을 만드세요.';
+  }
+  if (latestStatus !== 'DRAFT') {
+    return '게시하려면 최신 초안 버전이 필요합니다. 새 초안을 만들거나 초안을 편집하세요.';
+  }
+  return null;
+}
+
+export function activateDisabledReason(
+  agent: Pick<AgentDto, 'status' | 'current_version_id'>,
+): string | null {
+  if (agent.status === 'ACTIVE') {
+    return '이미 활성화되어 있습니다.';
+  }
+  if (!agent.current_version_id) {
+    return '게시된 버전이 있어야 활성화할 수 있습니다. 먼저 초안을 검증·게시하세요.';
+  }
+  return null;
+}
 
 export default function AgentDetail() {
   const { agentId } = useParams();
@@ -92,7 +168,7 @@ export default function AgentDetail() {
   useEffect(() => load(), [load]);
 
   const latest = versions[0] ?? null;
-  const latestStatus = (latest?.status ?? 'DRAFT') as VersionStatus;
+  const latestStatus = (latest?.status ?? null) as VersionStatus | null;
   const currentPublished = versions.find(v => v.id === agent?.current_version_id) ?? null;
   const hasPublishHistory = versions.some(v =>
     v.status === 'PUBLISHED' || v.status === 'DEPRECATED' || v.published_at != null,
@@ -103,10 +179,24 @@ export default function AgentDetail() {
     && agent.current_version_id == null
     && !hasPublishHistory,
   );
+  const setupSteps = agent ? buildAgentSetupSteps(agent, versions) : [];
+  const nextSetup = setupSteps.length > 0 ? nextAgentSetupAction(setupSteps) : null;
+  const publishReason = publishDisabledReason(latestStatus);
+  const activateReason = agent ? activateDisabledReason(agent) : null;
+  const readyToRun = Boolean(
+    agent && agent.status === 'ACTIVE' && agent.current_version_id,
+  );
+  const canPublish = latestStatus === 'DRAFT' && !actionBusy;
+  const canActivate = Boolean(
+    agent
+    && agent.status !== 'ACTIVE'
+    && agent.current_version_id
+    && !actionBusy,
+  );
 
   const handleLatestPrimary = () => {
     if (!agent) return;
-    if (!latest || latestStatus !== 'DRAFT') {
+    if (!latest || latest.status !== 'DRAFT') {
       navigate(`/agents/${agent.id}/versions/new/edit`);
       return;
     }
@@ -208,43 +298,66 @@ export default function AgentDetail() {
               <span className="text-xs text-slate-400">{agent.description ?? ''}</span>
             </div>
           </div>
-          <div className="flex gap-2">
-            <Button
-              variant="outline"
-              size="sm"
-              icon={latestStatus === 'DRAFT' ? <Pencil size={13} /> : <Plus size={13} />}
-              onClick={handleLatestPrimary}
-            >
-              {latestStatus === 'DRAFT' ? '최신 버전 편집' : '새 초안 버전 만들기'}
-            </Button>
-            <Button
-              size="sm"
-              icon={<Rocket size={13} />}
-              disabled={latestStatus !== 'DRAFT' || actionBusy}
-              loading={actionBusy && latestStatus === 'DRAFT'}
-              onClick={handlePublish}
-            >
-              게시
-            </Button>
-            <Button
-              size="sm"
-              variant="outline"
-              icon={<Power size={13} />}
-              disabled={agent.status === 'ACTIVE' || !agent.current_version_id || actionBusy}
-              loading={actionBusy && agent.status !== 'ACTIVE'}
-              onClick={handleActivate}
-            >
-              활성화
-            </Button>
-            {canDelete && (
+          <div className="flex flex-col items-end gap-2">
+            <div className="flex flex-wrap justify-end gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                icon={latest?.status === 'DRAFT' ? <Pencil size={13} /> : <Plus size={13} />}
+                onClick={handleLatestPrimary}
+              >
+                {latest?.status === 'DRAFT' ? '최신 버전 편집' : '새 초안 버전 만들기'}
+              </Button>
+              <Button
+                size="sm"
+                icon={<Rocket size={13} />}
+                disabled={!canPublish}
+                loading={actionBusy && latest?.status === 'DRAFT'}
+                title={publishReason ?? '검증된 초안 게시'}
+                onClick={handlePublish}
+              >
+                게시
+              </Button>
               <Button
                 size="sm"
                 variant="outline"
-                icon={<Trash2 size={13} />}
-                onClick={() => setDeleteOpen(true)}
+                icon={<Power size={13} />}
+                disabled={!canActivate}
+                loading={actionBusy && agent.status !== 'ACTIVE'}
+                title={activateReason ?? '게시 버전 활성화'}
+                onClick={handleActivate}
               >
-                삭제
+                활성화
               </Button>
+              {readyToRun && (
+                <Button
+                  size="sm"
+                  icon={<Play size={13} />}
+                  onClick={() => navigate('/run')}
+                >
+                  에이전트 실행으로 이동
+                </Button>
+              )}
+              {canDelete && (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  icon={<Trash2 size={13} />}
+                  onClick={() => setDeleteOpen(true)}
+                >
+                  삭제
+                </Button>
+              )}
+            </div>
+            {(publishReason || activateReason) && (
+              <div className="max-w-md space-y-1 text-right" data-testid="agent-action-disabled-reasons">
+                {publishReason && (
+                  <p className="text-xs text-slate-500">게시 불가: {publishReason}</p>
+                )}
+                {activateReason && (
+                  <p className="text-xs text-slate-500">활성화 불가: {activateReason}</p>
+                )}
+              </div>
             )}
           </div>
         </div>
@@ -253,6 +366,40 @@ export default function AgentDetail() {
             <InlineAlert type="error" message={actionError} />
           </div>
         )}
+        <div
+          className="mt-4 rounded-lg border border-slate-200 bg-slate-50 px-4 py-3"
+          data-testid="agent-setup-progress"
+        >
+          <p className="text-xs font-semibold text-slate-700 mb-2">
+            사용 준비: 생성 → 검증 → 게시 → 활성화 → 실행
+          </p>
+          <ol className="flex flex-wrap gap-3 mb-2">
+            {setupSteps.map(step => (
+              <li
+                key={step.id}
+                className={`inline-flex items-center gap-1.5 text-xs ${
+                  step.done ? 'text-emerald-700' : 'text-slate-500'
+                }`}
+                data-testid={`agent-setup-step-${step.id}`}
+                data-done={step.done ? 'true' : 'false'}
+              >
+                {step.done
+                  ? <CheckCircle2 size={14} className="shrink-0" aria-hidden />
+                  : <Circle size={14} className="shrink-0" aria-hidden />}
+                <span>{step.label}</span>
+              </li>
+            ))}
+          </ol>
+          {nextSetup ? (
+            <p className="text-xs text-slate-600" data-testid="agent-setup-next">
+              다음: {nextSetup.message}
+            </p>
+          ) : (
+            <p className="text-xs text-emerald-700" data-testid="agent-setup-next">
+              준비 완료. 에이전트 실행에서 자연어로 업무를 지시할 수 있습니다.
+            </p>
+          )}
+        </div>
       </div>
 
       <div className="bg-white border-b border-slate-200 px-6">
