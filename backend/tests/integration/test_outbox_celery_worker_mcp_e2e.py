@@ -1,15 +1,16 @@
 """Outbox → Celery/Redis → worker → Mock MCP → SUCCEEDED (docs/08, docs/09).
 
-Requires an isolated local Redis broker (default ``127.0.0.1:16379``). Does not
-use ops Redis/containers. Does not pass via manual ``ExecutionClaimService.claim``
-or direct ``McpToolRunner`` invocation — the Celery ``mcpflow.execution.claim``
-task owns claim + CurrentMCPClient tools/call.
+Starts a **dedicated** loopback ``redis-server`` for this suite only. Never
+``FLUSHDB`` / mutates a pre-existing Redis. Does not use ops Redis/containers.
+Does not pass via manual ``ExecutionClaimService.claim`` or direct
+``McpToolRunner`` — Celery ``mcpflow.execution.claim`` owns claim + MCP call.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import signal
 import socket
 import subprocess
 import threading
@@ -18,7 +19,9 @@ import uuid
 from collections.abc import Iterator
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
+from shutil import which
 from typing import Any
+from urllib.parse import urlparse
 
 import pytest
 from app.core.config import get_settings
@@ -31,42 +34,24 @@ from app.repositories.execution import ExecutionRepository
 from app.repositories.mcp_server import MCPServerRepository
 from app.repositories.mcp_tool import MCPToolRepository
 from celery.contrib.testing.worker import start_worker
+from celery.signals import task_postrun
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from tests.integration.test_execution_creation import _create, _idem_key, _seed_ready
 
 _REDIS_DIR = Path("/tmp/mcpflow-test-redis-broker-e2e")
+_CLAIM_TASK_NAME = "mcpflow.execution.claim"
 
 
-def _broker_target() -> tuple[str, int, int, str]:
-    """Return (host, port, db, url) for the isolated loopback broker only."""
-    host = "127.0.0.1"
-    port = int(os.environ.get("MCPFLOW_TEST_REDIS_PORT", "16379"))
-    db = int(os.environ.get("MCPFLOW_TEST_REDIS_DB", "15"))
-    configured = os.environ.get("MCPFLOW_REDIS_URL", "").strip()
-    if configured.startswith("redis://127.0.0.1:") or configured.startswith(
-        "redis://localhost:"
-    ):
-        # Honor explicit loopback URL from CI/dev; never accept non-loopback.
-        url = configured
-        # Best-effort parse port/db for ping/flush; fall back to env defaults.
-        try:
-            from urllib.parse import urlparse
-
-            parsed = urlparse(url)
-            if parsed.hostname in {"127.0.0.1", "localhost"} and parsed.port:
-                port = int(parsed.port)
-            if parsed.path and parsed.path.strip("/").isdigit():
-                db = int(parsed.path.strip("/"))
-            host = "127.0.0.1"
-        except Exception:
-            pass
-        return host, port, db, url
-    return host, port, db, f"redis://{host}:{port}/{db}"
+def _free_loopback_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        sock.listen(1)
+        return int(sock.getsockname()[1])
 
 
-def _redis_ping(host: str, port: int, db: int) -> bool:
+def _redis_ping(host: str, port: int) -> bool:
     try:
         with socket.create_connection((host, port), timeout=0.5):
             pass
@@ -75,28 +60,54 @@ def _redis_ping(host: str, port: int, db: int) -> bool:
     try:
         import redis
 
-        client = redis.Redis(host=host, port=port, db=db)
-        return client.ping() is True
+        return redis.Redis(host=host, port=port, socket_connect_timeout=0.5).ping() is True
     except Exception:
         return False
 
 
-def _ensure_local_redis() -> str:
-    """Use CI/service Redis when present; else start a throwaway redis-server.
+def _stop_redis_process(pid_path: Path) -> None:
+    if not pid_path.is_file():
+        return
+    try:
+        pid = int(pid_path.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        pid_path.unlink(missing_ok=True)
+        return
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pid_path.unlink(missing_ok=True)
+        return
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.05)
+    else:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    pid_path.unlink(missing_ok=True)
 
-    Never targets ops Redis — only loopback ports.
-    """
-    host, port, db, url = _broker_target()
-    if _redis_ping(host, port, db):
-        return url
-    from shutil import which
 
+def _start_dedicated_redis() -> tuple[str, Path]:
+    """Spawn a throwaway redis-server on a free loopback port (test-owned)."""
     if which("redis-server") is None:
         pytest.skip(
-            f"Isolated Redis unavailable at {host}:{port} "
-            "(provide loopback Redis or redis-server; ops Redis is not used)."
+            "redis-server binary required for dedicated broker E2E "
+            "(ops Redis is not used; FLUSHDB on shared Redis is forbidden)."
         )
     _REDIS_DIR.mkdir(parents=True, exist_ok=True)
+    # Unique dir/pid per invocation so parallel workers do not collide.
+    run_dir = _REDIS_DIR / uuid.uuid4().hex
+    run_dir.mkdir(parents=True, exist_ok=True)
+    pid_path = run_dir / "redis.pid"
+    port = _free_loopback_port()
+    host = "127.0.0.1"
+    # Dedicated instance — empty DB by construction; never FLUSHDB.
     proc = subprocess.Popen(
         [
             "redis-server",
@@ -105,11 +116,13 @@ def _ensure_local_redis() -> str:
             "--bind",
             host,
             "--dir",
-            str(_REDIS_DIR),
+            str(run_dir),
             "--pidfile",
-            str(_REDIS_DIR / "redis.pid"),
+            str(pid_path),
             "--logfile",
-            str(_REDIS_DIR / "redis.log"),
+            str(run_dir / "redis.log"),
+            "--dbfilename",
+            "dump.rdb",
             "--save",
             "",
             "--appendonly",
@@ -123,13 +136,11 @@ def _ensure_local_redis() -> str:
     proc.wait(timeout=10)
     deadline = time.time() + 5
     while time.time() < deadline:
-        if _redis_ping(host, port, db):
-            return url
+        if _redis_ping(host, port):
+            return f"redis://{host}:{port}/0", pid_path
         time.sleep(0.05)
-    pytest.skip(
-        f"Isolated Redis unavailable at {host}:{port} "
-        "(install/start redis-server for broker E2E; ops Redis is not used)."
-    )
+    _stop_redis_process(pid_path)
+    pytest.skip(f"Dedicated redis-server failed to become ready on {host}:{port}")
 
 
 class _MockMCPServer:
@@ -188,25 +199,75 @@ class _MockMCPServer:
         self._thread.join(timeout=5)
 
 
+def _wait_task_postrun(*, task_id: str) -> threading.Event:
+    """Return an Event that is set when Celery finishes the given task_id."""
+    done = threading.Event()
+    expected_task_id = task_id
+
+    def _on_postrun(
+        sender: object = None,
+        task_id: str | None = None,
+        **_kwargs: object,
+    ) -> None:
+        if task_id == expected_task_id:
+            done.set()
+
+    task_postrun.connect(_on_postrun, weak=False)
+    # Stash disconnect callback on the event for the caller.
+    done._mcpflow_disconnect = (  # type: ignore[attr-defined]
+        lambda: task_postrun.disconnect(_on_postrun)
+    )
+    return done
+
+
 @pytest.fixture
 def isolated_redis_broker() -> Iterator[str]:
-    redis_url = _ensure_local_redis()
-    host, port, db, redis_url = _broker_target()
-    os.environ["MCPFLOW_REDIS_URL"] = redis_url
+    """Dedicated redis-server + restore env/settings/Celery on teardown."""
+    previous_env = {
+        "MCPFLOW_REDIS_URL": os.environ.get("MCPFLOW_REDIS_URL"),
+        "MCPFLOW_DATABASE_URL": os.environ.get("MCPFLOW_DATABASE_URL"),
+    }
+    previous_broker_url = celery_app.conf.broker_url
+    previous_result_backend = celery_app.conf.result_backend
+
     db_url = os.environ.get("TEST_DATABASE_URL", "").strip()
     if not db_url:
         pytest.skip("TEST_DATABASE_URL is not set")
+
+    redis_url, pid_path = _start_dedicated_redis()
+    # Refuse non-loopback URLs even if somehow constructed incorrectly.
+    parsed = urlparse(redis_url)
+    assert parsed.hostname in {"127.0.0.1", "localhost"}
+
+    os.environ["MCPFLOW_REDIS_URL"] = redis_url
     os.environ["MCPFLOW_DATABASE_URL"] = db_url
     get_settings.cache_clear()
     settings = get_settings()
     assert settings.redis_url == redis_url
+    assert settings.database_url == db_url
     celery_app.conf.broker_url = redis_url
     celery_app.conf.result_backend = None
-    import redis
 
-    redis.Redis(host=host, port=port, db=db).flushdb()
-    yield redis_url
-    get_settings.cache_clear()
+    try:
+        yield redis_url
+    finally:
+        _stop_redis_process(pid_path)
+        # Restore process-wide env / settings / Celery broker bindings.
+        for key, value in previous_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+        celery_app.conf.broker_url = previous_broker_url
+        celery_app.conf.result_backend = previous_result_backend
+        # Drop pooled connections that may still point at the dedicated broker.
+        try:
+            pool = getattr(celery_app, "pool", None)
+            if pool is not None:
+                pool.force_close_all()
+        except Exception:
+            pass
+        get_settings.cache_clear()
 
 
 async def _point_execution_at_mock_mcp(
@@ -299,17 +360,26 @@ async def test_pg_outbox_celery_redis_worker_mock_mcp_succeeded_and_duplicate_sa
             shutdown_timeout=20,
         ):
             # Real Outbox → Celery/Redis publish (not FakePublisher).
-            async with integration_session_factory() as session:
-                relay = await OutboxRelayService(session).publish_batch(
-                    publisher=publisher,
-                    limit=10,
+            first_task_id = str(outbox_event_id)
+            first_done = _wait_task_postrun(task_id=first_task_id)
+            try:
+                async with integration_session_factory() as session:
+                    relay = await OutboxRelayService(session).publish_batch(
+                        publisher=publisher,
+                        limit=10,
+                    )
+                    await session.commit()
+                    assert relay.published == 1
+                    assert relay.failed == 0
+                    row = await session.get(OutboxEvent, outbox_event_id)
+                    assert row is not None
+                    assert row.published_at is not None
+
+                assert first_done.wait(timeout=30), (
+                    f"Celery did not finish {_CLAIM_TASK_NAME} task_id={first_task_id}"
                 )
-                await session.commit()
-                assert relay.published == 1
-                assert relay.failed == 0
-                row = await session.get(OutboxEvent, outbox_event_id)
-                assert row is not None
-                assert row.published_at is not None
+            finally:
+                first_done._mcpflow_disconnect()  # type: ignore[attr-defined]
 
             execution = await _wait_execution_status(
                 integration_session_factory,
@@ -338,18 +408,27 @@ async def test_pg_outbox_celery_redis_worker_mock_mcp_succeeded_and_duplicate_sa
                 )
                 assert "broker-celery-mcp-ok" in str(step.result_inline)
 
-            # At-least-once redelivery after mark-published: same IDs, new task_id.
-            celery_app.send_task(
-                "mcpflow.execution.claim",
-                kwargs={
-                    "execution_id": str(execution_id),
-                    "outbox_event_id": str(outbox_event_id),
-                },
-                queue="execution",
-                task_id=str(uuid.uuid4()),
-            )
-            # Allow worker to process the duplicate; MCP must not be called again.
-            await __import__("asyncio").sleep(1.0)
+            # At-least-once redelivery: same IDs, new task_id. Wait for actual
+            # Celery task_postrun before asserting MCP was not called again.
+            duplicate_task_id = str(uuid.uuid4())
+            dup_done = _wait_task_postrun(task_id=duplicate_task_id)
+            try:
+                celery_app.send_task(
+                    _CLAIM_TASK_NAME,
+                    kwargs={
+                        "execution_id": str(execution_id),
+                        "outbox_event_id": str(outbox_event_id),
+                    },
+                    queue="execution",
+                    task_id=duplicate_task_id,
+                )
+                assert dup_done.wait(timeout=30), (
+                    "Celery did not finish duplicate "
+                    f"{_CLAIM_TASK_NAME} task_id={duplicate_task_id}"
+                )
+            finally:
+                dup_done._mcpflow_disconnect()  # type: ignore[attr-defined]
+
             assert mock.tools_call_count == 1
 
             async with integration_session_factory() as session:
