@@ -29,5 +29,13 @@ export default defineConfig({
         url: baseURL,
         reuseExistingServer: !process.env.CI,
         timeout: 120_000,
+        // Propagate isolated-stack API proxy for E2E-001 (Vite reads at config load).
+        env: {
+          ...process.env,
+          PORT,
+          ...(process.env.MCPFLOW_API_PROXY_TARGET
+            ? { MCPFLOW_API_PROXY_TARGET: process.env.MCPFLOW_API_PROXY_TARGET }
+            : {}),
+        },
       },
 });
