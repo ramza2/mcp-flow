@@ -664,4 +664,70 @@ describe('AgentRunLive — chat phase 1', () => {
     expect(screen.getByRole('button', { name: '실행' })).toBeDisabled();
     expect(mocks.submit).not.toHaveBeenCalled();
   });
+
+  it('selects ?agentId= when it is in the runnable list', async () => {
+    const otherAgentId = '11111111-1111-4111-8111-111111111111';
+    mocks.list.mockResolvedValue({
+      items: [
+        {
+          id: otherAgentId,
+          agent_version_id: '22222222-2222-4222-8222-222222222222',
+          name: '기본 Agent',
+          description: null,
+          version_no: 1,
+        },
+        {
+          id: agentId,
+          agent_version_id: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
+          name: '상세에서 연 Agent',
+          description: null,
+          version_no: 2,
+        },
+      ],
+      default_agent_id: otherAgentId,
+    });
+
+    renderLive(`/run?agentId=${agentId}`);
+
+    const agentSelect = await screen.findByRole('combobox', { name: 'Agent 선택' });
+    await waitFor(() => expect(agentSelect).toHaveValue(agentId));
+    expect(screen.getByText('Agent 직접 선택 모드')).toBeTruthy();
+    expect(screen.queryByText(/연결한 에이전트를 실행할 수 없습니다/)).toBeNull();
+  });
+
+  it('shows guidance and blocks submit when ?agentId= is not runnable (no substitute)', async () => {
+    const otherAgentId = '11111111-1111-4111-8111-111111111111';
+    mocks.list.mockResolvedValue({
+      items: [{
+        id: otherAgentId,
+        agent_version_id: '22222222-2222-4222-8222-222222222222',
+        name: '다른 Agent',
+        description: null,
+        version_no: 1,
+      }],
+      default_agent_id: otherAgentId,
+    });
+
+    renderLive(`/run?agentId=${agentId}`);
+
+    expect(await screen.findByText(/연결한 에이전트를 실행할 수 없습니다/)).toBeTruthy();
+    const agentSelect = screen.getByRole('combobox', { name: 'Agent 선택' });
+    expect(agentSelect).toHaveValue('');
+    expect(screen.getByRole('button', { name: '실행' })).toBeDisabled();
+    expect(mocks.submit).not.toHaveBeenCalled();
+  });
+});
+
+describe('resolveAgentIdQuery', () => {
+  it('never invents a substitute agent id', async () => {
+    const { resolveAgentIdQuery } = await import('@/screens/work/AgentRunLive');
+    expect(resolveAgentIdQuery(null, ['a'])).toEqual({ kind: 'none' });
+    expect(resolveAgentIdQuery('a', ['a', 'b'])).toEqual({ kind: 'ok', agentId: 'a' });
+    const miss = resolveAgentIdQuery('missing', ['a', 'b']);
+    expect(miss.kind).toBe('unavailable');
+    if (miss.kind === 'unavailable') {
+      expect(miss.requestedId).toBe('missing');
+      expect(miss.message).toMatch(/실행할 수 없습니다/);
+    }
+  });
 });

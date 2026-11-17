@@ -49,7 +49,7 @@ export function buildAgentSetupSteps(
     { id: 'validate', label: '검증', done: validated },
     { id: 'publish', label: '게시', done: published },
     { id: 'activate', label: '활성화', done: activated },
-    { id: 'run', label: '실행', done: readyToRun },
+    { id: 'run', label: '실행 가능', done: readyToRun },
   ];
 }
 
@@ -68,7 +68,7 @@ export function nextAgentSetupAction(
     case 'activate':
       return { stepId: 'activate', message: '게시된 버전으로 에이전트를 활성화하세요.' };
     case 'run':
-      return { stepId: 'run', message: '에이전트 실행 화면에서 자연어로 업무를 지시하세요.' };
+      return { stepId: 'run', message: '에이전트 실행 화면에서 이 에이전트를 선택한 뒤 자연어로 업무를 지시하세요.' };
     default:
       return null;
   }
@@ -333,7 +333,7 @@ export default function AgentDetail() {
                 <Button
                   size="sm"
                   icon={<Play size={13} />}
-                  onClick={() => navigate('/run')}
+                  onClick={() => navigate(`/run?agentId=${encodeURIComponent(agent.id)}`)}
                 >
                   에이전트 실행으로 이동
                 </Button>
@@ -371,7 +371,7 @@ export default function AgentDetail() {
           data-testid="agent-setup-progress"
         >
           <p className="text-xs font-semibold text-slate-700 mb-2">
-            사용 준비: 생성 → 검증 → 게시 → 활성화 → 실행
+            사용 준비: 생성 → 검증 → 게시 → 활성화 → 실행 가능
           </p>
           <ol className="flex flex-wrap gap-3 mb-2">
             {setupSteps.map(step => (
