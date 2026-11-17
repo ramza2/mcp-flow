@@ -47,8 +47,8 @@ export function deriveMcpToolSetupFlags(tool: {
   return {
     found: true,
     statusReviewed: true,
-    // Policy/permission check is a user step; treat as progressed once ACTIVE.
-    policyReviewed: activated,
+    // Never infer policy review from ACTIVE alone — no durable review evidence in this UI.
+    policyReviewed: false,
     activated,
   };
 }
@@ -73,12 +73,24 @@ export function nextMcpToolSetupAction(
         message: '도구 상태(활성/비활성/발견됨 등)를 확인하세요. 서버 DRAFT 상태와 혼동하지 마세요.',
       };
     case 'policy':
+      if (tool && !tool.current_version_id) {
+        return {
+          stepId: 'policy',
+          message:
+            '현재 버전이 없습니다. 서버에서 도구 탐색을 다시 적용한 뒤 실행 정책과 권한을 확인하세요.',
+        };
+      }
+      if (tool?.status === 'ACTIVE') {
+        return {
+          stepId: 'policy',
+          message:
+            '활성화는 완료되었습니다. 실행 정책·권한은 별도 확인을 권장하며, 확인 증빙이 없어 완료로 표시하지 않습니다. 검증 완료(VERIFIED)와도 별개입니다.',
+        };
+      }
       return {
         stepId: 'policy',
         message:
-          tool && !tool.current_version_id
-            ? '현재 버전이 없습니다. 서버에서 도구 탐색을 다시 적용한 뒤 실행 정책과 권한을 확인하세요.'
-            : '실행 정책 탭에서 위험도·확인/승인 설정을 확인하고, 실행에 필요한 권한이 있는지 검토하세요. 활성화와 검증 완료(VERIFIED)는 별개입니다.',
+          '실행 정책 탭에서 위험도·확인/승인 설정을 확인하고, 실행에 필요한 권한이 있는지 검토하세요. 활성화와 검증 완료(VERIFIED)는 별개입니다.',
       };
     case 'activate':
       return {

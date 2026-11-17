@@ -58,6 +58,25 @@ describe('MCP tool activation UX helpers', () => {
     expect(toolStatusMeaningNote()).toMatch(/DRAFT/);
   });
 
+  it('keeps ACTIVE activate done without inferring policyReviewed', () => {
+    const flags = deriveMcpToolSetupFlags({
+      status: 'ACTIVE',
+      current_version_id: 'ver-1',
+    });
+    expect(flags.activated).toBe(true);
+    expect(flags.policyReviewed).toBe(false);
+    const steps = buildMcpToolSetupSteps(flags);
+    expect(steps.find(s => s.id === 'activate')?.done).toBe(true);
+    expect(steps.find(s => s.id === 'policy')?.done).toBe(false);
+    const next = nextMcpToolSetupAction(steps, {
+      status: 'ACTIVE',
+      current_version_id: 'ver-1',
+    });
+    expect(next?.stepId).toBe('policy');
+    expect(next?.message).toMatch(/권장/);
+    expect(next?.message).toMatch(/완료로 표시하지 않습니다/);
+  });
+
   it('explains activate blocks for MISSING/BLOCKED/no version/permission', () => {
     expect(toolLifecycleDisabledReason(missingTool, { canEdit: true })).toMatch(/누락/);
     expect(toolLifecycleDisabledReason(blockedTool, { canEdit: true })).toMatch(/차단/);
@@ -224,9 +243,11 @@ describe('MCPToolDetail activation UX', () => {
     });
 
     expect(await screen.findByTestId('mcp-tool-setup-step-activate')).toHaveAttribute('data-done', 'true');
+    expect(screen.getByTestId('mcp-tool-setup-step-policy')).toHaveAttribute('data-done', 'false');
     await waitFor(() => {
-      expect(screen.getByTestId('mcp-tool-setup-next')).toHaveTextContent(/VERIFIED/);
+      expect(screen.getByTestId('mcp-tool-setup-next')).toHaveTextContent(/권장/);
     });
+    expect(screen.getByTestId('mcp-tool-setup-next')).toHaveTextContent(/VERIFIED/);
     expect(screen.getByText(/서버 초안\(DRAFT\)≠도구 상태/)).toBeInTheDocument();
   });
 });
