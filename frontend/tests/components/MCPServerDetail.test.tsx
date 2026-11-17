@@ -49,9 +49,11 @@ describe('MCPServerDetail — API detail', () => {
     });
 
     expect(await screen.findByText('Docs MCP')).toBeInTheDocument();
-    expect(screen.getByText('서버 등록 후 이용 순서')).toBeInTheDocument();
+    expect(screen.getByTestId('mcp-server-setup-progress')).toBeInTheDocument();
+    expect(screen.getByText(/이용 준비: 등록 → 연결 확인 → 도구 탐색 → 결과 적용/)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '도구 탐색 미리보기' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '탐색 결과 적용' })).toBeDisabled();
+    expect(screen.getByTestId('mcp-apply-disabled-reason')).toHaveTextContent(/미리보기/);
     expect(screen.getAllByText('Streamable HTTP').length).toBeGreaterThan(0);
     expect(screen.getByText('2026-07-28')).toBeInTheDocument();
   });

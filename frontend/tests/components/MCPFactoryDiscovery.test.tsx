@@ -81,7 +81,7 @@ describe('Factory Discovery contract evidence and apply fail-closed', () => {
     await user.click(screen.getByRole('button', { name: '도구 탐색 미리보기' }));
 
     const region = await screen.findByRole('region', { name: 'Factory Discovery 계약 정합성' });
-    expect(region).toHaveTextContent('Factory 계약 불일치 (MISMATCHED)');
+    expect(region).toHaveTextContent('Factory 계약 정합성: 계약 불일치');
     expect(region).toHaveTextContent('getPet: 예상 도구 누락');
     expect(region).toHaveTextContent('unknown_tool: 미승인 원격 도구');
     expect(region).toHaveTextContent('getPetV2: 계약 변경');
@@ -103,7 +103,7 @@ describe('Factory Discovery contract evidence and apply fail-closed', () => {
 
     await screen.findByRole('heading', { name: 'Factory 도구 서버' });
     await user.click(screen.getByRole('button', { name: '도구 탐색 미리보기' }));
-    expect(await screen.findByText('Factory 계약 판정 불명확 (AMBIGUOUS)')).toBeInTheDocument();
+    expect(await screen.findByText('Factory 계약 정합성: 판정 불명확')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '탐색 결과 적용' })).toBeDisabled();
     expect(fetchMock.mock.calls.filter(([url, init]) =>
       String(url).includes('/discoveries') && init?.method === 'POST',
@@ -120,7 +120,7 @@ describe('Factory Discovery contract evidence and apply fail-closed', () => {
 
     await screen.findByRole('heading', { name: 'Factory 도구 서버' });
     await user.click(screen.getByRole('button', { name: '도구 탐색 미리보기' }));
-    expect(await screen.findByText('Factory 계약 정합성 일치 (CLEAN)')).toBeInTheDocument();
+    expect(await screen.findByText('Factory 계약 정합성: 계약 일치')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '탐색 결과 적용' })).toBeEnabled();
     expect(fetchMock.mock.calls.filter(([url, init]) =>
       String(url).includes('/discoveries') && init?.method === 'POST',
@@ -153,7 +153,7 @@ describe('Factory Discovery contract evidence and apply fail-closed', () => {
     view();
     await screen.findByRole('heading', { name: 'Factory 도구 서버' });
     await user.click(screen.getByRole('button', { name: /탐색 이력/ }));
-    expect(await screen.findByText(/Factory 정합성: MISMATCHED/)).toBeInTheDocument();
+    expect(await screen.findByText(/Factory 정합성: 계약 불일치/)).toBeInTheDocument();
     expect(fetchMock.mock.calls.every(([url, init]) =>
       !(String(url).includes('/discoveries') && init?.method === 'POST'),
     )).toBe(true);
