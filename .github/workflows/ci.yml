@@ -105,6 +105,13 @@ jobs:
           cache: pip
           cache-dependency-path: backend/pyproject.toml
 
+      - name: Install redis-server (dedicated broker E2E only)
+        run: |
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq redis-server
+          # Do not start the distro redis service — the E2E suite spawns its own
+          # throwaway redis-server on a free loopback port and stops it on teardown.
+
       - name: Install backend (dev)
         run: |
           python -m pip install -U pip
