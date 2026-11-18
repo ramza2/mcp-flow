@@ -1530,17 +1530,30 @@ Level 3 승인 성능지표는 내부 KPI harness와 **별도**로 `backend/test
 |---|---|---|
 | `L3-02` | 자연어 업무지시 분석 성공률 ≥ 85% | `measure_l3_02.py` (운영 Analyzer 핵심 처리 재사용, 정답 데이터셋 검토 필요) |
 | `L3-05` | Tool 검색 평균 응답시간 ≤ 3초 | `measure_l3_05.py` (`ToolRetrievalService.retrieve()`만 측정) |
+| `L3-06` | 연계·검증 완료 MCP Tool 수 ≥ 10 | `measure_l3_06.py` (Verification Repository DISTINCT 집계; KPI harness 결과 비재사용) |
 
 - 목표: `level3/targets.v1.yaml`
 - L3-02 고정 정답셋/채점: `level3/dataset_l302.v1.yaml`, `level3/scoring_l302.py`
 - L3-02 측정 방법/검토 게이트: `level3/METHOD_L302.md`
 - L3-05 고정 질의/반복: `level3/dataset.v2.yaml`
 - L3-05 방법·판정: `level3/METHOD.md`
+- L3-06 방법·판정: `level3/METHOD_L306.md`
 - 증적: `artifacts/level3/` (덮어쓰기 금지)
 - L3-05 진입점: `./scripts/level3-tool-retrieval-latency.sh --preflight|--run`
+- L3-06 진입점: `./scripts/level3-verified-tool-count.sh --preflight|--run`
 - L3-02 진입점: `python -m tests.evaluation.level3.measure_l3_02 --preflight|--run`
 
-`L3-01`, `L3-03`, `L3-04`, `L3-06`은 targets에 예약만 두고 이 PR에서는 측정하지 않는다.
+`L3-01`, `L3-03`, `L3-04`는 targets에 예약만 두고 이 절에서는 측정하지 않는다.
+
+`L3-06` 개발 최소기준:
+
+```text
+current ToolVersion의 미만료 VERIFIED DISTINCT MCPTool 수 ≥ 10
+ACTIVE 강제·실시간 재연결 없음
+alias/복제 의심은 목록만 남기고 자동 제외 금지
+미해결 중복이 MET/NOT_MET을 바꾸면 INCOMPLETE
+KPI harness 결과 재사용 금지 (Repository SELECT만 재사용)
+```
 
 ### 25.2 Final regression harness
 

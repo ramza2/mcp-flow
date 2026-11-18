@@ -25,7 +25,7 @@
 
 | 파일 | 역할 |
 |---|---|
-| `targets.v1.yaml` | L3-01~L3-06 목표 (이번 버전은 L3-05만 측정 구현) |
+| `targets.v1.yaml` | L3-01~L3-06 목표 (L3-05·L3-06 측정 구현; L3-06은 `METHOD_L306.md`) |
 | `dataset.v2.yaml` | 실제 허용된 4개 Tool에 대응하는 고정 질의, 기대 Tool 이름, warm-up/공식 반복 횟수 |
 
 - `dataset_version` / `targets_version`으로 버전 고정
