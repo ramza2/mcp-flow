@@ -158,25 +158,28 @@ def validate_plan(plan: dict[str, Any]) -> dict[str, Any]:
                     "--run collects every check in the window."
                 ),
             }
-        server_id = str(server.get("server_id") or "").strip()
+        server_id_raw = str(server.get("server_id") or "").strip()
         try:
-            server_uuid = uuid.UUID(server_id)
+            server_uuid = uuid.UUID(server_id_raw)
         except ValueError:
             return {
                 "ok": False,
                 "reason": "PLAN_SERVER_ID_INVALID",
-                "server_id": server_id or None,
+                "server_id": server_id_raw or None,
             }
+        # Canonical RFC-4122 string (lowercase hex) so case/bracing variants collide.
+        server_id = str(server_uuid)
         if server_id in seen_servers:
             return {
                 "ok": False,
                 "reason": "PLAN_SERVER_ID_DUPLICATE",
                 "server_id": server_id,
+                "server_id_raw": server_id_raw,
             }
         seen_servers.add(server_id)
         planned_servers.append(
             {
-                "server_id": str(server_uuid),
+                "server_id": server_id,
                 "server_label": server.get("label"),
             }
         )
@@ -263,13 +266,12 @@ def compose_commands() -> list[str]:
         "# Do not chown the entire artifacts/ tree",
         "mkdir -p artifacts/level3",
         "",
-        "# Preflight before connection tests (plan/servers/window; checks optional)",
+        "# Preflight before connection tests (preserve plan SHA256 evidence)",
         *run_prefix,
         f"{py_wrap}exec python -m tests.evaluation.level3.measure_l3_01 "
-        "--preflight --plan /opt/kpi-src/tests/evaluation/level3/"
-        "plan_l301.example.v1.yaml'",
+        "--preflight --write-artifact --plan /path/to/plan_l301.v1.yaml'",
         "",
-        "# Official L3-01 run (example:false plan; window must have exact counts)",
+        "# Official L3-01 run after window end (compare plan_sha256 to preflight)",
         *run_prefix,
         f"{py_wrap}exec python -m tests.evaluation.level3.measure_l3_01 "
         "--run --write-artifact --plan /path/to/plan_l301.v1.yaml'",
@@ -591,10 +593,40 @@ async def preflight_environment(
     }
 
 
+def assert_evaluation_window_finished(
+    *,
+    window_end: datetime,
+    as_of: datetime,
+) -> dict[str, Any]:
+    """Official --run may judge only after evaluation_window.end (UTC)."""
+
+    end = window_end if window_end.tzinfo is not None else window_end.replace(tzinfo=UTC)
+    measured = as_of if as_of.tzinfo is not None else as_of.replace(tzinfo=UTC)
+    end = end.astimezone(UTC)
+    measured = measured.astimezone(UTC)
+    if end > measured:
+        return {
+            "ok": False,
+            "reason": "WINDOW_NOT_FINISHED",
+            "window_end": format_as_of(end),
+            "as_of": format_as_of(measured),
+            "hint": (
+                "evaluation_window.end is still in the future relative to "
+                "measurement UTC; MET/NOT_MET is forbidden until the window ends."
+            ),
+        }
+    return {
+        "ok": True,
+        "window_end": format_as_of(end),
+        "as_of": format_as_of(measured),
+    }
+
+
 async def measure_attempts(
     session: AsyncSession,
     *,
     plan: dict[str, Any],
+    as_of: datetime | None = None,
 ) -> dict[str, Any]:
     plan_check = validate_plan(plan)
     if not plan_check.get("ok"):
@@ -606,6 +638,22 @@ async def measure_attempts(
             "hint": "Official --run requires example: false.",
         }
 
+    measured_as_of = as_of or new_as_of_utc()
+    window_gate = assert_evaluation_window_finished(
+        window_end=plan_check["window_end_dt"],
+        as_of=measured_as_of,
+    )
+    if not window_gate.get("ok"):
+        return {
+            "ok": False,
+            "reason": window_gate["reason"],
+            "window_end": window_gate.get("window_end"),
+            "as_of": window_gate.get("as_of"),
+            "hint": window_gate.get("hint"),
+            "required_attempts": plan_check["required_attempts"],
+            "plan_version": plan_check["plan_version"],
+        }
+
     snapshot = await begin_consistent_read_snapshot(session)
     collected = await collect_window_attempts(session, plan_check=plan_check)
     return {
@@ -615,6 +663,7 @@ async def measure_attempts(
         "window_start": plan_check["window_start"],
         "window_end": plan_check["window_end"],
         "required_attempts": plan_check["required_attempts"],
+        "as_of": format_as_of(measured_as_of),
     }
 
 
@@ -646,8 +695,9 @@ async def _run_async(args: argparse.Namespace) -> dict[str, Any]:
             "Fixed plan (server_id × attempts_per_server × evaluation_window). "
             "Collect every mcp_server_checks row in the window per server. "
             "Exact attempts_per_server required; missing/excess/ambiguous → "
-            "INCOMPLETE. FAILED/TIMED_OUT remain in the denominator. "
-            "SELECT-only; no live Connection Test."
+            "INCOMPLETE. --run with evaluation_window.end still in the future → "
+            "WINDOW_NOT_FINISHED (no MET/NOT_MET). FAILED/TIMED_OUT remain in "
+            "the denominator. SELECT-only; no live Connection Test."
         ),
         "compose_commands": compose_commands(),
     }
@@ -687,6 +737,17 @@ async def _run_async(args: argparse.Namespace) -> dict[str, Any]:
         return report
 
     if args.run:
+        window_gate = assert_evaluation_window_finished(
+            window_end=plan_check["window_end_dt"],
+            as_of=as_of,
+        )
+        if not window_gate.get("ok"):
+            report["ok"] = False
+            report["reason"] = "WINDOW_NOT_FINISHED"
+            report["judgment"] = "INCOMPLETE"
+            report["window_end"] = window_gate.get("window_end")
+            report["hint"] = window_gate.get("hint")
+            return report
         if not sha or sha == "unknown":
             report["ok"] = False
             report["reason"] = "GIT_SHA_UNKNOWN"
@@ -749,7 +810,7 @@ async def _run_async(args: argparse.Namespace) -> dict[str, Any]:
                     return report
 
                 await session.rollback()
-                measured = await measure_attempts(session, plan=plan)
+                measured = await measure_attempts(session, plan=plan, as_of=as_of)
                 report["read_snapshot"] = measured.get("read_snapshot")
                 report["attempts"] = measured.get("attempts")
                 report["per_server"] = measured.get("per_server")

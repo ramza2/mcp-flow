@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from tests.evaluation.level3 import L3_01_METRIC_ID, PLAN_VERSION_L301
 from tests.evaluation.level3.measure_l3_01 import (
     artifact_path_for,
+    assert_evaluation_window_finished,
     assign_attempts_from_window_checks,
     begin_consistent_read_snapshot,
     check_artifact_guard,
@@ -77,6 +78,43 @@ def test_plan_rejects_prepinned_check_ids() -> None:
     servers[0] = first
     plan["servers"] = servers
     assert validate_plan(plan)["reason"] == "PLAN_PREPINNED_CHECKS_FORBIDDEN"
+
+
+def test_plan_rejects_duplicate_server_uuid_case_variants() -> None:
+    sid = uuid.uuid4()
+    plan = {
+        "plan_version": PLAN_VERSION_L301,
+        "example": False,
+        "evaluation_window": {
+            "start": "2026-11-01T00:00:00Z",
+            "end": "2026-11-30T23:59:59Z",
+        },
+        "attempts_per_server": 1,
+        "servers": [
+            {"server_id": str(sid).upper(), "label": "a"},
+            {"server_id": str(sid).lower(), "label": "b"},
+        ],
+    }
+    result = validate_plan(plan)
+    assert result["ok"] is False
+    assert result["reason"] == "PLAN_SERVER_ID_DUPLICATE"
+    assert result["server_id"] == str(sid)
+
+
+def test_run_rejects_future_evaluation_window_end() -> None:
+    as_of = datetime(2026, 11, 18, 6, 0, 0, tzinfo=UTC)
+    future_end = datetime(2026, 11, 18, 7, 0, 0, tzinfo=UTC)
+    gate = assert_evaluation_window_finished(window_end=future_end, as_of=as_of)
+    assert gate["ok"] is False
+    assert gate["reason"] == "WINDOW_NOT_FINISHED"
+
+    past_end = datetime(2026, 11, 18, 5, 0, 0, tzinfo=UTC)
+    ok = assert_evaluation_window_finished(window_end=past_end, as_of=as_of)
+    assert ok["ok"] is True
+
+    # Boundary: end == as_of is finished (MET/NOT_MET allowed).
+    equal = assert_evaluation_window_finished(window_end=as_of, as_of=as_of)
+    assert equal["ok"] is True
 
 
 def test_judgment_includes_failures_and_timeouts_in_denominator() -> None:
@@ -217,6 +255,7 @@ def test_compose_commands_workdir_level3_mount_no_artifacts_chown() -> None:
     assert "$(pwd)/artifacts/level3:/opt/kpi-artifacts/level3" in text
     assert "MCPFLOW_ARTIFACT_DIR=/opt/kpi-artifacts" in text
     assert "measure_l3_01" in text
+    assert "--preflight --write-artifact" in text
     assert "chown -R" not in text
     assert '$(pwd)/artifacts:/opt/kpi-artifacts"' not in text
 

@@ -52,7 +52,21 @@ success_rate_percent = succeeded / required_attempts × 100
 
 `check_id` 사전 pin은 **금지**한다.  
 `example: true` plan은 `--run`을 거부한다.  
+동일 UUID의 대소문자/표기 차이는 정규화 후 중복으로 거부한다.  
 증적에 plan 파일 **SHA256**을 기록한다.
+
+### 사전 계획 증적 보존
+
+시험 시작 전에 plan을 고정한 뒤 preflight 증적을 남긴다.
+
+```bash
+python -m tests.evaluation.level3.measure_l3_01 --preflight --write-artifact \
+  --plan path/to/plan_l301.v1.yaml
+```
+
+공식 `--run` 증적의 `plan_sha256`은 위 preflight 증적의 `plan_sha256`과
+**바이트 단위로 동일**해야 한다. 불일치하면 시험 중 plan이 바뀐 것이므로
+공식 판정에 사용하지 않는다.
 
 ## Preflight
 
@@ -62,14 +76,17 @@ success_rate_percent = succeeded / required_attempts × 100
 - example plan은 DB 없이 통과 가능
 - 실plan은 서버 존재 확인 (check 행 존재는 요구하지 않음)
 - check 수집·성공률 판정은 `--run`에서만 수행
+- `--write-artifact`로 사전 plan SHA256 증적 보존 가능
 
 ## 인터페이스
 
 ```bash
 export PYTHONPATH=backend
-python -m tests.evaluation.level3.measure_l3_01 --preflight \
+# Before connection tests: freeze plan evidence
+python -m tests.evaluation.level3.measure_l3_01 --preflight --write-artifact \
   --plan path/to/plan_l301.v1.yaml
 
+# After evaluation_window.end (UTC): official judgment
 python -m tests.evaluation.level3.measure_l3_01 --run --write-artifact \
   --plan path/to/plan_l301.v1.yaml
 ```
@@ -77,7 +94,7 @@ python -m tests.evaluation.level3.measure_l3_01 --run --write-artifact \
 또는:
 
 ```bash
-./scripts/level3-mcp-connection-success.sh --preflight --plan ...
+./scripts/level3-mcp-connection-success.sh --preflight --write-artifact --plan ...
 ./scripts/level3-mcp-connection-success.sh --run --write-artifact --plan ...
 ```
 
@@ -91,11 +108,14 @@ python -m tests.evaluation.level3.measure_l3_01 --run --write-artifact \
 
 ## 판정
 
-1. 필수 시도 수 = plan 고정 분모
-2. 서버별 window 수집 건수가 정확히 일치하고 상태가 단말일 때만 성공률 산출
-3. `success_rate_percent ≥ 90` → `MET`, 미만 → `NOT_MET`
-4. 누락·초과·모호·오류 → `INCOMPLETE`
-5. 증적 파일 덮어쓰기 금지
+1. `--run` 측정 UTC 시각보다 `evaluation_window.end`가 미래이면
+   `INCOMPLETE` (`WINDOW_NOT_FINISHED`) — 종료 전 MET/NOT_MET 금지
+2. 필수 시도 수 = plan 고정 분모
+3. 서버별 window 수집 건수가 정확히 일치하고 상태가 단말일 때만 성공률 산출
+4. `success_rate_percent ≥ 90` → `MET`, 미만 → `NOT_MET`
+5. 누락·초과·모호·오류 → `INCOMPLETE`
+6. 증적 파일 덮어쓰기 금지
+7. 공식 `--run`의 `plan_sha256`은 사전 `--preflight --write-artifact` 증적과 일치해야 함
 
 ## 증적 필드 (요약)
 
