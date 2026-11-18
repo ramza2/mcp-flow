@@ -1551,10 +1551,12 @@ Level 3 승인 성능지표는 내부 KPI harness와 **별도**로 `backend/test
 `L3-01` 개발 최소기준:
 
 ```text
-사전 고정 plan(서버·반복·평가 구간·check_id)
+시험 전 plan 고정(서버·반복·평가 구간) + plan SHA256 증적
+check_id 사전 pin 금지; --run이 window 내 전체 검사 수집
+서버별 건수 누락·초과·모호 → INCOMPLETE
 분모 = servers × attempts_per_server (실패·타임아웃 포함)
-누락·모호 증적 → INCOMPLETE
 성공률 ≥ 90% → MET
+--preflight는 연결검사 전에 가능
 SELECT-only mcp_server_checks; 실연결/외부호출 금지
 ```
 

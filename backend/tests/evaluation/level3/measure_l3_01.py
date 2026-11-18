@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import os
 import sys
@@ -48,7 +49,6 @@ _COMPOSE_SERVER = (
     "docker compose --env-file .env.server -f compose.yaml -f compose.server.yaml"
 )
 _OPS_ENV_LABEL = "server-live-level3-l301"
-_ARTIFACT_CONTAINER_UID = 10001
 _TERMINAL_STATUSES = {
     MCPCheckStatus.SUCCEEDED.value,
     MCPCheckStatus.FAILED.value,
@@ -79,6 +79,10 @@ def load_plan(path: Path) -> dict[str, Any]:
     return doc
 
 
+def plan_file_sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
 def l3_01_target_min_percent(targets: dict[str, Any]) -> float:
     target = (targets.get("targets") or {}).get(L3_01_METRIC_ID) or {}
     return float(target.get("target_min_percent", 90.0))
@@ -106,6 +110,11 @@ def new_as_of_utc() -> datetime:
 
 
 def validate_plan(plan: dict[str, Any]) -> dict[str, Any]:
+    """Validate fixed server_id / attempts_per_server / evaluation_window.
+
+    Pre-pinned check_id lists are rejected — window collection is authoritative.
+    """
+
     version = str(plan.get("plan_version") or "").strip()
     if version != PLAN_VERSION_L301:
         return {
@@ -134,12 +143,21 @@ def validate_plan(plan: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(servers, list) or not servers:
         return {"ok": False, "reason": "PLAN_SERVERS_MISSING"}
 
-    planned: list[dict[str, Any]] = []
+    planned_servers: list[dict[str, Any]] = []
     seen_servers: set[str] = set()
-    seen_checks: set[str] = set()
     for server in servers:
         if not isinstance(server, dict):
             return {"ok": False, "reason": "PLAN_SERVER_INVALID"}
+        if "attempts" in server or "check_id" in server:
+            return {
+                "ok": False,
+                "reason": "PLAN_PREPINNED_CHECKS_FORBIDDEN",
+                "hint": (
+                    "Do not pre-pin check_id/attempts. Fix server_id, "
+                    "attempts_per_server, and evaluation_window only; "
+                    "--run collects every check in the window."
+                ),
+            }
         server_id = str(server.get("server_id") or "").strip()
         try:
             server_uuid = uuid.UUID(server_id)
@@ -156,90 +174,29 @@ def validate_plan(plan: dict[str, Any]) -> dict[str, Any]:
                 "server_id": server_id,
             }
         seen_servers.add(server_id)
-
-        attempts = server.get("attempts")
-        if not isinstance(attempts, list) or len(attempts) != attempts_per_server:
-            return {
-                "ok": False,
-                "reason": "PLAN_ATTEMPT_COUNT_MISMATCH",
-                "server_id": server_id,
-                "expected": attempts_per_server,
-                "actual": len(attempts) if isinstance(attempts, list) else None,
+        planned_servers.append(
+            {
+                "server_id": str(server_uuid),
+                "server_label": server.get("label"),
             }
-
-        indexes: set[int] = set()
-        for attempt in attempts:
-            if not isinstance(attempt, dict):
-                return {
-                    "ok": False,
-                    "reason": "PLAN_ATTEMPT_INVALID",
-                    "server_id": server_id,
-                }
-            attempt_index = attempt.get("attempt_index")
-            check_id = str(attempt.get("check_id") or "").strip()
-            if not isinstance(attempt_index, int) or attempt_index < 0:
-                return {
-                    "ok": False,
-                    "reason": "PLAN_ATTEMPT_INDEX_INVALID",
-                    "server_id": server_id,
-                }
-            if attempt_index in indexes:
-                return {
-                    "ok": False,
-                    "reason": "PLAN_ATTEMPT_INDEX_DUPLICATE",
-                    "server_id": server_id,
-                    "attempt_index": attempt_index,
-                }
-            indexes.add(attempt_index)
-            try:
-                check_uuid = uuid.UUID(check_id)
-            except ValueError:
-                return {
-                    "ok": False,
-                    "reason": "PLAN_CHECK_ID_INVALID",
-                    "server_id": server_id,
-                    "check_id": check_id or None,
-                }
-            if check_id in seen_checks:
-                return {
-                    "ok": False,
-                    "reason": "PLAN_CHECK_ID_AMBIGUOUS",
-                    "check_id": check_id,
-                }
-            seen_checks.add(check_id)
-            planned.append(
-                {
-                    "server_id": str(server_uuid),
-                    "server_label": server.get("label"),
-                    "attempt_index": attempt_index,
-                    "check_id": str(check_uuid),
-                }
-            )
+        )
 
     required = required_l301_attempt_count(
-        server_count=len(servers),
+        server_count=len(planned_servers),
         attempts_per_server=attempts_per_server,
     )
-    if len(planned) != required:
-        return {
-            "ok": False,
-            "reason": "PLAN_DENOMINATOR_MISMATCH",
-            "required_attempts": required,
-            "planned_attempts": len(planned),
-        }
-
     return {
         "ok": True,
         "plan_version": version,
         "example": bool(plan.get("example")),
-        "server_count": len(servers),
+        "server_count": len(planned_servers),
         "attempts_per_server": attempts_per_server,
         "required_attempts": required,
         "window_start": format_as_of(start),
         "window_end": format_as_of(end),
         "window_start_dt": start,
         "window_end_dt": end,
-        "planned_attempts": planned,
+        "planned_servers": planned_servers,
     }
 
 
@@ -267,12 +224,7 @@ def check_artifact_dir_writable() -> dict[str, Any]:
             "ok": False,
             "reason": "ARTIFACT_DIR_NOT_WRITABLE",
             "error": str(exc),
-            "expected_uid": _ARTIFACT_CONTAINER_UID,
-            "hint": (
-                "mkdir -p artifacts/level3 && "
-                f"sudo chown -R {_ARTIFACT_CONTAINER_UID}:{_ARTIFACT_CONTAINER_UID} "
-                "artifacts/level3"
-            ),
+            "hint": "mkdir -p artifacts/level3 and ensure the api container can write it",
         }
     probe = path / f".write_probe_{uuid.uuid4().hex}"
     try:
@@ -284,12 +236,7 @@ def check_artifact_dir_writable() -> dict[str, Any]:
             "reason": "ARTIFACT_DIR_NOT_WRITABLE",
             "artifact_dir": str(path),
             "error": str(exc),
-            "expected_uid": _ARTIFACT_CONTAINER_UID,
-            "hint": (
-                "mkdir -p artifacts/level3 && "
-                f"sudo chown -R {_ARTIFACT_CONTAINER_UID}:{_ARTIFACT_CONTAINER_UID} "
-                "artifacts/level3"
-            ),
+            "hint": "mkdir -p artifacts/level3 and ensure the api container can write it",
         }
     return {"ok": True, "artifact_dir": str(path), "euid": os.geteuid()}
 
@@ -297,8 +244,9 @@ def check_artifact_dir_writable() -> dict[str, Any]:
 def compose_commands() -> list[str]:
     run_prefix = [
         f"{_COMPOSE_SERVER} run --rm --no-deps -T \\",
+        "  --workdir /opt/kpi-src \\",
         '  -v "$(pwd)/backend:/opt/kpi-src:ro" \\',
-        '  -v "$(pwd)/artifacts:/opt/kpi-artifacts" \\',
+        '  -v "$(pwd)/artifacts/level3:/opt/kpi-artifacts/level3" \\',
         "  -e PYTHONPATH=/opt/kpi-src \\",
         "  -e MCPFLOW_ARTIFACT_DIR=/opt/kpi-artifacts \\",
         '  -e MCPFLOW_GIT_SHA="$(git rev-parse HEAD)" \\',
@@ -310,19 +258,18 @@ def compose_commands() -> list[str]:
     )
     return [
         "# Server prerequisites: .env.server + compose.yaml + compose.server.yaml",
-        "# api image uid/gid 10001; host artifacts/level3 must be writable",
+        "# Existing api image; backend read-only; mount artifacts/level3 only",
         "# DB SELECT only — no Connection Test / Discovery / external calls",
+        "# Do not chown the entire artifacts/ tree",
         "mkdir -p artifacts/level3",
-        f"sudo chown -R {_ARTIFACT_CONTAINER_UID}:{_ARTIFACT_CONTAINER_UID} "
-        "artifacts/level3",
         "",
-        "# Preflight (plan + pinned check_id SELECT readiness)",
+        "# Preflight before connection tests (plan/servers/window; checks optional)",
         *run_prefix,
         f"{py_wrap}exec python -m tests.evaluation.level3.measure_l3_01 "
         "--preflight --plan /opt/kpi-src/tests/evaluation/level3/"
         "plan_l301.example.v1.yaml'",
         "",
-        "# Official L3-01 run (replace example plan; example:false required)",
+        "# Official L3-01 run (example:false plan; window must have exact counts)",
         *run_prefix,
         f"{py_wrap}exec python -m tests.evaluation.level3.measure_l3_01 "
         "--run --write-artifact --plan /path/to/plan_l301.v1.yaml'",
@@ -374,134 +321,257 @@ def _normalize_checked_at(value: datetime | None) -> datetime | None:
     return value.astimezone(UTC)
 
 
-def match_attempt_to_check(
-    *,
-    planned: dict[str, Any],
-    check: Any | None,
-    window_start: datetime,
-    window_end: datetime,
-) -> dict[str, Any]:
-    base = {
-        "server_id": planned["server_id"],
-        "server_label": planned.get("server_label"),
-        "attempt_index": planned["attempt_index"],
-        "check_id": planned["check_id"],
-    }
-    if check is None:
-        return {**base, "ok": False, "reason": "CHECK_NOT_FOUND"}
-
-    check_server_id = str(check.mcp_server_id)
-    if check_server_id != planned["server_id"]:
-        return {
-            **base,
-            "ok": False,
-            "reason": "CHECK_SERVER_MISMATCH",
-            "actual_server_id": check_server_id,
-        }
-
+def serialize_check_row(check: Any) -> dict[str, Any]:
     checked_at = _normalize_checked_at(check.checked_at)
-    if checked_at is None:
-        return {**base, "ok": False, "reason": "CHECK_CHECKED_AT_MISSING"}
-    if checked_at < window_start or checked_at > window_end:
-        return {
-            **base,
-            "ok": False,
-            "reason": "CHECK_OUTSIDE_WINDOW",
-            "checked_at": format_as_of(checked_at),
-        }
-
-    status = str(getattr(check.status, "value", check.status))
-    if status not in _TERMINAL_STATUSES:
-        return {
-            **base,
-            "ok": False,
-            "reason": "CHECK_STATUS_INVALID",
-            "status": status,
-            "checked_at": format_as_of(checked_at),
-        }
-
     return {
-        **base,
-        "ok": True,
-        "reason": None,
-        "status": status,
+        "check_id": str(check.id),
+        "server_id": str(check.mcp_server_id),
+        "status": str(getattr(check.status, "value", check.status)),
         "check_type": str(getattr(check.check_type, "value", check.check_type)),
         "latency_ms": check.latency_ms,
         "protocol_version": check.protocol_version,
         "error_code": check.error_code,
-        "checked_at": format_as_of(checked_at),
+        "checked_at": format_as_of(checked_at) if checked_at else None,
     }
 
 
-async def load_matched_attempts(
+def assign_attempts_from_window_checks(
+    *,
+    server_id: str,
+    server_label: Any,
+    checks: list[Any],
+    attempts_per_server: int,
+) -> dict[str, Any]:
+    """Map all window checks for one server onto fixed attempt slots."""
+
+    collected = [serialize_check_row(row) for row in checks]
+    actual = len(checks)
+    if actual < attempts_per_server:
+        return {
+            "ok": False,
+            "reason": "CHECK_COUNT_MISSING",
+            "server_id": server_id,
+            "server_label": server_label,
+            "expected": attempts_per_server,
+            "actual": actual,
+            "collected_checks": collected,
+            "attempts": [],
+        }
+    if actual > attempts_per_server:
+        return {
+            "ok": False,
+            "reason": "CHECK_COUNT_EXCESS",
+            "server_id": server_id,
+            "server_label": server_label,
+            "expected": attempts_per_server,
+            "actual": actual,
+            "collected_checks": collected,
+            "attempts": [],
+        }
+
+    attempts: list[dict[str, Any]] = []
+    for index, check in enumerate(checks):
+        status = str(getattr(check.status, "value", check.status))
+        checked_at = _normalize_checked_at(check.checked_at)
+        if checked_at is None:
+            return {
+                "ok": False,
+                "reason": "CHECK_CHECKED_AT_MISSING",
+                "server_id": server_id,
+                "server_label": server_label,
+                "expected": attempts_per_server,
+                "actual": actual,
+                "collected_checks": collected,
+                "attempts": [],
+            }
+        if status not in _TERMINAL_STATUSES:
+            return {
+                "ok": False,
+                "reason": "CHECK_STATUS_INVALID",
+                "server_id": server_id,
+                "server_label": server_label,
+                "expected": attempts_per_server,
+                "actual": actual,
+                "collected_checks": collected,
+                "attempts": [],
+            }
+        attempts.append(
+            {
+                "ok": True,
+                "reason": None,
+                "server_id": server_id,
+                "server_label": server_label,
+                "attempt_index": index,
+                "check_id": str(check.id),
+                "status": status,
+                "check_type": str(
+                    getattr(check.check_type, "value", check.check_type)
+                ),
+                "latency_ms": check.latency_ms,
+                "protocol_version": check.protocol_version,
+                "error_code": check.error_code,
+                "checked_at": format_as_of(checked_at),
+            }
+        )
+    return {
+        "ok": True,
+        "reason": None,
+        "server_id": server_id,
+        "server_label": server_label,
+        "expected": attempts_per_server,
+        "actual": actual,
+        "collected_checks": collected,
+        "attempts": attempts,
+    }
+
+
+async def collect_window_attempts(
     session: AsyncSession,
     *,
     plan_check: dict[str, Any],
 ) -> dict[str, Any]:
-    planned = list(plan_check["planned_attempts"])
-    check_ids = [uuid.UUID(row["check_id"]) for row in planned]
-    repo = MCPDiscoveryRepository(session)
-    rows = await repo.list_checks_by_ids(check_ids)
-    by_id = {str(row.id): row for row in rows}
+    """Collect every check in the window for planned servers; fail on count drift."""
 
+    repo = MCPDiscoveryRepository(session)
+    per_server: list[dict[str, Any]] = []
     attempts: list[dict[str, Any]] = []
-    for item in planned:
-        attempts.append(
-            match_attempt_to_check(
-                planned=item,
-                check=by_id.get(item["check_id"]),
-                window_start=plan_check["window_start_dt"],
-                window_end=plan_check["window_end_dt"],
-            )
+    for server in plan_check["planned_servers"]:
+        rows = await repo.list_checks_in_window(
+            mcp_server_id=uuid.UUID(server["server_id"]),
+            window_start=plan_check["window_start_dt"],
+            window_end=plan_check["window_end_dt"],
         )
+        mapped = assign_attempts_from_window_checks(
+            server_id=server["server_id"],
+            server_label=server.get("server_label"),
+            checks=rows,
+            attempts_per_server=int(plan_check["attempts_per_server"]),
+        )
+        per_server.append(mapped)
+        if mapped.get("ok"):
+            attempts.extend(mapped["attempts"])
+
+    incomplete = [row for row in per_server if row.get("ok") is not True]
+    if incomplete:
+        first = incomplete[0]
+        return {
+            "ok": False,
+            "reason": first.get("reason") or "CHECK_WINDOW_INCOMPLETE",
+            "required_attempts": plan_check["required_attempts"],
+            "per_server": per_server,
+            "attempts": attempts,
+            "collected_check_count": sum(
+                int(row.get("actual") or 0) for row in per_server
+            ),
+        }
+
+    if len(attempts) != int(plan_check["required_attempts"]):
+        return {
+            "ok": False,
+            "reason": "EVIDENCE_COUNT_MISMATCH",
+            "required_attempts": plan_check["required_attempts"],
+            "matched_attempts": len(attempts),
+            "per_server": per_server,
+            "attempts": attempts,
+            "collected_check_count": len(attempts),
+        }
+
     return {
+        "ok": True,
+        "reason": None,
+        "required_attempts": plan_check["required_attempts"],
+        "per_server": per_server,
         "attempts": attempts,
-        "fetched_check_count": len(rows),
-        "planned_check_count": len(planned),
+        "collected_check_count": len(attempts),
     }
 
 
 async def preflight_environment(
-    session: AsyncSession,
+    session: AsyncSession | None,
     *,
     plan: dict[str, Any],
+    plan_sha256: str,
     require_non_example: bool,
+    require_db: bool,
 ) -> dict[str, Any]:
+    """Fail-closed readiness. Checks are NOT required before tests."""
+
     targets = load_targets()
     target_min = l3_01_target_min_percent(targets)
     plan_check = validate_plan(plan)
     if not plan_check.get("ok"):
-        return {"ok": False, **plan_check}
+        return {"ok": False, **plan_check, "plan_sha256": plan_sha256}
 
     if require_non_example and plan_check.get("example"):
         return {
             "ok": False,
             "reason": "PLAN_IS_EXAMPLE",
+            "plan_sha256": plan_sha256,
             "hint": (
-                "Copy plan_l301.example.v1.yaml, set example: false, and pin "
-                "real server/check IDs before --run."
+                "Copy plan_l301.example.v1.yaml, set example: false, and set "
+                "real server_id / window / attempts_per_server before --run."
             ),
         }
 
     writable = check_artifact_dir_writable()
     if not writable.get("ok"):
-        return {"ok": False, **writable}
+        return {"ok": False, **writable, "plan_sha256": plan_sha256}
+
+    base = {
+        "ok": True,
+        "target_min_percent": target_min,
+        "targets_version": str(targets.get("targets_version") or TARGETS_VERSION),
+        "plan_version": plan_check["plan_version"],
+        "plan_sha256": plan_sha256,
+        "example": plan_check["example"],
+        "required_attempts": plan_check["required_attempts"],
+        "server_count": plan_check["server_count"],
+        "attempts_per_server": plan_check["attempts_per_server"],
+        "window_start": plan_check["window_start"],
+        "window_end": plan_check["window_end"],
+        "artifact_dir": writable.get("artifact_dir"),
+        "notes": (
+            "Preflight before connection tests: plan/servers/window fixed. "
+            "Checks are collected only on --run. SELECT-only."
+        ),
+    }
+
+    if not require_db:
+        return base
+
+    if session is None:
+        return {
+            "ok": False,
+            "reason": "NO_DATABASE_SESSION",
+            "plan_sha256": plan_sha256,
+        }
 
     try:
         snapshot = await begin_consistent_read_snapshot(session)
-        servers_repo = MCPServerRepository(session)
         missing_servers: list[str] = []
-        for server_id in sorted({row["server_id"] for row in plan_check["planned_attempts"]}):
-            row = await servers_repo.get(uuid.UUID(server_id))
-            if row is None:
-                missing_servers.append(server_id)
-        matched = await load_matched_attempts(session, plan_check=plan_check)
+        observed_counts: dict[str, int] = {}
+        if not plan_check.get("example"):
+            servers_repo = MCPServerRepository(session)
+            discovery_repo = MCPDiscoveryRepository(session)
+            for server in plan_check["planned_servers"]:
+                sid = server["server_id"]
+                row = await servers_repo.get(uuid.UUID(sid))
+                if row is None:
+                    missing_servers.append(sid)
+                    continue
+                checks = await discovery_repo.list_checks_in_window(
+                    mcp_server_id=uuid.UUID(sid),
+                    window_start=plan_check["window_start_dt"],
+                    window_end=plan_check["window_end_dt"],
+                )
+                observed_counts[sid] = len(checks)
     except Exception as exc:  # noqa: BLE001
         return {
             "ok": False,
             "reason": "CHECK_SELECT_FAILED",
             "error_type": type(exc).__name__,
             "error_message": str(exc),
+            "plan_sha256": plan_sha256,
         }
 
     if missing_servers:
@@ -509,37 +579,15 @@ async def preflight_environment(
             "ok": False,
             "reason": "SERVER_NOT_FOUND",
             "missing_server_ids": missing_servers,
-            "read_snapshot": snapshot,
-        }
-
-    incomplete = [row for row in matched["attempts"] if row.get("ok") is not True]
-    if incomplete and require_non_example:
-        return {
-            "ok": False,
-            "reason": incomplete[0].get("reason") or "ATTEMPT_EVIDENCE_INCOMPLETE",
-            "incomplete_attempts": incomplete,
+            "plan_sha256": plan_sha256,
             "read_snapshot": snapshot,
         }
 
     return {
-        "ok": True,
-        "target_min_percent": target_min,
-        "targets_version": str(targets.get("targets_version") or TARGETS_VERSION),
-        "plan_version": plan_check["plan_version"],
-        "example": plan_check["example"],
-        "required_attempts": plan_check["required_attempts"],
-        "server_count": plan_check["server_count"],
-        "attempts_per_server": plan_check["attempts_per_server"],
-        "window_start": plan_check["window_start"],
-        "window_end": plan_check["window_end"],
-        "fetched_check_count": matched["fetched_check_count"],
-        "incomplete_attempt_count": len(incomplete),
+        **base,
         "read_snapshot": snapshot,
-        "artifact_dir": writable.get("artifact_dir"),
-        "notes": (
-            "SELECT-only mcp_server_checks matching. "
-            "No Connection Test / Discovery / external calls."
-        ),
+        "observed_check_counts": observed_counts,
+        "checks_required_for_run": False,
     }
 
 
@@ -559,15 +607,14 @@ async def measure_attempts(
         }
 
     snapshot = await begin_consistent_read_snapshot(session)
-    matched = await load_matched_attempts(session, plan_check=plan_check)
+    collected = await collect_window_attempts(session, plan_check=plan_check)
     return {
-        "ok": True,
-        "required_attempts": plan_check["required_attempts"],
-        "window_start": plan_check["window_start"],
-        "window_end": plan_check["window_end"],
-        "attempts": matched["attempts"],
+        **collected,
         "read_snapshot": snapshot,
         "plan_version": plan_check["plan_version"],
+        "window_start": plan_check["window_start"],
+        "window_end": plan_check["window_end"],
+        "required_attempts": plan_check["required_attempts"],
     }
 
 
@@ -596,10 +643,10 @@ async def _run_async(args: argparse.Namespace) -> dict[str, Any]:
         "environment": environment_label(),
         "plan_path": str(plan_path),
         "measurement_definition": (
-            "Pinned mcp_server_checks attempts within a fixed evaluation window. "
-            "Denominator = servers × attempts_per_server. "
-            "FAILED/TIMED_OUT remain in the denominator. "
-            "Missing/ambiguous evidence → INCOMPLETE. "
+            "Fixed plan (server_id × attempts_per_server × evaluation_window). "
+            "Collect every mcp_server_checks row in the window per server. "
+            "Exact attempts_per_server required; missing/excess/ambiguous → "
+            "INCOMPLETE. FAILED/TIMED_OUT remain in the denominator. "
             "SELECT-only; no live Connection Test."
         ),
         "compose_commands": compose_commands(),
@@ -608,6 +655,7 @@ async def _run_async(args: argparse.Namespace) -> dict[str, Any]:
     try:
         targets = load_targets()
         plan = load_plan(plan_path)
+        plan_sha = plan_file_sha256(plan_path)
     except Exception as exc:
         report["ok"] = False
         report["reason"] = "TARGETS_OR_PLAN_LOAD_FAILED"
@@ -615,6 +663,7 @@ async def _run_async(args: argparse.Namespace) -> dict[str, Any]:
         report["judgment"] = "INCOMPLETE"
         return report
 
+    report["plan_sha256"] = plan_sha
     report["target_min_percent"] = l3_01_target_min_percent(targets)
     plan_check = validate_plan(plan)
     report["plan_check"] = {
@@ -653,86 +702,110 @@ async def _run_async(args: argparse.Namespace) -> dict[str, Any]:
             return report
         report["planned_artifact_path"] = str(art_path)
 
+    needs_db = bool(args.run) or not bool(plan_check.get("example"))
+    engine = None
     try:
-        engine, factory = await _session_factory()
-    except RuntimeError as exc:
-        report["ok"] = False
-        report["reason"] = "NO_DATABASE_URL"
-        report["error"] = str(exc)
-        report["judgment"] = "INCOMPLETE"
-        return report
-    except Exception as exc:  # noqa: BLE001
-        report["ok"] = False
-        report["reason"] = "DATABASE_ENGINE_FAILED"
-        report["error"] = f"{type(exc).__name__}: {exc}"
-        report["judgment"] = "INCOMPLETE"
-        return report
+        if needs_db:
+            try:
+                engine, factory = await _session_factory()
+            except RuntimeError as exc:
+                report["ok"] = False
+                report["reason"] = "NO_DATABASE_URL"
+                report["error"] = str(exc)
+                report["judgment"] = "INCOMPLETE"
+                return report
+            except Exception as exc:  # noqa: BLE001
+                report["ok"] = False
+                report["reason"] = "DATABASE_ENGINE_FAILED"
+                report["error"] = f"{type(exc).__name__}: {exc}"
+                report["judgment"] = "INCOMPLETE"
+                return report
 
-    try:
-        async with factory() as session:
-            env = await preflight_environment(
-                session,
-                plan=plan,
-                require_non_example=bool(args.run),
-            )
-            report["preflight"] = {
-                k: v
-                for k, v in env.items()
-                if k
-                not in {
-                    "incomplete_attempts",
+            async with factory() as session:
+                env = await preflight_environment(
+                    session,
+                    plan=plan,
+                    plan_sha256=plan_sha,
+                    require_non_example=bool(args.run),
+                    require_db=True,
+                )
+                report["preflight"] = {
+                    k: v for k, v in env.items() if k != "incomplete_attempts"
                 }
-            }
-            if env.get("read_snapshot"):
-                report["read_snapshot"] = env.get("read_snapshot")
+                if env.get("read_snapshot"):
+                    report["read_snapshot"] = env.get("read_snapshot")
+                if not env.get("ok"):
+                    report["ok"] = False
+                    report["reason"] = env.get("reason")
+                    report["judgment"] = "INCOMPLETE"
+                    return report
+
+                if args.preflight and not args.run:
+                    report["ok"] = True
+                    report["note"] = (
+                        "Preflight only (before connection tests). "
+                        "Pass --run after checks exist in the evaluation window."
+                    )
+                    return report
+
+                await session.rollback()
+                measured = await measure_attempts(session, plan=plan)
+                report["read_snapshot"] = measured.get("read_snapshot")
+                report["attempts"] = measured.get("attempts")
+                report["per_server"] = measured.get("per_server")
+                report["collected_check_count"] = measured.get(
+                    "collected_check_count"
+                )
+                report["required_attempts"] = measured.get("required_attempts")
+                report["evaluation_window"] = {
+                    "start": measured.get("window_start"),
+                    "end": measured.get("window_end"),
+                }
+                if not measured.get("ok"):
+                    report["ok"] = False
+                    report["reason"] = measured.get("reason")
+                    report["judgment"] = "INCOMPLETE"
+                    return report
+
+                verdict = judge_l3_01(
+                    attempts=list(measured.get("attempts") or []),
+                    required_attempts=int(measured["required_attempts"]),
+                    target_min_percent=float(report["target_min_percent"]),
+                )
+                report.update(verdict)
+                report["ok"] = verdict["judgment"] in {"MET", "NOT_MET"}
+                if verdict["judgment"] == "INCOMPLETE":
+                    report["ok"] = False
+                    report["reason"] = verdict.get("reason") or "INCOMPLETE"
+        else:
+            # Example-plan preflight: no DB required (before any tests).
+            env = await preflight_environment(
+                None,
+                plan=plan,
+                plan_sha256=plan_sha,
+                require_non_example=False,
+                require_db=False,
+            )
+            report["preflight"] = env
             if not env.get("ok"):
                 report["ok"] = False
                 report["reason"] = env.get("reason")
                 report["judgment"] = "INCOMPLETE"
-                if env.get("incomplete_attempts"):
-                    report["incomplete_attempts"] = env.get("incomplete_attempts")
                 return report
-
-            if args.preflight and not args.run:
-                report["ok"] = True
-                report["note"] = (
-                    "Preflight only. Pass --run with example:false plan for "
-                    "official success-rate measurement."
-                )
-                return report
-
-            await session.rollback()
-            measured = await measure_attempts(session, plan=plan)
-            report["read_snapshot"] = measured.get("read_snapshot")
-            report["attempts"] = measured.get("attempts")
-            report["required_attempts"] = measured.get("required_attempts")
-            report["evaluation_window"] = {
-                "start": measured.get("window_start"),
-                "end": measured.get("window_end"),
-            }
-            if not measured.get("ok"):
-                report["ok"] = False
-                report["reason"] = measured.get("reason")
-                report["judgment"] = "INCOMPLETE"
-                return report
-
-            verdict = judge_l3_01(
-                attempts=list(measured.get("attempts") or []),
-                required_attempts=int(measured["required_attempts"]),
-                target_min_percent=float(report["target_min_percent"]),
+            report["ok"] = True
+            report["note"] = (
+                "Example-plan preflight without DB. Replace with example:false "
+                "and real server_ids before official --run."
             )
-            report.update(verdict)
-            report["ok"] = verdict["judgment"] in {"MET", "NOT_MET"}
-            if verdict["judgment"] == "INCOMPLETE":
-                report["ok"] = False
-                report["reason"] = verdict.get("reason") or "INCOMPLETE"
+            return report
     except Exception as exc:  # noqa: BLE001
         report["ok"] = False
         report["reason"] = "MEASUREMENT_ERROR"
         report["error"] = f"{type(exc).__name__}: {exc}"
         report["judgment"] = "INCOMPLETE"
     finally:
-        await engine.dispose()
+        if engine is not None:
+            await engine.dispose()
 
     return report
 
@@ -785,6 +858,7 @@ def main(argv: list[str] | None = None) -> int:
             "TARGETS_OR_PLAN_LOAD_FAILED",
             "PLAN_IS_EXAMPLE",
             "PLAN_VERSION_MISMATCH",
+            "PLAN_PREPINNED_CHECKS_FORBIDDEN",
         }:
             print(json.dumps(report, indent=2, ensure_ascii=False))
             return 2

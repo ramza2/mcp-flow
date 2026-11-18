@@ -8,16 +8,25 @@
 
 ## 측정 정의
 
-분모(사전 고정):
+분모(시험 전 사전 고정):
 
 ```text
 required_attempts = servers × attempts_per_server
 ```
 
+공식 `--run`은 평가 구간에 존재하는 **해당 서버의 모든** `mcp_server_checks`를 수집한다.
+
+서버별 규칙:
+
+- 수집 건수 == `attempts_per_server` → `checked_at` ASC, `id` ASC로 attempt 매핑
+- 수집 건수 < 기대 → `CHECK_COUNT_MISSING` → `INCOMPLETE`
+- 수집 건수 > 기대 → `CHECK_COUNT_EXCESS` → `INCOMPLETE`
+- 비단말 status / 모호한 증적 → `INCOMPLETE`
+
 분자:
 
 ```text
-status == SUCCEEDED 인 매칭된 check 수
+status == SUCCEEDED 인 매칭 시도 수
 ```
 
 성공률:
@@ -26,53 +35,38 @@ status == SUCCEEDED 인 매칭된 check 수
 success_rate_percent = succeeded / required_attempts × 100
 ```
 
-포함:
-
-- `mcp_server_checks`의 `SUCCEEDED` / `FAILED` / `TIMED_OUT`
-- 평가 구간에 포함되고 plan에 pin된 `check_id`
-
-제외 / 금지:
-
-- 실시간 연결 검사, Discovery, ACTIVE 전환
-- 실패·타임아웃을 분모에서 제거
-- 성공 건만 골라 재계산
-- KPI harness 결과 JSON 재사용
+`FAILED` / `TIMED_OUT`은 분모에 남긴다. 성공만 골라 재계산하지 않는다.
 
 ## 평가계획
 
 | 파일 | 역할 |
 |---|---|
 | `targets.v1.yaml` | L3-01 목표 (≥ 90%) |
-| `plan_l301.example.v1.yaml` | **예시** 5서버×2회 plan (공식 측정 전 교체) |
+| `plan_l301.example.v1.yaml` | **예시** 5서버×2회 (공식 측정 전 교체) |
 
-Plan에 사전 고정:
+시험 전 plan에 고정:
 
 1. `evaluation_window.start` / `end` (UTC)
 2. `attempts_per_server`
 3. 대상 `server_id` 목록
-4. 시도별 정확한 `check_id`
 
-`example: true` plan은 `--run` 공식 측정을 거부한다.  
-운영자는 실제 서버/체크 ID와 구간으로 plan을 복사·수정한 뒤 `example: false`로 둔다.
+`check_id` 사전 pin은 **금지**한다.  
+`example: true` plan은 `--run`을 거부한다.  
+증적에 plan 파일 **SHA256**을 기록한다.
 
-## check_id 매칭
+## Preflight
 
-각 plan attempt는 정확히 하나의 `mcp_server_checks.id`와 매칭되어야 한다.
+`--preflight`는 연결검사 전에 가능하다.
 
-Fail-closed → `INCOMPLETE`:
-
-- check 행 누락
-- `check.mcp_server_id` ≠ plan `server_id`
-- `checked_at`이 evaluation window 밖
-- 동일 `check_id` 중복 pin (모호)
-- status가 `SUCCEEDED`/`FAILED`/`TIMED_OUT` 이외
-- 분모 개수와 매칭 결과 수 불일치
+- plan 구조 / SHA256 / 분모 / 구간 검증
+- example plan은 DB 없이 통과 가능
+- 실plan은 서버 존재 확인 (check 행 존재는 요구하지 않음)
+- check 수집·성공률 판정은 `--run`에서만 수행
 
 ## 인터페이스
 
 ```bash
 export PYTHONPATH=backend
-# Plan path (default: plan_l301.example.v1.yaml — example only)
 python -m tests.evaluation.level3.measure_l3_01 --preflight \
   --plan path/to/plan_l301.v1.yaml
 
@@ -87,26 +81,36 @@ python -m tests.evaluation.level3.measure_l3_01 --run --write-artifact \
 ./scripts/level3-mcp-connection-success.sh --run --write-artifact --plan ...
 ```
 
+서버 compose 명령은 도구 출력 `compose_commands`를 따른다:
+
+- `--workdir /opt/kpi-src`
+- `backend:/opt/kpi-src:ro`
+- `artifacts/level3:/opt/kpi-artifacts/level3` 직접 마운트
+- 기존 api 이미지 유지
+- `artifacts/` 전체 `chown` 금지
+
 ## 판정
 
 1. 필수 시도 수 = plan 고정 분모
-2. 모든 시도가 유효 check_id에 매칭되고 상태가 단말일 때만 성공률 산출
+2. 서버별 window 수집 건수가 정확히 일치하고 상태가 단말일 때만 성공률 산출
 3. `success_rate_percent ≥ 90` → `MET`, 미만 → `NOT_MET`
-4. 누락·모호·오류 → `INCOMPLETE` (성공만 골라 평균/비율 금지)
+4. 누락·초과·모호·오류 → `INCOMPLETE`
 5. 증적 파일 덮어쓰기 금지
 
 ## 증적 필드 (요약)
 
 - 지표명 / 목표 / 측정 정의 / plan·targets 버전
-- evaluation_window, required_attempts, 시도별 server_id·check_id·status
+- `plan_sha256`
+- evaluation_window, required_attempts
+- 서버별 수집 check 목록 및 attempt 매핑 (check_id는 수집 결과)
 - success_rate_percent, judgment
 - `as_of`, `read_snapshot` (PostgreSQL REPEATABLE READ READ ONLY)
 - git_sha, measured_at (UTC), environment
 
 ## 운영 사전조건
 
-- Plan의 모든 check_id가 이미 `mcp_server_checks`에 존재
-- `DATABASE_URL` / `TEST_DATABASE_URL` / `MCPFLOW_DATABASE_URL`
+- 시험 전 plan 고정 → 이후 연결검사 수행 → `--run`으로 window 수집
+- `DATABASE_URL` / `TEST_DATABASE_URL` / `MCPFLOW_DATABASE_URL` (실plan/run)
 - `artifacts/level3` 쓰기 가능
 - `MCPFLOW_GIT_SHA` 또는 git checkout으로 SHA 해석 가능
 

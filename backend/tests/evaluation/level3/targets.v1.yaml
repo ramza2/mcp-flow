@@ -11,14 +11,16 @@ targets:
     measured_value_unit: percent
     target_min_percent: 90.0
     counting_rule: >
-      Fixed denominator = servers × attempts_per_server from the evaluation plan.
-      Each attempt pins one mcp_server_checks.id inside the evaluation window.
-      SUCCEEDED / FAILED / TIMED_OUT all remain in the denominator. Missing or
-      ambiguous check_id matching → INCOMPLETE (never drop failures).
+      Fixed denominator = servers × attempts_per_server from the evaluation plan
+      (server_id, attempts_per_server, evaluation_window fixed before tests).
+      --run collects every mcp_server_checks row in the window per server; exact
+      attempts_per_server required. Missing/excess/ambiguous → INCOMPLETE.
+      SUCCEEDED / FAILED / TIMED_OUT all remain in the denominator. check_id is
+      not pre-pinned. Plan file SHA256 is recorded in evidence.
     measurement_definition: >
       SELECT-only reuse of durable mcp_server_checks rows. Does not run live
       Connection Test, Discovery, or external HTTP. PostgreSQL reads use
-      REPEATABLE READ READ ONLY.
+      REPEATABLE READ READ ONLY. Preflight works before checks exist.
     plan: plan_l301.example.v1.yaml
     notes: >
       Entry: measure_l3_01.py / scripts/level3-mcp-connection-success.sh.

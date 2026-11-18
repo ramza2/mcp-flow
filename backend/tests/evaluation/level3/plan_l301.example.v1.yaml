@@ -1,14 +1,16 @@
 # Level 3 L3-01 evaluation plan — EXAMPLE ONLY (5 servers × 2 attempts).
-# Replace server_id / check_id / evaluation_window before any official --run.
-# Official runs require example: false and real mcp_server_checks rows.
+# Fix server_id / attempts_per_server / evaluation_window before official --run.
+# Do NOT pre-pin check_id; --run collects every mcp_server_checks row in the window.
+# Official runs require example: false.
 schema_version: mcpflow.level3_l301_plan.v1
 plan_version: level3-mcp-connection.v1
 example: true
 notes: >
-  Fixed denominator = servers × attempts_per_server.
-  Each attempt pins exactly one mcp_server_checks.id.
+  Fixed denominator = servers × attempts_per_server (set before tests).
+  Collect all mcp_server_checks in the evaluation window per server.
+  Exact attempts_per_server rows required; missing/excess/ambiguous → INCOMPLETE.
   SUCCEEDED / FAILED / TIMED_OUT all remain in the denominator.
-  Missing or ambiguous check_id matching → INCOMPLETE.
+  Preflight validates plan/servers/window without requiring checks yet.
 
 evaluation_window:
   start: "2026-01-01T00:00:00Z"
@@ -19,40 +21,11 @@ attempts_per_server: 2
 servers:
   - server_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1"
     label: "example-server-1"
-    attempts:
-      - attempt_index: 0
-        check_id: "b1111111-bbbb-4bbb-8bbb-bbbbbbbbbbb1"
-      - attempt_index: 1
-        check_id: "b1111111-bbbb-4bbb-8bbb-bbbbbbbbbbb2"
-
   - server_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa2"
     label: "example-server-2"
-    attempts:
-      - attempt_index: 0
-        check_id: "b2222222-bbbb-4bbb-8bbb-bbbbbbbbbbb1"
-      - attempt_index: 1
-        check_id: "b2222222-bbbb-4bbb-8bbb-bbbbbbbbbbb2"
-
   - server_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa3"
     label: "example-server-3"
-    attempts:
-      - attempt_index: 0
-        check_id: "b3333333-bbbb-4bbb-8bbb-bbbbbbbbbbb1"
-      - attempt_index: 1
-        check_id: "b3333333-bbbb-4bbb-8bbb-bbbbbbbbbbb2"
-
   - server_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa4"
     label: "example-server-4"
-    attempts:
-      - attempt_index: 0
-        check_id: "b4444444-bbbb-4bbb-8bbb-bbbbbbbbbbb1"
-      - attempt_index: 1
-        check_id: "b4444444-bbbb-4bbb-8bbb-bbbbbbbbbbb2"
-
   - server_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa5"
     label: "example-server-5"
-    attempts:
-      - attempt_index: 0
-        check_id: "b5555555-bbbb-4bbb-8bbb-bbbbbbbbbbb1"
-      - attempt_index: 1
-        check_id: "b5555555-bbbb-4bbb-8bbb-bbbbbbbbbbb2"
