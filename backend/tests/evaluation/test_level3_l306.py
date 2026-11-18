@@ -18,8 +18,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from tests.evaluation.level3 import L3_06_METRIC_ID
 from tests.evaluation.level3.measure_l3_06 import (
     artifact_path_for,
+    begin_consistent_read_snapshot,
     check_artifact_guard,
     compose_commands,
+    format_as_of,
     load_targets,
     measure_inventory,
     preflight_environment,
@@ -207,28 +209,45 @@ def test_compose_commands_select_only_no_kpi_reuse() -> None:
 
 
 @pytest.mark.asyncio
-async def test_measure_inventory_surfaces_count_mismatch() -> None:
+async def test_measure_inventory_surfaces_count_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     class _Repo:
-        async def count_tools_with_effective_current_verification(self) -> int:
+        async def count_tools_with_effective_current_verification(
+            self, *, now: datetime | None = None
+        ) -> int:
+            assert now is not None
             return 2
 
-        async def list_tools_with_effective_current_verification(self) -> list[dict]:
+        async def list_tools_with_effective_current_verification(
+            self, *, now: datetime | None = None
+        ) -> list[dict]:
+            assert now is not None
             return [{"tool_id": str(uuid.uuid4())}]
 
-    session = AsyncMock()
+    session = SimpleNamespace(
+        get_bind=lambda: SimpleNamespace(dialect=SimpleNamespace(name="sqlite"))
+    )
     from tests.evaluation.level3 import measure_l3_06 as mod
 
-    monkey_repo = _Repo()
-
-    # Patch repository constructor used inside measure_inventory
-    original = mod.MCPToolVerificationRepository
-    mod.MCPToolVerificationRepository = lambda _s: monkey_repo  # type: ignore[misc,assignment]
-    try:
-        out = await measure_inventory(session)
-    finally:
-        mod.MCPToolVerificationRepository = original
+    monkeypatch.setattr(
+        mod, "MCPToolVerificationRepository", lambda _s: _Repo()
+    )
+    monkeypatch.setattr(
+        mod,
+        "begin_consistent_read_snapshot",
+        AsyncMock(
+            return_value={
+                "dialect": "sqlite",
+                "snapshot": None,
+                "applied": False,
+            }
+        ),
+    )
+    out = await measure_inventory(session)  # type: ignore[arg-type]
     assert out["ok"] is False
     assert out["reason"] == "COUNT_INVENTORY_MISMATCH"
+    assert out["as_of"]
 
 
 @pytest.mark.asyncio
@@ -239,18 +258,122 @@ async def test_preflight_select_failure_incomplete(
     from tests.evaluation.level3 import measure_l3_06 as mod
 
     class _Boom:
-        async def count_tools_with_effective_current_verification(self) -> int:
+        async def count_tools_with_effective_current_verification(
+            self, *, now: datetime | None = None
+        ) -> int:
             raise RuntimeError("db down")
 
-        async def list_tools_with_effective_current_verification(self) -> list:
+        async def list_tools_with_effective_current_verification(
+            self, *, now: datetime | None = None
+        ) -> list:
             return []
 
     monkeypatch.setattr(
         mod, "MCPToolVerificationRepository", lambda _s: _Boom()
     )
-    result = await preflight_environment(SimpleNamespace())  # type: ignore[arg-type]
+    monkeypatch.setattr(
+        mod,
+        "begin_consistent_read_snapshot",
+        AsyncMock(
+            return_value={
+                "dialect": "sqlite",
+                "snapshot": None,
+                "applied": False,
+            }
+        ),
+    )
+    result = await preflight_environment(
+        SimpleNamespace(
+            get_bind=lambda: SimpleNamespace(
+                dialect=SimpleNamespace(name="sqlite")
+            )
+        )  # type: ignore[arg-type]
+    )
     assert result["ok"] is False
     assert result["reason"] == "VERIFICATION_SELECT_FAILED"
+    assert result["as_of"]
+
+
+@pytest.mark.asyncio
+async def test_count_list_share_identical_as_of(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[datetime] = []
+
+    class _Repo:
+        async def count_tools_with_effective_current_verification(
+            self, *, now: datetime | None = None
+        ) -> int:
+            assert now is not None
+            seen.append(now)
+            return 0
+
+        async def list_tools_with_effective_current_verification(
+            self, *, now: datetime | None = None
+        ) -> list[dict]:
+            assert now is not None
+            seen.append(now)
+            return []
+
+    from tests.evaluation.level3 import measure_l3_06 as mod
+
+    monkeypatch.setattr(
+        mod, "MCPToolVerificationRepository", lambda _s: _Repo()
+    )
+    monkeypatch.setattr(
+        mod,
+        "begin_consistent_read_snapshot",
+        AsyncMock(
+            return_value={
+                "dialect": "sqlite",
+                "snapshot": None,
+                "applied": False,
+            }
+        ),
+    )
+    fixed = datetime(2026, 11, 18, 6, 0, 0, tzinfo=UTC)
+    out = await measure_inventory(
+        SimpleNamespace(),  # type: ignore[arg-type]
+        as_of=fixed,
+    )
+    assert out["ok"] is True
+    assert out["as_of"] == format_as_of(fixed)
+    assert len(seen) == 2
+    assert seen[0] is fixed
+    assert seen[1] is fixed
+
+
+@pytest.mark.asyncio
+async def test_postgres_snapshot_sets_repeatable_read_readonly() -> None:
+    executed: list[str] = []
+
+    class _Session:
+        def get_bind(self) -> SimpleNamespace:
+            return SimpleNamespace(dialect=SimpleNamespace(name="postgresql"))
+
+        async def execute(self, statement: object) -> None:
+            executed.append(str(statement))
+
+    meta = await begin_consistent_read_snapshot(_Session())  # type: ignore[arg-type]
+    assert meta["applied"] is True
+    assert meta["snapshot"] == "REPEATABLE READ READ ONLY"
+    assert executed
+    assert "REPEATABLE READ" in executed[0]
+    assert "READ ONLY" in executed[0]
+
+
+@pytest.mark.asyncio
+async def test_sqlite_snapshot_skipped_for_compatibility() -> None:
+    class _Session:
+        def get_bind(self) -> SimpleNamespace:
+            return SimpleNamespace(dialect=SimpleNamespace(name="sqlite"))
+
+        async def execute(self, statement: object) -> None:
+            raise AssertionError("SQLite must not SET TRANSACTION")
+
+    meta = await begin_consistent_read_snapshot(_Session())  # type: ignore[arg-type]
+    assert meta["applied"] is False
+    assert meta["snapshot"] is None
 
 
 @pytest.mark.asyncio
@@ -328,8 +451,13 @@ async def test_repository_list_matches_count_and_excludes_expired(
     )
     await db_session.commit()
 
-    counted = await verifications.count_tools_with_effective_current_verification()
-    inventory = await verifications.list_tools_with_effective_current_verification()
+    as_of = datetime.now(UTC)
+    counted = await verifications.count_tools_with_effective_current_verification(
+        now=as_of
+    )
+    inventory = await verifications.list_tools_with_effective_current_verification(
+        now=as_of
+    )
     assert counted == 2
     assert len(inventory) == 2
     ids = {row["tool_id"] for row in inventory}
@@ -341,3 +469,86 @@ async def test_repository_list_matches_count_and_excludes_expired(
         assert row["verification_id"]
         assert row["tool_version_id"]
         assert "tool_status" in row
+
+
+@pytest.mark.asyncio
+async def test_expiry_boundary_shared_as_of_excludes_equal_expires_at(
+    db_session: AsyncSession,
+) -> None:
+    """expires_at > as_of is required; equal boundary is expired (not counted)."""
+
+    server = await MCPServerRepository(db_session).create(
+        code=f"l306-b-{uuid.uuid4().hex[:8]}",
+        name="L306 Boundary",
+        transport_type="STREAMABLE_HTTP",
+        endpoint_url="https://mcp.test/l306-boundary",
+    )
+    tools = MCPToolRepository(db_session)
+    tool_eq = await tools.create_tool(
+        mcp_server_id=server.id, remote_name="boundary_echo"
+    )
+    tool_future = await tools.create_tool(
+        mcp_server_id=server.id, remote_name="future_echo"
+    )
+    v_eq = await tools.create_version(
+        mcp_tool_id=tool_eq.id,
+        version_no=1,
+        content_hash="hash-eq",
+        validation_status=ToolVersionValidationStatus.VALID,
+    )
+    v_future = await tools.create_version(
+        mcp_tool_id=tool_future.id,
+        version_no=1,
+        content_hash="hash-future",
+        validation_status=ToolVersionValidationStatus.VALID,
+    )
+    tool_eq.current_version_id = v_eq.id
+    tool_future.current_version_id = v_future.id
+    await db_session.commit()
+
+    as_of = datetime(2026, 11, 18, 6, 30, 0, tzinfo=UTC)
+    verifications = MCPToolVerificationRepository(db_session)
+    await verifications.create(
+        mcp_tool_version_id=v_eq.id,
+        status=ToolVerificationStatus.VERIFIED,
+        criteria_version="tool-verification-v1",
+        test_execution_id=uuid.uuid4(),
+        evidence_blob_id=uuid.uuid4(),
+        result_summary={"schema_valid": True},
+        expires_at=as_of,
+    )
+    await verifications.create(
+        mcp_tool_version_id=v_future.id,
+        status=ToolVerificationStatus.VERIFIED,
+        criteria_version="tool-verification-v1",
+        test_execution_id=uuid.uuid4(),
+        evidence_blob_id=uuid.uuid4(),
+        result_summary={"schema_valid": True},
+        expires_at=as_of + timedelta(seconds=1),
+    )
+    await db_session.commit()
+
+    counted = await verifications.count_tools_with_effective_current_verification(
+        now=as_of
+    )
+    inventory = await verifications.list_tools_with_effective_current_verification(
+        now=as_of
+    )
+    assert counted == 1
+    assert len(inventory) == 1
+    assert inventory[0]["tool_id"] == str(tool_future.id)
+
+    # One microsecond earlier: equal-boundary row becomes effective for both APIs.
+    earlier = as_of - timedelta(microseconds=1)
+    counted_earlier = (
+        await verifications.count_tools_with_effective_current_verification(
+            now=earlier
+        )
+    )
+    inventory_earlier = (
+        await verifications.list_tools_with_effective_current_verification(
+            now=earlier
+        )
+    )
+    assert counted_earlier == 2
+    assert len(inventory_earlier) == 2

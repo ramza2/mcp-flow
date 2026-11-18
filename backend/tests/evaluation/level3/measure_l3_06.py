@@ -13,10 +13,12 @@ import json
 import os
 import sys
 import uuid
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from app.repositories.mcp_tool_verification import MCPToolVerificationRepository
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from tests.evaluation.harness.common import (
@@ -166,7 +168,58 @@ async def _session_factory() -> tuple[Any, async_sessionmaker[AsyncSession]]:
     return engine, factory
 
 
-async def preflight_environment(session: AsyncSession) -> dict[str, Any]:
+def session_dialect_name(session: AsyncSession) -> str:
+    bind = session.get_bind()
+    dialect = getattr(bind, "dialect", None)
+    return str(getattr(dialect, "name", "") or "")
+
+
+def format_as_of(as_of: datetime) -> str:
+    """Serialize measurement as_of as UTC Zulu (microseconds preserved when present)."""
+
+    value = as_of if as_of.tzinfo is not None else as_of.replace(tzinfo=UTC)
+    return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
+
+
+def new_as_of_utc() -> datetime:
+    return datetime.now(UTC)
+
+
+async def begin_consistent_read_snapshot(session: AsyncSession) -> dict[str, Any]:
+    """Apply PostgreSQL READ ONLY + REPEATABLE READ; keep SQLite tests compatible.
+
+    ``SET TRANSACTION`` must run before other statements in the transaction.
+    Callers should ``rollback()`` any prior work on the session first when
+    reusing a connection after preflight SELECTs.
+    """
+
+    dialect = session_dialect_name(session)
+    if dialect == "postgresql":
+        # First statement of the transaction: isolation + read-only snapshot.
+        await session.execute(
+            text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+        )
+        return {
+            "dialect": dialect,
+            "snapshot": "REPEATABLE READ READ ONLY",
+            "applied": True,
+        }
+    return {
+        "dialect": dialect or "unknown",
+        "snapshot": None,
+        "applied": False,
+        "note": (
+            "Non-PostgreSQL dialect: skip SET TRANSACTION; "
+            "count/list still share one as_of UTC."
+        ),
+    }
+
+
+async def preflight_environment(
+    session: AsyncSession,
+    *,
+    as_of: datetime | None = None,
+) -> dict[str, Any]:
     """Fail-closed readiness checks (SELECT only; no side-effecting MCP calls)."""
 
     targets = load_targets()
@@ -178,16 +231,23 @@ async def preflight_environment(session: AsyncSession) -> dict[str, Any]:
     if not writable.get("ok"):
         return {"ok": False, **writable}
 
+    measured_as_of = as_of or new_as_of_utc()
     repo = MCPToolVerificationRepository(session)
     try:
-        counted = await repo.count_tools_with_effective_current_verification()
-        inventory = await repo.list_tools_with_effective_current_verification()
+        snapshot = await begin_consistent_read_snapshot(session)
+        counted = await repo.count_tools_with_effective_current_verification(
+            now=measured_as_of
+        )
+        inventory = await repo.list_tools_with_effective_current_verification(
+            now=measured_as_of
+        )
     except Exception as exc:  # noqa: BLE001 — surface as preflight failure
         return {
             "ok": False,
             "reason": "VERIFICATION_SELECT_FAILED",
             "error_type": type(exc).__name__,
             "error_message": str(exc),
+            "as_of": format_as_of(measured_as_of),
         }
 
     if counted != len(inventory):
@@ -196,6 +256,8 @@ async def preflight_environment(session: AsyncSession) -> dict[str, Any]:
             "reason": "COUNT_INVENTORY_MISMATCH",
             "counted": counted,
             "inventory_rows": len(inventory),
+            "as_of": format_as_of(measured_as_of),
+            "read_snapshot": snapshot,
         }
 
     return {
@@ -204,20 +266,33 @@ async def preflight_environment(session: AsyncSession) -> dict[str, Any]:
         "targets_version": str(targets.get("targets_version") or TARGETS_VERSION),
         "preflight_counted": counted,
         "inventory_rows": len(inventory),
+        "as_of": format_as_of(measured_as_of),
+        "read_snapshot": snapshot,
         "artifact_dir": writable.get("artifact_dir"),
         "notes": (
-            "SELECT-only inventory. Tool.status ACTIVE is not required. "
+            "SELECT-only inventory with shared as_of. "
+            "Tool.status ACTIVE is not required. "
             "No live reconnect/discovery/verification writes."
         ),
     }
 
 
-async def measure_inventory(session: AsyncSession) -> dict[str, Any]:
+async def measure_inventory(
+    session: AsyncSession,
+    *,
+    as_of: datetime | None = None,
+) -> dict[str, Any]:
     """Official L3-06 inventory: repository count + list + suspicion groups."""
 
+    measured_as_of = as_of or new_as_of_utc()
     repo = MCPToolVerificationRepository(session)
-    counted = await repo.count_tools_with_effective_current_verification()
-    tools = await repo.list_tools_with_effective_current_verification()
+    snapshot = await begin_consistent_read_snapshot(session)
+    counted = await repo.count_tools_with_effective_current_verification(
+        now=measured_as_of
+    )
+    tools = await repo.list_tools_with_effective_current_verification(
+        now=measured_as_of
+    )
     if counted != len(tools):
         return {
             "ok": False,
@@ -225,6 +300,8 @@ async def measure_inventory(session: AsyncSession) -> dict[str, Any]:
             "counted": counted,
             "inventory_rows": len(tools),
             "tools": tools,
+            "as_of": format_as_of(measured_as_of),
+            "read_snapshot": snapshot,
         }
     suspects = find_duplicate_suspect_groups(tools)
     tool_ids = [str(row["tool_id"]) for row in tools]
@@ -238,6 +315,8 @@ async def measure_inventory(session: AsyncSession) -> dict[str, Any]:
         "tools": tools,
         "duplicate_suspect_groups": suspects,
         "unique_lower_bound": lower,
+        "as_of": format_as_of(measured_as_of),
+        "read_snapshot": snapshot,
     }
 
 
@@ -264,8 +343,10 @@ async def _run_async(args: argparse.Namespace) -> dict[str, Any]:
         "measurement_definition": (
             "Distinct MCPTool rows (deleted_at IS NULL) whose current_version_id "
             "has non-expired VERIFIED evidence via "
-            "MCPToolVerificationRepository.count_tools_with_effective_current_verification. "
-            "Does not require Tool.status=ACTIVE and does not perform live "
+            "MCPToolVerificationRepository.count_tools_with_effective_current_verification "
+            "and list_tools_with_effective_current_verification using one shared as_of UTC. "
+            "PostgreSQL ops reads use REPEATABLE READ READ ONLY; SQLite keeps as_of-only "
+            "compatibility. Does not require Tool.status=ACTIVE and does not perform live "
             "reconnect/discovery. Alias/clone suspicions are listed only; "
             "never auto-excluded. KPI harness outputs are not reused."
         ),
@@ -315,6 +396,10 @@ async def _run_async(args: argparse.Namespace) -> dict[str, Any]:
         async with factory() as session:
             env = await preflight_environment(session)
             report["preflight"] = env
+            if env.get("as_of"):
+                report["as_of"] = env.get("as_of")
+            if env.get("read_snapshot"):
+                report["read_snapshot"] = env.get("read_snapshot")
             if not env.get("ok"):
                 report["ok"] = False
                 report["reason"] = env.get("reason")
@@ -328,12 +413,16 @@ async def _run_async(args: argparse.Namespace) -> dict[str, Any]:
                 )
                 return report
 
+            # Fresh transaction so SET TRANSACTION is first on PostgreSQL.
+            await session.rollback()
             measured = await measure_inventory(session)
             report["tools"] = measured.get("tools")
             report["duplicate_suspect_groups"] = measured.get(
                 "duplicate_suspect_groups"
             )
             report["unique_lower_bound"] = measured.get("unique_lower_bound")
+            report["as_of"] = measured.get("as_of")
+            report["read_snapshot"] = measured.get("read_snapshot")
             if not measured.get("ok"):
                 report["ok"] = False
                 report["reason"] = measured.get("reason")
@@ -364,8 +453,6 @@ async def _run_async(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def datetime_stamp() -> str:
-    from datetime import UTC, datetime
-
     return datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
 
 

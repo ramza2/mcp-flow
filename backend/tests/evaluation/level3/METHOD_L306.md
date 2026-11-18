@@ -17,6 +17,13 @@
 증거 목록은 동일 조인 기준의  
 `list_tools_with_effective_current_verification()` SELECT만 사용한다.
 
+조회 일관성:
+
+- count/list에 **동일한 `as_of` UTC**를 전달한다 (`expires_at IS NULL OR expires_at > as_of`).
+- PostgreSQL 운영 조회는 트랜잭션 첫 문으로 `SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY`를 적용한다.
+- SQLite 단위 테스트는 SET TRANSACTION을 건너뛰고 `as_of` 공유만으로 만료 경계를 맞춘다.
+- 실제 `as_of`와 `read_snapshot` 메타를 증적 JSON에 기록한다.
+
 포함하지 않음:
 
 - Tool.status = `ACTIVE` 강제
@@ -71,6 +78,7 @@ python -m tests.evaluation.level3.measure_l3_06 --run --write-artifact
 - Tool / ToolVersion / Verification / Server ID
 - `test_execution_id`, `error_test_execution_id`, `evidence_blob_id` 참조
 - `duplicate_suspect_groups`, `unique_lower_bound`
+- `as_of` (실제 만료 판정 시각, UTC), `read_snapshot`
 - git_sha, measured_at (UTC), environment
 
 ## 운영 사전조건
