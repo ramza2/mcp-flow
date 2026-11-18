@@ -8,6 +8,7 @@ import type {
   AuditActorType,
   AuditResult,
   ExecutionSourceType,
+  ExecutionStatus,
   ExecutionTriggerType,
   ExternalMCPReviewState,
   MCPAuthType,
@@ -98,6 +99,21 @@ export const EXECUTION_SOURCE_LABELS: Record<ExecutionSourceType, string> = {
   SCHEDULE_OCCURRENCE: '예약 실행',
   MANUAL_TOOL_TEST: '도구 수동 테스트',
   FACTORY_TEST: '도구 생성 테스트',
+};
+
+/** Presentation only — aligned with StatusBadge; Domain/API values stay canonical. */
+export const EXECUTION_STATUS_LABELS: Record<ExecutionStatus, string> = {
+  CREATED: '생성됨',
+  QUEUED: '실행 대기',
+  RUNNING: '실행 중',
+  WAITING_INPUT: '입력 대기',
+  WAITING_APPROVAL: '승인 대기',
+  CANCEL_REQUESTED: '취소 요청됨',
+  SUCCEEDED: '성공',
+  PARTIALLY_SUCCEEDED: '일부 성공',
+  FAILED: '실패',
+  CANCELLED: '취소됨',
+  TIMED_OUT: '시간 초과',
 };
 
 export const EXECUTION_TRIGGER_LABELS: Record<ExecutionTriggerType, string> = {
@@ -292,6 +308,10 @@ export const RISK_CLASS_LABELS: Record<RiskClass, string> = {
 
 export function labelExecutionSource(value: string): string {
   return EXECUTION_SOURCE_LABELS[value as ExecutionSourceType] ?? value;
+}
+
+export function labelExecutionStatus(value: string): string {
+  return EXECUTION_STATUS_LABELS[value as ExecutionStatus] ?? value;
 }
 
 export function labelExecutionTrigger(value: string): string {

@@ -202,7 +202,7 @@ describe('Ops screens real API wiring', () => {
     await waitFor(() => {
       expect(String(fetchMock.mock.calls.at(-1)?.[0])).toContain('status=FAILED');
     });
-    expect(await screen.findByText(/조건에 맞는 Execution이 없습니다/i)).toBeInTheDocument();
+    expect(await screen.findByText(/조건에 맞는 실행이 없습니다/i)).toBeInTheDocument();
   });
 
   it('Executions 403 shows PermissionDenied', async () => {
@@ -470,7 +470,7 @@ describe('Ops screens real API wiring', () => {
     );
     vi.stubGlobal('fetch', fetchMock);
     renderWithRouter(<Executions />);
-    await screen.findByText(/Execution이 없습니다/i);
+    await screen.findByText(/실행이 없습니다/i);
     expect(screen.queryByText('EXE-20260902-00126')).not.toBeInTheDocument();
     expect(screen.queryByText('EXE-20260901-00119')).not.toBeInTheDocument();
   });

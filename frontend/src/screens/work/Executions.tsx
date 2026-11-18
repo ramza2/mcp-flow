@@ -25,6 +25,7 @@ import {
   formatDurationMs,
   formatTimestamp,
   labelExecutionSource,
+  labelExecutionStatus,
   shortenId,
 } from '../../domain';
 
@@ -83,7 +84,7 @@ export default function Executions() {
         }
         const apiErr = isApiError(err) ? err : null;
         setError({
-          message: apiErr?.message ?? 'Execution 목록을 불러오지 못했습니다.',
+          message: apiErr?.message ?? '실행 목록을 불러오지 못했습니다.',
           requestId: apiErr?.requestId ?? undefined,
         });
         setItems([]);
@@ -107,14 +108,14 @@ export default function Executions() {
   const columns: Column<ExecutionListItemDto>[] = [
     {
       key: 'id',
-      label: 'Execution ID',
+      label: '실행 ID',
       render: (r) => (
         <span className="font-mono text-xs text-slate-500">{shortenId(r.id, 12)}</span>
       ),
     },
     {
       key: 'source',
-      label: 'Source',
+      label: '출처',
       render: (r) => (
         <div className="min-w-0">
           <div className="text-sm font-medium text-slate-800 truncate">
@@ -128,7 +129,7 @@ export default function Executions() {
     },
     {
       key: 'requester',
-      label: 'Requester',
+      label: '요청자',
       render: (r) => (
         <span className="text-slate-600 font-mono text-xs">{shortenId(r.requester_id, 10)}</span>
       ),
@@ -136,11 +137,15 @@ export default function Executions() {
     {
       key: 'status',
       label: '상태',
-      render: (r) => <StatusBadge status={r.status} size="sm" />,
+      render: (r) => (
+        <span title={r.status}>
+          <StatusBadge status={r.status} label={labelExecutionStatus(r.status)} size="sm" />
+        </span>
+      ),
     },
     {
       key: 'steps',
-      label: 'Steps',
+      label: '단계',
       align: 'center',
       render: (r) => (
         <span className="text-sm text-slate-500">
@@ -150,7 +155,7 @@ export default function Executions() {
     },
     {
       key: 'duration',
-      label: 'Duration',
+      label: '소요 시간',
       render: (r) => (
         <span className="font-mono text-xs text-slate-500">
           {formatDurationMs(r.duration_ms)}
@@ -159,14 +164,14 @@ export default function Executions() {
     },
     {
       key: 'requested',
-      label: 'Requested',
+      label: '요청 시각',
       render: (r) => (
         <span className="text-xs text-slate-500">{formatTimestamp(r.requested_at)}</span>
       ),
     },
     {
       key: 'started',
-      label: 'Started',
+      label: '시작 시각',
       render: (r) => (
         <span className="text-xs text-slate-500">{formatTimestamp(r.started_at)}</span>
       ),
@@ -176,7 +181,7 @@ export default function Executions() {
   return (
     <div>
       <PageHeader
-        title="Executions"
+        title="실행 이력"
         description="실행 기록을 조회하고 상태를 모니터링합니다."
         actions={
           <Button icon={<Plus size={14} />} onClick={() => navigate('/run')}>
@@ -187,17 +192,20 @@ export default function Executions() {
       <div className="p-6 space-y-4">
         <FilterBar
           search
-          searchPlaceholder="ID, trace, error_code..."
+          searchPlaceholder="실행 ID, 추적 ID, 오류 코드 검색..."
           onSearch={setSearchInput}
           filters={[
             {
               key: 'status',
               label: '상태',
-              options: EXECUTION_STATUSES.map((v) => ({ value: v, label: v })),
+              options: EXECUTION_STATUSES.map((v) => ({
+                value: v,
+                label: labelExecutionStatus(v),
+              })),
             },
             {
               key: 'sourceType',
-              label: 'Source',
+              label: '출처',
               options: EXECUTION_SOURCE_TYPES.map((v) => ({
                 value: v,
                 label: labelExecutionSource(v),
@@ -205,14 +213,14 @@ export default function Executions() {
             },
             {
               key: 'sort',
-              label: 'Sort',
+              label: '정렬',
               options: [
-                { value: '-requested_at', label: 'Requested ↓' },
-                { value: 'requested_at', label: 'Requested ↑' },
-                { value: '-started_at', label: 'Started ↓' },
-                { value: 'started_at', label: 'Started ↑' },
-                { value: '-finished_at', label: 'Finished ↓' },
-                { value: 'status', label: 'Status ↑' },
+                { value: '-requested_at', label: '요청 최신 순' },
+                { value: 'requested_at', label: '요청 오래된 순' },
+                { value: '-started_at', label: '시작 최신 순' },
+                { value: 'started_at', label: '시작 오래된 순' },
+                { value: '-finished_at', label: '종료 최신 순' },
+                { value: 'status', label: '상태 오름차순' },
               ],
             },
           ]}
@@ -237,11 +245,11 @@ export default function Executions() {
             />
           ) : items.length === 0 ? (
             <EmptyState
-              title={hasFilters ? '조건에 맞는 Execution이 없습니다.' : 'Execution이 없습니다.'}
+              title={hasFilters ? '조건에 맞는 실행이 없습니다.' : '실행이 없습니다.'}
               description={
                 hasFilters
                   ? '필터를 변경하거나 검색어를 비워 보세요.'
-                  : 'Agent/Workflow/Schedule로 실행을 시작하면 여기에 표시됩니다.'
+                  : '에이전트·워크플로·예약 실행으로 시작하면 여기에 표시됩니다.'
               }
             />
           ) : (
@@ -251,7 +259,7 @@ export default function Executions() {
                 data={items}
                 rowKey={(r) => r.id}
                 onRowClick={(r) => navigate(`/executions/${r.id}`)}
-                emptyMessage="조건에 맞는 Execution이 없습니다."
+                emptyMessage="조건에 맞는 실행이 없습니다."
               />
               <Pagination
                 page={page}
