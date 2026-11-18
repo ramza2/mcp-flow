@@ -1,5 +1,5 @@
 # Level 3 approval performance targets (separate from KPI-01..06 / targets.yaml).
-# Official approved six indicators. L3-02 (pending gold review), L3-05, and L3-06 evaluators are available.
+# Official approved six indicators. L3-01, L3-02 (pending gold review), L3-05, and L3-06 evaluators are available.
 # Thresholds are approval goals; NOT_IMPLEMENTED does not imply failure or achievement.
 schema_version: mcpflow.level3_targets.v1
 targets_version: level3.targets.v1
@@ -7,10 +7,25 @@ targets_version: level3.targets.v1
 targets:
   L3-01:
     name: "MCP 서버 연동 성공률"
-    status: NOT_IMPLEMENTED
+    status: MEASURED_BY_TOOLING
     measured_value_unit: percent
     target_min_percent: 90.0
-    notes: Measure actual MCP server connection attempts separately from discovery/registration.
+    counting_rule: >
+      Fixed denominator = servers × attempts_per_server from the evaluation plan
+      (server_id, attempts_per_server, evaluation_window fixed before tests).
+      --run collects every mcp_server_checks row in the window per server; exact
+      attempts_per_server required. Missing/excess/ambiguous → INCOMPLETE.
+      SUCCEEDED / FAILED / TIMED_OUT all remain in the denominator. check_id is
+      not pre-pinned. Plan file SHA256 is recorded in evidence.
+    measurement_definition: >
+      SELECT-only reuse of durable mcp_server_checks rows. Does not run live
+      Connection Test, Discovery, or external HTTP. PostgreSQL reads use
+      REPEATABLE READ READ ONLY. Preflight works before checks exist.
+    plan: plan_l301.example.v1.yaml
+    notes: >
+      Entry: measure_l3_01.py / scripts/level3-mcp-connection-success.sh.
+      Method: METHOD_L301.md. Example plan is 5×2 only; replace before --run.
+      Artifacts under artifacts/level3/ (no overwrite).
 
   L3-02:
     name: "자연어 업무지시 분석 성공률"

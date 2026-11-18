@@ -1528,22 +1528,37 @@ Level 3 승인 성능지표는 내부 KPI harness와 **별도**로 `backend/test
 
 | ID | 지표 | 이번 구현 |
 |---|---|---|
+| `L3-01` | MCP 서버 연동 성공률 ≥ 90% | `measure_l3_01.py` (`mcp_server_checks` SELECT 매칭; 실연결 금지) |
 | `L3-02` | 자연어 업무지시 분석 성공률 ≥ 85% | `measure_l3_02.py` (운영 Analyzer 핵심 처리 재사용, 정답 데이터셋 검토 필요) |
 | `L3-05` | Tool 검색 평균 응답시간 ≤ 3초 | `measure_l3_05.py` (`ToolRetrievalService.retrieve()`만 측정) |
 | `L3-06` | 연계·검증 완료 MCP Tool 수 ≥ 10 | `measure_l3_06.py` (Verification Repository DISTINCT 집계; KPI harness 결과 비재사용) |
 
 - 목표: `level3/targets.v1.yaml`
+- L3-01 평가계획/방법: `level3/plan_l301.example.v1.yaml`, `level3/METHOD_L301.md`
 - L3-02 고정 정답셋/채점: `level3/dataset_l302.v1.yaml`, `level3/scoring_l302.py`
 - L3-02 측정 방법/검토 게이트: `level3/METHOD_L302.md`
 - L3-05 고정 질의/반복: `level3/dataset.v2.yaml`
 - L3-05 방법·판정: `level3/METHOD.md`
 - L3-06 방법·판정: `level3/METHOD_L306.md`
 - 증적: `artifacts/level3/` (덮어쓰기 금지)
+- L3-01 진입점: `./scripts/level3-mcp-connection-success.sh --preflight|--run`
 - L3-05 진입점: `./scripts/level3-tool-retrieval-latency.sh --preflight|--run`
 - L3-06 진입점: `./scripts/level3-verified-tool-count.sh --preflight|--run`
 - L3-02 진입점: `python -m tests.evaluation.level3.measure_l3_02 --preflight|--run`
 
-`L3-01`, `L3-03`, `L3-04`는 targets에 예약만 두고 이 절에서는 측정하지 않는다.
+`L3-03`, `L3-04`는 targets에 예약만 두고 이 절에서는 측정하지 않는다.
+
+`L3-01` 개발 최소기준:
+
+```text
+시험 전 plan 고정(서버·반복·평가 구간) + plan SHA256 증적
+check_id 사전 pin 금지; --run이 window 내 전체 검사 수집
+서버별 건수 누락·초과·모호 → INCOMPLETE
+분모 = servers × attempts_per_server (실패·타임아웃 포함)
+성공률 ≥ 90% → MET
+--preflight는 연결검사 전에 가능
+SELECT-only mcp_server_checks; 실연결/외부호출 금지
+```
 
 `L3-06` 개발 최소기준:
 

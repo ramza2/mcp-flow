@@ -214,6 +214,99 @@ def judge_l3_06(
     }
 
 
+_L301_TERMINAL_STATUSES = frozenset({"SUCCEEDED", "FAILED", "TIMED_OUT"})
+
+
+def required_l301_attempt_count(*, server_count: int, attempts_per_server: int) -> int:
+    return server_count * attempts_per_server
+
+
+def judge_l3_01(
+    *,
+    attempts: list[dict[str, Any]],
+    required_attempts: int,
+    target_min_percent: float = 90.0,
+) -> dict[str, Any]:
+    """Judge L3-01 MCP connection success rate from matched check attempts.
+
+    Failures and timeouts remain in the denominator. Missing/ambiguous/invalid
+    evidence yields INCOMPLETE — never drop failed attempts to inflate the rate.
+    """
+
+    if required_attempts < 1:
+        return {
+            "judgment": JUDGMENT_INCOMPLETE,
+            "reason": "REQUIRED_ATTEMPTS_INVALID",
+            "required_attempts": required_attempts,
+            "matched_attempts": len(attempts),
+            "succeeded": 0,
+            "failed": 0,
+            "timed_out": 0,
+            "success_rate_percent": None,
+            "target_min_percent": target_min_percent,
+        }
+
+    if len(attempts) != required_attempts:
+        return {
+            "judgment": JUDGMENT_INCOMPLETE,
+            "reason": "EVIDENCE_COUNT_MISMATCH",
+            "required_attempts": required_attempts,
+            "matched_attempts": len(attempts),
+            "succeeded": 0,
+            "failed": 0,
+            "timed_out": 0,
+            "success_rate_percent": None,
+            "target_min_percent": target_min_percent,
+        }
+
+    incomplete = [row for row in attempts if row.get("ok") is not True]
+    if incomplete:
+        reason = incomplete[0].get("reason") or "ATTEMPT_EVIDENCE_INCOMPLETE"
+        return {
+            "judgment": JUDGMENT_INCOMPLETE,
+            "reason": reason,
+            "required_attempts": required_attempts,
+            "matched_attempts": required_attempts,
+            "incomplete_attempts": len(incomplete),
+            "succeeded": 0,
+            "failed": 0,
+            "timed_out": 0,
+            "success_rate_percent": None,
+            "target_min_percent": target_min_percent,
+        }
+
+    statuses = [str(row.get("status") or "") for row in attempts]
+    if any(status not in _L301_TERMINAL_STATUSES for status in statuses):
+        return {
+            "judgment": JUDGMENT_INCOMPLETE,
+            "reason": "CHECK_STATUS_INVALID",
+            "required_attempts": required_attempts,
+            "matched_attempts": required_attempts,
+            "succeeded": 0,
+            "failed": 0,
+            "timed_out": 0,
+            "success_rate_percent": None,
+            "target_min_percent": target_min_percent,
+        }
+
+    succeeded = sum(1 for status in statuses if status == "SUCCEEDED")
+    failed = sum(1 for status in statuses if status == "FAILED")
+    timed_out = sum(1 for status in statuses if status == "TIMED_OUT")
+    success_rate_percent = (succeeded / required_attempts) * 100.0
+    met = success_rate_percent >= float(target_min_percent)
+    return {
+        "judgment": JUDGMENT_MET if met else JUDGMENT_NOT_MET,
+        "reason": None,
+        "required_attempts": required_attempts,
+        "matched_attempts": required_attempts,
+        "succeeded": succeeded,
+        "failed": failed,
+        "timed_out": timed_out,
+        "success_rate_percent": success_rate_percent,
+        "target_min_percent": target_min_percent,
+    }
+
+
 def judge_l3_05(
     *,
     official_samples: list[dict[str, Any]],
