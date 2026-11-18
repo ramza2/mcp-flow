@@ -25,47 +25,21 @@ import {
   labelApprovalStatus,
   shortenId,
 } from '../../domain';
+import {
+  APPROVAL_REVIEW_FLOW_LABEL,
+  APPROVAL_REVIEW_STEPS,
+  approvalCannotDecideGuidance,
+  approvalStatusGuidance,
+  approvalVsExecutionNote,
+  approvalsForbiddenGuidance,
+  formatApprovalDecisionError,
+} from './approvalUx';
 
 function formatDecisionError(err: unknown): { message: string; requestId?: string } {
   if (!isApiError(err)) {
-    return { message: '결정을 제출하지 못했습니다. 네트워크 상태를 확인한 뒤 다시 시도하세요.' };
+    return formatApprovalDecisionError(null);
   }
-  if (err.status === 0 || err.code === 'NETWORK_ERROR') {
-    return {
-      message: '네트워크 오류로 결정을 확인하지 못했습니다. 성공으로 표시하지 않습니다. 목록을 새로고침해 상태를 확인하세요.',
-      requestId: err.requestId ?? undefined,
-    };
-  }
-  if (err.status === 403) {
-    return {
-      message: err.message || '결정 권한이 없거나 정책/범위에 맞지 않습니다.',
-      requestId: err.requestId ?? undefined,
-    };
-  }
-  if (err.status === 404) {
-    return {
-      message: err.message || '승인 요청을 찾을 수 없거나 더 이상 볼 수 없습니다.',
-      requestId: err.requestId ?? undefined,
-    };
-  }
-  if (err.status === 409) {
-    return {
-      message:
-        err.message ||
-        '이미 결정했거나 상태가 변경되어 처리할 수 없습니다. 상세를 다시 불러오세요.',
-      requestId: err.requestId ?? undefined,
-    };
-  }
-  if (err.status === 422) {
-    return {
-      message: err.message || '입력값이 올바르지 않습니다.',
-      requestId: err.requestId ?? undefined,
-    };
-  }
-  return {
-    message: err.message || '결정을 제출하지 못했습니다.',
-    requestId: err.requestId ?? undefined,
-  };
+  return formatApprovalDecisionError(err);
 }
 
 export default function ApprovalDetail() {
@@ -238,7 +212,7 @@ export default function ApprovalDetail() {
                   />
                 </span>
                 <span className="text-xs text-slate-400">
-                  Execution:{' '}
+                  실행:{' '}
                   <button
                     type="button"
                     className="font-mono text-indigo-600 hover:underline"
@@ -286,8 +260,11 @@ export default function ApprovalDetail() {
         {forbidden ? (
           <div>
             <PermissionDenied />
-            <p className="text-center text-sm text-slate-400 -mt-8 mb-4">
-              승인 상세를 보려면 관리자에게 승인 결정 권한을 요청하세요.
+            <p
+              className="text-center text-sm text-slate-400 -mt-8 mb-4"
+              data-testid="approval-detail-forbidden-guidance"
+            >
+              {approvalsForbiddenGuidance()}
             </p>
           </div>
         ) : loading ? (
@@ -297,7 +274,7 @@ export default function ApprovalDetail() {
         ) : notFound ? (
           <EmptyState
             title="승인 요청을 찾을 수 없습니다"
-            description="요청이 없거나, 현재 계정으로는 볼 수 없습니다. (서버는 권한 부족을 404로 반환할 수 있습니다.)"
+            description="요청이 없거나, 현재 계정으로는 볼 수 없습니다. (서버는 권한 부족을 404로 반환할 수 있습니다.) 자동으로 승인하지 않습니다."
             action={{ label: '목록으로', onClick: () => navigate('/approvals') }}
           />
         ) : error ? (
@@ -308,6 +285,50 @@ export default function ApprovalDetail() {
           />
         ) : detail ? (
           <>
+            <section
+              aria-label="승인 처리 안내"
+              className="rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600"
+              data-testid="approval-setup-progress"
+            >
+              <p className="font-semibold text-slate-800">
+                처리 순서: {APPROVAL_REVIEW_FLOW_LABEL}
+              </p>
+              <ol className="mt-2 flex flex-wrap gap-2 text-xs">
+                {APPROVAL_REVIEW_STEPS.map((step, index) => (
+                  <li
+                    key={step.id}
+                    className="rounded-md border border-slate-200 bg-white px-2 py-1 text-slate-700"
+                    data-testid={`approval-setup-step-${step.id}`}
+                  >
+                    {index + 1}. {step.label}
+                  </li>
+                ))}
+              </ol>
+              <p className="mt-2 text-xs text-slate-500" data-testid="approval-vs-execution-note">
+                {approvalVsExecutionNote()}
+              </p>
+            </section>
+
+            {(() => {
+              const guide = approvalStatusGuidance(detail.status);
+              if (!guide) return null;
+              return (
+                <section
+                  className="rounded-lg border border-slate-200 bg-white px-4 py-3"
+                  data-testid="approval-status-guidance"
+                >
+                  <p className="text-xs font-semibold text-slate-700">승인 상태 안내</p>
+                  <p className="mt-1 text-xs text-slate-600">{guide.meaning}</p>
+                  <p
+                    className="mt-1 text-xs text-slate-600"
+                    data-testid="approval-status-next"
+                  >
+                    다음: {guide.nextAction}
+                  </p>
+                </section>
+              );
+            })()}
+
             {actionError && (
               <InlineAlert
                 type="error"
@@ -324,17 +345,18 @@ export default function ApprovalDetail() {
               />
             )}
 
-            {detail.status === 'PENDING' && !detail.can_decide && (
-              <InlineAlert
-                type="info"
-                message="이 요청은 조회만 가능합니다. 이미 결정했거나 정책·만료·범위 때문에 지금은 결정할 수 없습니다."
-              />
-            )}
+            {(() => {
+              const cannotDecide = approvalCannotDecideGuidance(
+                detail.status,
+                detail.can_decide,
+              );
+              return cannotDecide ? <InlineAlert type="info" message={cannotDecide} /> : null;
+            })()}
 
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
               <InfoCard title="상태 · 결정 가능 여부">
                 <div className="space-y-2 text-sm">
-                  <Row label="상태">
+                  <Row label="승인 상태">
                     <span title={detail.status}>
                       <StatusBadge
                         status={detail.status}
@@ -386,7 +408,7 @@ export default function ApprovalDetail() {
                   <Row label="해결 시각">
                     <span>{formatTimestamp(detail.resolved_at)}</span>
                   </Row>
-                  <Row label="Step">
+                  <Row label="단계">
                     <span className="font-mono text-xs" title={detail.step_execution_id}>
                       {shortenId(detail.step_execution_id, 12)}
                     </span>
@@ -394,14 +416,15 @@ export default function ApprovalDetail() {
                 </div>
                 <p className="text-[10px] text-slate-400 mt-3 flex items-start gap-1.5">
                   <Info size={12} className="shrink-0 mt-0.5" />
-                  Approval 거절/만료는 Execution 상태를 REJECTED/EXPIRED로 만들지 않습니다.
+                  Approval 거절/만료는 Execution 상태를 REJECTED/EXPIRED로 만들지 않습니다. 승인
+                  후에도 즉시 실행 완료를 보장하지 않습니다.
                 </p>
               </InfoCard>
 
-              <InfoCard title="안전 컨텍스트 (safe_context)">
+              <InfoCard title="내용·위험 검토 (safe_context)">
                 <p className="text-xs text-slate-500 mb-2">
                   마스킹된 이력 투영만 표시합니다. 원본 context_snapshot / context_hash / secret_id는
-                  노출되지 않습니다.
+                  노출되지 않습니다. 위험·영향은 이 투영과 정책을 기준으로 검토하세요.
                 </p>
                 <pre className="text-xs font-mono bg-slate-50 rounded-lg p-3 text-slate-700 overflow-auto max-h-80">
                   {JSON.stringify(detail.safe_context ?? {}, null, 2)}
@@ -451,7 +474,9 @@ export default function ApprovalDetail() {
               <div className="bg-white border border-slate-200 rounded-xl p-4">
                 <h3 className="text-sm font-semibold text-slate-800 mb-2">승인 / 거절</h3>
                 <p className="text-xs text-slate-500 mb-3">
-                  최종 권한·정책·만료·중복 결정은 서버가 판정합니다. 자동 승인하지 않습니다.
+                  내용·위험을 검토한 뒤 명시적으로 결정하세요. 최종 권한·정책·만료·중복 결정은
+                  서버가 판정합니다. 자동 승인하지 않으며, 승인만으로 즉시 실행 완료를 보장하지
+                  않습니다.
                 </p>
                 <div className="flex gap-3">
                   <Button
@@ -502,7 +527,7 @@ export default function ApprovalDetail() {
         }}
         onConfirm={() => void submitDecision('APPROVE')}
         title="승인 확인"
-        description="이 요청을 승인할까요? 서버가 권한·정책·만료를 다시 검증합니다. 승인 후에도 Execution은 즉시 RUNNING이 되지 않을 수 있습니다."
+        description="이 요청을 승인할까요? 서버가 권한·정책·만료를 다시 검증합니다. 승인 결정 저장 후에도 Execution이 즉시 RUNNING이 되거나 완료된다고 보장하지 않습니다."
         confirmLabel="승인 확정"
         loading={submitting}
       />
@@ -573,7 +598,7 @@ function DecisionResultBanner({
       </div>
       <dl className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
         <div>
-          <dt className="text-slate-500">Approval 상태</dt>
+          <dt className="text-slate-500">승인(Approval) 상태</dt>
           <dd className="font-medium text-slate-800" title={result.approval_status}>
             {labelApprovalStatus(result.approval_status)}
           </dd>
@@ -585,12 +610,16 @@ function DecisionResultBanner({
           </dd>
         </div>
         <div>
-          <dt className="text-slate-500">Execution 상태</dt>
-          <dd className="font-mono text-slate-800">{result.execution_status}</dd>
+          <dt className="text-slate-500">실행(Execution) 상태</dt>
+          <dd className="font-mono text-slate-800" title={result.execution_status}>
+            <StatusBadge status={result.execution_status} size="sm" />
+          </dd>
         </div>
         <div>
-          <dt className="text-slate-500">Step 상태</dt>
-          <dd className="font-mono text-slate-800">{result.step_status}</dd>
+          <dt className="text-slate-500">단계(Step) 상태</dt>
+          <dd className="font-mono text-slate-800" title={result.step_status}>
+            <StatusBadge status={result.step_status} size="sm" />
+          </dd>
         </div>
         <div className="sm:col-span-2">
           <dt className="text-slate-500">재개 Outbox</dt>
@@ -601,13 +630,14 @@ function DecisionResultBanner({
           </dd>
         </div>
       </dl>
-      <p className="text-xs text-slate-600 mt-3">
-        거절/만료 시 Execution은 REJECTED/EXPIRED가 아니라 계획 정책에 따라 FAILED 등으로
-        종료될 수 있습니다.
+      <p className="text-xs text-slate-600 mt-3" data-testid="approval-decision-execution-note">
+        승인 Entity 상태와 실행 상태는 별개입니다. 거절/만료 시 Execution은 REJECTED/EXPIRED가
+        아니라 계획 정책에 따라 FAILED 등으로 종료될 수 있으며, 승인만으로 즉시 실행 완료를
+        보장하지 않습니다.
       </p>
       <div className="mt-3">
         <Button size="sm" variant="outline" onClick={onOpenExecution}>
-          Execution 보기
+          실행 상세 보기
         </Button>
       </div>
     </div>

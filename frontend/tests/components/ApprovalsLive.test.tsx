@@ -213,7 +213,10 @@ describe('ApprovalDetail decide (phase 2)', () => {
       });
     });
     expect(await screen.findByText('승인 결정이 저장되었습니다')).toBeInTheDocument();
-    expect(screen.getAllByText('WAITING_APPROVAL').length).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByTitle('WAITING_APPROVAL').length).toBeGreaterThanOrEqual(1);
+    expect(screen.getByTestId('approval-decision-execution-note')).toHaveTextContent(
+      /즉시 실행 완료/,
+    );
     expect(screen.getByText(/EXECUTION_APPROVAL_RESUME/)).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: '승인' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: '거절' })).not.toBeInTheDocument();
@@ -319,7 +322,10 @@ describe('ApprovalDetail decide (phase 2)', () => {
         comment: '정책상 거절',
       });
     });
-    expect(await screen.findByText(/Already decided/)).toBeInTheDocument();
+    const conflictAlert = await screen.findByText(/Already decided/);
+    expect(conflictAlert).toHaveTextContent(/Already decided/);
+    expect(conflictAlert).toHaveTextContent(/최신 승인 상태|다시 불러/);
+    expect(conflictAlert).toHaveTextContent(/Request ID: req-conflict/);
     expect(screen.queryByText(/결정이 저장되었습니다/)).not.toBeInTheDocument();
   });
 
