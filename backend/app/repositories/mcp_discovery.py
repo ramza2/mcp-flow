@@ -120,6 +120,19 @@ class MCPDiscoveryRepository:
         result = await self._session.execute(stmt)
         return result.scalar_one_or_none()
 
+    async def list_checks_by_ids(
+        self, check_ids: list[uuid.UUID]
+    ) -> list[MCPServerCheck]:
+        """SELECT-only inventory for pinned Level 3 L3-01 check_id matching."""
+
+        if not check_ids:
+            return []
+        stmt = select(MCPServerCheck).where(MCPServerCheck.id.in_(list(check_ids)))
+        rows = list((await self._session.execute(stmt)).scalars().all())
+        by_id = {row.id: row for row in rows}
+        # Preserve caller order; omit missing ids (caller fail-closes).
+        return [by_id[cid] for cid in check_ids if cid in by_id]
+
     async def list_checks(
         self,
         *,
