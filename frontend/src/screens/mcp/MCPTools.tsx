@@ -10,7 +10,8 @@ import { EmptyState, ErrorState, InlineAlert, LoadingSkeleton } from '../../comp
 import { activateMCPTool, deactivateMCPTool, getMCPTool, listMCPServers, listMCPTools } from '../../api/mcp';
 import { isAbortError, isApiError } from '../../api/client';
 import type { MCPServerDto, MCPToolDto } from '../../api/types';
-import { formatTimestamp, hasPermission, MCP_TOOL_STATUSES, labelMCPToolStatus } from '../../domain';
+import { useAuth } from '../../auth/useAuth';
+import { formatTimestamp, MCP_TOOL_STATUSES, labelMCPToolStatus } from '../../domain';
 import {
   isLifecycleActionDisabled,
   isVersionConflict,
@@ -32,6 +33,8 @@ const PAGE_SIZE = 20;
 
 export default function MCPTools() {
   const navigate = useNavigate();
+  const { hasPermission } = useAuth();
+  const canEdit = hasPermission('mcp.server.manage');
   const [page, setPage] = useState(1);
   const [searchInput, setSearchInput] = useState('');
   const [debouncedQ, setDebouncedQ] = useState('');
@@ -186,7 +189,7 @@ export default function MCPTools() {
       width: 'w-44',
       render: r => {
         const action = toolLifecycleAction(r.status);
-        const reason = toolLifecycleDisabledReason(r, { canEdit: hasPermission('mcp.edit') });
+        const reason = toolLifecycleDisabledReason(r, { canEdit });
         const statusBlocked = isLifecycleActionDisabled(r.status) || !action;
         const busy = mutatingIds.has(r.id);
         if (reason || statusBlocked || !action) {

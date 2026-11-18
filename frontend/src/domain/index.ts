@@ -2,49 +2,34 @@ export * from './types';
 export * from './labels';
 
 /**
- * Frontend PermissionGate is UX only.
- * Backend authorization remains authoritative.
+ * Formal permission codes — aligned with backend BOOTSTRAP_PERMISSION_CODES
+ * (docs/05–06). Frontend PermissionGate is UX only; Backend remains authoritative.
+ *
+ * Do not invent UX-only codes such as agent.view / admin.view / mcp.edit.
  */
-export type Permission =
-  | 'agent.view'
-  | 'agent.edit'
-  | 'agent.publish'
-  | 'workflow.view'
-  | 'workflow.edit'
-  | 'workflow.publish'
-  | 'execution.view'
-  | 'execution.cancel'
-  | 'execution.retry'
-  | 'approval.view'
-  | 'approval.approve'
-  | 'schedule.view'
-  | 'schedule.edit'
-  | 'mcp.view'
-  | 'mcp.edit'
-  | 'admin.view'
-  | 'admin.manage';
-
-/** Mock current user permissions (UX helper only). */
-export const MOCK_CURRENT_PERMISSIONS: Permission[] = [
-  'agent.view',
-  'agent.edit',
-  'agent.publish',
-  'workflow.view',
-  'workflow.edit',
-  'workflow.publish',
-  'execution.view',
+export const FORMAL_PERMISSION_CODES = [
+  'mcp.server.read',
+  'mcp.server.manage',
+  'mcp.tool.read',
+  'mcp.tool.execute',
+  'agent.read',
+  'agent.manage',
+  'workflow.execute',
+  'execution.read',
   'execution.cancel',
-  'execution.retry',
-  'approval.view',
-  'approval.approve',
-  'schedule.view',
-  'schedule.edit',
-  'mcp.view',
-  'mcp.edit',
-  'admin.view',
-  'admin.manage',
-];
+  'approval.decide',
+  'approval.policy.manage',
+  'audit.read',
+  'audit.export',
+  'schedule.manage',
+] as const;
 
-export function hasPermission(permission: Permission, granted: Permission[] = MOCK_CURRENT_PERMISSIONS): boolean {
+export type Permission = (typeof FORMAL_PERMISSION_CODES)[number];
+
+/** Pure checker — pass the session's effective codes (no mock defaults). */
+export function hasPermission(
+  permission: Permission,
+  granted: readonly string[],
+): boolean {
   return granted.includes(permission);
 }

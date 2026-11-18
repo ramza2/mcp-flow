@@ -483,3 +483,77 @@ async def test_protected_apis_require_csrf_on_unsafe(
     )
     assert created.status_code == 201
     assert created.json()["id"]
+
+
+@pytest.mark.asyncio
+async def test_effective_permissions_empty_without_roles(
+    authenticated_db_client: AsyncClient,
+) -> None:
+    response = await authenticated_db_client.get(f"{AUTH}/permissions")
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body == {"permission_codes": []}
+
+
+@pytest.mark.asyncio
+async def test_effective_permissions_requires_session(
+    db_client: AsyncClient,
+) -> None:
+    response = await db_client.get(f"{AUTH}/permissions")
+    assert response.status_code == 401
+    assert response.json()["error"]["code"] == "AUTH_SESSION_INVALID"
+
+
+@pytest.mark.asyncio
+async def test_effective_permissions_reuses_role_membership(
+    authenticated_db_client: AsyncClient,
+) -> None:
+    """GET /auth/permissions returns AuthorizationResolver effective codes only."""
+    from app.domain.enums import BOOTSTRAP_PERMISSION_CODES
+
+    client = authenticated_db_client
+    session_info = await client.get(f"{AUTH}/session")
+    assert session_info.status_code == 200
+    user_id = session_info.json()["user"]["id"]
+    user_detail = await client.get(f"{USERS}/{user_id}")
+    assert user_detail.status_code == 200
+    lock_version = user_detail.json()["lock_version"]
+
+    role = await client.post(
+        "/api/v1/roles",
+        json={
+            "code": f"ops_{uuid.uuid4().hex[:8]}",
+            "name": "Ops Reader",
+            "description": "test role for effective permissions",
+        },
+    )
+    assert role.status_code == 201, role.text
+    role_id = role.json()["id"]
+
+    perms = await client.get("/api/v1/permissions", params={"page_size": 100})
+    assert perms.status_code == 200
+    wanted = {"execution.read", "agent.read", "approval.decide"}
+    permission_ids = [
+        item["id"] for item in perms.json()["items"] if item["code"] in wanted
+    ]
+    assert len(permission_ids) == 3
+
+    replaced = await client.put(
+        f"/api/v1/roles/{role_id}/permissions",
+        headers={"If-Match": str(role.json()["lock_version"])},
+        json={"permission_ids": permission_ids},
+    )
+    assert replaced.status_code == 200, replaced.text
+
+    assigned = await client.put(
+        f"{USERS}/{user_id}/roles",
+        headers={"If-Match": str(lock_version)},
+        json={"role_ids": [role_id]},
+    )
+    assert assigned.status_code == 200, assigned.text
+
+    effective = await client.get(f"{AUTH}/permissions")
+    assert effective.status_code == 200, effective.text
+    codes = effective.json()["permission_codes"]
+    assert codes == sorted(wanted)
+    assert set(codes).issubset(set(BOOTSTRAP_PERMISSION_CODES))

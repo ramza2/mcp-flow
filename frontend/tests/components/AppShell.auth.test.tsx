@@ -4,12 +4,33 @@ import { createMemoryRouter, RouterProvider } from 'react-router';
 import { AuthProvider } from '../../src/auth/AuthProvider';
 import AppShell from '../../src/components/layout/AppShell';
 import { clearCsrfCache } from '../../src/api/csrf';
-import { mockAuthSession } from '../fixtures/auth-api';
+import { mockAuthSession, mockEffectivePermissions } from '../fixtures/auth-api';
 
 function jsonResponse(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), {
     status,
     headers: { 'Content-Type': 'application/json' },
+  });
+}
+
+function authFetchMock(extra?: (url: string, init?: RequestInit) => Response | null) {
+  return vi.fn().mockImplementation((url: string, init?: RequestInit) => {
+    const href = String(url);
+    const fromExtra = extra?.(href, init);
+    if (fromExtra) return Promise.resolve(fromExtra);
+    if (href.includes('/auth/session')) {
+      return Promise.resolve(jsonResponse(mockAuthSession));
+    }
+    if (href.includes('/auth/permissions')) {
+      return Promise.resolve(jsonResponse(mockEffectivePermissions));
+    }
+    if (href.includes('/auth/csrf')) {
+      return Promise.resolve(jsonResponse({ csrf_token: 'csrf-1' }));
+    }
+    if (href.includes('/auth/logout') && init?.method === 'POST') {
+      return Promise.resolve(new Response(null, { status: 204 }));
+    }
+    return Promise.resolve(jsonResponse({}));
   });
 }
 
@@ -20,18 +41,7 @@ describe('AppShell session user', () => {
   });
 
   it('shows real session user and calls logout API', async () => {
-    const fetchMock = vi.fn().mockImplementation((url: string, init?: RequestInit) => {
-      if (String(url).includes('/auth/session')) {
-        return Promise.resolve(jsonResponse(mockAuthSession));
-      }
-      if (String(url).includes('/auth/csrf')) {
-        return Promise.resolve(jsonResponse({ csrf_token: 'csrf-1' }));
-      }
-      if (String(url).includes('/auth/logout') && init?.method === 'POST') {
-        return Promise.resolve(new Response(null, { status: 204 }));
-      }
-      return Promise.resolve(jsonResponse({}));
-    });
+    const fetchMock = authFetchMock();
     vi.stubGlobal('fetch', fetchMock);
 
     const router = createMemoryRouter(
@@ -76,7 +86,7 @@ describe('AppShell session user', () => {
   });
 
   it('uses Korean navigation while keeping the existing schedule route and permissions', async () => {
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(mockAuthSession)));
+    vi.stubGlobal('fetch', authFetchMock());
     const router = createMemoryRouter(
       [{
         path: '/', element: <AppShell />,
@@ -100,5 +110,42 @@ describe('AppShell session user', () => {
     fireEvent.click(screen.getByRole('button', { name: '메뉴 접기' }));
     expect(screen.getByRole('button', { name: '메뉴 펼치기' })).toBeInTheDocument();
     expect(screen.getByTitle('업무 실행')).toBeInTheDocument();
+  });
+
+  it('hides gated nav children without permission and keeps parent when any child remains', async () => {
+    vi.stubGlobal(
+      'fetch',
+      authFetchMock((href) => {
+        if (href.includes('/auth/permissions')) {
+          return jsonResponse({
+            permission_codes: ['execution.read', 'agent.read'],
+          });
+        }
+        return null;
+      }),
+    );
+    const router = createMemoryRouter(
+      [{
+        path: '/', element: <AppShell />,
+        children: [{ index: true, element: <div>홈</div> }],
+      }],
+      { initialEntries: ['/'] },
+    );
+    render(<AuthProvider><RouterProvider router={router} /></AuthProvider>);
+
+    await waitFor(() => expect(screen.getByRole('link', { name: '대시보드' })).toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole('button', { name: '업무 실행' }));
+    expect(screen.getByRole('link', { name: '실행 이력' })).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: '에이전트 실행' })).toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: '예약 실행' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: '승인 요청' })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: '구성 관리' }));
+    expect(screen.getByRole('link', { name: '에이전트 관리' })).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: '워크플로 관리' })).toBeInTheDocument();
+
+    expect(screen.queryByRole('button', { name: 'MCP' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '시스템 관리' })).toBeInTheDocument();
   });
 });

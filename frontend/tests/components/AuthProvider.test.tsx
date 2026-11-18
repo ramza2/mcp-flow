@@ -4,7 +4,7 @@ import { createMemoryRouter, RouterProvider } from 'react-router';
 import { AuthProvider } from '../../src/auth/AuthProvider';
 import { useAuth } from '../../src/auth/useAuth';
 import { clearCsrfCache } from '../../src/api/csrf';
-import { mockAuthSession, sessionUnauthorizedBody } from '../fixtures/auth-api';
+import { mockAuthSession, mockEffectivePermissions, sessionUnauthorizedBody } from '../fixtures/auth-api';
 
 function jsonResponse(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), {
@@ -13,12 +13,28 @@ function jsonResponse(body: unknown, status = 200) {
   });
 }
 
+function authFetch(url: string, init?: RequestInit): Promise<Response> | null {
+  const href = String(url);
+  if (href.includes('/auth/permissions')) {
+    return Promise.resolve(jsonResponse(mockEffectivePermissions));
+  }
+  if (href.includes('/auth/csrf')) {
+    return Promise.resolve(jsonResponse({ csrf_token: 'csrf-1' }));
+  }
+  if (href.includes('/auth/logout') && init?.method === 'POST') {
+    return Promise.resolve(new Response(null, { status: 204 }));
+  }
+  return null;
+}
+
 function Probe() {
-  const { status, user, login, logout } = useAuth();
+  const { status, user, login, logout, permissions, hasPermission } = useAuth();
   return (
     <div>
       <div data-testid="status">{status}</div>
       <div data-testid="user">{user?.username ?? ''}</div>
+      <div data-testid="perm-count">{permissions.length}</div>
+      <div data-testid="has-exec-read">{hasPermission('execution.read') ? 'yes' : 'no'}</div>
       <button type="button" onClick={() => void login('demo', 'secret-password')}>
         do-login
       </button>
@@ -45,10 +61,24 @@ describe('AuthProvider', () => {
   });
 
   it('bootstraps authenticated from GET /auth/session 200', async () => {
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(mockAuthSession)));
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((url: string, init?: RequestInit) => {
+        const handled = authFetch(url, init);
+        if (handled) return handled;
+        if (String(url).includes('/auth/session')) {
+          return Promise.resolve(jsonResponse(mockAuthSession));
+        }
+        return Promise.resolve(jsonResponse({}));
+      }),
+    );
     renderAuthApp();
     await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('authenticated'));
     expect(screen.getByTestId('user')).toHaveTextContent('demo');
+    expect(screen.getByTestId('perm-count')).toHaveTextContent(
+      String(mockEffectivePermissions.permission_codes.length),
+    );
+    expect(screen.getByTestId('has-exec-read')).toHaveTextContent('yes');
   });
 
   it('bootstraps unauthenticated from GET /auth/session 401', async () => {
@@ -64,7 +94,9 @@ describe('AuthProvider', () => {
   });
 
   it('login success stores session', async () => {
-    const fetchMock = vi.fn().mockImplementation((url: string) => {
+    const fetchMock = vi.fn().mockImplementation((url: string, init?: RequestInit) => {
+      const handled = authFetch(url, init);
+      if (handled) return handled;
       if (String(url).includes('/auth/session')) {
         return Promise.resolve(jsonResponse(sessionUnauthorizedBody(), 401));
       }
@@ -83,14 +115,10 @@ describe('AuthProvider', () => {
 
   it('logout success clears state', async () => {
     const fetchMock = vi.fn().mockImplementation((url: string, init?: RequestInit) => {
+      const handled = authFetch(url, init);
+      if (handled) return handled;
       if (String(url).includes('/auth/session')) {
         return Promise.resolve(jsonResponse(mockAuthSession));
-      }
-      if (String(url).includes('/auth/csrf')) {
-        return Promise.resolve(jsonResponse({ csrf_token: 'csrf-1' }));
-      }
-      if (String(url).includes('/auth/logout') && init?.method === 'POST') {
-        return Promise.resolve(new Response(null, { status: 204 }));
       }
       return Promise.resolve(jsonResponse({}));
     });
@@ -104,11 +132,22 @@ describe('AuthProvider', () => {
 
   it('clears to unauthenticated on session-invalid event', async () => {
     const { notifySessionInvalid } = await import('../../src/api/sessionEvents');
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(mockAuthSession)));
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((url: string, init?: RequestInit) => {
+        const handled = authFetch(url, init);
+        if (handled) return handled;
+        if (String(url).includes('/auth/session')) {
+          return Promise.resolve(jsonResponse(mockAuthSession));
+        }
+        return Promise.resolve(jsonResponse({}));
+      }),
+    );
     renderAuthApp();
     await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('authenticated'));
     notifySessionInvalid();
     await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('unauthenticated'));
     expect(screen.getByTestId('user')).toHaveTextContent('');
+    expect(screen.getByTestId('perm-count')).toHaveTextContent('0');
   });
 });

@@ -16,9 +16,11 @@ from app.core.config import Settings
 from app.schemas.auth_session import (
     AuthSessionResponse,
     CsrfTokenResponse,
+    EffectivePermissionsResponse,
     LoginRequest,
 )
 from app.services.authentication import AuthenticationService
+from app.services.authorization import AuthorizationResolver
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -92,6 +94,22 @@ async def get_csrf(
         session_id=principal.session_id
     )
     return CsrfTokenResponse(csrf_token=token)
+
+
+@router.get("/permissions", response_model=EffectivePermissionsResponse)
+async def get_effective_permissions(
+    principal: CurrentPrincipalDep,
+    session: DbSessionDep,
+) -> EffectivePermissionsResponse:
+    """Return the session user's effective Role permission codes.
+
+    Reuses AuthorizationResolver.get_effective_permission_codes.
+    Does not create Roles, grant permissions, or mutate Session/CSRF.
+    """
+    codes = await AuthorizationResolver(session).get_effective_permission_codes(
+        principal.user_id
+    )
+    return EffectivePermissionsResponse(permission_codes=sorted(codes))
 
 
 @router.post(

@@ -1,14 +1,14 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { Outlet, NavLink, useNavigate, useLocation } from 'react-router';
 import {
-  LayoutDashboard, Play, List, Calendar, CheckSquare,
+  LayoutDashboard, Play, Calendar, CheckSquare,
   Bot, GitBranch, Server, Wrench, Globe, Factory,
   Users, Shield, Clock, ScrollText, Settings, Briefcase,
-  ChevronDown, ChevronRight, Menu, X, Bell, User,
+  ChevronDown, ChevronRight, Bell, User,
   LogOut, ChevronLeft, Zap, Activity
 } from 'lucide-react';
 import PermissionGate from '../PermissionGate';
-import type { Permission } from '../../domain';
+import { hasPermission, type Permission } from '../../domain';
 import { useAuth } from '../../auth/useAuth';
 import { isApiError } from '../../api/client';
 
@@ -17,10 +17,21 @@ interface NavItem {
   path?: string;
   icon?: React.ReactNode;
   children?: NavItem[];
-  /** Frontend PermissionGate is UX only. Backend authorization remains authoritative. */
+  /**
+   * Formal permission code only (docs/06 catalog).
+   * Omit when mapping is unclear — preserve prior always-visible UX (RBAC-UX01 gaps).
+   * Frontend PermissionGate is UX only. Backend authorization remains authoritative.
+   */
   permission?: Permission;
 }
 
+/**
+ * RBAC-UX01 formal mapping. Gaps (ungated, prior visibility preserved):
+ * - /workflows — no workflow.read (only workflow.execute)
+ * - /admin/users, /admin/roles, /admin/model-profiles, /admin/jobs, /admin/settings
+ *   — no admin.* / user.manage bootstrap codes
+ * - /run (에이전트 실행) — no dedicated agent.execute UX code beyond grants
+ */
 const navConfig: NavItem[] = [
   { label: '대시보드', path: '/', icon: <LayoutDashboard size={16} /> },
   {
@@ -28,58 +39,80 @@ const navConfig: NavItem[] = [
     icon: <Briefcase size={16} />,
     children: [
       { label: '에이전트 실행', path: '/run', icon: <Play size={14} /> },
-      { label: '실행 이력', path: '/executions', icon: <Activity size={14} />, permission: 'execution.view' },
-      { label: '예약 실행', path: '/schedules', icon: <Calendar size={14} />, permission: 'schedule.view' },
-      { label: '승인 요청', path: '/approvals', icon: <CheckSquare size={14} />, permission: 'approval.view' },
+      { label: '실행 이력', path: '/executions', icon: <Activity size={14} />, permission: 'execution.read' },
+      { label: '예약 실행', path: '/schedules', icon: <Calendar size={14} />, permission: 'schedule.manage' },
+      { label: '승인 요청', path: '/approvals', icon: <CheckSquare size={14} />, permission: 'approval.decide' },
     ],
   },
   {
     label: '구성 관리',
     icon: <Zap size={16} />,
     children: [
-      { label: '에이전트 관리', path: '/agents', icon: <Bot size={14} />, permission: 'agent.view' },
-      { label: '워크플로 관리', path: '/workflows', icon: <GitBranch size={14} />, permission: 'workflow.view' },
+      { label: '에이전트 관리', path: '/agents', icon: <Bot size={14} />, permission: 'agent.read' },
+      // Gap: no workflow.read — leave ungated
+      { label: '워크플로 관리', path: '/workflows', icon: <GitBranch size={14} /> },
     ],
   },
   {
     label: 'MCP',
     icon: <Server size={16} />,
-    permission: 'mcp.view',
     children: [
-      { label: 'MCP 서버', path: '/mcp/servers', icon: <Server size={14} />, permission: 'mcp.view' },
-      { label: 'MCP 도구', path: '/mcp/tools', icon: <Wrench size={14} />, permission: 'mcp.view' },
-      { label: '외부 MCP 탐색', path: '/mcp/discovery', icon: <Globe size={14} />, permission: 'mcp.view' },
-      { label: 'Factory 실제 작업', path: '/tool-factory/jobs', icon: <Factory size={14} />, permission: 'mcp.view' },
-      { label: '도구 생성 (시연)', path: '/tool-factory', icon: <Factory size={14} />, permission: 'mcp.view' }
+      { label: 'MCP 서버', path: '/mcp/servers', icon: <Server size={14} />, permission: 'mcp.server.read' },
+      { label: 'MCP 도구', path: '/mcp/tools', icon: <Wrench size={14} />, permission: 'mcp.tool.read' },
+      { label: '외부 MCP 탐색', path: '/mcp/discovery', icon: <Globe size={14} />, permission: 'mcp.server.read' },
+      { label: 'Factory 실제 작업', path: '/tool-factory/jobs', icon: <Factory size={14} />, permission: 'mcp.server.read' },
+      { label: '도구 생성 (시연)', path: '/tool-factory', icon: <Factory size={14} />, permission: 'mcp.server.read' },
     ],
   },
   {
     label: '시스템 관리',
     icon: <Shield size={16} />,
-    permission: 'admin.view',
     children: [
-      { label: '사용자 관리', path: '/admin/users', icon: <Users size={14} />, permission: 'admin.view' },
-      { label: '역할 및 권한', path: '/admin/roles', icon: <Shield size={14} />, permission: 'admin.view' },
-      { label: '승인 정책', path: '/admin/approval-policies', icon: <CheckSquare size={14} />, permission: 'admin.view' },
-      { label: '모델 설정', path: '/admin/model-profiles', icon: <Bot size={14} />, permission: 'admin.view' },
-      { label: '감사 기록', path: '/admin/audit-logs', icon: <ScrollText size={14} />, permission: 'admin.view' },
-      { label: '백그라운드 작업', path: '/admin/jobs', icon: <Clock size={14} />, permission: 'admin.view' },
-      { label: '시스템 설정', path: '/admin/settings', icon: <Settings size={14} />, permission: 'admin.view' },
+      // Gaps: users/roles/model-profiles/jobs/settings — no formal admin.* codes
+      { label: '사용자 관리', path: '/admin/users', icon: <Users size={14} /> },
+      { label: '역할 및 권한', path: '/admin/roles', icon: <Shield size={14} /> },
+      { label: '승인 정책', path: '/admin/approval-policies', icon: <CheckSquare size={14} />, permission: 'approval.policy.manage' },
+      { label: '모델 설정', path: '/admin/model-profiles', icon: <Bot size={14} /> },
+      { label: '감사 기록', path: '/admin/audit-logs', icon: <ScrollText size={14} />, permission: 'audit.read' },
+      { label: '백그라운드 작업', path: '/admin/jobs', icon: <Clock size={14} /> },
+      { label: '시스템 설정', path: '/admin/settings', icon: <Settings size={14} /> },
     ],
   },
 ];
 
-function NavSection({ item, collapsed, level = 0 }: { item: NavItem; collapsed: boolean; level?: number }) {
+function navItemAllowed(item: NavItem, permissions: readonly string[]): boolean {
+  if (item.children?.length) {
+    return item.children.some(child => navItemAllowed(child, permissions));
+  }
+  if (!item.permission) return true;
+  return hasPermission(item.permission, permissions);
+}
+
+function NavSection({
+  item,
+  collapsed,
+  level = 0,
+  permissions,
+}: {
+  item: NavItem;
+  collapsed: boolean;
+  level?: number;
+  permissions: readonly string[];
+}) {
   const location = useLocation();
   const [open, setOpen] = useState(() => {
     if (!item.children) return false;
     return item.children.some(c => c.path && location.pathname.startsWith(c.path));
   });
 
-  const wrapPermission = (node: React.ReactNode) => {
-    if (!item.permission) return node;
+  if (!navItemAllowed(item, permissions)) {
+    return null;
+  }
+
+  const wrapPermission = (node: React.ReactNode, permission?: Permission) => {
+    if (!permission) return node;
     // Frontend PermissionGate is UX only. Backend authorization remains authoritative.
-    return <PermissionGate permission={item.permission}>{node}</PermissionGate>;
+    return <PermissionGate permission={permission}>{node}</PermissionGate>;
   };
 
   if (item.path) {
@@ -99,13 +132,19 @@ function NavSection({ item, collapsed, level = 0 }: { item: NavItem; collapsed: 
       >
         {item.icon && <span className="shrink-0">{item.icon}</span>}
         {!collapsed && <span className="truncate">{item.label}</span>}
-      </NavLink>
+      </NavLink>,
+      item.permission,
     );
   }
 
-  const hasActiveChild = item.children?.some(c => c.path && location.pathname.startsWith(c.path));
+  const visibleChildren = (item.children ?? []).filter(c => navItemAllowed(c, permissions));
+  if (visibleChildren.length === 0) {
+    return null;
+  }
 
-  return wrapPermission(
+  const hasActiveChild = visibleChildren.some(c => c.path && location.pathname.startsWith(c.path));
+
+  return (
     <div>
       <button
         onClick={() => setOpen(v => !v)}
@@ -121,10 +160,16 @@ function NavSection({ item, collapsed, level = 0 }: { item: NavItem; collapsed: 
           </>
         )}
       </button>
-      {!collapsed && open && item.children && (
+      {!collapsed && open && (
         <div className="mt-0.5 space-y-0.5">
-          {item.children.map(child => (
-            <NavSection key={child.label} item={child} collapsed={collapsed} level={level + 1} />
+          {visibleChildren.map(child => (
+            <NavSection
+              key={child.label}
+              item={child}
+              collapsed={collapsed}
+              level={level + 1}
+              permissions={permissions}
+            />
           ))}
         </div>
       )}
@@ -143,7 +188,12 @@ export default function AppShell() {
   const [logoutError, setLogoutError] = useState('');
   const [logoutLoading, setLogoutLoading] = useState(false);
   const navigate = useNavigate();
-  const { user, logout } = useAuth();
+  const { user, logout, permissions } = useAuth();
+
+  const visibleNav = useMemo(
+    () => navConfig.filter(item => navItemAllowed(item, permissions)),
+    [permissions],
+  );
 
   const handleLogout = async () => {
     if (logoutLoading) return;
@@ -189,8 +239,13 @@ export default function AppShell() {
 
         {/* Nav */}
         <nav className="flex-1 overflow-y-auto py-3 px-2 space-y-0.5">
-          {navConfig.map(item => (
-            <NavSection key={item.label} item={item} collapsed={collapsed} />
+          {visibleNav.map(item => (
+            <NavSection
+              key={item.label}
+              item={item}
+              collapsed={collapsed}
+              permissions={permissions}
+            />
           ))}
         </nav>
 

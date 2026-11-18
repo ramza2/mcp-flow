@@ -13,6 +13,26 @@ export const mockAuthSession: AuthSession = {
   expires_at: '2026-09-08T08:00:00.000Z',
 };
 
+/** Broad operator-style codes for AppShell/AuthProvider fetch stubs. */
+export const mockEffectivePermissions = {
+  permission_codes: [
+    'mcp.server.read',
+    'mcp.server.manage',
+    'mcp.tool.read',
+    'mcp.tool.execute',
+    'agent.read',
+    'agent.manage',
+    'workflow.execute',
+    'execution.read',
+    'execution.cancel',
+    'approval.decide',
+    'approval.policy.manage',
+    'audit.read',
+    'audit.export',
+    'schedule.manage',
+  ],
+};
+
 export function sessionUnauthorizedBody() {
   return {
     error: {

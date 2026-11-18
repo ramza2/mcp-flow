@@ -8,10 +8,18 @@ import {
   useState,
   type ReactNode,
 } from 'react';
-import { getSession, login as apiLogin, logout as apiLogout, type AuthSession, type SessionUser } from '../api/auth';
+import {
+  getEffectivePermissions,
+  getSession,
+  login as apiLogin,
+  logout as apiLogout,
+  type AuthSession,
+  type SessionUser,
+} from '../api/auth';
 import { ApiError, isAbortError, isApiError } from '../api/client';
 import { clearCsrfCache } from '../api/csrf';
 import { onSessionInvalid } from '../api/sessionEvents';
+import { hasPermission as checkPermission, type Permission } from '../domain';
 
 export type AuthStatus = 'loading' | 'authenticated' | 'unauthenticated' | 'error';
 
@@ -20,6 +28,8 @@ export interface AuthState {
   session: AuthSession | null;
   user: SessionUser | null;
   error: ApiError | null;
+  /** Effective formal permission codes from GET /auth/permissions. */
+  permissions: readonly string[];
 }
 
 export interface AuthContextValue extends AuthState {
@@ -27,16 +37,24 @@ export interface AuthContextValue extends AuthState {
   logout: () => Promise<void>;
   refreshSession: () => Promise<void>;
   clearSessionLocal: () => void;
+  /** UX helper — Backend authorization remains authoritative. */
+  hasPermission: (permission: Permission) => boolean;
 }
 
-const AuthContext = createContext<AuthContextValue | null>(null);
+export const AuthContext = createContext<AuthContextValue | null>(null);
 
 const initialState: AuthState = {
   status: 'loading',
   session: null,
   user: null,
   error: null,
+  permissions: [],
 };
+
+async function loadPermissions(signal?: AbortSignal): Promise<readonly string[]> {
+  const body = await getEffectivePermissions({ signal });
+  return Array.isArray(body.permission_codes) ? body.permission_codes : [];
+}
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [state, setState] = useState<AuthState>(initialState);
@@ -49,8 +67,43 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       session: null,
       user: null,
       error: null,
+      permissions: [],
     });
   }, []);
+
+  const applyAuthenticated = useCallback(
+    async (session: AuthSession, gen: number, signal?: AbortSignal) => {
+      let permissions: readonly string[] = [];
+      try {
+        permissions = await loadPermissions(signal);
+      } catch (error) {
+        if (signal?.aborted || isAbortError(error)) return;
+        if (isApiError(error) && error.status === 401 && error.code === 'AUTH_SESSION_INVALID') {
+          clearCsrfCache();
+          if (gen !== bootstrapGen.current) return;
+          setState({
+            status: 'unauthenticated',
+            session: null,
+            user: null,
+            error: null,
+            permissions: [],
+          });
+          return;
+        }
+        // Fail closed for gated UX: keep session, empty permissions.
+        permissions = [];
+      }
+      if (gen !== bootstrapGen.current || signal?.aborted) return;
+      setState({
+        status: 'authenticated',
+        session,
+        user: session.user,
+        error: null,
+        permissions,
+      });
+    },
+    [],
+  );
 
   const refreshSession = useCallback(async () => {
     const gen = ++bootstrapGen.current;
@@ -63,12 +116,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     try {
       const session = await getSession({ signal: ac.signal });
       if (gen !== bootstrapGen.current) return;
-      setState({
-        status: 'authenticated',
-        session,
-        user: session.user,
-        error: null,
-      });
+      await applyAuthenticated(session, gen, ac.signal);
     } catch (error) {
       if (gen !== bootstrapGen.current) return;
       if (isAbortError(error)) return;
@@ -79,6 +127,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           session: null,
           user: null,
           error: null,
+          permissions: [],
         });
         return;
       }
@@ -94,9 +143,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
               message: error instanceof Error ? error.message : 'Session bootstrap failed',
               retryable: true,
             }),
+        permissions: [],
       });
     }
-  }, []);
+  }, [applyAuthenticated]);
 
   useEffect(() => {
     const gen = ++bootstrapGen.current;
@@ -106,12 +156,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       try {
         const session = await getSession({ signal: ac.signal });
         if (gen !== bootstrapGen.current || ac.signal.aborted) return;
-        setState({
-          status: 'authenticated',
-          session,
-          user: session.user,
-          error: null,
-        });
+        await applyAuthenticated(session, gen, ac.signal);
       } catch (error) {
         if (gen !== bootstrapGen.current || ac.signal.aborted || isAbortError(error)) return;
         if (isApiError(error) && error.status === 401 && error.code === 'AUTH_SESSION_INVALID') {
@@ -121,6 +166,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             session: null,
             user: null,
             error: null,
+            permissions: [],
           });
           return;
         }
@@ -136,6 +182,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
                 message: error instanceof Error ? error.message : 'Session bootstrap failed',
                 retryable: true,
               }),
+          permissions: [],
         });
       }
     })();
@@ -143,7 +190,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return () => {
       ac.abort();
     };
-  }, []);
+  }, [applyAuthenticated]);
 
   useEffect(() => {
     return onSessionInvalid(() => {
@@ -153,21 +200,34 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         session: null,
         user: null,
         error: null,
+        permissions: [],
       });
     });
   }, []);
 
-  const login = useCallback(async (username: string, password: string) => {
-    const session = await apiLogin(username, password);
-    clearCsrfCache();
-    setState({
-      status: 'authenticated',
-      session,
-      user: session.user,
-      error: null,
-    });
-    return session;
-  }, []);
+  const login = useCallback(
+    async (username: string, password: string) => {
+      const session = await apiLogin(username, password);
+      clearCsrfCache();
+      const gen = ++bootstrapGen.current;
+      let permissions: readonly string[] = [];
+      try {
+        permissions = await loadPermissions();
+      } catch {
+        permissions = [];
+      }
+      if (gen !== bootstrapGen.current) return session;
+      setState({
+        status: 'authenticated',
+        session,
+        user: session.user,
+        error: null,
+        permissions,
+      });
+      return session;
+    },
+    [],
+  );
 
   const logout = useCallback(async () => {
     try {
@@ -178,6 +238,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         session: null,
         user: null,
         error: null,
+        permissions: [],
       });
     } catch (error) {
       if (isApiError(error) && error.status === 401 && error.code === 'AUTH_SESSION_INVALID') {
@@ -187,12 +248,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           session: null,
           user: null,
           error: null,
+          permissions: [],
         });
         return;
       }
       throw error;
     }
   }, []);
+
+  const hasPermission = useCallback(
+    (permission: Permission) => checkPermission(permission, state.permissions),
+    [state.permissions],
+  );
 
   const value = useMemo<AuthContextValue>(
     () => ({
@@ -201,8 +268,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       logout,
       refreshSession,
       clearSessionLocal,
+      hasPermission,
     }),
-    [state, login, logout, refreshSession, clearSessionLocal],
+    [state, login, logout, refreshSession, clearSessionLocal, hasPermission],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

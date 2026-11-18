@@ -5,27 +5,23 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import PermissionGate from '@/components/PermissionGate';
-import { hasPermission } from '@/domain';
+import { buildAuthContext } from '../fixtures/auth-context';
 
-vi.mock('@/domain', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('@/domain')>();
-  return {
-    ...actual,
-    hasPermission: vi.fn(),
-  };
-});
+const useAuthMock = vi.fn();
 
-const mockedHasPermission = vi.mocked(hasPermission);
+vi.mock('@/auth/useAuth', () => ({
+  useAuth: () => useAuthMock(),
+}));
 
 describe('PermissionGate (UX helper only — Backend auth remains authoritative)', () => {
   beforeEach(() => {
-    mockedHasPermission.mockReset();
+    useAuthMock.mockReset();
   });
 
-  it('shows children when permission is allowed', () => {
-    mockedHasPermission.mockReturnValue(true);
+  it('shows children when session permission is allowed', () => {
+    useAuthMock.mockReturnValue(buildAuthContext({ permissions: ['approval.decide'] }));
     render(
-      <PermissionGate permission="approval.approve">
+      <PermissionGate permission="approval.decide">
         <button type="button">Approve</button>
       </PermissionGate>,
     );
@@ -33,9 +29,9 @@ describe('PermissionGate (UX helper only — Backend auth remains authoritative)
   });
 
   it('hides children by default when permission is denied (mode=hide)', () => {
-    mockedHasPermission.mockReturnValue(false);
+    useAuthMock.mockReturnValue(buildAuthContext({ permissions: [] }));
     render(
-      <PermissionGate permission="admin.manage">
+      <PermissionGate permission="audit.read">
         <button type="button">Secret Admin</button>
       </PermissionGate>,
     );
@@ -43,7 +39,7 @@ describe('PermissionGate (UX helper only — Backend auth remains authoritative)
   });
 
   it('keeps children visible but aria-disabled when mode=disable', () => {
-    mockedHasPermission.mockReturnValue(false);
+    useAuthMock.mockReturnValue(buildAuthContext({ permissions: [] }));
     render(
       <PermissionGate permission="execution.cancel" mode="disable">
         <button type="button">Cancel</button>
