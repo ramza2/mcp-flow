@@ -47,6 +47,7 @@ import {
 import {
   labelDiscoveryMode,
   labelExecutionSource,
+  labelExecutionStatus,
   labelOccurrenceStatus,
   labelScheduleDecision,
   labelScheduleMisfire,
@@ -331,6 +332,14 @@ describe('Presentation labels — Domain values stay Canonical', () => {
     expect(EXECUTION_SOURCE_TYPES).toContain('AGENT_REQUEST');
     expect(EXECUTION_SOURCE_TYPES).not.toContain('Agent');
     expect(labelExecutionSource('SOME_UNKNOWN_SOURCE')).toBe('SOME_UNKNOWN_SOURCE');
+  });
+
+  it('maps Execution status Canonical → Korean label without inventing Domain values', () => {
+    expect(labelExecutionStatus('WAITING_APPROVAL')).toBe('승인 대기');
+    expect(labelExecutionStatus('RUNNING')).toBe('실행 중');
+    expect(labelExecutionStatus('PARTIALLY_SUCCEEDED')).toBe('일부 성공');
+    expect(EXECUTION_STATUSES).toContain('WAITING_APPROVAL');
+    expect(labelExecutionStatus('NOT_A_REAL_STATUS')).toBe('NOT_A_REAL_STATUS');
   });
 
   it('maps Schedule target Canonical → label', () => {
