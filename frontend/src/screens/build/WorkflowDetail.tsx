@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useNavigate, useParams } from 'react-router';
-import { ArrowLeft, Eye, Pencil, Play, Plus, Power, Rocket } from 'lucide-react';
+import { ArrowLeft, CheckCircle2, Circle, Eye, Pencil, Play, Plus, Power, Rocket } from 'lucide-react';
 import StatusBadge, { VersionBadge } from '../../components/ui/StatusBadge';
 import { TabBar } from '../../components/ui/Tabs';
 import Button from '../../components/ui/Button';
@@ -14,6 +14,16 @@ import type { WorkflowStatus } from '../../domain/types';
 import { parseWorkflowRunInputs, planInputDefinitions } from './workflowRunInputs';
 import { canUseWorkflowInputForm, parseWorkflowInputForm, workflowInputsToForm } from './workflowRunInputForm';
 import WorkflowRunInputForm from './WorkflowRunInputForm';
+import {
+  WORKFLOW_RUN_READY_FLOW_LABEL,
+  activateDisabledReason,
+  buildWorkflowRunReadySteps,
+  formatWorkflowDetailActionError,
+  formatWorkflowRunSubmitError,
+  nextWorkflowRunReadyAction,
+  publishDisabledReason,
+  runDisabledReason,
+} from './workflowRunReadyUx';
 
 /** Initial server-side DRAFT is intentionally incomplete and must be edited + validated. */
 export function initialWorkflowPlan(workflow: WorkflowDto) {
@@ -80,6 +90,39 @@ export default function WorkflowDetail() {
   const hasPublishedCurrent = Boolean(current && current.status === 'PUBLISHED' && current.validation_status === 'VALID');
   const canActivate = Boolean(hasPublishedCurrent && (workflow?.status === 'DRAFT' || workflow?.status === 'INACTIVE'));
   const canRun = Boolean(workflow?.status === 'ACTIVE' && hasPublishedCurrent);
+  const draftValidated = Boolean(
+    draft
+      && draft.validation_status === 'VALID'
+      && draft.validation_report?.valid === true
+      && draft.validation_report.content_hash === draft.content_hash,
+  );
+  const runReadySteps = buildWorkflowRunReadySteps({
+    hasDraft: Boolean(draft),
+    draftValidated,
+    hasPublishedValid: hasPublishedCurrent,
+    isActive: workflow?.status === 'ACTIVE',
+  });
+  const nextRunReady = nextWorkflowRunReadyAction(runReadySteps);
+  const publishBlockedReason = publishDisabledReason({
+    busy,
+    hasDraft: Boolean(draft),
+    canPublish,
+  });
+  const activateBlockedReason = workflow
+    ? activateDisabledReason({
+        busy,
+        workflowStatus: workflow.status,
+        canActivate,
+      })
+    : null;
+  const runBlockedReason = workflow
+    ? runDisabledReason({
+        busy,
+        canRun,
+        workflowStatus: workflow.status,
+        hasPublishedValid: hasPublishedCurrent,
+      })
+    : null;
   const inputDefinitions = current ? planInputDefinitions(current.plan_definition) : {};
   const runFormSupported = current ? canUseWorkflowInputForm(current.plan_definition) : false;
 
@@ -98,7 +141,11 @@ export default function WorkflowDetail() {
         : { plan_definition: initialWorkflowPlan(workflow), change_summary: '초기 초안' });
       navigate(`/workflows/${workflow.id}/versions/${created.id}/edit`);
     } catch (err) {
-      setActionError(isApiError(err) ? err.message : '초안 버전 생성에 실패했습니다.');
+      const formatted = formatWorkflowDetailActionError(
+        isApiError(err) ? err : null,
+        'draft',
+      );
+      setActionError(formatted.message);
     } finally {
       setBusy(false);
     }
@@ -129,8 +176,11 @@ export default function WorkflowDetail() {
       setActionSuccess(`v${draft.version_no} 게시가 완료되었습니다. 실행하려면 별도 활성화 및 실행 절차가 필요합니다.`);
       load();
     } catch (err) {
-      const apiErr = isApiError(err) ? err : null;
-      setActionError(apiErr?.message ?? '게시하지 못했습니다. 서버 검증 상태를 확인해 주세요.');
+      const formatted = formatWorkflowDetailActionError(
+        isApiError(err) ? err : null,
+        'publish',
+      );
+      setActionError(formatted.message);
       load();
     } finally {
       setPublishOpen(false);
@@ -155,7 +205,11 @@ export default function WorkflowDetail() {
       setActionSuccess(statusTarget === 'ACTIVE' ? '워크플로가 활성화되었습니다.' : '워크플로가 비활성화되었습니다.');
       load();
     } catch (err) {
-      setActionError(isApiError(err) ? err.message : '워크플로 상태를 변경하지 못했습니다.');
+      const formatted = formatWorkflowDetailActionError(
+        isApiError(err) ? err : null,
+        'status',
+      );
+      setActionError(formatted.message);
       load();
     } finally {
       setStatusTarget(null);
@@ -213,10 +267,9 @@ export default function WorkflowDetail() {
       setRunOpen(false);
       navigate(`/executions/${result.id}`);
     } catch (err) {
-      const apiErr = isApiError(err) ? err : null;
-      setRunInputError(apiErr?.status === 403
-        ? '실행 권한이 없습니다. workflow.execute + WORKFLOW 권한 및 도구별 mcp.tool.execute + MCP_TOOL 권한을 확인하세요.'
-        : apiErr?.message ?? '실행 요청에 실패했습니다. 동일한 요청 키로 재시도할 수 있습니다.');
+      setRunInputError(
+        formatWorkflowRunSubmitError(isApiError(err) ? err : null),
+      );
     } finally {
       setBusy(false);
     }
@@ -291,6 +344,58 @@ export default function WorkflowDetail() {
           </div>
         </div>
       </div>
+
+      <section
+        aria-label="워크플로 실행 준비 안내"
+        className="border-b border-slate-200 bg-slate-50 px-6 py-3"
+        data-testid="workflow-run-ready-progress"
+      >
+        <p className="text-xs font-semibold text-slate-700 mb-2">
+          실행 준비: {WORKFLOW_RUN_READY_FLOW_LABEL}
+        </p>
+        <ol className="flex flex-wrap gap-3 mb-2">
+          {runReadySteps.map((step) => (
+            <li
+              key={step.id}
+              className={`inline-flex items-center gap-1.5 text-xs ${
+                step.done ? 'text-emerald-700' : 'text-slate-500'
+              }`}
+              data-testid={`workflow-run-ready-step-${step.id}`}
+              data-done={step.done ? 'true' : 'false'}
+            >
+              {step.done
+                ? <CheckCircle2 size={14} className="shrink-0" aria-hidden />
+                : <Circle size={14} className="shrink-0" aria-hidden />}
+              <span>{step.label}</span>
+            </li>
+          ))}
+        </ol>
+        {nextRunReady ? (
+          <p className="text-xs text-slate-600" data-testid="workflow-run-ready-next">
+            다음: {nextRunReady.message}
+          </p>
+        ) : (
+          <p className="text-xs text-emerald-700" data-testid="workflow-run-ready-next">
+            실행 준비가 끝났습니다. 수동 실행은 명시적으로만 시작되며 자동 실행하지 않습니다.
+          </p>
+        )}
+        {(publishBlockedReason || activateBlockedReason || runBlockedReason) && (
+          <ul className="mt-2 space-y-1" data-testid="workflow-run-ready-disabled-reasons">
+            {publishBlockedReason && !canPublish && (
+              <li className="text-xs text-slate-500">게시 비활성: {publishBlockedReason}</li>
+            )}
+            {activateBlockedReason && workflow.status !== 'ACTIVE' && (
+              <li className="text-xs text-slate-500">활성화 비활성: {activateBlockedReason}</li>
+            )}
+            {runBlockedReason && (
+              <li className="text-xs text-slate-500">수동 실행 비활성: {runBlockedReason}</li>
+            )}
+          </ul>
+        )}
+        <p className="mt-1 text-xs text-slate-500">
+          게시·활성화만으로 실행되지 않습니다. 자동 실행·자동 재시도는 하지 않습니다.
+        </p>
+      </section>
 
       <div className="bg-white border-b border-slate-200 px-6">
         <TabBar tabs={[{ id: 'overview', label: '개요' }, { id: 'versions', label: '버전', badge: versions.length }]} activeTab={tab} onChange={setTab} />
