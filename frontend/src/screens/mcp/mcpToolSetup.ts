@@ -4,7 +4,6 @@
  * Does not invent Domain states or change API / lifecycle transitions.
  */
 
-import { hasPermission } from '../../domain';
 import type { MCPToolStatus } from '../../domain/types';
 import { toolLifecycleAction } from './toolLifecycle';
 
@@ -108,9 +107,9 @@ export function toolLifecycleDisabledReason(
   tool: { status: string; current_version_id: string | null },
   options: { canEdit?: boolean } = {},
 ): string | null {
-  const canEdit = options.canEdit ?? hasPermission('mcp.edit');
+  const canEdit = options.canEdit ?? false;
   if (!canEdit) {
-    return '도구 상태를 변경할 권한이 없습니다. 관리자에게 mcp.edit 권한을 요청하세요.';
+    return '도구 상태를 변경할 권한이 없습니다. 관리자에게 mcp.server.manage 권한을 요청하세요.';
   }
 
   const status = tool.status as MCPToolStatus | string;
@@ -157,7 +156,7 @@ export function listEmptyGuidance(input: {
 
 export function listLoadFailureGuidance(code?: string, status?: number): string {
   if (status === 403 || code === 'FORBIDDEN') {
-    return '도구 목록을 볼 권한이 없습니다. 관리자에게 mcp.view 권한을 요청하세요.';
+    return '도구 목록을 볼 권한이 없습니다. 관리자에게 mcp.tool.read 권한을 요청하세요.';
   }
   return '목록을 다시 불러오거나, 권한이 있다면 MCP 서버에서 도구 탐색 적용 여부를 확인하세요.';
 }
@@ -167,7 +166,7 @@ export function lifecycleMutationNextAction(
   err: { code?: string; message?: string },
 ): string {
   if (err.code === 'FORBIDDEN' || /권한|forbidden/i.test(err.message ?? '')) {
-    return '다음: 관리자에게 mcp.edit 권한을 요청한 뒤 다시 시도하세요. UI 안내는 참고용이며 최종 인가는 서버가 결정합니다.';
+    return '다음: 관리자에게 mcp.server.manage 권한을 요청한 뒤 다시 시도하세요. UI 안내는 참고용이며 최종 인가는 서버가 결정합니다.';
   }
   if (err.code === 'RESOURCE_CONFLICT') {
     if (/current ToolVersion|version/i.test(err.message ?? '')) {

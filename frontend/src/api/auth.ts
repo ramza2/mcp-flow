@@ -4,9 +4,21 @@
  */
 
 import { apiRequest, type RequestOptions } from './client';
-import type { AuthSession, CsrfTokenResponse, LoginRequest } from './authTypes';
+import type {
+  AuthSession,
+  CsrfTokenResponse,
+  EffectivePermissionsResponse,
+  LoginRequest,
+} from './authTypes';
 
-export type { AuthSession, CsrfTokenResponse, LoginRequest, SessionUser, UserStatus } from './authTypes';
+export type {
+  AuthSession,
+  CsrfTokenResponse,
+  EffectivePermissionsResponse,
+  LoginRequest,
+  SessionUser,
+  UserStatus,
+} from './authTypes';
 
 type AuthCallOptions = Pick<RequestOptions, 'signal'>;
 
@@ -35,6 +47,17 @@ export function getCsrf(options: AuthCallOptions = {}): Promise<CsrfTokenRespons
     signal: options.signal,
     // Session-invalid during CSRF fetch should still notify (caller decides).
     // Bootstrap paths that need silence use getSession first.
+  });
+}
+
+/** Effective permission codes for the current Session (docs/06 §3.3). */
+export function getEffectivePermissions(
+  options: AuthCallOptions = {},
+): Promise<EffectivePermissionsResponse> {
+  return apiRequest<EffectivePermissionsResponse>('/auth/permissions', {
+    method: 'GET',
+    signal: options.signal,
+    suppressSessionInvalidation: true,
   });
 }
 

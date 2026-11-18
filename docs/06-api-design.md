@@ -101,6 +101,7 @@ POST /auth/login
 POST /auth/logout
 GET  /auth/session
 GET  /auth/csrf
+GET  /auth/permissions
 ```
 
 ### 3.2 Login
@@ -139,7 +140,31 @@ Auth Session Response 예:
 }
 ```
 
-### 3.3 CSRF
+### 3.3 Effective permissions (session)
+
+`GET /auth/permissions` returns the authenticated Session user's **effective**
+permission codes (union of Role → Permission memberships for the ACTIVE user).
+
+Response:
+
+```json
+{
+  "permission_codes": [
+    "agent.read",
+    "execution.read"
+  ]
+}
+```
+
+Implementation reuses `AuthorizationResolver.get_effective_permission_codes`.
+This endpoint is a read-only UX surface for frontend `PermissionGate` / menu
+visibility. Backend authorization on each resource API remains authoritative.
+It does not create Roles, invent permission codes, or auto-grant memberships.
+
+Codes are the formal bootstrap catalog (`docs/05` / §6 Permission code 예),
+sorted ascending. An ACTIVE user with no Role permissions receives `[]`.
+
+### 3.4 CSRF
 
 상태변경 Method(`POST`, `PUT`, `PATCH`, `DELETE`)는 Cookie Session 사용 시 CSRF 검증을 적용한다.
 

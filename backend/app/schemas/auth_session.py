@@ -50,3 +50,15 @@ class CsrfTokenResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     csrf_token: str
+
+
+class EffectivePermissionsResponse(BaseModel):
+    """Session actor's effective permission codes (docs/06 §3).
+
+    Reuses AuthorizationResolver.get_effective_permission_codes.
+    UX-only surface for PermissionGate / menu; Backend remains authoritative.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    permission_codes: list[str] = Field(default_factory=list)

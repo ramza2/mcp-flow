@@ -1,9 +1,10 @@
+import { useAuth } from '../auth/useAuth';
 import type { Permission } from '../domain';
-import { hasPermission } from '../domain';
 
 /**
  * Frontend PermissionGate is UX only.
  * Backend authorization remains authoritative.
+ * Uses session effective permissions from GET /auth/permissions.
  */
 export default function PermissionGate({
   permission,
@@ -17,6 +18,7 @@ export default function PermissionGate({
   /** hide = remove from DOM; disable = render but non-interactive */
   mode?: 'hide' | 'disable';
 }) {
+  const { hasPermission } = useAuth();
   const allowed = hasPermission(permission);
   if (allowed) return <>{children}</>;
   if (mode === 'disable') {

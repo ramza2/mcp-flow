@@ -21,17 +21,7 @@ import {
 } from '../fixtures/mcp-api';
 import { renderWithRouter } from '../test-utils';
 
-vi.mock('@/domain', async () => {
-  const actual = await vi.importActual<typeof import('@/domain')>('@/domain');
-  return {
-    ...actual,
-    hasPermission: vi.fn(actual.hasPermission),
-  };
-});
-
-import { hasPermission } from '@/domain';
-
-const mockedHasPermission = vi.mocked(hasPermission);
+import { buildAuthContext } from '../fixtures/auth-context';
 
 function jsonResponse(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), {
@@ -84,25 +74,23 @@ describe('MCP tool activation UX helpers', () => {
       { ...discoveredTool, current_version_id: null },
       { canEdit: true },
     )).toMatch(/현재 버전/);
-    expect(toolLifecycleDisabledReason(discoveredTool, { canEdit: false })).toMatch(/mcp\.edit/);
+    expect(toolLifecycleDisabledReason(discoveredTool, { canEdit: false })).toMatch(/mcp\.server\.manage/);
     expect(toolLifecycleDisabledReason(discoveredTool, { canEdit: true })).toBeNull();
   });
 
   it('guides empty and forbidden list failures in Korean', () => {
     expect(listEmptyGuidance({ hasFilters: false }).description).toMatch(/탐색 결과 적용/);
     expect(listEmptyGuidance({ hasFilters: true }).title).toMatch(/조건에 맞는/);
-    expect(listLoadFailureGuidance('FORBIDDEN')).toMatch(/mcp\.view/);
+    expect(listLoadFailureGuidance('FORBIDDEN')).toMatch(/mcp\.tool\.read/);
   });
 });
 
-describe('MCPTools activation UX', () => {
-  beforeEach(() => {
-    mockedHasPermission.mockImplementation(() => true);
-  });
+const manageAuth = () =>
+  buildAuthContext({ permissions: ['mcp.tool.read', 'mcp.server.manage'] });
 
+describe('MCPTools activation UX', () => {
   afterEach(() => {
     vi.unstubAllGlobals();
-    mockedHasPermission.mockReset();
   });
 
   it('shows setup flow and body reasons for blocked/missing tools', async () => {
@@ -124,7 +112,11 @@ describe('MCPTools activation UX', () => {
       }),
     );
 
-    renderWithRouter(<MCPTools />, { path: '/mcp/tools', route: '/mcp/tools' });
+    renderWithRouter(<MCPTools />, {
+      path: '/mcp/tools',
+      route: '/mcp/tools',
+      authValue: manageAuth(),
+    });
     expect(await screen.findByTestId('mcp-tool-setup-progress')).toHaveTextContent(/도구 찾기/);
     expect(screen.getByText(/VERIFIED/)).toBeInTheDocument();
     const reasons = await screen.findAllByTestId('mcp-tool-list-disabled-reason');
@@ -148,12 +140,15 @@ describe('MCPTools activation UX', () => {
       }),
     );
 
-    renderWithRouter(<MCPTools />, { path: '/mcp/tools', route: '/mcp/tools' });
-    expect(await screen.findByTestId('mcp-tool-list-error-next')).toHaveTextContent(/mcp\.view/);
+    renderWithRouter(<MCPTools />, {
+      path: '/mcp/tools',
+      route: '/mcp/tools',
+      authValue: manageAuth(),
+    });
+    expect(await screen.findByTestId('mcp-tool-list-error-next')).toHaveTextContent(/mcp\.tool\.read/);
   });
 
-  it('disables activate actions when mcp.edit is missing (UX helper only)', async () => {
-    mockedHasPermission.mockImplementation(permission => permission === 'mcp.view');
+  it('disables activate actions when mcp.server.manage is missing (UX helper only)', async () => {
     vi.stubGlobal(
       'fetch',
       vi.fn((input: RequestInfo) => {
@@ -172,18 +167,20 @@ describe('MCPTools activation UX', () => {
       }),
     );
 
-    renderWithRouter(<MCPTools />, { path: '/mcp/tools', route: '/mcp/tools' });
+    renderWithRouter(<MCPTools />, {
+      path: '/mcp/tools',
+      route: '/mcp/tools',
+      authValue: buildAuthContext({ permissions: ['mcp.tool.read'] }),
+    });
     expect(await screen.findByText('Search Docs')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: '활성화' })).not.toBeInTheDocument();
-    expect(screen.getByTestId('mcp-tool-list-disabled-reason')).toHaveTextContent(/mcp\.edit/);
+    expect(screen.getByTestId('mcp-tool-list-disabled-reason')).toHaveTextContent(/mcp\.server\.manage/);
   });
 });
 
 describe('MCPToolDetail activation UX', () => {
   afterEach(() => {
     vi.unstubAllGlobals();
-    mockedHasPermission.mockReset();
-    mockedHasPermission.mockImplementation(() => true);
   });
 
   it('shows next policy step and blocks activate without current version', async () => {
@@ -211,6 +208,7 @@ describe('MCPToolDetail activation UX', () => {
     renderWithRouter(<MCPToolDetail />, {
       path: '/mcp/tools/:toolId',
       route: `/mcp/tools/${noVersion.id}`,
+      authValue: manageAuth(),
     });
 
     expect(await screen.findByTestId('mcp-tool-setup-progress')).toBeInTheDocument();
@@ -240,6 +238,7 @@ describe('MCPToolDetail activation UX', () => {
     renderWithRouter(<MCPToolDetail />, {
       path: '/mcp/tools/:toolId',
       route: `/mcp/tools/${active.id}`,
+      authValue: manageAuth(),
     });
 
     expect(await screen.findByTestId('mcp-tool-setup-step-activate')).toHaveAttribute('data-done', 'true');

@@ -130,7 +130,7 @@ export default function Agents() {
         title="에이전트 관리"
         description="업무 지시문을 이해하고 허용된 MCP 도구를 사용하는 에이전트를 생성·관리합니다."
         actions={
-          <PermissionGate permission="agent.edit">
+          <PermissionGate permission="agent.manage">
             <Button icon={<Plus size={14} />} onClick={handleNewAgent}>
               새 에이전트
             </Button>
@@ -157,7 +157,7 @@ export default function Agents() {
             <ErrorState message={error.message} requestId={error.requestId} onRetry={() => { loadAgents(); }} />
           ) : agents.length === 0 ? (
             <PermissionGate
-              permission="agent.edit"
+              permission="agent.manage"
               fallback={(
                 <EmptyState
                   title="등록된 에이전트가 없습니다"

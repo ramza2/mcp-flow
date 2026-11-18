@@ -4,7 +4,7 @@ import { createMemoryRouter, RouterProvider } from 'react-router';
 import { AuthProvider } from '../../src/auth/AuthProvider';
 import { useAuth } from '../../src/auth/useAuth';
 import { clearCsrfCache } from '../../src/api/csrf';
-import { mockAuthSession, sessionUnauthorizedBody } from '../fixtures/auth-api';
+import { mockAuthSession, mockEffectivePermissions, sessionUnauthorizedBody } from '../fixtures/auth-api';
 
 function jsonResponse(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), {
@@ -13,13 +13,40 @@ function jsonResponse(body: unknown, status = 200) {
   });
 }
 
+function authFetch(url: string, init?: RequestInit): Promise<Response> | null {
+  const href = String(url);
+  if (href.includes('/auth/permissions')) {
+    return Promise.resolve(jsonResponse(mockEffectivePermissions));
+  }
+  if (href.includes('/auth/csrf')) {
+    return Promise.resolve(jsonResponse({ csrf_token: 'csrf-1' }));
+  }
+  if (href.includes('/auth/logout') && init?.method === 'POST') {
+    return Promise.resolve(new Response(null, { status: 204 }));
+  }
+  return null;
+}
+
 function Probe() {
-  const { status, user, login, logout } = useAuth();
+  const { status, user, login, logout, permissions, hasPermission } = useAuth();
   return (
     <div>
       <div data-testid="status">{status}</div>
       <div data-testid="user">{user?.username ?? ''}</div>
-      <button type="button" onClick={() => void login('demo', 'secret-password')}>
+      <div data-testid="perm-count">{permissions.length}</div>
+      <div data-testid="has-exec-read">{hasPermission('execution.read') ? 'yes' : 'no'}</div>
+      <div data-testid="login-error" />
+      <button
+        type="button"
+        onClick={() => {
+          void login('demo', 'secret-password').catch((err: unknown) => {
+            const node = document.querySelector('[data-testid="login-error"]');
+            if (node) {
+              node.textContent = isApiErrorLike(err) ? err.code : 'error';
+            }
+          });
+        }}
+      >
         do-login
       </button>
       <button type="button" onClick={() => void logout()}>
@@ -27,6 +54,10 @@ function Probe() {
       </button>
     </div>
   );
+}
+
+function isApiErrorLike(err: unknown): err is { code: string } {
+  return typeof err === 'object' && err !== null && 'code' in err;
 }
 
 function renderAuthApp() {
@@ -45,10 +76,24 @@ describe('AuthProvider', () => {
   });
 
   it('bootstraps authenticated from GET /auth/session 200', async () => {
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(mockAuthSession)));
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((url: string, init?: RequestInit) => {
+        const handled = authFetch(url, init);
+        if (handled) return handled;
+        if (String(url).includes('/auth/session')) {
+          return Promise.resolve(jsonResponse(mockAuthSession));
+        }
+        return Promise.resolve(jsonResponse({}));
+      }),
+    );
     renderAuthApp();
     await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('authenticated'));
     expect(screen.getByTestId('user')).toHaveTextContent('demo');
+    expect(screen.getByTestId('perm-count')).toHaveTextContent(
+      String(mockEffectivePermissions.permission_codes.length),
+    );
+    expect(screen.getByTestId('has-exec-read')).toHaveTextContent('yes');
   });
 
   it('bootstraps unauthenticated from GET /auth/session 401', async () => {
@@ -64,7 +109,9 @@ describe('AuthProvider', () => {
   });
 
   it('login success stores session', async () => {
-    const fetchMock = vi.fn().mockImplementation((url: string) => {
+    const fetchMock = vi.fn().mockImplementation((url: string, init?: RequestInit) => {
+      const handled = authFetch(url, init);
+      if (handled) return handled;
       if (String(url).includes('/auth/session')) {
         return Promise.resolve(jsonResponse(sessionUnauthorizedBody(), 401));
       }
@@ -83,14 +130,10 @@ describe('AuthProvider', () => {
 
   it('logout success clears state', async () => {
     const fetchMock = vi.fn().mockImplementation((url: string, init?: RequestInit) => {
+      const handled = authFetch(url, init);
+      if (handled) return handled;
       if (String(url).includes('/auth/session')) {
         return Promise.resolve(jsonResponse(mockAuthSession));
-      }
-      if (String(url).includes('/auth/csrf')) {
-        return Promise.resolve(jsonResponse({ csrf_token: 'csrf-1' }));
-      }
-      if (String(url).includes('/auth/logout') && init?.method === 'POST') {
-        return Promise.resolve(new Response(null, { status: 204 }));
       }
       return Promise.resolve(jsonResponse({}));
     });
@@ -104,11 +147,115 @@ describe('AuthProvider', () => {
 
   it('clears to unauthenticated on session-invalid event', async () => {
     const { notifySessionInvalid } = await import('../../src/api/sessionEvents');
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(mockAuthSession)));
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((url: string, init?: RequestInit) => {
+        const handled = authFetch(url, init);
+        if (handled) return handled;
+        if (String(url).includes('/auth/session')) {
+          return Promise.resolve(jsonResponse(mockAuthSession));
+        }
+        return Promise.resolve(jsonResponse({}));
+      }),
+    );
     renderAuthApp();
     await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('authenticated'));
     notifySessionInvalid();
     await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('unauthenticated'));
     expect(screen.getByTestId('user')).toHaveTextContent('');
+    expect(screen.getByTestId('perm-count')).toHaveTextContent('0');
+  });
+
+  it('does not restore auth when permissions resolve after logout', async () => {
+    let resolvePermissions!: (value: Response) => void;
+    const pendingPermissions = new Promise<Response>(resolve => {
+      resolvePermissions = resolve;
+    });
+    const fetchMock = vi.fn().mockImplementation((url: string, init?: RequestInit) => {
+      const href = String(url);
+      if (href.includes('/auth/permissions')) {
+        return pendingPermissions;
+      }
+      if (href.includes('/auth/session')) {
+        return Promise.resolve(jsonResponse(mockAuthSession));
+      }
+      if (href.includes('/auth/csrf')) {
+        return Promise.resolve(jsonResponse({ csrf_token: 'csrf-1' }));
+      }
+      if (href.includes('/auth/logout') && init?.method === 'POST') {
+        return Promise.resolve(new Response(null, { status: 204 }));
+      }
+      return Promise.resolve(jsonResponse({}));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    renderAuthApp();
+    await waitFor(() => expect(fetchMock.mock.calls.some(c => String(c[0]).includes('/auth/permissions'))).toBe(true));
+    // Still loading permissions — not yet authenticated with grants.
+    expect(screen.getByTestId('status').textContent).not.toBe('authenticated');
+
+    screen.getByText('do-logout').click();
+    await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('unauthenticated'));
+
+    resolvePermissions(jsonResponse(mockEffectivePermissions));
+    // Delayed permissions must not re-authenticate after logout generation bump.
+    await new Promise(r => setTimeout(r, 50));
+    expect(screen.getByTestId('status')).toHaveTextContent('unauthenticated');
+    expect(screen.getByTestId('user')).toHaveTextContent('');
+    expect(screen.getByTestId('perm-count')).toHaveTextContent('0');
+  });
+
+  it('does not restore auth when permissions resolve after session-invalid', async () => {
+    const { notifySessionInvalid } = await import('../../src/api/sessionEvents');
+    let resolvePermissions!: (value: Response) => void;
+    const pendingPermissions = new Promise<Response>(resolve => {
+      resolvePermissions = resolve;
+    });
+    const fetchMock = vi.fn((url: string) => {
+      if (String(url).includes('/auth/permissions')) return pendingPermissions;
+      if (String(url).includes('/auth/session')) {
+        return Promise.resolve(jsonResponse(mockAuthSession));
+      }
+      return Promise.resolve(jsonResponse({}));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    renderAuthApp();
+    await waitFor(() =>
+      expect(fetchMock.mock.calls.some(c => String(c[0]).includes('/auth/permissions'))).toBe(true),
+    );
+    // Permissions still pending — force invalidation first.
+    notifySessionInvalid();
+    await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('unauthenticated'));
+
+    resolvePermissions(jsonResponse(mockEffectivePermissions));
+    await new Promise(r => setTimeout(r, 50));
+    expect(screen.getByTestId('status')).toHaveTextContent('unauthenticated');
+    expect(screen.getByTestId('perm-count')).toHaveTextContent('0');
+  });
+
+  it('login permissions 401 AUTH_SESSION_INVALID clears session', async () => {
+    const fetchMock = vi.fn().mockImplementation((url: string, init?: RequestInit) => {
+      const href = String(url);
+      if (href.includes('/auth/session')) {
+        return Promise.resolve(jsonResponse(sessionUnauthorizedBody(), 401));
+      }
+      if (href.includes('/auth/login') && init?.method === 'POST') {
+        return Promise.resolve(jsonResponse(mockAuthSession));
+      }
+      if (href.includes('/auth/permissions')) {
+        return Promise.resolve(jsonResponse(sessionUnauthorizedBody(), 401));
+      }
+      return Promise.resolve(jsonResponse({}));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    renderAuthApp();
+    await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('unauthenticated'));
+
+    screen.getByText('do-login').click();
+    await waitFor(() => expect(screen.getByTestId('login-error')).toHaveTextContent('AUTH_SESSION_INVALID'));
+    expect(screen.getByTestId('status')).toHaveTextContent('unauthenticated');
+    expect(screen.getByTestId('user')).toHaveTextContent('');
+    expect(screen.getByTestId('perm-count')).toHaveTextContent('0');
   });
 });

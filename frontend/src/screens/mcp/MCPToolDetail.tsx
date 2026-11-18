@@ -17,7 +17,8 @@ import {
 } from '../../api/mcp';
 import { isAbortError, isApiError } from '../../api/client';
 import type { MCPToolDto, MCPToolVersionDto } from '../../api/types';
-import { formatTimestamp, hasPermission, shortenId } from '../../domain';
+import { useAuth } from '../../auth/useAuth';
+import { formatTimestamp, shortenId } from '../../domain';
 import ToolPolicyTab from './ToolPolicyTab';
 import ToolTestCallTab from './ToolTestCallTab';
 import ToolVerificationTab from './ToolVerificationTab';
@@ -44,6 +45,7 @@ export default function MCPToolDetail() {
   const { toolId } = useParams();
   const navigate = useNavigate();
   const location = useLocation();
+  const { hasPermission } = useAuth();
   const fromServer = (location.state as { fromServer?: boolean } | null)?.fromServer === true;
   const mountedRef = useRef(true);
   const versionRequestRef = useRef<AbortController | null>(null);
@@ -302,7 +304,7 @@ export default function MCPToolDetail() {
   const validationStatus = selectedVersion?.validation_status;
   const lifecycle = toolLifecycleAction(tool.status);
   const lifecycleDisabledReason = toolLifecycleDisabledReason(tool, {
-    canEdit: hasPermission('mcp.edit'),
+    canEdit: hasPermission('mcp.server.manage'),
   });
   const lifecycleBlocked = Boolean(lifecycleDisabledReason) || isLifecycleActionDisabled(tool.status);
   const tags = stringTags(tool.tags);

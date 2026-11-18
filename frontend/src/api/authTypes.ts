@@ -25,6 +25,11 @@ export interface CsrfTokenResponse {
   csrf_token: string;
 }
 
+/** GET /auth/permissions — effective Role permission codes for the session user. */
+export interface EffectivePermissionsResponse {
+  permission_codes: string[];
+}
+
 export interface LoginRequest {
   username: string;
   password: string;

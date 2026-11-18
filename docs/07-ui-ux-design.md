@@ -188,6 +188,11 @@ RuntimeInputPanel
 
 `PermissionGate`는 UX helper일 뿐 보안 원본이 아니다.
 
+로그인 Session의 `GET /auth/permissions` 유효 권한 코드(정식 bootstrap catalog)로
+메뉴·버튼 표시를 제어한다. Mock 권한 코드(`agent.view`, `admin.view` 등)를
+사용하지 않는다. 대응이 불명확한 화면은 게이트 없이 기존 표시를 보존한다.
+부모 메뉴는 허용된 하위 메뉴가 하나 이상일 때만 표시한다.
+
 ---
 
 ## 7. Canonical Status 표시
@@ -698,6 +703,7 @@ Tool Grant API는 Version 단위다.
 - Approvals·ApprovalDetail 초보자 UX(2026-11-17): 목록/상세에 `요청 확인 → 내용·위험 검토 → 승인/거절` 진행 안내와 Approval 상태별 의미·다음 행동을 한국어로 표시한다. 권한 부족·만료·중복 결정·Empty·403·충돌·실패 사유를 안내하고, Approval PENDING과 Execution WAITING_APPROVAL을 혼동하지 않으며 승인 후 즉시 실행 완료/RUNNING을 보장하지 않는다고 명시한다. 자동 결정·DB·API·권한·정책·상태전이는 변경하지 않는다.
 - 실행 목록 한국어 UX(2026-11-18): `/executions` 제목·테이블·필터·정렬·상태·빈 목록 문구를 한국어로 표시하며 `labelExecutionStatus`/`labelExecutionSource` 등 domain 라벨을 재사용한다. 필터·정렬 API value, 검색·페이지네이션·라우팅은 유지한다.
 - WorkflowDetail 실행 준비 UX(2026-11-18): 상세에 `초안 → 검증 → 게시 → 활성화 → 실행 가능` 진행 안내와 버튼 비활성 사유·다음 행동을 본문에 표시한다. ACTIVE+유효 게시 버전은 실행 가능이지 실행 완료가 아니며 실행 이력 없이 완료로 추정하지 않는다. 5xx·네트워크 등 결과 불명확 시 실행 목록 확인을 우선하고 무조건 재시도를 유도하지 않는다. 기존 입력 폼·JSON·idempotency key·버전 재검증·실행 상세 이동과 API·권한·상태전이는 유지하며 자동 실행·자동 재시도는 추가하지 않는다.
+- RBAC-UX01 Session 권한 표시(2026-11-18): `PermissionGate`·사이드바 메뉴가 Mock 권한 대신 `GET /auth/permissions` 유효 코드(정식 catalog)를 사용한다. 대응 불명확 항목(워크플로 목록, 사용자/역할/모델/Jobs/설정 등)은 게이트 없이 기존 표시를 보존한다. 부모 메뉴는 허용 하위가 있을 때만 표시한다. 역할 생성·자동 권한 부여·DB/CSRF/상태전이는 변경하지 않는다.
 - MCP 도구 실행 정책 한국어 UX(2026-11-13): 정책 부재 안내·정책 생성/수정 화면의 위험도·자동 선택·사용자 확인·승인·실행 제한·재시도·데이터 분류 항목을 한국어로 표시한다. 화면 기본 입력값이 저장된 정책이나 자동 생성된 정책을 의미하지 않음을 명시한다. 정책 JSON 입력은 기존 객체 형식과 nullable 계약을 유지하며, 승인 정책 연결 미지원 제약·canonical 위험 분류·409 동시 수정 처리와 저장 API를 변경하지 않는다.
 - MCP 도구 수동 실행 UX 보완(2026-11-16): 실제 E2E에서 관찰된 ToolPolicy 누락(409)은 실행 정책 탭으로 즉시 이동, 실행 권한/ResourceGrant 부족(403)은 관리자 역할·사용자별 도구 접근 권한 화면으로 이동할 수 있게 안내한다. UI가 정책/권한을 자동 생성하거나 부여하지 않으며 Backend의 fail-closed 검사는 유지한다. 저장된 실행 상태가 `FAILED`/`TIMED_OUT`이면 '아직 실행 중' 대신 종료된 오류라고 정확히 설명하고 기존 실행 상세에서 오류 코드를 확인하도록 한다.
 - MCP 도구 검증·실행 테스트 한국어 UX(2026-11-13): ToolVerificationTab은 선택 버전에 종속되는 검증 이력·증빙 요구사항·상태별 생성 대화상자를 한국어로 안내한다. PENDING/FAILED/VERIFIED 옵션의 실제 value 및 검증 API 계약, 정상·오류 실행 증빙의 서로 다른 Execution ID, 서버 파생 결과 및 유효기간 판정은 유지한다. ToolTestCallTab은 실제 외부 도구가 실행될 수 있음을 알리고 입력 JSON·버전 유효성·응답 조회를 한국어로 표시한다. MANUAL_TOOL_TEST 생성과 VERIFIED 검증 생성은 별개이며, 자동 검증 생성/자동 실행을 추가하지 않는다.

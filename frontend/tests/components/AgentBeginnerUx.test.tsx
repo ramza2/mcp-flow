@@ -20,23 +20,13 @@ vi.mock('@/api/agents', () => ({
   validateAgentVersion: vi.fn(),
 }));
 
-vi.mock('@/domain', async () => {
-  const actual = await vi.importActual<typeof import('@/domain')>('@/domain');
-  return {
-    ...actual,
-    hasPermission: vi.fn(actual.hasPermission),
-  };
-});
-
 import {
   getAgent,
   listAgentToolGrants,
   listAgentVersions,
   listAgents,
 } from '@/api/agents';
-import { hasPermission } from '@/domain';
-
-const mockedHasPermission = vi.mocked(hasPermission);
+import { buildAuthContext } from '../fixtures/auth-context';
 
 describe('Agent beginner UX helpers', () => {
   it('builds create→validate→publish→activate→run from existing fields only', () => {
@@ -85,11 +75,12 @@ describe('Agents empty CTA by permission', () => {
     });
   });
 
-  it('shows Empty 새 에이전트 CTA when agent.edit is allowed', async () => {
-    mockedHasPermission.mockImplementation(permission =>
-      permission === 'agent.edit' || permission === 'agent.view',
-    );
-    const { router } = renderWithRouter(<Agents />, { path: '/agents', route: '/agents' });
+  it('shows Empty 새 에이전트 CTA when agent.manage is allowed', async () => {
+    const { router } = renderWithRouter(<Agents />, {
+      path: '/agents',
+      route: '/agents',
+      authValue: buildAuthContext({ permissions: ['agent.read', 'agent.manage'] }),
+    });
 
     expect(await screen.findByText('등록된 에이전트가 없습니다')).toBeInTheDocument();
     const buttons = screen.getAllByRole('button', { name: '새 에이전트' });
@@ -99,9 +90,12 @@ describe('Agents empty CTA by permission', () => {
     expect(router.state.location.pathname).toBe(NEW_AGENT_PATH);
   });
 
-  it('hides Empty CTA when agent.edit is denied', async () => {
-    mockedHasPermission.mockImplementation(permission => permission === 'agent.view');
-    renderWithRouter(<Agents />, { path: '/agents', route: '/agents' });
+  it('hides Empty CTA when agent.manage is denied', async () => {
+    renderWithRouter(<Agents />, {
+      path: '/agents',
+      route: '/agents',
+      authValue: buildAuthContext({ permissions: ['agent.read'] }),
+    });
 
     expect(await screen.findByText('등록된 에이전트가 없습니다')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: '새 에이전트' })).not.toBeInTheDocument();
@@ -199,7 +193,6 @@ describe('AgentDetail beginner progress and CTAs', () => {
 describe('Agents New Agent still works with Empty CTA', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mockedHasPermission.mockReturnValue(true);
     vi.mocked(listAgents).mockResolvedValue({
       items: [],
       page: 1,
@@ -213,6 +206,7 @@ describe('Agents New Agent still works with Empty CTA', () => {
     const { router } = renderWithRouter(<Agents />, {
       path: '/agents',
       route: '/agents',
+      authValue: buildAuthContext({ permissions: ['agent.manage'] }),
     });
 
     await waitFor(() => {
