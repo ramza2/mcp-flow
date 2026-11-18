@@ -13,11 +13,17 @@ export type WorkflowRunReadyStepId =
 export type WorkflowRunReadyStep = {
   id: WorkflowRunReadyStepId;
   label: string;
+  /** Completed prerequisite (draft/validate/publish/activate). Never means an Execution finished. */
   done: boolean;
+  /**
+   * Run step only: ACTIVE + valid published version → runnable.
+   * Never treat as execution completed; this screen has no execution history.
+   */
+  ready?: boolean;
 };
 
 export const WORKFLOW_RUN_READY_FLOW_LABEL =
-  '초안 → 검증 → 게시 → 활성화 → 실행';
+  '초안 → 검증 → 게시 → 활성화 → 실행 가능';
 
 export function buildWorkflowRunReadySteps(input: {
   hasDraft: boolean;
@@ -25,21 +31,36 @@ export function buildWorkflowRunReadySteps(input: {
   hasPublishedValid: boolean;
   isActive: boolean;
 }): WorkflowRunReadyStep[] {
+  const runnable = input.isActive && input.hasPublishedValid;
   return [
     { id: 'draft', label: '초안', done: input.hasDraft || input.hasPublishedValid },
     { id: 'validate', label: '검증', done: input.draftValidated || input.hasPublishedValid },
     { id: 'publish', label: '게시', done: input.hasPublishedValid },
-    { id: 'activate', label: '활성화', done: input.isActive && input.hasPublishedValid },
-    // "done" means ready to run (ACTIVE + published valid), not that an execution already started.
-    { id: 'run', label: '실행', done: input.isActive && input.hasPublishedValid },
+    { id: 'activate', label: '활성화', done: runnable },
+    // Never mark run as done — ACTIVE+published is "실행 가능", not "실행 완료".
+    { id: 'run', label: '실행 가능', done: false, ready: runnable },
   ];
 }
 
 export function nextWorkflowRunReadyAction(
   steps: WorkflowRunReadyStep[],
 ): { stepId: WorkflowRunReadyStepId; message: string } | null {
-  const pending = steps.find((step) => !step.done);
-  if (!pending) return null;
+  const runStep = steps.find((step) => step.id === 'run');
+  if (runStep?.ready) {
+    return {
+      stepId: 'run',
+      message:
+        '실행 가능 상태입니다. 수동 실행으로만 시작되며, 이 화면에는 실행 이력이 없어 완료로 추정하지 마세요. 실행 전 서버가 권한·정책을 다시 검증합니다.',
+    };
+  }
+  const pending = steps.find((step) => step.id !== 'run' && !step.done);
+  if (!pending) {
+    return {
+      stepId: 'run',
+      message:
+        'ACTIVE와 검증된 게시 버전이 필요합니다. 준비가 끝나도 실행 완료를 의미하지 않습니다.',
+    };
+  }
   switch (pending.id) {
     case 'draft':
       return {
@@ -63,13 +84,7 @@ export function nextWorkflowRunReadyAction(
       return {
         stepId: 'activate',
         message:
-          '검증된 게시 버전으로 워크플로를 활성화하세요. 활성화만으로 실행되지 않습니다.',
-      };
-    case 'run':
-      return {
-        stepId: 'run',
-        message:
-          'ACTIVE 워크플로의 현재 게시 버전으로 수동 실행할 수 있습니다. 실행 전 서버가 권한·정책을 다시 검증합니다.',
+          '검증된 게시 버전으로 워크플로를 활성화하세요. 활성화만으로 실행되지 않으며 실행 가능 상태도 아닙니다.',
       };
     default:
       return null;
@@ -122,6 +137,16 @@ function isNetworkUncertainty(err: {
   code?: string;
 } | null): boolean {
   return Boolean(err && (err.status === 0 || err.code === 'NETWORK_ERROR'));
+}
+
+/** 5xx or transport uncertainty — outcome of createExecution is not known. */
+function isUncertainRunOutcome(err: {
+  status?: number;
+  code?: string;
+} | null): boolean {
+  if (!err) return false;
+  if (isNetworkUncertainty(err)) return true;
+  return typeof err.status === 'number' && err.status >= 500;
 }
 
 /** Preserve server text when present; append Korean next action without inventing success. */
@@ -182,8 +207,8 @@ export function formatWorkflowDetailActionError(
 
 /**
  * Manual-run submit errors.
- * Network uncertainty must not claim execution creation or push blind retries.
- * Non-network failures may note the same Idempotency-Key can be reused — never auto-retry.
+ * 5xx / network uncertainty: check execution history first; never claim creation or push blind retry.
+ * 403/409 unchanged in meaning. Other failures may note same Idempotency-Key — never auto-retry.
  */
 export function formatWorkflowRunSubmitError(
   err: { status?: number; code?: string; message?: string; requestId?: string | null } | null,
@@ -191,11 +216,11 @@ export function formatWorkflowRunSubmitError(
   if (!err) {
     return '실행 요청에 실패했습니다. 동일한 요청 키로 재시도할 수 있습니다. 자동으로 재시도하지는 않습니다.';
   }
-  if (isNetworkUncertainty(err)) {
-    return (
-      '네트워크 오류로 실행 생성 여부를 확인하지 못했습니다. 성공으로 표시하지 않습니다. ' +
-      '실행 목록에서 생성 여부를 확인하세요. 결과가 불명확할 때 무조건 재시도하지 마세요.'
-    );
+  if (isUncertainRunOutcome(err)) {
+    const next =
+      '실행 생성 여부를 확정하지 못했습니다. 성공으로 표시하지 않습니다. ' +
+      '실행 목록에서 먼저 확인하세요. 결과가 불명확할 때 무조건 재시도하지 마세요.';
+    return composeMessage(err.message, next);
   }
   if (err.status === 403) {
     return composeMessage(

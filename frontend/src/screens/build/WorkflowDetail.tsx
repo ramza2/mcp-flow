@@ -354,29 +354,43 @@ export default function WorkflowDetail() {
           실행 준비: {WORKFLOW_RUN_READY_FLOW_LABEL}
         </p>
         <ol className="flex flex-wrap gap-3 mb-2">
-          {runReadySteps.map((step) => (
-            <li
-              key={step.id}
-              className={`inline-flex items-center gap-1.5 text-xs ${
-                step.done ? 'text-emerald-700' : 'text-slate-500'
-              }`}
-              data-testid={`workflow-run-ready-step-${step.id}`}
-              data-done={step.done ? 'true' : 'false'}
-            >
-              {step.done
-                ? <CheckCircle2 size={14} className="shrink-0" aria-hidden />
-                : <Circle size={14} className="shrink-0" aria-hidden />}
-              <span>{step.label}</span>
-            </li>
-          ))}
+          {runReadySteps.map((step) => {
+            const isRunReady = step.id === 'run' && Boolean(step.ready);
+            return (
+              <li
+                key={step.id}
+                className={`inline-flex items-center gap-1.5 text-xs ${
+                  step.done
+                    ? 'text-emerald-700'
+                    : isRunReady
+                      ? 'text-amber-700'
+                      : 'text-slate-500'
+                }`}
+                data-testid={`workflow-run-ready-step-${step.id}`}
+                data-done={step.done ? 'true' : 'false'}
+                data-ready={isRunReady ? 'true' : 'false'}
+              >
+                {step.done ? (
+                  <CheckCircle2 size={14} className="shrink-0" aria-hidden />
+                ) : isRunReady ? (
+                  <Play size={14} className="shrink-0" aria-hidden />
+                ) : (
+                  <Circle size={14} className="shrink-0" aria-hidden />
+                )}
+                <span>{step.label}{isRunReady ? ' (완료 아님)' : ''}</span>
+              </li>
+            );
+          })}
         </ol>
-        {nextRunReady ? (
-          <p className="text-xs text-slate-600" data-testid="workflow-run-ready-next">
-            다음: {nextRunReady.message}
-          </p>
-        ) : (
-          <p className="text-xs text-emerald-700" data-testid="workflow-run-ready-next">
-            실행 준비가 끝났습니다. 수동 실행은 명시적으로만 시작되며 자동 실행하지 않습니다.
+        {nextRunReady && (
+          <p
+            className={`text-xs ${
+              nextRunReady.stepId === 'run' && canRun ? 'text-amber-800' : 'text-slate-600'
+            }`}
+            data-testid="workflow-run-ready-next"
+          >
+            {nextRunReady.stepId === 'run' && canRun ? '상태: ' : '다음: '}
+            {nextRunReady.message}
           </p>
         )}
         {(publishBlockedReason || activateBlockedReason || runBlockedReason) && (
