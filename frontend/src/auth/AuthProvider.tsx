@@ -60,7 +60,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [state, setState] = useState<AuthState>(initialState);
   const bootstrapGen = useRef(0);
 
-  const clearSessionLocal = useCallback(() => {
+  const clearToUnauthenticated = useCallback(() => {
+    // Bump generation so in-flight session/permission responses cannot restore auth.
+    bootstrapGen.current += 1;
     clearCsrfCache();
     setState({
       status: 'unauthenticated',
@@ -71,6 +73,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     });
   }, []);
 
+  const clearSessionLocal = useCallback(() => {
+    clearToUnauthenticated();
+  }, [clearToUnauthenticated]);
+
   const applyAuthenticated = useCallback(
     async (session: AuthSession, gen: number, signal?: AbortSignal) => {
       let permissions: readonly string[] = [];
@@ -79,15 +85,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       } catch (error) {
         if (signal?.aborted || isAbortError(error)) return;
         if (isApiError(error) && error.status === 401 && error.code === 'AUTH_SESSION_INVALID') {
-          clearCsrfCache();
           if (gen !== bootstrapGen.current) return;
-          setState({
-            status: 'unauthenticated',
-            session: null,
-            user: null,
-            error: null,
-            permissions: [],
-          });
+          clearToUnauthenticated();
           return;
         }
         // Fail closed for gated UX: keep session, empty permissions.
@@ -102,7 +101,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         permissions,
       });
     },
-    [],
+    [clearToUnauthenticated],
   );
 
   const refreshSession = useCallback(async () => {
@@ -121,14 +120,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       if (gen !== bootstrapGen.current) return;
       if (isAbortError(error)) return;
       if (isApiError(error) && error.status === 401 && error.code === 'AUTH_SESSION_INVALID') {
-        clearCsrfCache();
-        setState({
-          status: 'unauthenticated',
-          session: null,
-          user: null,
-          error: null,
-          permissions: [],
-        });
+        clearToUnauthenticated();
         return;
       }
       setState({
@@ -146,7 +138,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         permissions: [],
       });
     }
-  }, [applyAuthenticated]);
+  }, [applyAuthenticated, clearToUnauthenticated]);
 
   useEffect(() => {
     const gen = ++bootstrapGen.current;
@@ -160,14 +152,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       } catch (error) {
         if (gen !== bootstrapGen.current || ac.signal.aborted || isAbortError(error)) return;
         if (isApiError(error) && error.status === 401 && error.code === 'AUTH_SESSION_INVALID') {
-          clearCsrfCache();
-          setState({
-            status: 'unauthenticated',
-            session: null,
-            user: null,
-            error: null,
-            permissions: [],
-          });
+          clearToUnauthenticated();
           return;
         }
         setState({
@@ -190,20 +175,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return () => {
       ac.abort();
     };
-  }, [applyAuthenticated]);
+  }, [applyAuthenticated, clearToUnauthenticated]);
 
   useEffect(() => {
     return onSessionInvalid(() => {
-      clearCsrfCache();
-      setState({
-        status: 'unauthenticated',
-        session: null,
-        user: null,
-        error: null,
-        permissions: [],
-      });
+      clearToUnauthenticated();
     });
-  }, []);
+  }, [clearToUnauthenticated]);
 
   const login = useCallback(
     async (username: string, password: string) => {
@@ -213,7 +191,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       let permissions: readonly string[] = [];
       try {
         permissions = await loadPermissions();
-      } catch {
+      } catch (error) {
+        if (isApiError(error) && error.status === 401 && error.code === 'AUTH_SESSION_INVALID') {
+          if (gen === bootstrapGen.current) {
+            clearToUnauthenticated();
+          }
+          throw error;
+        }
+        // Fail closed for gated UX: keep session, empty permissions.
         permissions = [];
       }
       if (gen !== bootstrapGen.current) return session;
@@ -226,35 +211,21 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       });
       return session;
     },
-    [],
+    [clearToUnauthenticated],
   );
 
   const logout = useCallback(async () => {
     try {
       await apiLogout();
-      clearCsrfCache();
-      setState({
-        status: 'unauthenticated',
-        session: null,
-        user: null,
-        error: null,
-        permissions: [],
-      });
+      clearToUnauthenticated();
     } catch (error) {
       if (isApiError(error) && error.status === 401 && error.code === 'AUTH_SESSION_INVALID') {
-        clearCsrfCache();
-        setState({
-          status: 'unauthenticated',
-          session: null,
-          user: null,
-          error: null,
-          permissions: [],
-        });
+        clearToUnauthenticated();
         return;
       }
       throw error;
     }
-  }, []);
+  }, [clearToUnauthenticated]);
 
   const hasPermission = useCallback(
     (permission: Permission) => checkPermission(permission, state.permissions),
