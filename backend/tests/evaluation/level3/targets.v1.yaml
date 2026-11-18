@@ -1,5 +1,5 @@
 # Level 3 approval performance targets (separate from KPI-01..06 / targets.yaml).
-# Official approved six indicators. L3-02 (pending gold review) and L3-05 evaluators are available.
+# Official approved six indicators. L3-02 (pending gold review), L3-05, and L3-06 evaluators are available.
 # Thresholds are approval goals; NOT_IMPLEMENTED does not imply failure or achievement.
 schema_version: mcpflow.level3_targets.v1
 targets_version: level3.targets.v1
@@ -60,7 +60,20 @@ targets:
 
   L3-06:
     name: "연계·검증 완료 MCP Tool 수"
-    status: NOT_IMPLEMENTED
+    status: MEASURED_BY_TOOLING
     measured_value_unit: count
     target_min_count: 10
-    notes: Count unique connected and verified MCP Tools with reproducible evidence.
+    counting_rule: >
+      Distinct MCPTool rows (deleted_at IS NULL) whose current_version_id has
+      non-expired VERIFIED evidence via
+      MCPToolVerificationRepository.count_tools_with_effective_current_verification.
+      Alias/clone suspicions are listed only (never auto-excluded); if unresolved
+      suspicions change MET vs NOT_MET → INCOMPLETE. Does not require ACTIVE and
+      does not perform live reconnect. Does not reuse KPI harness outputs.
+    measurement_definition: >
+      Repository SELECT inventory of effective VERIFIED current ToolVersions
+      (linkage/verification already recorded by FNC-TOOL-006). Evidence includes
+      Tool/Version/Verification/Server IDs and test/evidence references.
+    notes: >
+      Entry: measure_l3_06.py / scripts/level3-verified-tool-count.sh.
+      Method: METHOD_L306.md. Artifacts under artifacts/level3/ (no overwrite).
