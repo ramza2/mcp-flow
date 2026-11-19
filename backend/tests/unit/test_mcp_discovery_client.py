@@ -452,3 +452,152 @@ async def test_authenticated_discovery_and_paginated_list_use_headers_only() -> 
     assert [tool.name for tool in tools] == ["first", "second"]
     assert [method for method, _ in seen] == ["server/discover", "tools/list", "tools/list"]
     assert auth == {"Authorization": f"Bearer {secret}"}
+
+
+@pytest.mark.asyncio
+async def test_sse_discover_skips_priming_and_notification_and_stops_before_eof() -> None:
+    class OpenAfterResponse(httpx.AsyncByteStream):
+        def __init__(self, content: bytes) -> None:
+            self.content = content
+
+        async def __aiter__(self):
+            midpoint = len(self.content) // 2
+            yield self.content[:midpoint]
+            yield self.content[midpoint:]
+            raise AssertionError("must stop reading as soon as the JSON-RPC response arrives")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        request_id = json.loads(request.content)["id"]
+        notification = json.dumps({
+            "jsonrpc": "2.0",
+            "method": "notifications/progress",
+            "params": {"progress": 10},
+        })
+        result = json.dumps(
+            {"jsonrpc": "2.0", "id": request_id, "result": {"tools": {"listChanged": True}}},
+            indent=2,
+        )
+        events = (
+            ": keepalive\r\n\r\n"
+            "id: priming\r\ndata:\r\n\r\n"
+            "event: message\r\ndata: " + notification + "\r\n\r\n"
+            "event: message\r\n"
+            + "".join("data: " + line + "\r\n" for line in result.splitlines())
+            + "\r\n"
+        )
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream; charset=utf-8"},
+            stream=OpenAfterResponse(events.encode("utf-8")),
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        client = CurrentMCPClient(http=http)
+        result = await client.discover_capabilities("https://mcp.example/mcp")
+    assert result == {"tools": {"listChanged": True}}
+
+
+@pytest.mark.asyncio
+async def test_sse_discover_method_not_found_preserves_inferred_fallback() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        request_id = json.loads(request.content)["id"]
+        event = json.dumps({
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "error": {"code": -32601, "message": "Method not found"},
+        })
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content=("event: message\ndata: " + event + "\n\n").encode(),
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        client = CurrentMCPClient(http=http)
+        with pytest.raises(DiscoverUnsupportedError):
+            await client.discover_capabilities("https://mcp.example/mcp")
+
+
+@pytest.mark.asyncio
+async def test_sse_tools_list_mixed_json_and_sse_pages() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        request_id = body["id"]
+        if not body["params"].get("cursor"):
+            result = {"tools": [{"name": "first", "inputSchema": {"type": "object"}}],
+                      "nextCursor": "page-2"}
+            payload = json.dumps({"jsonrpc": "2.0", "id": request_id, "result": result})
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                content=("data: " + payload + "\n\n").encode(),
+            )
+        assert body["params"]["cursor"] == "page-2"
+        return httpx.Response(200, json={
+            "jsonrpc": "2.0", "id": request_id,
+            "result": {"tools": [{"name": "second", "inputSchema": {"type": "object"}}]},
+        })
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        client = CurrentMCPClient(http=http)
+        tools = await client.list_tools("https://mcp.example/mcp")
+    assert [tool.name for tool in tools] == ["first", "second"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("event_data", "expected"),
+    [
+        ("data: not-json\n\n", "MCP_INVALID_JSON"),
+        ("event: message\ndata: \n\n", "MCP_SSE_RESPONSE_MISSING"),
+        (": heartbeat\n\n", "MCP_SSE_RESPONSE_MISSING"),
+    ],
+)
+async def test_sse_invalid_or_missing_response_fails_closed(event_data: str, expected: str) -> None:
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(
+                200, headers={"content-type": "text/event-stream"}, content=event_data
+            )
+        )
+    ) as http:
+        client = CurrentMCPClient(http=http)
+        with pytest.raises(MCPClientError) as exc:
+            await client.discover_capabilities("https://mcp.example/mcp")
+    assert exc.value.error_code == expected
+
+
+@pytest.mark.asyncio
+async def test_sse_wrong_jsonrpc_id_stays_rejected() -> None:
+    payload = json.dumps({"jsonrpc": "2.0", "id": "wrong-id", "result": {}})
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                content=("data: " + payload + "\n\n").encode(),
+            )
+        )
+    ) as http:
+        client = CurrentMCPClient(http=http)
+        with pytest.raises(MCPClientError) as exc:
+            await client.discover_capabilities("https://mcp.example/mcp")
+    assert exc.value.error_code == "MCP_INVALID_JSONRPC"
+
+
+@pytest.mark.asyncio
+async def test_sse_response_size_guard(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("app.mcp.current._SSE_MAX_RESPONSE_BYTES", 64)
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                content=("data: " + "x" * 65 + "\n\n").encode(),
+            )
+        )
+    ) as http:
+        client = CurrentMCPClient(http=http)
+        with pytest.raises(MCPClientError) as exc:
+            await client.discover_capabilities("https://mcp.example/mcp")
+    assert exc.value.error_code == "MCP_SSE_RESPONSE_TOO_LARGE"
