@@ -352,7 +352,12 @@ class CurrentMCPClient:
                     if response.status_code >= 400:
                         raise self._map_http_error(response.status_code)
 
-                    content_type = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+                    content_type = (
+                        response.headers.get("content-type", "")
+                        .split(";", 1)[0]
+                        .strip()
+                        .lower()
+                    )
                     if content_type == "text/event-stream":
                         payload = await self._read_sse_rpc_response(response)
                     else:
