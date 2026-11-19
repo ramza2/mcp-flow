@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
@@ -23,6 +24,7 @@ logger = logging.getLogger(__name__)
 _CLIENT_INFO = {"name": "mcpflow", "version": "0.1.0"}
 _JSONRPC_METHOD_NOT_FOUND = -32601
 _INPUT_REQUIRED_RESULT_TYPE = "input_required"
+_SSE_MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 
 
 class CurrentMCPClient:
@@ -241,6 +243,81 @@ class CurrentMCPClient:
             )
         return payload
 
+    @staticmethod
+    async def _read_sse_rpc_response(response: httpx.Response) -> Any:
+        """Read the first JSON-RPC response from request-scoped SSE without waiting for EOF.
+
+        Ignore heartbeats, empty priming events, and notifications. Bound the
+        total received bytes, including unfinished lines/events, to avoid
+        unlimited buffering. Do not retain or log SSE event data.
+        """
+        buffer = bytearray()
+        data_lines: list[bytes] = []
+        received_bytes = 0
+
+        def dispatch() -> tuple[bool, Any]:
+            if not data_lines:
+                return False, None
+            raw = b"\n".join(data_lines)
+            data_lines.clear()
+            if not raw.strip():
+                return False, None
+            try:
+                message = json.loads(raw.decode("utf-8"))
+            except (ValueError, UnicodeDecodeError) as exc:
+                raise MCPClientError(
+                    error_layer="PROTOCOL",
+                    error_code="MCP_INVALID_JSON",
+                    message="MCP server returned invalid SSE JSON.",
+                    retryable=False,
+                ) from exc
+            if (
+                isinstance(message, dict)
+                and message.get("jsonrpc") == "2.0"
+                and "method" in message
+                and "id" not in message
+            ):
+                return False, None  # Request-scoped notification, not a response.
+            return True, message
+
+        async for chunk in response.aiter_bytes():
+            received_bytes += len(chunk)
+            if received_bytes > _SSE_MAX_RESPONSE_BYTES:
+                raise MCPClientError(
+                    error_layer="PROTOCOL",
+                    error_code="MCP_SSE_RESPONSE_TOO_LARGE",
+                    message="MCP SSE response exceeded the maximum allowed size.",
+                    retryable=False,
+                )
+            buffer.extend(chunk)
+            while True:
+                newline = buffer.find(b"\n")
+                if newline < 0:
+                    break
+                line = bytes(buffer[:newline]).removesuffix(b"\r")
+                del buffer[: newline + 1]
+                if not line:
+                    found, message = dispatch()
+                    if found:
+                        return message
+                elif line.startswith(b"data:"):
+                    value = line[5:]
+                    data_lines.append(value[1:] if value.startswith(b" ") else value)
+                elif line == b"data":
+                    data_lines.append(b"")
+                # Ignore SSE comments and metadata fields (event, id, retry).
+
+        # Some servers close the stream without a final blank line.
+        found, message = dispatch()
+        if found:
+            return message
+        raise MCPClientError(
+            error_layer="PROTOCOL",
+            error_code="MCP_SSE_RESPONSE_MISSING",
+            message="MCP SSE stream ended without a JSON-RPC response.",
+            retryable=False,
+        )
+
     async def _post_rpc(
         self,
         *,
@@ -265,23 +342,42 @@ class CurrentMCPClient:
 
         request_sent = False
         try:
-            response = await client.post(endpoint, headers=headers, json=body, timeout=timeout)
-            request_sent = True
+            # Streamable HTTP permits application/json or request-scoped SSE.
+            # SSE may remain open after the response event; stop at that event.
+            async with asyncio.timeout(timeout_ms / 1000.0):
+                async with client.stream(
+                    "POST", endpoint, headers=headers, json=body, timeout=timeout
+                ) as response:
+                    request_sent = True
+                    if response.status_code >= 400:
+                        raise self._map_http_error(response.status_code)
+
+                    content_type = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+                    if content_type == "text/event-stream":
+                        payload = await self._read_sse_rpc_response(response)
+                    else:
+                        await response.aread()
+                        try:
+                            payload = response.json()
+                        except ValueError as exc:
+                            raise MCPClientError(
+                                error_layer="PROTOCOL",
+                                error_code="MCP_INVALID_JSON",
+                                message="MCP server returned non-JSON response.",
+                                retryable=False,
+                            ) from exc
+        except MCPClientError:
+            raise
+        except TimeoutError as exc:
+            raise MCPClientError(
+                error_layer="TIMEOUT",
+                error_code="MCP_CONNECTION_TIMEOUT",
+                message="MCP server connection timed out.",
+                retryable=True,
+                outcome_unknown=request_sent,
+            ) from exc
         except Exception as exc:
             raise self._map_transport_error(exc, request_sent=request_sent) from exc
-
-        if response.status_code >= 400:
-            raise self._map_http_error(response.status_code)
-
-        try:
-            payload = response.json()
-        except ValueError as exc:
-            raise MCPClientError(
-                error_layer="PROTOCOL",
-                error_code="MCP_INVALID_JSON",
-                message="MCP server returned non-JSON response.",
-                retryable=False,
-            ) from exc
 
         envelope = self._validate_jsonrpc_envelope(payload, request_id=rpc_id)
 
