@@ -11,7 +11,6 @@ import json
 import os
 import sys
 import uuid
-from collections import defaultdict
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -63,6 +62,10 @@ def load_plan(path: Path) -> dict[str, Any]:
 
 
 def validate_plan(plan: dict[str, Any]) -> dict[str, Any]:
+    if plan.get("schema_version") != "mcpflow.level3_l303_plan.v1":
+        return {"ok": False, "reason": "PLAN_SCHEMA_MISMATCH"}
+    if not isinstance(plan.get("example"), bool):
+        return {"ok": False, "reason": "PLAN_EXAMPLE_FLAG_INVALID"}
     if plan.get("plan_version") != PLAN_VERSION:
         return {"ok": False, "reason": "PLAN_VERSION_MISMATCH"}
     try:
@@ -221,7 +224,10 @@ async def run_mode(
         except (OSError, ValueError, KeyError, TypeError) as exc:
             return {**report, "ok": False, "judgment": "INCOMPLETE",
                     "reason": "PREFLIGHT_EVIDENCE_INVALID", "detail": str(exc)}
-    elif not check["example"] and now >= start:
+    elif check["example"]:
+        return {**report, "ok": True,
+                "note": "Example plan structure valid; no live DB preflight"}
+    elif now >= start:
         return {**report, "ok": False, "reason": "PREFLIGHT_TOO_LATE"}
 
     db_url = (
@@ -254,7 +260,9 @@ async def run_mode(
         slots=check["slots"],
         occurrences=occurrences,
         executions=executions,
-        target_min_percent=90.0,
+        target_min_percent=float(
+            load_yaml(ROOT / "targets.v1.yaml")["targets"]["L3-03"]["target_min_percent"]
+        ),
     )
     return {**report, **verdict, "ok": verdict["judgment"] in {"MET", "NOT_MET"}}
 

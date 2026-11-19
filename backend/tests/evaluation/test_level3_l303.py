@@ -16,6 +16,7 @@ def _stamp(minute: int) -> str:
 def _plan(*, count: int = 10) -> dict:
     sid = str(uuid.UUID("11111111-1111-4111-8111-111111111111"))
     return {
+        "schema_version": "mcpflow.level3_l303_plan.v1",
         "plan_version": PLAN_VERSION,
         "example": False,
         "evaluation_window": {"start": _stamp(0), "end": _stamp(30)},
