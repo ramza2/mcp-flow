@@ -162,3 +162,42 @@ def test_plan_rejects_slot_outside_window_and_negative_grace():
     plan = _plan(count=1)
     plan["completion_grace_seconds"] = -1
     assert validate_plan(plan)["reason"] == "PLAN_INVALID"
+
+
+def test_finishing_after_frozen_grace_deadline_is_not_success():
+    plan = _plan(count=1)
+    slots = validate_plan(plan)["slots"]
+    occurrences, executions = _rows(plan, successes=1)
+    # The window ends at minute 30 and frozen grace lasts 10 minutes.
+    cutoff = datetime(2026, 11, 20, 1, 40, tzinfo=UTC)
+
+    executions[0]["finished_at"] = _stamp(40)
+    on_time = judge_l303(
+        slots=slots, occurrences=occurrences, executions=executions,
+        target_min_percent=90, latest_finish_at=cutoff,
+    )
+    assert on_time["judgment"] == "MET"
+    assert on_time["completion_deadline_at"] == cutoff.isoformat()
+
+    executions[0]["finished_at"] = _stamp(41)
+    late = judge_l303(
+        slots=slots, occurrences=occurrences, executions=executions,
+        target_min_percent=90, latest_finish_at=cutoff,
+    )
+    assert late["judgment"] == "NOT_MET"
+    assert late["succeeded"] == 0
+    assert late["per_slot"][0]["reason"] == "FINISHED_AFTER_DEADLINE"
+    assert late["per_slot"][0]["execution_finished_at"] == _stamp(41)
+
+
+def test_invalid_finished_at_cannot_be_success():
+    plan = _plan(count=1)
+    slots = validate_plan(plan)["slots"]
+    occurrences, executions = _rows(plan, successes=1)
+    executions[0]["finished_at"] = "not-a-timestamp"
+    verdict = judge_l303(
+        slots=slots, occurrences=occurrences, executions=executions,
+        target_min_percent=90, latest_finish_at=datetime(2026, 11, 20, tzinfo=UTC),
+    )
+    assert verdict["judgment"] == "NOT_MET"
+    assert verdict["succeeded"] == 0

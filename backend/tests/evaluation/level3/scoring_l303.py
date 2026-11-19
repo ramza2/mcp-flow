@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from datetime import datetime
 from typing import Any
 
 
@@ -11,6 +12,7 @@ def judge_l303(
     occurrences: list[dict[str, Any]],
     executions: list[dict[str, Any]],
     target_min_percent: float,
+    latest_finish_at: datetime | None = None,
 ) -> dict[str, Any]:
     """Score pre-frozen due slots against every durable row in the selected window.
 
@@ -18,6 +20,8 @@ def judge_l303(
     SCHEDULE_OCCURRENCE Execution counts as normal execution. A MISFIRE_SKIP
     is visible in evidence but never scored as success.
     """
+    if latest_finish_at is not None and latest_finish_at.tzinfo is None:
+        return {"judgment": "INCOMPLETE", "reason": "NAIVE_FINISH_DEADLINE"}
     if not slots or not 0 < target_min_percent <= 100:
         return {"judgment": "INCOMPLETE", "reason": "INVALID_DENOMINATOR_OR_TARGET"}
     keys = [(row["schedule_id"], row["scheduled_for"]) for row in slots]
@@ -80,19 +84,37 @@ def judge_l303(
                 "judgment": "INCOMPLETE", "reason": "UNKNOWN_OCCURRENCE_STATUS",
                 "occurrence_id": str(occurrence["id"]),
             }
+        finish_dt = None
+        if execution and isinstance(execution.get("finished_at"), str):
+            try:
+                finish_dt = datetime.fromisoformat(
+                    execution["finished_at"].replace("Z", "+00:00")
+                )
+                if finish_dt.tzinfo is None:
+                    finish_dt = None
+            except ValueError:
+                finish_dt = None
+        finished_in_time = bool(
+            finish_dt is not None
+            and (latest_finish_at is None or finish_dt <= latest_finish_at)
+        )
         success = bool(
             occurrence_status == "COMPLETED"
             and execution
             and execution.get("source_type") == "SCHEDULE_OCCURRENCE"
             and execution.get("status") == "SUCCEEDED"
-            and execution.get("finished_at")
+            and finished_in_time
         )
-        reason = (
-            None if success else
-            str(occurrence.get("decision_reason") or "")
-            if occurrence_status == "SKIPPED" else
-            "EXECUTION_NOT_SUCCEEDED" if execution else "NO_EXECUTION"
-        )
+        if success:
+            reason = None
+        elif occurrence_status == "SKIPPED":
+            reason = str(occurrence.get("decision_reason") or "SKIPPED")
+        elif not execution:
+            reason = "NO_EXECUTION"
+        elif finish_dt is not None and not finished_in_time:
+            reason = "FINISHED_AFTER_DEADLINE"
+        else:
+            reason = "EXECUTION_NOT_SUCCEEDED"
         results.append({
             **slot,
             "success": success,
@@ -102,6 +124,7 @@ def judge_l303(
             "decision_reason": occurrence.get("decision_reason"),
             "execution_id": str(execution["id"]) if execution else None,
             "execution_status": execution.get("status") if execution else None,
+            "execution_finished_at": execution.get("finished_at") if execution else None,
         })
 
     total = len(slots)
@@ -115,5 +138,8 @@ def judge_l303(
         "reason": None, "target_min_percent": target_min_percent,
         "required_slots": total, "succeeded": succeeded, "failed_or_skipped": failed,
         "skipped": skipped, "missing": missing, "success_rate_percent": round(rate, 4),
+        "completion_deadline_at": (
+            latest_finish_at.isoformat() if latest_finish_at is not None else None
+        ),
         "per_slot": results,
     }

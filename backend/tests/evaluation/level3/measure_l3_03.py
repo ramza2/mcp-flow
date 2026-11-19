@@ -263,6 +263,7 @@ async def run_mode(
         target_min_percent=float(
             load_yaml(ROOT / "targets.v1.yaml")["targets"]["L3-03"]["target_min_percent"]
         ),
+        latest_finish_at=end + timedelta(seconds=check["completion_grace_seconds"]),
     )
     return {**report, **verdict, "ok": verdict["judgment"] in {"MET", "NOT_MET"}}
 

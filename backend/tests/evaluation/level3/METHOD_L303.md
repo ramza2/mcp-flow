@@ -26,7 +26,7 @@
 
 고정 slot 1개당 분모 1건.
 
-- **성공(1)**: 정확히 1개 `schedule_occurrences` 행이 있고 상태가 `COMPLETED`이며, 정확히 1개 연결 `executions` 행의 `source_type=SCHEDULE_OCCURRENCE`, `status=SUCCEEDED`, `finished_at`이 존재한다.
+- **성공(1)**: 정확히 1개 `schedule_occurrences` 행이 있고 상태가 `COMPLETED`이며, 정확히 1개 연결 `executions` 행의 `source_type=SCHEDULE_OCCURRENCE`, `status=SUCCEEDED`, `finished_at`이 존재하고 **평가 구간 종료 + 사전에 고정한 완료 유예시간 이내에 완료**돼야 한다. 이 시한 이후의 성공 상태는 0점이며 원본 상태를 변경하지 않는다.
 - **실패(0)**: `SKIPPED`(`MISFIRE_SKIP` 포함), `FAILED`(`TARGET_PRECONDITION_FAILED` 포함), 예약행 부재, Execution 부재/실패/시간초과/미종료, Occurrence 상태 `PLANNED/ENQUEUED/RUNNING` 지속.
 - **평가불가**: 예정 slot 중복, 예상 외 추가 Occurrence, 같은 Occurrence에 Execution 둘 이상, 알 수 없는 상태, 불일치하는 사전 계획/증적.
 
