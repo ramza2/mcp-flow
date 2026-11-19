@@ -15,11 +15,11 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from app.models.execution import Execution
+from app.models.schedule import Schedule, ScheduleOccurrence
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from app.models.execution import Execution
-from app.models.schedule import Schedule, ScheduleOccurrence
 from tests.evaluation.harness.common import (
     artifact_dir,
     environment_label,
