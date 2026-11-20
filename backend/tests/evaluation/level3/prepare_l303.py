@@ -16,7 +16,6 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-
 from app.core.config import get_settings
 from app.db.session import dispose_db, init_db, session_scope
 from app.models.auth import User
@@ -27,8 +26,10 @@ from sqlalchemy import select, text
 from tests.evaluation.harness.common import artifact_dir, git_sha
 from tests.evaluation.level3.measure_l3_03 import (
     check_due_slot_coverage,
-    main as evaluator_main,
     validate_plan,
+)
+from tests.evaluation.level3.measure_l3_03 import (
+    main as evaluator_main,
 )
 
 KST = timezone(timedelta(hours=9))
