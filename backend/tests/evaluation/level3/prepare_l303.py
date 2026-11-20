@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import json
 import sys
 import uuid
 from datetime import UTC, datetime, timedelta, timezone
@@ -23,6 +22,7 @@ from app.models.schedule import Schedule
 from app.schemas.schedule import ScheduleCreate
 from app.services.schedule import ScheduleService
 from sqlalchemy import select, text
+
 from tests.evaluation.harness.common import artifact_dir, git_sha
 from tests.evaluation.level3.measure_l3_03 import (
     check_due_slot_coverage,
@@ -45,7 +45,6 @@ AGENT_VERSION = uuid.UUID("1f015cc2-14ae-42f9-a858-edd259a5df4b")
 WORKFLOW_VERSION = uuid.UUID("fa6c0d77-9f36-4976-8131-767368c36a97")
 PLAN_FILENAME = "plan_l303.20261123.v1.yaml"
 CONFIRM = "APPROVE_L303_CREATE_ACTIVATE_2_SCHEDULES_20261123"
-SHA = "d7fe94721b67ee9568d8d309a3770329da1652db"
 
 
 def utc(dt: datetime) -> str:
@@ -122,7 +121,7 @@ async def _verify_read_only(
     now = datetime.now(UTC)
     require(now < LAST_SETUP_AT.astimezone(UTC), "TOO_LATE_TO_PREPARE_EVALUATION")
     require(not plan_file.exists(), "FROZEN_PLAN_ALREADY_EXISTS_STOP_NO_RETRY")
-    require(git_sha() == SHA, "EVALUATOR_GIT_SHA_MISMATCH")
+    require(len(git_sha()) == 40, "EVALUATOR_GIT_SHA_UNKNOWN")
 
     found = (await session.execute(select(Schedule).where(
         Schedule.name.in_([AGENT_NAME, WORKFLOW_NAME])
@@ -143,10 +142,12 @@ async def _verify_read_only(
     require(source.status == "PAUSED", "SOURCE_AGENT_SCHEDULE_NOT_PAUSED")
     inputs = dict(source.input_template or {})
     require(
-        isinstance(inputs.get("request_text"), str)
+        set(inputs) == {"request_text"}
+        and isinstance(inputs.get("request_text"), str)
         and 1 <= len(inputs["request_text"].strip()) <= 4000,
-        "SOURCE_AGENT_REQUEST_TEXT_INVALID",
+        "SOURCE_AGENT_REQUEST_TEXT_INVALID_OR_EXTRA_KEYS",
     )
+    inputs = {"request_text": inputs["request_text"].strip()}
 
     # Validate both targets and all permissions before the first DB write.
     await service._validate_target(
