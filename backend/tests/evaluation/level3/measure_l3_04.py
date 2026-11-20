@@ -30,7 +30,11 @@ from tests.evaluation.harness.common import (
     measured_at,
 )
 from tests.evaluation.harness.live_evidence import plan_matches_scenario_kind
-from tests.evaluation.level3.scoring_l304 import SCENARIOS, judge_l304
+from tests.evaluation.level3.scoring_l304 import (
+    SCENARIOS,
+    approval_plan_has_gate,
+    judge_l304,
+)
 
 ROOT = Path(__file__).resolve().parent
 PLAN_VERSION = "level3-composite-completion.v1"
@@ -141,6 +145,10 @@ async def collect(
         shape_ok, shape_reason = plan_matches_scenario_kind(
             version.plan_definition, scenario["kind"]
         )
+        if scenario["kind"] == "approval" and not approval_plan_has_gate(
+            version.plan_definition
+        ):
+            shape_ok, shape_reason = False, "AUTHORABLE_APPROVAL_GATE_MISSING"
         versions.append({
             "workflow_version_id": str(version.id),
             "workflow_id": str(workflow.id),

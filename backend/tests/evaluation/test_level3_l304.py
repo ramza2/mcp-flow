@@ -68,7 +68,12 @@ def _scenario_plan(kind: str) -> dict:
             }},
         ]}
     return {"steps": [
-        {"id": "approve", "type": "APPROVAL", "depends_on": []},
+        {
+            "id": "approve", "type": "APPROVAL", "depends_on": [],
+            "config": {
+                "approval_policy_id": "77777777-7777-4777-8777-777777777777"
+            },
+        },
         {"id": "tool", "type": "TOOL", "depends_on": ["approve"]},
     ]}
 
@@ -294,5 +299,18 @@ def test_approval_requires_actual_succeeded_authorable_step_and_plan():
             execution["plan_snapshot"] = {"steps": [{"id": "tool", "type": "TOOL"}]}
     verdict = _score(cases, no_plan, steps, approvals, calls)
     assert verdict["judgment"] == "NOT_MET"
-    assert any(c["reason"] == "AUTHORABLE_APPROVAL_PLAN_MISSING"
+    assert any(c["reason"] == "AUTHORABLE_APPROVAL_GATE_MISSING"
+               for c in verdict["cases"])
+
+
+def test_approval_gate_must_connect_to_downstream_tool():
+    cases, executions, steps, approvals, calls = _evidence()
+    approval_case = next(c for c in cases if c["kind"] == "approval")
+    altered = copy.deepcopy(executions)
+    for execution in altered:
+        if execution["workflow_version_id"] == approval_case["workflow_version_id"]:
+            execution["plan_snapshot"]["steps"][1]["depends_on"] = []
+    verdict = _score(cases, altered, steps, approvals, calls)
+    assert verdict["judgment"] == "NOT_MET"
+    assert any(c["reason"] == "AUTHORABLE_APPROVAL_GATE_MISSING"
                for c in verdict["cases"])

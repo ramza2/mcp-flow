@@ -20,6 +20,30 @@ SCENARIOS = {
 }
 
 
+def approval_plan_has_gate(plan: Any) -> bool:
+    """Require a configured APPROVAL Step upstream of a TOOL, not global ToolPolicy."""
+    if not isinstance(plan, dict):
+        return False
+    steps = plan.get("steps")
+    if not isinstance(steps, list):
+        return False
+    approval_ids = {
+        s.get("id")
+        for s in steps
+        if isinstance(s, dict)
+        and s.get("type") == "APPROVAL"
+        and isinstance(s.get("id"), str)
+        and isinstance(s.get("config"), dict)
+        and s["config"].get("approval_policy_id")
+    }
+    return bool(approval_ids) and any(
+        isinstance(step, dict)
+        and step.get("type") == "TOOL"
+        and bool(approval_ids.intersection(step.get("depends_on") or []))
+        for step in steps
+    )
+
+
 def _utc(value: str | None) -> datetime | None:
     if not isinstance(value, str) or not value.strip():
         return None
@@ -184,11 +208,10 @@ def judge_l304(
             reason = "FINISHED_AFTER_DEADLINE"
         elif not plan_ok:
             reason = plan_reason or "PLAN_SHAPE_MISMATCH"
-        elif case["kind"] == "approval" and not any(
-            isinstance(step, dict) and step.get("type") == "APPROVAL"
-            for step in execution.get("plan_snapshot", {}).get("steps", [])
+        elif case["kind"] == "approval" and not approval_plan_has_gate(
+            execution.get("plan_snapshot")
         ):
-            reason = "AUTHORABLE_APPROVAL_PLAN_MISSING"
+            reason = "AUTHORABLE_APPROVAL_GATE_MISSING"
         else:
             reason = _check_steps(
                 case["kind"],
