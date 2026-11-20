@@ -16,7 +16,6 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from sqlalchemy import select, text
 
 from app.core.config import get_settings
 from app.db.session import dispose_db, init_db, session_scope
@@ -24,6 +23,7 @@ from app.models.auth import User
 from app.models.schedule import Schedule
 from app.schemas.schedule import ScheduleCreate
 from app.services.schedule import ScheduleService
+from sqlalchemy import select, text
 from tests.evaluation.harness.common import artifact_dir, git_sha
 from tests.evaluation.level3.measure_l3_03 import (
     check_due_slot_coverage,
