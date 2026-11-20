@@ -44,7 +44,7 @@
 2. 별도 허가된 정상 Workflow 실행 경로로 **각 버전 정확히 1회**를 실행한다. 평가기는 Workflow 생성·실행·승인·Tool 호출 등을 하지 않는다.
 3. 종료시각+유예시간이 지난 후 `--run --write-artifact --plan <FILE> --preflight-artifact <PREFLIGHT_JSON>`으로 한 번 판정한다.
 4. 검사기는 PostgreSQL `REPEATABLE READ READ ONLY`에서 평가 구간 내 해당 WorkflowVersion의 **모든** Execution을 SELECT한다. `source_type`이나 성공 상태를 조건으로 미리 걸러내지 않는다.
-5. 버전별 0건이면 실패(분모 유지), 2건 이상이면 평가불가(`INCOMPLETE`)로 처리. 한 건 존재해도 FAILED/PARTIALLY_SUCCEEDED/CANCELLED/TIMED_OUT, 잘못된 계획, Step 불완전, ToolCall 미검증, 승인 대기/거절 등은 실패 0점.
+5. 버전별 0건이면 실패(분모 유지), 2건 이상이면 평가불가(`INCOMPLETE`)로 처리. 한 건 존재해도 FAILED/PARTIALLY_SUCCEEDED/CANCELLED/TIMED_OUT, 잘못된 계획, Step 불완전, ToolCall 미검증, 승인 대기/거절 등은 실패 0점. `SUCCEEDED` 실행 안에 `PENDING`·`READY`·`RUNNING`·`WAITING_INPUT`·`WAITING_APPROVAL` 등 미종결 Step이 남아 있어도 실패로 판정한다. 정상 비선택 분기는 `SKIPPED`를 허용한다.
 6. Preflight와 비교해 WorkflowVersion의 상태·원본 Workflow 상태·계획 형태가 달라졌다면 평가불가.
 7. `completion_rate_percent = passed_cases / 6 × 100`, 값이 ≥85%이면 `MET`, 미달 `NOT_MET`. 최초 결과·실패·중단 이력은 삭제/덮어쓰기 금지.
 
