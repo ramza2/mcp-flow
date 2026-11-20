@@ -69,6 +69,10 @@ def _check_steps(
             "FAILED", "TIMED_OUT", "CANCELLED", "UNKNOWN_OUTCOME",
         }:
             return "STEP_TERMINAL_FAILURE"
+        # A completed Execution must not contain unfinished persisted steps.
+        # SKIPPED remains valid for the non-selected CONDITION branch.
+        if step["status"] not in {"SUCCEEDED", "SKIPPED"}:
+            return "STEP_NOT_TERMINAL"
     if succeeded_tool_calls < 1:
         return "SUCCESSFUL_TOOL_CALL_MISSING"
     if kind == "sequential":
