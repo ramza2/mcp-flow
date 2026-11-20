@@ -13,7 +13,7 @@ import re
 import subprocess
 from pathlib import Path
 
-_SHA = re.compile(r"[0-9a-f]{40}\\Z")
+_SHA = re.compile(r"[0-9a-f]{40}\Z")
 
 
 def all_jobs(reason: str) -> dict[str, str]:
@@ -75,7 +75,7 @@ def determine() -> dict[str, str]:
         )
         paths = [
             chunk.decode("utf-8", "surrogateescape")
-            for chunk in result.stdout.split(b"\\0") if chunk
+            for chunk in result.stdout.split(b"\0") if chunk
         ]
         return route_paths(paths)
     except (OSError, KeyError, TypeError, ValueError, subprocess.CalledProcessError):
@@ -88,15 +88,15 @@ def main() -> None:
     if output:
         with open(output, "a", encoding="utf-8") as target:
             for key, value in result.items():
-                target.write(f"{key}={value}\\n")
+                target.write(f"{key}={value}\n")
     print("CI IMPACT: " + json.dumps(result, sort_keys=True))
     summary = os.environ.get("GITHUB_STEP_SUMMARY")
     if summary:
         with open(summary, "a", encoding="utf-8") as target:
             target.write(
-                "### CI impact routing\\n\\n"
+                "### CI impact routing\n\n"
                 + " | ".join(f"{key}: {value}" for key, value in result.items())
-                + "\\n"
+                + "\n"
             )
 
 
