@@ -1665,3 +1665,26 @@ Keep Level 3 assessment separate from internal KPI harness outputs.
 Official achievement claims require actual measurement evidence, fixed
 denominators/counting rules, environment and Git SHA. Preserve failures;
 do not silently cherry-pick successes or invent results.
+
+
+---
+
+# 54. CI Cost and Quality Routing
+
+GitHub Actions minutes are limited. Follow `docs/09-test-strategy.md`
+section 29 ("Changed-area CI routing") and `scripts/ci/impact.py`.
+
+- Create **one coherent commit before opening a PR** whenever possible;
+  avoid pushing successive partial commits that each start a full CI run.
+- The impact detector is fail-closed: unknown files, shared infrastructure,
+  workflow updates, invalid git diffs and manual dispatch require **all jobs**.
+- Frontend-only changes run Frontend; backend-only changes run Backend and
+  PostgreSQL when runtime or integration scope is involved.
+- Unit/evaluation test-only backend changes can omit PostgreSQL integration.
+- Do not bypass the always-running `CI quality gate` or mark a required
+  skipped/failed test as PASS. A successful selector is not a test substitute.
+- Preserve the full backend, frontend and PostgreSQL test commands when
+  a job is selected; use `workflow_dispatch` for an intentional full run.
+- Prefer rerunning **only failed jobs**, and inspect logs before retrying.
+- Never optimize by running GitHub Actions on production DB/secrets/services,
+  by disabling essential Level 3 evidence, or by auto-retrying unsafe Tool calls.

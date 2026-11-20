@@ -2021,6 +2021,35 @@ GitHub Actions `.github/workflows/ci.yml` on `pull_request` / `push` to `main` (
 - Frontend: `pnpm check` (`tsc` + vitest + build)
 - PostgreSQL integration: `pgvector/pgvector` service, Alembic single-head + `upgrade head`, `pytest -m integration` with `TEST_DATABASE_URL`
 
+### Changed-area CI routing (2026-11-20)
+
+GitHub Actions는 PR/main Push마다 **항상** 시작하며, `CI change impact`가 변경 파일을
+분류한 후 필요한 Job만 실행한다. 전체 워크플로에 `paths:` 필터를 적용하지
+않는다. 필수 상태 검사 시 Pending으로 남는 문제를 피하기 위해 `CI quality gate`
+Job은 `always()`로 실행해, **필요한 Job의 실제 성공** 여부를 검증한다.
+
+- `frontend/**`만 변경 → Frontend (`pnpm check`).
+- `backend/**` 변경 → Backend (`ruff check .` + 전체 비통합 `pytest`).
+- Backend 런타임/모델/마이그레이션/통합테스트·의존성 등 변경 → 추가로 PostgreSQL Integration.
+- `backend/tests/unit/**` 및 `backend/tests/evaluation/**` **만** 변경한 경우 PostgreSQL Integration 생략. 범위를 벗어난 Backend 변경이 하나라도 있으면 PostgreSQL Integration 실행.
+- `docs/**`, 루트 Markdown, `AGENTS.md`, `LICENSE`만 변경 → 분류기/최종 Gate만 실행.
+- `.github/**`, `scripts/**`, 인프라·루트 설정·알 수 없는 경로 → 전 Job 실행(안전 우선).
+- diff 실패·SHA 불명확·변경 파일 0개 → 전 Job 실행. `workflow_dispatch`는 항상 전 Job 실행.
+
+PR 비교는 GitHub 기본 synthetic merge checkout HEAD와 PR base SHA를,
+main Push 비교는 `before`와 `GITHUB_SHA`를 사용한다. 전체 Git 이력을 fetch해
+비교 대상 누락을 방지하고, 분류기에 표준 라이브러리 단위 테스트를 적용한다.
+
+본 최적화는 **테스트 범위의 선택**만 변경하며, 선택된 Job의 검사 명령이나
+PostgreSQL 테스트 DB, 기존 외부 호출 금지 정책은 그대로 유지한다.
+운영 DB/서비스와는 연결하지 않는다. 기능 개발 완료·평가 증거 준비 시에는
+GitHub Actions `workflow_dispatch`로 전체 검사를 수행할 수 있다.
+
+실행시간/비용 절감률은 실제 적용 뒤 GitHub Actions Job 사용량으로만 측정한다.
+비통합 Backend 전체 실행과 PostgreSQL Integration은 각각 다수 분이 소요되므로,
+다른 영역만 수정한 PR에서 생략하는 것이 주된 절감 수단이다.
+
+
 ---
 
 ## 30. Coverage 및 결함
