@@ -17,6 +17,7 @@ from typing import Any
 
 from app.models.execution import Execution
 from app.models.schedule import Schedule, ScheduleOccurrence
+from app.scheduler.recurrence import next_scheduled_at
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
@@ -144,6 +145,73 @@ def _report(mode: str, plan_path: Path, sha: str) -> dict[str, Any]:
     }
 
 
+def check_due_slot_coverage(
+    check: dict[str, Any], schedules: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """Require the frozen plan to cover every expected schedule tick in its window."""
+    planned = {(s["schedule_id"], s["scheduled_for"]) for s in check["slots"]}
+    expected: set[tuple[str, str]] = set()
+    for row in schedules:
+        cursor = check["window_start_dt"] - timedelta(microseconds=1)
+        # One more than the entire plan suffices to detect an incomplete denominator.
+        for _ in range(check["required_slots"] + 1):
+            try:
+                nxt = next_scheduled_at(
+                    schedule_type=row["schedule_type"],
+                    expression=row["schedule_expression"],
+                    timezone=row["timezone"],
+                    after=cursor,
+                    start_at=_parse_time(row["start_at"]) if row["start_at"] else None,
+                    end_at=_parse_time(row["end_at"]) if row["end_at"] else None,
+                )
+            except Exception as exc:  # noqa: BLE001
+                return {
+                    "ok": False,
+                    "reason": "RECURRENCE_CHECK_FAILED",
+                    "schedule_id": row["id"],
+                    "error_type": type(exc).__name__,
+                }
+            if nxt is None or nxt >= check["window_end_dt"]:
+                break
+            if nxt <= cursor:
+                return {
+                    "ok": False,
+                    "reason": "NON_MONOTONIC_RECURRENCE",
+                    "schedule_id": row["id"],
+                }
+            expected.add((row["id"], iso(nxt)))
+            cursor = nxt
+    missing = sorted(expected - planned)
+    extra = sorted(planned - expected)
+    if missing or extra:
+        return {
+            "ok": False,
+            "reason": "PLAN_DUE_SLOTS_MISMATCH",
+            "expected_slots": len(expected),
+            "planned_slots": len(planned),
+            "missing_planned_slots": [
+                {"schedule_id": sid, "scheduled_for": when} for sid, when in missing
+            ],
+            "unexpected_planned_slots": [
+                {"schedule_id": sid, "scheduled_for": when} for sid, when in extra
+            ],
+        }
+    return {"ok": True, "expected_slots": len(expected), "planned_slots": len(planned)}
+
+
+def _schedule_config_snapshot(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Exclude lifecycle status; COMPLETED is expected after the evaluation window."""
+    keys = (
+        "id", "target_type", "agent_version_id", "workflow_version_id",
+        "schedule_type", "schedule_expression", "timezone", "start_at", "end_at",
+        "misfire_policy", "overlap_policy",
+    )
+    return sorted(
+        [{key: row.get(key) for key in keys} for row in rows],
+        key=lambda row: row["id"],
+    )
+
+
 async def collect_rows(
     session: Any, plan_check: dict[str, Any]
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
@@ -172,6 +240,14 @@ async def collect_rows(
             {
                 "id": str(row.id), "status": row.status,
                 "schedule_type": row.schedule_type, "target_type": row.target_type,
+                "schedule_expression": row.schedule_expression,
+                "timezone": row.timezone,
+                "start_at": iso(row.start_at) if row.start_at else None,
+                "end_at": iso(row.end_at) if row.end_at else None,
+                "agent_version_id": str(row.agent_version_id) if row.agent_version_id else None,
+                "workflow_version_id": (
+                    str(row.workflow_version_id) if row.workflow_version_id else None
+                ),
                 "misfire_policy": row.misfire_policy, "overlap_policy": row.overlap_policy,
             }
             for row in schedules
@@ -252,10 +328,26 @@ async def run_mode(
     if missing:
         return {**report, "ok": False, "reason": "SCHEDULE_NOT_FOUND",
                 "missing_schedule_ids": missing}
+    coverage = check_due_slot_coverage(check, schedules)
+    report["due_slot_check"] = coverage
+    if not coverage["ok"]:
+        return {
+            **report, "ok": False, "judgment": "INCOMPLETE",
+            "reason": coverage["reason"],
+        }
     if args.preflight:
-        if not check["example"] and any(row["status"] != "ACTIVE" for row in schedules):
+        if any(row["status"] != "ACTIVE" for row in schedules):
             return {**report, "ok": False, "reason": "SCHEDULE_NOT_ACTIVE"}
+        if occurrences:
+            return {**report, "ok": False, "reason": "PREEXISTING_OCCURRENCES"}
         return {**report, "ok": True, "note": "Plan frozen before tests; SELECT only"}
+    if _schedule_config_snapshot(schedules) != _schedule_config_snapshot(
+        prior.get("schedules", [])
+    ):
+        return {
+            **report, "ok": False, "judgment": "INCOMPLETE",
+            "reason": "SCHEDULE_CONFIGURATION_DRIFT",
+        }
     verdict = judge_l303(
         slots=check["slots"],
         occurrences=occurrences,

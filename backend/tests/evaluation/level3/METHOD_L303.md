@@ -18,6 +18,8 @@
 - `example: false`와 `plan_version: level3-schedule-completion.v1`.
 - plan 파일 바이트의 SHA256을 평가 **시작 전** `--preflight --write-artifact` 증적에 기록한다.
 
+평가기 Preflight는 실제 `schedule_type / schedule_expression / timezone / start_at / end_at`를 이용해 구간 내 모든 due 시각을 다시 계산한다. 계획에 누락되거나 예정되지 않은 due 시각이 있으면 `PLAN_DUE_SLOTS_MISMATCH`로 평가를 막는다. 평가 종료 후에는 사전 Preflight의 예약 설정 스냅샷과 현재 설정을 비교하며, 상태만 `ACTIVE → COMPLETED`로 바뀐 경우는 허용하지만 예약식·대상 버전·정책 등의 변경은 `SCHEDULE_CONFIGURATION_DRIFT`로 처리한다.
+
 시험 환경과 일정을 정할 때 특정 결과를 보고 목표를 바꾸거나 불리한 예약만 제외해서는 안 된다. 한 스케줄을 평가하는 동안 발생하도록 설계된 **모든 due 시각**을 포함하고, 일시중지·정책 건너뜀·자원 장애까지 기록한다. 시각 목록과 실제 예약 주기가 일치하는지는 시험 담당자가 사전 확인한다.
 
 평가 도구는 `schedule_occurrences`와 `executions`에서 계획 대상 스케줄의 **구간 내 모든 행**을 SELECT한다. 계획에 빠진 구간 내 Occurrence가 발견되면 임의로 버리지 않고 `INCOMPLETE / EXTRA_OCCURRENCES`로 처리한다.

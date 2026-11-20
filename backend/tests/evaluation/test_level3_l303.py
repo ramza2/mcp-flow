@@ -4,7 +4,12 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime, timedelta
 
-from tests.evaluation.level3.measure_l3_03 import PLAN_VERSION, validate_plan
+from tests.evaluation.level3.measure_l3_03 import (
+    PLAN_VERSION,
+    _schedule_config_snapshot,
+    check_due_slot_coverage,
+    validate_plan,
+)
 from tests.evaluation.level3.scoring_l303 import judge_l303
 
 
@@ -201,3 +206,64 @@ def test_invalid_finished_at_cannot_be_success():
     )
     assert verdict["judgment"] == "NOT_MET"
     assert verdict["succeeded"] == 0
+
+
+def _scheduled_row(*, start: str, end: str, expression: str = "PT2M") -> dict:
+    return {
+        "id": str(uuid.UUID("11111111-1111-4111-8111-111111111111")),
+        "status": "ACTIVE",
+        "target_type": "WORKFLOW_VERSION",
+        "agent_version_id": None,
+        "workflow_version_id": str(uuid.uuid4()),
+        "schedule_type": "INTERVAL",
+        "schedule_expression": expression,
+        "timezone": "Asia/Seoul",
+        "start_at": start,
+        "end_at": end,
+        "misfire_policy": "SKIP",
+        "overlap_policy": "SKIP",
+    }
+
+
+def test_coverage_accepts_all_future_interval_due_slots():
+    plan = _plan(count=2)
+    plan["evaluation_window"]["end"] = _stamp(4)
+    plan["slots"][1]["scheduled_for"] = _stamp(2)
+    check = validate_plan(plan)
+    assert check["ok"]
+    schedules = [_scheduled_row(start=_stamp(0), end=_stamp(4))]
+    result = check_due_slot_coverage(check, schedules)
+    assert result == {"ok": True, "expected_slots": 2, "planned_slots": 2}
+
+
+def test_coverage_rejects_unplanned_due_slot():
+    plan = _plan(count=2)
+    plan["evaluation_window"]["end"] = _stamp(3)
+    check = validate_plan(plan)
+    schedules = [_scheduled_row(start=_stamp(0), end=_stamp(3), expression="PT1M")]
+    result = check_due_slot_coverage(check, schedules)
+    assert result["reason"] == "PLAN_DUE_SLOTS_MISMATCH"
+    assert result["missing_planned_slots"] == [{
+        "schedule_id": schedules[0]["id"], "scheduled_for": _stamp(2)
+    }]
+
+
+def test_coverage_rejects_plan_slot_not_produced_by_schedule():
+    plan = _plan(count=2)
+    plan["evaluation_window"]["end"] = _stamp(4)
+    check = validate_plan(plan)
+    schedules = [_scheduled_row(start=_stamp(0), end=_stamp(4))]
+    result = check_due_slot_coverage(check, schedules)
+    assert result["reason"] == "PLAN_DUE_SLOTS_MISMATCH"
+    assert result["unexpected_planned_slots"] == [{
+        "schedule_id": schedules[0]["id"], "scheduled_for": _stamp(1)
+    }]
+
+
+def test_schedule_config_drift_detects_misfire_change_but_ignores_completion_status():
+    schedule = _scheduled_row(start=_stamp(0), end=_stamp(4))
+    former = _schedule_config_snapshot([schedule])
+    finished = {**schedule, "status": "COMPLETED"}
+    assert _schedule_config_snapshot([finished]) == former
+    altered = {**finished, "misfire_policy": "RUN_ONCE"}
+    assert _schedule_config_snapshot([altered]) != former
