@@ -67,7 +67,10 @@ def _scenario_plan(kind: str) -> dict:
                 "mode": "FOR_EACH" if kind == "foreach" else "WHILE",
             }},
         ]}
-    return {"steps": [{"id": "tool", "type": "TOOL"}]}
+    return {"steps": [
+        {"id": "approve", "type": "APPROVAL", "depends_on": []},
+        {"id": "tool", "type": "TOOL", "depends_on": ["approve"]},
+    ]}
 
 
 def _evidence():
@@ -117,10 +120,22 @@ def _evidence():
                 {"step_key": "loop-tool", "step_type": "TOOL", "status": "SUCCEEDED"},
             ]
         elif kind == "approval":
-            steps[eid] = [{
-                "step_key": "tool", "step_type": "TOOL", "status": "SUCCEEDED",
+            approval_step_id = str(uuid.uuid4())
+            steps[eid] = [
+                {
+                    "id": approval_step_id, "step_key": "approve",
+                    "step_type": "APPROVAL", "status": "SUCCEEDED",
+                },
+                {
+                    "step_key": "tool", "step_type": "TOOL",
+                    "status": "SUCCEEDED",
+                },
+            ]
+            approvals[eid] = [{
+                "id": str(uuid.uuid4()), "status": "APPROVED",
+                "step_execution_id": approval_step_id,
+                "approval_kind": "AUTHORABLE_STEP",
             }]
-            approvals[eid] = [{"id": str(uuid.uuid4()), "status": "APPROVED"}]
         calls[eid] = 2 if kind in {"sequential", "parallel", "condition"} else 1
     return cases, executions, steps, approvals, calls
 
@@ -193,7 +208,7 @@ def test_approval_request_must_be_approved_and_real():
     no_approval = {**approvals, approval_id: []}
     verdict = _score(cases, executions, steps, no_approval, calls)
     assert verdict["judgment"] == "NOT_MET"
-    assert any(c["reason"] == "APPROVED_REQUEST_EVIDENCE_MISSING"
+    assert any(c["reason"] == "APPROVED_AUTHORABLE_REQUEST_EVIDENCE_MISSING"
                for c in verdict["cases"])
 
 
@@ -235,3 +250,49 @@ def test_wrong_source_retry_and_wrong_plan_fail():
     bad = copy.deepcopy(executions)
     bad[0]["plan_snapshot"] = {"steps": [{"type": "TOOL"}]}
     assert _score(cases, bad, steps, approvals, calls)["judgment"] == "NOT_MET"
+
+
+def test_approval_toolpolicy_evidence_cannot_replace_authorable_step():
+    cases, executions, steps, approvals, calls = _evidence()
+    approval_case = next(c for c in cases if c["kind"] == "approval")
+    approval_execution = next(
+        e for e in executions
+        if e["workflow_version_id"] == approval_case["workflow_version_id"]
+    )
+    eid = approval_execution["id"]
+    wrong_kind = copy.deepcopy(approvals)
+    wrong_kind[eid][0]["approval_kind"] = "TOOL_POLICY"
+    verdict = _score(cases, executions, steps, wrong_kind, calls)
+    assert verdict["judgment"] == "NOT_MET"
+    assert any(c["reason"] == "APPROVED_AUTHORABLE_REQUEST_EVIDENCE_MISSING"
+               for c in verdict["cases"])
+
+    mismatched_step = copy.deepcopy(approvals)
+    mismatched_step[eid][0]["step_execution_id"] = str(uuid.uuid4())
+    verdict = _score(cases, executions, steps, mismatched_step, calls)
+    assert verdict["judgment"] == "NOT_MET"
+
+
+def test_approval_requires_actual_succeeded_authorable_step_and_plan():
+    cases, executions, steps, approvals, calls = _evidence()
+    approval_case = next(c for c in cases if c["kind"] == "approval")
+    approval_execution = next(
+        e for e in executions
+        if e["workflow_version_id"] == approval_case["workflow_version_id"]
+    )
+    eid = approval_execution["id"]
+    no_step = copy.deepcopy(steps)
+    no_step[eid] = [s for s in no_step[eid] if s["step_type"] != "APPROVAL"]
+    verdict = _score(cases, executions, no_step, approvals, calls)
+    assert verdict["judgment"] == "NOT_MET"
+    assert any(c["reason"] == "AUTHORABLE_APPROVAL_STEP_NOT_COMPLETED"
+               for c in verdict["cases"])
+
+    no_plan = copy.deepcopy(executions)
+    for execution in no_plan:
+        if execution["id"] == eid:
+            execution["plan_snapshot"] = {"steps": [{"id": "tool", "type": "TOOL"}]}
+    verdict = _score(cases, no_plan, steps, approvals, calls)
+    assert verdict["judgment"] == "NOT_MET"
+    assert any(c["reason"] == "AUTHORABLE_APPROVAL_PLAN_MISSING"
+               for c in verdict["cases"])

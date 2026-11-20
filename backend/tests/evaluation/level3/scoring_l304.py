@@ -33,7 +33,7 @@ def _utc(value: str | None) -> datetime | None:
 def _check_steps(
     kind: str,
     steps: list[dict[str, Any]],
-    approval_statuses: list[str],
+    approvals: list[dict[str, Any]],
     succeeded_tool_calls: int,
 ) -> str | None:
     """Structural/terminal durable checks, independent of plan shape."""
@@ -89,8 +89,22 @@ def _check_steps(
         ):
             return "LOOP_STEP_INCOMPLETE"
     elif kind == "approval":
-        if "APPROVED" not in approval_statuses:
-            return "APPROVED_REQUEST_EVIDENCE_MISSING"
+        approved_steps = {
+            str(s["id"])
+            for s in steps
+            if s["step_type"] == "APPROVAL"
+            and s["status"] == "SUCCEEDED"
+            and s.get("id")
+        }
+        if not approved_steps:
+            return "AUTHORABLE_APPROVAL_STEP_NOT_COMPLETED"
+        if not any(
+            a.get("status") == "APPROVED"
+            and a.get("approval_kind") == "AUTHORABLE_STEP"
+            and str(a.get("step_execution_id")) in approved_steps
+            for a in approvals
+        ):
+            return "APPROVED_AUTHORABLE_REQUEST_EVIDENCE_MISSING"
         if not any(
             s["step_type"] == "TOOL" and s["status"] == "SUCCEEDED"
             for s in steps
@@ -170,14 +184,16 @@ def judge_l304(
             reason = "FINISHED_AFTER_DEADLINE"
         elif not plan_ok:
             reason = plan_reason or "PLAN_SHAPE_MISMATCH"
+        elif case["kind"] == "approval" and not any(
+            isinstance(step, dict) and step.get("type") == "APPROVAL"
+            for step in execution.get("plan_snapshot", {}).get("steps", [])
+        ):
+            reason = "AUTHORABLE_APPROVAL_PLAN_MISSING"
         else:
             reason = _check_steps(
                 case["kind"],
                 steps_by_execution.get(execution_id, []),
-                [
-                    str(item["status"])
-                    for item in approvals_by_execution.get(execution_id, [])
-                ],
+                approvals_by_execution.get(execution_id, []),
                 int(tool_calls_by_execution.get(execution_id, 0)),
             )
         output.append({

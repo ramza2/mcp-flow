@@ -184,6 +184,7 @@ async def collect(
             )
         )).scalars().all():
             steps.setdefault(str(row.execution_id), []).append({
+                "id": str(row.id),
                 "step_key": row.step_key,
                 "step_type": row.step_type,
                 "status": row.status,
@@ -195,7 +196,12 @@ async def collect(
             )
         )).scalars().all():
             approvals.setdefault(str(row.execution_id), []).append({
-                "id": str(row.id), "status": row.status,
+                "id": str(row.id),
+                "status": row.status,
+                "step_execution_id": str(row.step_execution_id),
+                "approval_kind": (
+                    (row.context_snapshot or {}).get("approval_kind")
+                ),
             })
         success_rows = (await session.execute(
             select(
@@ -345,6 +351,8 @@ def main(argv: list[str] | None = None) -> int:
             "Frozen 6 scenario kinds, one prospective workflow Execution per case. "
             "All cases in denominator. Real terminal SUCCEEDED + finished_at + "
             "plan shape + durable Step, ToolCall, ApprovalRequest evidence required. "
+            "Approval requires an authorable APPROVAL Step linked to an APPROVED "
+            "AUTHORABLE_STEP ApprovalRequest, without changing global ToolPolicy. "
             "Unplanned duplicates are INCOMPLETE; missing/failed are 0. "
             "No KPI-05 pytest or direct result flags."
         ),

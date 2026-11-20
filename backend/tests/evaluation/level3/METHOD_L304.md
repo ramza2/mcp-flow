@@ -16,9 +16,11 @@
 | `condition_branch` | 조건 | CONDITION 결과, 선택 분기 SUCCEEDED, 비선택 분기 SKIPPED, JOIN 성공 |
 | `foreach_loop` | FOR_EACH | 실제 LOOP Step SUCCEEDED 및 ToolCall 성공 |
 | `while_loop` | WHILE | 실제 LOOP Step SUCCEEDED 및 ToolCall 성공 |
-| `approval_wait_resume` | 승인 후 재개 | 같은 Execution의 승인 요청 APPROVED와 TOOL Step/ToolCall 성공 |
+| `approval_wait_resume` | 승인 후 재개 | 독립 Workflow의 명시적 `APPROVAL` Step SUCCEEDED, 해당 Step에 연결된 `AUTHORABLE_STEP` ApprovalRequest APPROVED 및 후속 TOOL Step/ToolCall 성공 |
 
 모든 유형에서 `executions.source_type=WORKFLOW_VERSION`, `status=SUCCEEDED`, `finished_at` 존재 및 사전 완료마감 이내를 요구한다. 실행 계획 형태는 기존 `plan_matches_scenario_kind()`와 비교한다. 단위 테스트 결과, LLM 서술, 환경변수의 성공 플래그만으로 성공 판정 금지.
+
+**승인 시나리오 구현 원칙:** 현재 `suggest_questions` ToolPolicy는 `requires_approval=false`다. 이 공통 ToolPolicy를 `true`로 변경하지 말고, 평가 전용 Workflow에 `APPROVAL` 단계를 추가하여 해당 Workflow에만 승인 흐름을 적용한다. 활성 `ApprovalPolicy`를 명시적으로 선택하고 실제 승인 권한을 가진 담당자가 승인해야 하며, 승인 요청의 `approval_kind=AUTHORABLE_STEP`·`step_execution_id`와 완료된 Step ID가 일치해야 한다. 과거 ToolPolicy 기반 승인 이력 또는 단순 승인 상태만으로 이번 공식 승인 시나리오 성공을 인정하지 않는다.
 
 병렬의 실제 시간 겹침은 별도 진단이다. JOIN fan-in 실행과 정상 종료 여부가 본 완료율의 판정 근거이며, 벽시계상의 동시성 여부를 단정하지 않는다.
 
