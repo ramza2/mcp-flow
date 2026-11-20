@@ -231,6 +231,22 @@ def test_condition_branch_mismatch_fails_even_on_succeeded_execution():
                for c in verdict["cases"])
 
 
+def test_incomplete_persisted_step_blocks_successful_execution():
+    # A top-level SUCCEEDED status alone must never mask unfinished steps.
+    cases, executions, steps, approvals, calls = _evidence()
+    execution_id = executions[0]["id"]
+    for status in ("PENDING", "READY", "RUNNING", "WAITING_INPUT", "WAITING_APPROVAL"):
+        incomplete = copy.deepcopy(steps)
+        incomplete[execution_id].append({
+            "step_key": "incomplete_tool",
+            "step_type": "TOOL",
+            "status": status,
+        })
+        verdict = _score(cases, executions, incomplete, approvals, calls)
+        assert verdict["judgment"] == "NOT_MET"
+        assert verdict["cases"][0]["reason"] == "STEP_NOT_TERMINAL"
+
+
 def test_tool_call_and_deadline_requirements():
     cases, executions, steps, approvals, calls = _evidence()
     broken_calls = {**calls, executions[0]["id"]: 0}
