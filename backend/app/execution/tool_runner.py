@@ -1765,7 +1765,7 @@ class McpToolRunner:
             )
             return result, response_meta, first_byte_at, None
         except MCPClientError as exc:
-            return None, None, None, exc
+            return None, exc.response_meta, None, exc
         finally:
             heartbeat_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
