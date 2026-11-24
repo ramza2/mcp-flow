@@ -671,13 +671,9 @@ class CurrentMCPClient:
                     .strip()
                     .lower()
                 )
-                # Preserve the existing HTTP error classification; never parse
-                # an HTTP error as a successful JSON-RPC SSE response.
-                if status_code >= 400:
-                    raise self._map_http_error(
-                        status_code, outcome_unknown=status_code >= 500
-                    )
-                is_sse = content_type == "text/event-stream"
+                # Keep the existing bounded body read for HTTP errors.
+                # An error response must never be parsed as a successful SSE reply.
+                is_sse = status_code < 400 and content_type == "text/event-stream"
                 if is_sse:
                     # A request-scoped stream can remain open after the reply.
                     # Stop at the response event; bound the total time and bytes,
@@ -693,6 +689,10 @@ class CurrentMCPClient:
                     async for chunk in response.aiter_bytes():
                         observe_chunk(chunk)
                         raw_chunks.extend(chunk)
+                if status_code >= 400:
+                    raise self._map_http_error(
+                        status_code, outcome_unknown=status_code >= 500
+                    )
         except MCPClientError as exc:
             retain_failure_meta(exc)
             raise
