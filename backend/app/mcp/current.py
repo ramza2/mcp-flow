@@ -7,7 +7,7 @@ import json
 import logging
 import time
 import uuid
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from typing import Any
 
@@ -244,7 +244,12 @@ class CurrentMCPClient:
         return payload
 
     @staticmethod
-    async def _read_sse_rpc_response(response: httpx.Response) -> Any:
+    async def _read_sse_rpc_response(
+        response: httpx.Response,
+        *,
+        on_chunk: Callable[[bytes], None] | None = None,
+        outcome_unknown: bool = False,
+    ) -> Any:
         """Read the first JSON-RPC response from request-scoped SSE without waiting for EOF.
 
         Ignore heartbeats, empty priming events, and notifications. Bound the
@@ -270,6 +275,7 @@ class CurrentMCPClient:
                     error_code="MCP_INVALID_JSON",
                     message="MCP server returned invalid SSE JSON.",
                     retryable=False,
+                    outcome_unknown=outcome_unknown,
                 ) from exc
             if (
                 isinstance(message, dict)
@@ -281,6 +287,8 @@ class CurrentMCPClient:
             return True, message
 
         async for chunk in response.aiter_bytes():
+            if on_chunk is not None:
+                on_chunk(chunk)
             received_bytes += len(chunk)
             if received_bytes > _SSE_MAX_RESPONSE_BYTES:
                 raise MCPClientError(
@@ -288,6 +296,7 @@ class CurrentMCPClient:
                     error_code="MCP_SSE_RESPONSE_TOO_LARGE",
                     message="MCP SSE response exceeded the maximum allowed size.",
                     retryable=False,
+                    outcome_unknown=outcome_unknown,
                 )
             buffer.extend(chunk)
             while True:
@@ -316,6 +325,7 @@ class CurrentMCPClient:
             error_code="MCP_SSE_RESPONSE_MISSING",
             message="MCP SSE stream ended without a JSON-RPC response.",
             retryable=False,
+            outcome_unknown=outcome_unknown,
         )
 
     async def _post_rpc(
@@ -607,9 +617,46 @@ class CurrentMCPClient:
         request_sent = False
         first_byte_at: datetime | None = None
         raw_chunks = bytearray()
+        raw_size_bytes = 0
         status_code: int | None = None
+        content_type = ""
         safe_response_headers: dict[str, str] = {}
         started_monotonic = time.monotonic()
+        payload: Any = None
+        is_sse = False
+
+        def observe_chunk(chunk: bytes) -> None:
+            nonlocal raw_size_bytes, first_byte_at
+            if not chunk:
+                return
+            if first_byte_at is None:
+                first_byte_at = datetime.now(UTC)
+            raw_size_bytes += len(chunk)
+            if max_result_bytes is not None and raw_size_bytes > max_result_bytes:
+                raise MCPResultTooLargeError(max_result_bytes=max_result_bytes)
+
+        def retain_failure_meta(exc: MCPClientError) -> None:
+            # Do not retain arbitrary remote header values or body fragments on
+            # errors. Classify unknown media types rather than echoing them.
+            if status_code is not None:
+                known_types = {
+                    "application/json",
+                    "application/problem+json",
+                    "text/event-stream",
+                    "text/html",
+                    "text/plain",
+                    "application/octet-stream",
+                }
+                exc.response_meta = {
+                    "http_status": status_code,
+                    "response_headers": {
+                        "content-type": (
+                            content_type if content_type in known_types
+                            else "other" if content_type else "missing"
+                        )
+                    },
+                    "duration_ms": int((time.monotonic() - started_monotonic) * 1000),
+                }
 
         try:
             async with client.stream(
@@ -618,21 +665,51 @@ class CurrentMCPClient:
                 request_sent = True
                 status_code = response.status_code
                 safe_response_headers = redact_headers_for_meta(dict(response.headers))
-                async for chunk in response.aiter_bytes():
-                    if not chunk:
-                        continue
-                    if first_byte_at is None:
-                        first_byte_at = datetime.now(UTC)
-                    raw_chunks.extend(chunk)
-                    if (
-                        max_result_bytes is not None
-                        and len(raw_chunks) > max_result_bytes
-                    ):
-                        raise MCPResultTooLargeError(max_result_bytes=max_result_bytes)
-        except MCPResultTooLargeError:
+                content_type = (
+                    response.headers.get("content-type", "")
+                    .split(";", 1)[0]
+                    .strip()
+                    .lower()
+                )
+                # Keep the existing bounded body read for HTTP errors.
+                # An error response must never be parsed as a successful SSE reply.
+                is_sse = status_code < 400 and content_type == "text/event-stream"
+                if is_sse:
+                    # A request-scoped stream can remain open after the reply.
+                    # Stop at the response event; bound the total time and bytes,
+                    # including comments and notifications, not just JSON size.
+                    remaining = max(
+                        0.0, timeout_ms / 1000.0 - (time.monotonic() - started_monotonic)
+                    )
+                    async with asyncio.timeout(remaining):
+                        payload = await self._read_sse_rpc_response(
+                            response, on_chunk=observe_chunk, outcome_unknown=True
+                        )
+                else:
+                    async for chunk in response.aiter_bytes():
+                        observe_chunk(chunk)
+                        raw_chunks.extend(chunk)
+                if status_code >= 400:
+                    raise self._map_http_error(
+                        status_code, outcome_unknown=status_code >= 500
+                    )
+        except MCPClientError as exc:
+            retain_failure_meta(exc)
             raise
+        except TimeoutError as exc:
+            error = MCPClientError(
+                error_layer="TIMEOUT",
+                error_code="MCP_CONNECTION_TIMEOUT",
+                message="MCP server connection timed out.",
+                retryable=True,
+                outcome_unknown=request_sent,
+            )
+            retain_failure_meta(error)
+            raise error from exc
         except Exception as exc:
-            raise self._map_transport_error(exc, request_sent=request_sent) from exc
+            error = self._map_transport_error(exc, request_sent=request_sent)
+            retain_failure_meta(error)
+            raise error from exc
 
         duration_ms = int((time.monotonic() - started_monotonic) * 1000)
         response_meta: dict[str, Any] = {
@@ -641,102 +718,101 @@ class CurrentMCPClient:
             "duration_ms": duration_ms,
         }
 
-        if status_code is not None and status_code >= 400:
-            # tools/call already dispatched. 4xx stays non-ambiguous (explicit
-            # rejection). 5xx is conservative post-send ambiguity.
-            raise self._map_http_error(
-                status_code, outcome_unknown=status_code >= 500
-            )
+        # Both response formats share the existing envelope and result checks.
+        if not is_sse:
+            try:
+                payload = json.loads(bytes(raw_chunks).decode("utf-8"))
+            except (ValueError, UnicodeDecodeError) as exc:
+                error = MCPClientError(
+                    error_layer="PROTOCOL",
+                    error_code="MCP_INVALID_JSON",
+                    message="MCP server returned non-JSON response.",
+                    retryable=False,
+                    outcome_unknown=True,
+                )
+                retain_failure_meta(error)
+                raise error from exc
 
-        # tools/call was sent and a body arrived — malformed JSON / JSON-RPC is
-        # post-send ambiguity (external side effect may already have occurred).
         try:
-            payload = json.loads(bytes(raw_chunks).decode("utf-8"))
-        except (ValueError, UnicodeDecodeError) as exc:
-            raise MCPClientError(
-                error_layer="PROTOCOL",
-                error_code="MCP_INVALID_JSON",
-                message="MCP server returned non-JSON response.",
-                retryable=False,
-                outcome_unknown=True,
-            ) from exc
-
-        envelope = self._validate_jsonrpc_envelope(
-            payload, request_id=remote_request_id, outcome_unknown=True
-        )
-
-        error = envelope.get("error")
-        if error is not None:
-            err_message = (
-                error.get("message")
-                if isinstance(error, dict) and isinstance(error.get("message"), str)
-                else "MCP JSON-RPC error."
-            )
-            raise MCPClientError(
-                error_layer="PROTOCOL",
-                error_code="MCP_JSONRPC_ERROR",
-                message=err_message,
-                retryable=False,
+            envelope = self._validate_jsonrpc_envelope(
+                payload, request_id=remote_request_id, outcome_unknown=True
             )
 
-        result = envelope.get("result")
-        if not isinstance(result, dict):
-            raise MCPClientError(
-                error_layer="PROTOCOL",
-                error_code="MCP_INVALID_TOOL_RESULT",
-                message="tools/call result must be an object.",
-                retryable=False,
-                outcome_unknown=True,
-            )
+            error = envelope.get("error")
+            if error is not None:
+                err_message = (
+                    error.get("message")
+                    if isinstance(error, dict) and isinstance(error.get("message"), str)
+                    else "MCP JSON-RPC error."
+                )
+                raise MCPClientError(
+                    error_layer="PROTOCOL",
+                    error_code="MCP_JSONRPC_ERROR",
+                    message=err_message,
+                    retryable=False,
+                )
 
-        result_type = result.get("resultType")
-        if result_type == _INPUT_REQUIRED_RESULT_TYPE:
-            # MRTR requestState is opaque — never log/inspect fields inside it.
-            return (
-                self._normalize_input_required(
-                    result, raw_size_bytes=len(raw_chunks), duration_ms=duration_ms
-                ),
-                response_meta,
-                first_byte_at,
-            )
+            result = envelope.get("result")
+            if not isinstance(result, dict):
+                raise MCPClientError(
+                    error_layer="PROTOCOL",
+                    error_code="MCP_INVALID_TOOL_RESULT",
+                    message="tools/call result must be an object.",
+                    retryable=False,
+                    outcome_unknown=True,
+                )
 
-        content = result.get("content")
-        if content is None:
-            content = []
-        if not isinstance(content, list):
-            raise MCPClientError(
-                error_layer="PROTOCOL",
-                error_code="MCP_INVALID_TOOL_RESULT",
-                message="tools/call result.content must be an array.",
-                retryable=False,
-                outcome_unknown=True,
-            )
+            result_type = result.get("resultType")
+            if result_type == _INPUT_REQUIRED_RESULT_TYPE:
+                # MRTR requestState is opaque — never log/inspect fields inside it.
+                return (
+                    self._normalize_input_required(
+                        result, raw_size_bytes=raw_size_bytes, duration_ms=duration_ms
+                    ),
+                    response_meta,
+                    first_byte_at,
+                )
 
-        structured_content = result.get("structuredContent")
-        if structured_content is not None and not isinstance(structured_content, (dict, list)):
-            raise MCPClientError(
-                error_layer="PROTOCOL",
-                error_code="MCP_INVALID_TOOL_RESULT",
-                message="tools/call result.structuredContent must be an object or array.",
-                retryable=False,
-                outcome_unknown=True,
-            )
+            content = result.get("content")
+            if content is None:
+                content = []
+            if not isinstance(content, list):
+                raise MCPClientError(
+                    error_layer="PROTOCOL",
+                    error_code="MCP_INVALID_TOOL_RESULT",
+                    message="tools/call result.content must be an array.",
+                    retryable=False,
+                    outcome_unknown=True,
+                )
 
-        metadata = result.get("_meta")
-        task_handle = result.get("taskHandle")
-        normalized = NormalizedToolResult(
-            protocol_success=True,
-            tool_error=bool(result.get("isError", False)),
-            content=list(content),
-            structured_content=structured_content,
-            metadata=metadata if isinstance(metadata, dict) else {},
-            task_handle=task_handle if isinstance(task_handle, str) else None,
-            raw_size_bytes=len(raw_chunks),
-            duration_ms=duration_ms,
-            truncated=False,
-            result_type=result_type if isinstance(result_type, str) else None,
-        )
-        return normalized, response_meta, first_byte_at
+            structured_content = result.get("structuredContent")
+            if structured_content is not None and not isinstance(structured_content, (dict, list)):
+                raise MCPClientError(
+                    error_layer="PROTOCOL",
+                    error_code="MCP_INVALID_TOOL_RESULT",
+                    message="tools/call result.structuredContent must be an object or array.",
+                    retryable=False,
+                    outcome_unknown=True,
+                )
+
+            metadata = result.get("_meta")
+            task_handle = result.get("taskHandle")
+            normalized = NormalizedToolResult(
+                protocol_success=True,
+                tool_error=bool(result.get("isError", False)),
+                content=list(content),
+                structured_content=structured_content,
+                metadata=metadata if isinstance(metadata, dict) else {},
+                task_handle=task_handle if isinstance(task_handle, str) else None,
+                raw_size_bytes=raw_size_bytes,
+                duration_ms=duration_ms,
+                truncated=False,
+                result_type=result_type if isinstance(result_type, str) else None,
+            )
+            return normalized, response_meta, first_byte_at
+        except MCPClientError as exc:
+            retain_failure_meta(exc)
+            raise
 
     @staticmethod
     def _normalize_input_required(

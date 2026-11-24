@@ -1596,3 +1596,58 @@ async def test_pg_tool_error_preserves_bounded_diagnostic_inline(
         assert attempts[0].result_inline == step.result_inline
         tool_calls = await ExecutionRepository(session).list_tool_calls(attempts[0].id)
         assert tool_calls[0].normalized_status == ToolCallNormalizedStatus.FAILED.value
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_pg_invalid_json_preserves_safe_response_metadata(
+    integration_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    import httpx
+    from app.mcp.current import CurrentMCPClient
+
+    sentinel = "private-error-body-canary"
+    execution_id, worker_id, lease_token = await _claim_ready_execution(
+        integration_session_factory
+    )
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        assert json.loads(request.content)["method"] == "tools/call"
+        calls += 1
+        return httpx.Response(
+            200,
+            headers={
+                "Content-Type": "text/html; charset=utf-8",
+                "X-Private": sentinel,
+                "Set-Cookie": sentinel,
+            },
+            content=("<html>" + sentinel + "</html>").encode(),
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        runner = McpToolRunner(
+            session_factory=integration_session_factory,
+            mcp_client=CurrentMCPClient(http=http),
+            secret_resolver_factory=_unimplemented_resolver_factory,
+            lease_seconds=60,
+            result_inline_max_bytes=256_000,
+        )
+        outcome = await runner.run_claimed_execution(
+            execution_id=execution_id, worker_id=worker_id, lease_token=lease_token
+        )
+
+    assert calls == 1
+    assert outcome.mcp_called is True
+    assert outcome.terminal_status == StepStatus.FAILED.value
+    payload = await _assert_pg_no_sentinel(
+        integration_session_factory, execution_id=execution_id, sentinel=sentinel
+    )
+    assert payload["attempt_error_code"] == "MCP_INVALID_JSON"
+    meta = payload["tool_call_response_meta"]
+    assert meta is not None
+    assert meta["http_status"] == 200
+    assert meta["response_headers"] == {"content-type": "text/html"}
+    assert isinstance(meta["duration_ms"], int)
+

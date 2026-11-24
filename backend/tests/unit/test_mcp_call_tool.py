@@ -535,3 +535,174 @@ async def test_authorization_header_never_logged(caplog: pytest.LogCaptureFixtur
 
     for record in caplog.records:
         assert "super-secret-token" not in record.getMessage()
+
+
+@pytest.mark.asyncio
+async def test_sse_tool_result_stops_at_reply_before_eof() -> None:
+    class ReplyStream(httpx.AsyncByteStream):
+        def __init__(self, reply: bytes) -> None:
+            self.reply = reply
+            self.closed = False
+
+        async def __aiter__(self):
+            yield b": heartbeat\r\n\r\n"
+            yield b"data: \r\n\r\n"
+            yield b'data: {"jsonrpc":"2.0","method":"notifications/progress"}\n\n'
+            yield b"event: message\r\nda"
+            yield b"ta: " + self.reply[:12]
+            yield self.reply[12:] + b"\r\n\r\n"
+            raise AssertionError("must not wait for stream EOF after response")
+
+        async def aclose(self) -> None:
+            self.closed = True
+
+    streams: list[ReplyStream] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        reply = json.dumps({
+            "jsonrpc": "2.0",
+            "id": body["id"],
+            "result": {"content": [{"type": "text", "text": "ok"}]},
+        }).encode()
+        stream = ReplyStream(reply)
+        streams.append(stream)
+        return httpx.Response(
+            200, headers={"Content-Type": "text/event-stream; charset=utf-8"},
+            stream=stream,
+        )
+
+    result, meta, first_byte = await _call(handler, max_result_bytes=4096)
+    assert result.protocol_success is True
+    assert result.content == [{"type": "text", "text": "ok"}]
+    assert result.raw_size_bytes > len(streams[0].reply)
+    assert meta["http_status"] == 200
+    assert first_byte is not None
+    assert streams[0].closed
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("body", "expected_code"),
+    [
+        (b"data: not-json\n\n", "MCP_INVALID_JSON"),
+        (b": heartbeat\n\n", "MCP_SSE_RESPONSE_MISSING"),
+        (
+            b'data: {"jsonrpc":"2.0","id":"wrong","result":{}}\n\n',
+            "MCP_INVALID_JSONRPC",
+        ),
+    ],
+)
+async def test_sse_failure_preserves_only_safe_metadata(
+    body: bytes, expected_code: str,
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={
+                "Content-Type": "text/event-stream",
+                "Set-Cookie": "secret=must-not-retain",
+                "X-Private": "secret-canary",
+            },
+            content=body,
+        )
+
+    with pytest.raises(MCPClientError) as exc:
+        await _call(handler)
+
+    assert exc.value.error_code == expected_code
+    assert exc.value.retryable is False
+    assert exc.value.outcome_unknown is True
+    meta = exc.value.response_meta
+    assert meta is not None
+    assert meta["http_status"] == 200
+    assert meta["response_headers"] == {"content-type": "text/event-stream"}
+    assert "secret" not in json.dumps(meta)
+
+
+@pytest.mark.asyncio
+async def test_sse_heartbeat_counts_toward_tool_policy_byte_limit() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"Content-Type": "text/event-stream"},
+            content=b": " + b"x" * 100 + b"\n\n",
+        )
+
+    with pytest.raises(MCPResultTooLargeError) as exc:
+        await _call(handler, max_result_bytes=32)
+
+    assert exc.value.error_code == "MCP_RESULT_TOO_LARGE"
+    assert exc.value.outcome_unknown is True
+    assert exc.value.retryable is False
+
+
+@pytest.mark.asyncio
+async def test_sse_input_required_preserves_opaque_state() -> None:
+    from app.mcp.contracts import NormalizedInputRequired
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        payload = json.dumps({
+            "jsonrpc": "2.0",
+            "id": body["id"],
+            "result": {
+                "resultType": "input_required",
+                "inputRequests": {"otp": {"type": "string"}},
+                "requestState": {"token": "opaque-canary"},
+            },
+        }).encode()
+        return httpx.Response(
+            200, headers={"Content-Type": "text/event-stream"},
+            content=b"data: " + payload + b"\n\n",
+        )
+
+    result, meta, _first = await _call(handler)
+    assert isinstance(result, NormalizedInputRequired)
+    assert result.request_state == {"token": "opaque-canary"}
+    assert "opaque-canary" not in json.dumps(meta)
+
+
+@pytest.mark.asyncio
+async def test_invalid_json_retains_only_safe_content_type() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, headers={"Content-Type": "text/html", "X-Private": "canary"},
+            content=b"<html>private body canary</html>",
+        )
+
+    with pytest.raises(MCPClientError) as exc:
+        await _call(handler)
+
+    assert exc.value.error_code == "MCP_INVALID_JSON"
+    assert exc.value.outcome_unknown is True
+    assert exc.value.response_meta is not None
+    assert exc.value.response_meta["http_status"] == 200
+    assert exc.value.response_meta["response_headers"] == {"content-type": "text/html"}
+    assert "canary" not in json.dumps(exc.value.response_meta)
+
+
+@pytest.mark.asyncio
+async def test_sse_total_deadline_is_bounded_even_with_heartbeats() -> None:
+    import asyncio
+
+    class Heartbeats(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            while True:
+                await asyncio.sleep(0.005)
+                yield b": heartbeat\n\n"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, headers={"Content-Type": "text/event-stream"},
+            stream=Heartbeats(),
+        )
+
+    with pytest.raises(MCPClientError) as exc:
+        await asyncio.wait_for(_call(handler, timeout_ms=50), timeout=2)
+
+    assert exc.value.error_code == "MCP_CONNECTION_TIMEOUT"
+    assert exc.value.outcome_unknown is True
+    assert exc.value.response_meta is not None
+    assert exc.value.response_meta["response_headers"] == {"content-type": "text/event-stream"}
+

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 
 class MCPClientError(Exception):
     """Transport/protocol failure talking to a remote MCP server.
@@ -28,6 +30,8 @@ class MCPClientError(Exception):
         self.message = message
         self.retryable = retryable
         self.outcome_unknown = outcome_unknown
+        # Optional, sanitized HTTP metadata for dispatched calls; never a body.
+        self.response_meta: dict[str, Any] | None = None
 
 
 class DiscoverUnsupportedError(MCPClientError):
