@@ -2825,6 +2825,43 @@ class ExecutionOrchestrator:
                     previous_exec = execution.status
                     skip_all_pending(by_key=by_key, now=now)
                     cancel_unused_ready_tools(by_key=by_key, now=now)
+                    # A settled, fail-fast body wave must not leave its owning
+                    # LOOP RUNNING when the Execution becomes terminal. Preserve
+                    # terminal child/attempt evidence and never settle in-flight
+                    # children here. Use the same deterministic stop selection
+                    # per LOOP, including multiple failing LOOPs in one wave.
+                    for parent in by_key.values():
+                        if (
+                            parent.step_type != AuthorableStepType.LOOP.value
+                            or parent.status != StepStatus.RUNNING.value
+                        ):
+                            continue
+                        children = [
+                            child for child in steps if child.parent_step_id == parent.id
+                        ]
+                        if not children or any(
+                            child.status not in _STEP_TERMINAL for child in children
+                        ):
+                            continue
+                        child_keys = {child.step_key for child in children}
+                        parent_stop = pick_stop_cause([
+                            cause for cause in causes if cause.step_key in child_keys
+                        ])
+                        if parent_stop is None:
+                            continue
+                        parent_status = (
+                            StepStatus.TIMED_OUT.value
+                            if parent_stop.kind == "FAIL_EXECUTION_TIMED_OUT"
+                            else StepStatus.FAILED.value
+                        )
+                        fail_loop_known(
+                            parent,
+                            status=parent_status,
+                            error_code=parent_stop.error_code or "RESOURCE_CONFLICT",
+                            error_message=parent_stop.error_message
+                            or "LOOP body caused Execution to stop.",
+                            now=now,
+                        )
                     await emit_step_transitions(
                         session,
                         previous_by_id=prev_steps,

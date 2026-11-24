@@ -1242,3 +1242,52 @@ async def test_n_previous_lineage_snapshot_drift(
         attempts = await ExecutionRepository(session).list_attempts(b2.id)
         assert len(attempts) == 0
     assert len(client.calls) == 0
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_while_candidate_iteration_predicate_executes_exactly_once(
+    integration_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    predicate = {
+        "op": "eq",
+        "left": _lc("/iteration_no"),
+        "right": {"kind": BindingKind.LITERAL.value, "value": 1},
+    }
+    async with integration_session_factory() as session:
+        eid, lease, _ = await _materialize_claim(
+            session,
+            step_specs=[
+                _while("L", body_step_ids=["B"], predicate=predicate, max_iterations=2),
+                _tool("B", depends_on=["L"]),
+            ],
+            response_step_ids=["L"],
+            worker_id="pg-while-once",
+        )
+    client = _ValueClient()
+    outcome = await _run(
+        integration_session_factory,
+        execution_id=eid,
+        lease=lease,
+        client=client,
+        worker_id="pg-while-once",
+    )
+    assert outcome.reason == "EXECUTION_SUCCEEDED"
+    assert len(client.calls) == 1
+    async with integration_session_factory() as session:
+        repo = ExecutionRepository(session)
+        execution = await repo.get(eid)
+        assert execution is not None
+        assert execution.status == ExecutionStatus.SUCCEEDED.value
+        steps = await repo.list_steps(eid)
+        loop = next(step for step in steps if step.step_key == "L")
+        assert loop.status == StepStatus.SUCCEEDED.value
+        assert loop.result_inline == {"mode": "WHILE", "iterations_completed": 1}
+        children = [step for step in steps if step.parent_step_id == loop.id]
+        assert len(children) == 1
+        assert children[0].status == StepStatus.SUCCEEDED.value
+        attempts = await repo.list_attempts(children[0].id)
+        assert len(attempts) == 1
+        calls = await repo.list_tool_calls(attempts[0].id)
+        assert len(calls) == 1
+
