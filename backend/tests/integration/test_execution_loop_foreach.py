@@ -1150,3 +1150,49 @@ async def test_o_next_iteration_materialize_race(
         )
         # Complete set for single-body LOOP.
         assert (iter2[0].step_snapshot or {}).get("id") == "body"
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_fail_fast_body_failure_terminalizes_owning_loop(
+    integration_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with integration_session_factory() as session:
+        execution_id, lease, _ = await _materialize_claim(
+            session,
+            step_specs=[
+                _loop("loop1", body_step_ids=["body"]),
+                _tool("body", depends_on=["loop1"], on_error="FAIL_EXECUTION"),
+            ],
+            items=[{"id": 1}, {"id": 2}],
+            worker_id="pg-failfast-parent",
+        )
+    client = _FailFirstClient()
+    await _run(
+        integration_session_factory,
+        execution_id=execution_id,
+        lease=lease,
+        client=client,
+        worker_id="pg-failfast-parent",
+    )
+    assert len(client.calls) == 1
+    async with integration_session_factory() as session:
+        repo = ExecutionRepository(session)
+        execution = await repo.get(execution_id)
+        assert execution is not None
+        assert execution.status == ExecutionStatus.FAILED.value
+        assert execution.finished_at is not None
+        steps = await repo.list_steps(execution_id)
+        loop = next(step for step in steps if step.step_key == "loop1")
+        children = [step for step in steps if step.parent_step_id == loop.id]
+        assert len(children) == 1
+        assert children[0].status == StepStatus.FAILED.value
+        assert children[0].error_code == "MCP_TEST_ERROR"
+        assert loop.status == StepStatus.FAILED.value
+        assert loop.error_code == children[0].error_code
+        assert loop.finished_at is not None
+        attempts = await repo.list_attempts(children[0].id)
+        assert len(attempts) == 1
+        calls = await repo.list_tool_calls(attempts[0].id)
+        assert len(calls) == 1
+
